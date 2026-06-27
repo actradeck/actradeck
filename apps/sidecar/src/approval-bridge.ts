@@ -226,7 +226,7 @@ export class ApprovalBridge {
     const kind = classifyTool(toolName);
     const toolInput = (input.tool_input ?? {}) as { command?: unknown; file_path?: unknown };
     let risk = "n/a";
-    let operand = toolName;
+    let operand: string;
     if (kind === "bash" && typeof toolInput.command === "string") {
       risk = classifyCommandRisk(toolInput.command);
       operand = toolInput.command;
@@ -270,8 +270,17 @@ export class ApprovalBridge {
       return classifyCommandRisk(toolInput.command) !== "low";
     }
     // .env / secret / credential ファイルへの編集は常に承認。
+    // fail-safe ゲート: secret らしき path は「広めの部分一致」で承認に倒す。
+    //   - 部分一致は意図的: over-approval が安全側。anchor (^/$) を足すと網が狭まり
+    //     "mysecret_notes" 等を取りこぼすため、CodeQL の missing-anchor 指摘は本ゲートでは
+    //     不採用 (anchoring は coverage を縮小する=安全と逆)。
+    //   - `.key` は末尾固定にしない: "server.key.bak" 等の鍵バックアップも承認に含める。
+    //   - SSH 秘密鍵は 4 種 (rsa/ed25519/ecdsa/dsa)、keystore (.p12/.pfx/.jks)、credential
+    //     file (.netrc/.pgpass/.npmrc)、kubeconfig も対象 (QA-1/SEC-2: 取りこぼし防止)。
     if (kind === "edit" && typeof toolInput.file_path === "string") {
-      return /\.env|secret|credential|\.pem|id_rsa|\.key$/i.test(toolInput.file_path);
+      return /\.env|secret|credential|\.pem|\.key|\.p12|\.pfx|\.jks|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.npmrc|kubeconfig/i.test(
+        toolInput.file_path,
+      );
     }
     // 再#SEC-3: MCP tool 呼び出しは高リスク (副作用・credential server を含む)。
     // 個々の MCP server の安全性を sidecar は判定できない → 判定不能は high に倒す

@@ -329,13 +329,17 @@ describe("@actradeck/projection reducer", () => {
       //   (b) allowlist gate を外す → proto 名 kind が proj に載り赤化 (allowlist も proto 名を弾く)。
       describe("INV-PROJECTION-BYKIND-PROTO (QA-1r): prototype 名 kind の型崩壊/汚染なし", () => {
         it("constructor / __proto__ を含む incoming を畳んでも値は number・proj に proto 名が載らない", () => {
-          // constructor は loose schema を通る。__proto__ は zod が own-key から strip する。
+          // constructor / __proto__ はいずれも redaction-kinds allowlist 非該当ゆえ
+          // gateRedactionCountByKind が strip する (zod でなく allowlist gate が落とす・QA-4)。
           const proj = reduceEvents("s1", [
             evWithCount({
               redaction_count: 7,
               redaction_count_by_kind: {
                 constructor: 5,
-                __proto__: 9,
+                // 計算プロパティで「__proto__」を *own-key* として入れる。`__proto__: 9`
+                // リテラルは prototype setter になり own-key を作らない (CodeQL: invalid
+                // prototype value)。allowlist が proto 名 own-key を捨てることを実検証する。
+                ["__proto__"]: 9,
                 "github-token": 2,
               } as Record<string, number>,
             }),

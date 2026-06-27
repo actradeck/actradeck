@@ -53,6 +53,11 @@ if (!DATABASE_URL) {
 const INGEST_TOKEN = randomBytes(32).toString("hex");
 const REALTIME_TOKEN = randomBytes(32).toString("hex");
 
+// redaction-first (SEC-1): 失敗時の err.message は子プロセスの stdout/stderr を内包し得る。
+// 万一そこに ephemeral token が紛れても CI ログに出さないよう、ログ直前に値を伏せる。
+const scrubSecrets = (s: string): string =>
+  s.split(INGEST_TOKEN).join("[redacted]").split(REALTIME_TOKEN).join("[redacted]");
+
 const children: ChildProcess[] = [];
 
 /**
@@ -264,7 +269,7 @@ async function main(): Promise<void> {
   );
 
   console.log("[boot-smoke] all assertions passed:");
-  for (const a of assertions) console.log(`  ${a}`);
+  for (const a of assertions) console.log(`  ${scrubSecrets(a)}`);
 }
 
 main()
@@ -274,7 +279,7 @@ main()
     process.exit(0);
   })
   .catch(async (err: unknown) => {
-    console.error("[boot-smoke]", (err as Error).message);
+    console.error("[boot-smoke]", scrubSecrets((err as Error).message));
     await teardown();
     process.exit(1);
   });

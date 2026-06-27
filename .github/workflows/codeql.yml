@@ -44,6 +44,9 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           # security-and-quality = security-extended + maintainability/reliability queries.
           queries: security-and-quality
+          # Excludes tests / smoke harness from analysis (FP noise on non-shipped
+          # code); production src stays fully analyzed. See the config for rationale.
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4

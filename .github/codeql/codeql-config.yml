@@ -1,0 +1,29 @@
+# CodeQL configuration for ActraDeck.
+#
+# Tests and the CI boot-smoke harness are excluded from analysis. They are not
+# shipped artifacts or attack surface, and CodeQL's generic findings there are
+# false positives for this codebase:
+#   - js/file-system-race in *.test.ts: operations run inside unique, atomic
+#     mkdtemp() dirs (no predictable path, no cross-process race / TOCTOU).
+#   - js/clear-text-logging in apps/*/smoke: the only "secrets" are per-run
+#     ephemeral randomBytes tokens (die with the process, zero external scope);
+#     the smoke harness also redacts them before logging (scrubSecrets).
+#
+# Production code (apps/*/src, packages/*/src) remains FULLY analyzed with the
+# security-and-quality suite (declared in .github/workflows/codeql.yml).
+#
+# NOT excluded here (handled by per-alert dismissal + ADR instead): the
+# js/missing-regexp-anchor findings on the redactor and the approval gate.
+# Those are production files and the rule cannot be path-scoped; excluding the
+# query repo-wide would blind the most security-sensitive query on the most
+# security-sensitive files. They are intentional fail-safe / redaction patterns
+# (over-matching is the safe direction; anchoring would SHRINK the match set =
+# under-redaction / gate bypass), dismissed with that rationale.
+name: "ActraDeck CodeQL config"
+paths-ignore:
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/test/**"
+  - "**/__tests__/**"
+  - "**/e2e/**"
+  - "apps/*/smoke/**"

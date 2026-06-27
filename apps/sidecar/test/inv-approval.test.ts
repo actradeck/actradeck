@@ -53,6 +53,52 @@ describe("INV-APPROVAL: high-risk gating", () => {
     expect(r.behavior).toBe("deny"); // timeout → safe default
   });
 
+  // INV-APPROVAL-SECRET-PATH: secret らしき file_path は fail-safe で承認に倒す。
+  // 広めの部分一致 (over-approval が安全側=設計意図)。anchor を足すと網が狭まるため不採用。
+  // mutation: regex の `\.key` を `\.key$` に戻すと "server.key.bak" が漏れて赤、
+  //           SSH 鍵を `id_rsa|id_ed25519` に戻すと id_ecdsa/id_dsa が漏れて赤、
+  //           "secret" を消すと "secrets/app.yaml" が漏れて赤になる (falsifiable)。
+  it.each([
+    "/repo/.env",
+    "/repo/.env.production",
+    "/repo/.ENV", // 大文字: /i フラグを pin (QA-2)
+    "/home/u/.ssh/id_rsa",
+    "/home/u/.ssh/id_ed25519",
+    "/home/u/.ssh/id_ecdsa", // SSH 鍵 4 種すべて (QA-1)
+    "/home/u/.ssh/id_dsa",
+    "/etc/ssl/server.key",
+    "/etc/ssl/server.key.bak", // 鍵バックアップも承認 (末尾固定にしない)
+    "/certs/tls.pem",
+    "/certs/store.p12", // keystore
+    "/certs/store.pfx",
+    "/certs/store.jks", // Java keystore (SEC-2)
+    "config/credentials.json",
+    "secrets/app.yaml",
+    "/home/u/.netrc", // credential files (QA-1)
+    "/home/u/.pgpass",
+    "/home/u/.npmrc",
+    "/home/u/.kube/kubeconfig", // kubeconfig (SEC-2)
+  ])("gates edit of secret-bearing path %s", async (fp) => {
+    const bridge = new ApprovalBridge({ timeoutMs: 20 });
+    const emit = vi.fn();
+    const r = await bridge.requestApproval(preToolUse("Edit", { file_path: fp }), emit);
+    expect(emit, `${fp} must require approval`).toHaveBeenCalledTimes(1);
+    expect(r.behavior).toBe("deny"); // timeout → safe default
+  });
+
+  // over-approval は設計意図 (安全側) ゆえ、これらは「ゲートが完全に死んでいない」ことの
+  // 下限 canary。境界 (例 "secretary.ts" が secret にマッチ) は許容範囲 (QA-3)。
+  it.each(["/repo/src/index.ts", "/repo/README.md", "/repo/package.json"])(
+    "does not over-gate ordinary edit of %s",
+    async (fp) => {
+      const bridge = new ApprovalBridge({ timeoutMs: 20 });
+      const emit = vi.fn();
+      const r = await bridge.requestApproval(preToolUse("Edit", { file_path: fp }), emit);
+      expect(emit, `${fp} must not require approval`).not.toHaveBeenCalled();
+      expect(r.behavior).toBe("defer");
+    },
+  );
+
   it("PermissionRequest is always gated (allow when UI approves)", async () => {
     const bridge = new ApprovalBridge({ timeoutMs: 1000 });
     let capturedId = "";
