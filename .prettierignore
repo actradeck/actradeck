@@ -1,0 +1,8 @@
+**/dist/**
+**/.next/**
+**/node_modules/**
+**/coverage/**
+pnpm-lock.yaml
+# Next.js が build ごとに自動書き換えるため対象外。
+apps/webui/tsconfig.json
+apps/webui/next-env.d.ts

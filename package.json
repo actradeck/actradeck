@@ -1,0 +1,50 @@
+{
+  "name": "actradeck",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "ActraDeck — Agent Cockpit / Coding Agent Console",
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=22.16.0",
+    "pnpm": ">=10.28.0"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @actradeck/backend --filter @actradeck/webui run dev",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --check \"{packages,apps,db}/**/*.{ts,tsx,mts,mjs,json}\" \"*.{json,mjs}\"",
+    "format:fix": "prettier --write \"{packages,apps,db}/**/*.{ts,tsx,mts,mjs,json}\" \"*.{json,mjs}\"",
+    "type-check": "pnpm -r --if-present run type-check",
+    "test": "pnpm -r --if-present run test",
+    "build": "pnpm -r --if-present run build",
+    "db:migrate": "pnpm --filter @actradeck/db run migrate:up",
+    "db:migrate:down": "pnpm --filter @actradeck/db run migrate:down"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@types/node": "25.9.1",
+    "@vitest/coverage-v8": "4.1.8",
+    "eslint": "9.39.4",
+    "eslint-config-prettier": "10.1.8",
+    "prettier": "3.8.3",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.60.1",
+    "vitest": "4.1.8"
+  },
+  "pnpm": {
+    "overrides": {
+      "esbuild@<0.28.1": ">=0.28.1 <0.29.0",
+      "postcss@<8.5.10": ">=8.5.10"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actradeck/actradeck.git"
+  },
+  "homepage": "https://github.com/actradeck/actradeck#readme",
+  "bugs": {
+    "url": "https://github.com/actradeck/actradeck/issues"
+  }
+}

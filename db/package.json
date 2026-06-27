@@ -1,0 +1,27 @@
+{
+  "name": "@actradeck/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Database migrations (node-pg-migrate, TS up/down) for ActraDeck event store + projections",
+  "scripts": {
+    "migrate": "node --env-file-if-exists=../.env --import tsx ./node_modules/node-pg-migrate/bin/node-pg-migrate.js -j ts -m migrations",
+    "migrate:up": "node --env-file-if-exists=../.env --import tsx ./node_modules/node-pg-migrate/bin/node-pg-migrate.js -j ts -m migrations up",
+    "migrate:down": "node --env-file-if-exists=../.env --import tsx ./node_modules/node-pg-migrate/bin/node-pg-migrate.js -j ts -m migrations down 1",
+    "migrate:redo": "pnpm run migrate:down && pnpm run migrate:up",
+    "migrate:create": "node --env-file-if-exists=../.env --import tsx ./node_modules/node-pg-migrate/bin/node-pg-migrate.js -j ts -m migrations create",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@actradeck/event-model": "workspace:*",
+    "node-pg-migrate": "8.0.4",
+    "pg": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.20.0",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

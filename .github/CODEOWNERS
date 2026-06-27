@@ -1,0 +1,48 @@
+# CODEOWNERS — ActraDeck
+#
+# Purpose: route review of the security/correctness CHOKE POINTS to a maintainer.
+# These paths carry the invariants INV-REDACTION / INV-APPROVAL / INV-EVENT-ORDER /
+# INV-STALLED and the auth/token surface. They are intentionally NOT "good first issue"
+# territory — see CONTRIBUTING.md ("Where to start" vs "Security-sensitive areas").
+#
+# There is deliberately NO global owner: everything NOT listed below — docs, demo
+# fixtures, the diagnostics scripts, and UI copy / i18n under apps/webui — stays open
+# and does not require a maintainer's review. That is where newcomers should start.
+#
+# Note: CODEOWNERS only AUTO-REQUESTS the listed reviewer. To make it blocking, enable
+# "Require review from Code Owners" in the branch-protection rules for `main`.
+# Replace @actradeck/maintainers if the maintainer handle / team changes.
+
+# --- Local sidecar: highest-risk surface ---------------------------------------------
+# Secret redactor (INV-REDACTION), approval bridge/allowlist/persistence (INV-APPROVAL),
+# stdout/stderr + git-diff collectors, append-only log. The whole src tree is owned
+# because a leak can originate anywhere a collector or the redact choke point changes.
+/apps/sidecar/src/                 @actradeck/maintainers
+
+# --- Canonical event contracts & projection (INV-EVENT-ORDER / INV-STALLED) ----------
+# Normalized event model, redaction-kind enum, and the projection/derivation are T1
+# (source of truth). Changes here ripple across the whole pipeline.
+/packages/event-model/             @actradeck/maintainers
+/packages/projection/              @actradeck/maintainers
+
+# --- Backend: event store + state engine + realtime auth ------------------------------
+# Ingestion, idempotency/ordering, state derivation, and the realtime token boundary.
+/apps/backend/src/                 @actradeck/maintainers
+
+# --- Web UI BFF / realtime transport: token relay + SSRF surface ----------------------
+# The custom server and the server/realtime layer relay REALTIME_TOKEN to the backend
+# (never to the browser) and proxy WS/replay — this is the token-isolation / SSRF
+# boundary (transitive reach, cf. INV token-isolation tests). NOT good-first territory.
+# The UI *copy* layer (apps/webui/src/ui/, i18n) is intentionally left open below.
+/apps/webui/server.ts              @actradeck/maintainers
+/apps/webui/src/server/            @actradeck/maintainers
+/apps/webui/src/realtime/          @actradeck/maintainers
+
+# --- Invariant tests must not be weakened without review ------------------------------
+/apps/**/test/inv-*.test.ts        @actradeck/maintainers
+/packages/**/test/inv-*.test.ts    @actradeck/maintainers
+
+# --- Security policy, threat model, CI, and this file ---------------------------------
+/SECURITY.md                       @actradeck/maintainers
+/.github/workflows/                @actradeck/maintainers
+/.github/CODEOWNERS                @actradeck/maintainers

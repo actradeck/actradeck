@@ -1,0 +1,47 @@
+{
+  "$description": "Adaptive Clarity 2030 — semantic tier. 意味で参照する。light テーマの既定値。",
+  "bg": {
+    "canvas": { "$type": "color", "$value": "{color.neutral.50}" },
+    "surface": { "$type": "color", "$value": "{color.neutral.0}" },
+    "layer": { "$type": "color", "$value": "{color.neutral.100}" },
+    "layer-raised": { "$type": "color", "$value": "{color.neutral.0}" },
+    "selected": { "$type": "color", "$value": "{color.blue.50}" }
+  },
+  "fg": {
+    "primary": { "$type": "color", "$value": "{color.neutral.900}" },
+    "muted": { "$type": "color", "$value": "{color.neutral.600}" },
+    "on-action": { "$type": "color", "$value": "{color.neutral.0}" }
+  },
+  "border": {
+    "subtle": { "$type": "color", "$value": "{color.neutral.200}" },
+    "strong": { "$type": "color", "$value": "{color.neutral.500}" }
+  },
+  "focus": { "$type": "color", "$value": "{color.blue.600}" },
+  "action": {
+    "primary": {
+      "bg": { "$type": "color", "$value": "{color.blue.600}" },
+      "bg-hover": { "$type": "color", "$value": "{color.blue.700}" }
+    },
+    "danger": {
+      "bg": { "$type": "color", "$value": "{color.red.600}" }
+    }
+  },
+  "status": {
+    "success": {
+      "fg": { "$type": "color", "$value": "{color.green.600}" },
+      "bg": { "$type": "color", "$value": "{color.green.50}" }
+    },
+    "warn": {
+      "fg": { "$type": "color", "$value": "{color.amber.600}" },
+      "bg": { "$type": "color", "$value": "{color.amber.50}" }
+    },
+    "danger": {
+      "fg": { "$type": "color", "$value": "{color.red.600}" },
+      "bg": { "$type": "color", "$value": "{color.red.50}" }
+    },
+    "info": {
+      "fg": { "$type": "color", "$value": "{color.blue.600}" },
+      "bg": { "$type": "color", "$value": "{color.blue.50}" }
+    }
+  }
+}

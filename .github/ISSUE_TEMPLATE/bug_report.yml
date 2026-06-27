@@ -1,0 +1,75 @@
+name: Bug report
+description: Something is not working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Do not include real secrets** anywhere in this
+        report — use synthetic dummies (e.g. `ghp_…`, `AKIA…`-style), exactly as the
+        test suite does. For a **security vulnerability** (redaction bypass, approval
+        bypass, SSRF, a secret reaching disk/network), do not file here — follow
+        [SECURITY.md](https://github.com/actradeck/actradeck/blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, plus what you expected instead.
+      placeholder: When I …, ActraDeck … . I expected … .
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps. Include the command(s) you ran.
+      placeholder: |
+        1. `./scripts/quickstart`
+        2. `cd ~/project && claude`
+        3. …
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of ActraDeck does this affect?
+      options:
+        - sidecar (daemon / redaction / approval bridge)
+        - backend (ingestion / event store / state engine / realtime)
+        - webui (cockpit)
+        - scripts (quickstart / actradeck / ad-attach)
+        - docs
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `git rev-parse --short HEAD`.
+      placeholder: a5e5d56
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and Node version
+      placeholder: "Ubuntu 24.04 / Node 22.16.0"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any relevant output. Redact anything sensitive first.
+      render: shell
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: This report contains no real secrets (only synthetic dummies).
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true

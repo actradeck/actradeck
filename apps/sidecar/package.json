@@ -1,0 +1,40 @@
+{
+  "name": "@actradeck/sidecar",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Sidecar daemon (Phase 2): hook receiver / PTY / process monitor / git diff / secret redactor / SQLite / WS client",
+  "main": "./dist/index.js",
+  "bin": {
+    "agentmon": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "type-check": "tsc -b",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "dev": "tsx watch src/cli.ts",
+    "start": "node dist/cli.js",
+    "e2e:claude": "tsx e2e/run-claude-e2e.mts",
+    "e2e:replay": "tsx e2e/run-hook-replay-e2e.mts"
+  },
+  "dependencies": {
+    "@actradeck/event-model": "workspace:*",
+    "better-sqlite3": "12.10.0",
+    "chokidar": "5.0.0",
+    "node-pty": "1.1.0",
+    "pidusage": "4.0.1",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@actradeck/backend": "workspace:*",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/pg": "8.20.0",
+    "@types/pidusage": "2.0.5",
+    "@types/ws": "8.18.1",
+    "pg": "8.21.0",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

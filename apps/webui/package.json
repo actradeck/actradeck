@@ -1,0 +1,40 @@
+{
+  "name": "@actradeck/webui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Web UI (Phase 4): Next.js cockpit — session list / detail (4-pane) / Approval Inbox / Replay",
+  "scripts": {
+    "dev": "node --env-file-if-exists=../../.env --import tsx --watch server.ts",
+    "build": "next build",
+    "start": "NODE_ENV=production node --env-file-if-exists=../../.env --import tsx server.ts",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "smoke:boot": "node --import tsx smoke/boot-smoke.ts"
+  },
+  "dependencies": {
+    "@actradeck/design-tokens": "workspace:*",
+    "@actradeck/event-model": "workspace:*",
+    "@actradeck/projection": "workspace:*",
+    "next": "16.2.7",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-is": "19.2.0",
+    "sass": "^1.100.0"
+  },
+  "devDependencies": {
+    "@actradeck/backend": "workspace:*",
+    "@types/jsdom": "^27.0.0",
+    "@types/pg": "8.20.0",
+    "@types/react": "19.2.16",
+    "@types/react-dom": "19.2.3",
+    "@types/ws": "8.18.1",
+    "fastify": "5.8.5",
+    "jsdom": "^27.3.0",
+    "pg": "8.21.0",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8",
+    "ws": "^8.21.0"
+  }
+}

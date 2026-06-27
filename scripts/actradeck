@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+#
+# actradeck — ActraDeck 全スタックを systemd --user で常駐させるワンコマンド orchestrator。
+#
+# 強み(c)「Attach Mode の摩擦の低さ(systemd 常駐)」の完成 (ADR 019ee25e)。観測 daemon
+# (attach/codex) は `ad-attach` が systemd 化済だが、それが繋ぐ **cockpit サーバ層**
+# (backend :55410 / webui :55400) は手動 setsid のままで再起動非常駐だった。本スクリプトが
+# backend/webui を systemd user service 化し、daemon 層は `ad-attach install-all` へ委譲して
+# **全4ティアを 1 コマンドで常駐**させる (set once, always runs)。
+#
+# 責務分離: actradeck=全スタック orchestrator / ad-attach=観測 daemon ランチャ (無改変・委譲先)。
+#
+# セキュリティ (ad-attach と同方針・SEC APPROVE 019eac91/019ee143):
+#   - 秘匿 (INGEST_TOKEN/REALTIME_TOKEN 等) は <repo>/.env から node の `--env-file-if-exists` が読む。
+#     unit 本体にも argv にも **値を書かない** (argv には .env の path だけが載る)。.env は chmod 600 推奨。
+#   - unit は実 node 絶対パス + WorkingDirectory を install 時に確定。Restart=on-failure + TimeoutStopSec
+#     + NoNewPrivileges。hook/state 書込・WS を壊す aggressive sandbox は入れない。
+#
+# 使い方:
+#   actradeck up            全ワークスペース build → 全4ティア起動。systemd があれば常駐 (Linux)、
+#                           無ければ (macOS 等) foreground supervisor で起動 (Ctrl-C で一括停止)。
+#   actradeck down          backend+webui を停止/無効化/削除 → ad-attach uninstall-all (systemd のみ)。
+#   actradeck restart       全4ティアを再起動 (systemctl restart + ad-attach service restart)。
+#   actradeck status        全4ティアの systemd 状態を表示。
+#   actradeck logs <svc>    journalctl -f (svc = backend|webui|attach|codex)。
+#   actradeck build         全ワークスペースパッケージ (共有 packages dist / sidecar dist / webui .next) をビルド。
+#   actradeck print-unit <backend|webui>   生成 unit を標準出力 (確認用・単一ソース)。
+#   actradeck doctor        .env 権限 / node / linger / 4ティア unit / ポート到達性を点検 (秘匿非表示)。
+#
+# 注意:
+#   - node を更新 (nvm install 等) したら `actradeck up` を再実行して unit を更新 (203/EXEC 回避)。
+#   - ログイン外でも常駐させるには linger: `loginctl enable-linger "$USER"` (doctor が確認)。
+#   - webui は本番 prebuilt (.next) を配信するため、コード更新時は `actradeck up`/`build` で再ビルド要。
+#
+set -euo pipefail
+
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="$REPO_ROOT/.env"
+AD_ATTACH="$SCRIPT_DIR/ad-attach"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+err() { printf '%s\n' "$*" >&2; }
+die() { err "actradeck: $*"; exit 1; }
+# .env から非秘匿の設定値 (ポート等) を読む。無ければ default。値は exec せず表示・比較のみに使う
+# (ハードコード回避: .env.example はポート offset を推奨するため doctor 等は実ポートを参照する)。
+env_val() {
+  local key="$1" def="$2" v=""
+  [ -f "$ENV_FILE" ] && v="$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+  printf '%s' "${v:-$def}"
+}
+
+# 指定 TCP ポートに LISTEN があるかだけを返す (内容は見ない)。検出手段は環境依存:
+# ss (Linux) → lsof (macOS) → netstat の順で利用可能なものを使う (macOS には ss が無い)。
+port_listening() {
+  local port="$1"
+  # ポートは整数のみ受理する (SEC-1)。.env 由来の異常値 (例 "55410.*") が grep の正規表現
+  # として作用しリスナー判定を誤らせるのを構造的に防ぐ。診断専用・非実行だが入口で弾く。
+  case "$port" in '' | *[!0-9]*) return 2 ;; esac
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -q ":${port} "
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+  elif command -v netstat >/dev/null 2>&1; then
+    # Linux は ":port"、macOS(BSD netstat) は ".port"。両対応 + 行に LISTEN を要求。
+    netstat -an 2>/dev/null | grep -E "[.:]${port}[[:space:]]" | grep -qi listen
+  else
+    return 2
+  fi
+}
+
+# doctor 用: ポートの LISTEN 状態を 1 行報告する。port_listening の戻り値で 3 分岐する
+# (0=listen / 1=未 listen / 2=点検不能 = ss/lsof/netstat 無し or 非整数ポート)。
+# TDA-4: ツール検出を port_listening に一本化し、do_doctor 側の二重検出を解消する。
+doctor_port_line() {
+  local label="$1" port="$2" rc=0
+  port_listening "$port" && rc=0 || rc=$?
+  case "$rc" in
+    0) err "[doctor] :${port} ${label} LISTEN ✓" ;;
+    2) err "[doctor] (:${port} ${label} 点検 skip: ss/lsof/netstat 無し or 不正ポート)" ;;
+    *) err "[doctor] 警告: :${port} ${label} 未 listen" ;;
+  esac
+}
+
+resolve_node() {
+  local n
+  n="$(command -v node || true)"
+  [ -n "$n" ] || die "node が PATH に見つかりません。Node.js を入れてください。"
+  printf '%s' "$n"
+}
+
+# --- サーバ層サービスレジストリ (backend / webui・generalize-reusable-tooling) ----------
+SVC_NAME="" SVC_DESC="" SVC_WORKDIR="" SVC_ENTRY="" SVC_NODE_ENV="" SVC_AFTER="" SVC_UNIT_PATH=""
+
+use_service() {
+  case "${1:-}" in
+    backend)
+      SVC_NAME="actradeck-backend.service"
+      SVC_DESC="ActraDeck backend (ingestion + realtime cockpit server, :55410)"
+      SVC_WORKDIR="$REPO_ROOT/apps/backend"
+      SVC_ENTRY="src/index.ts"
+      SVC_NODE_ENV=""
+      SVC_AFTER="network-online.target"
+      ;;
+    webui)
+      SVC_NAME="actradeck-webui.service"
+      SVC_DESC="ActraDeck webui (Cockpit UI + BFF proxy, :55400)"
+      SVC_WORKDIR="$REPO_ROOT/apps/webui"
+      SVC_ENTRY="server.ts"
+      SVC_NODE_ENV="production"
+      # webui の BFF は backend を叩くため起動順を後に (ordering のみ・hard Requires にしない)。
+      SVC_AFTER="network-online.target actradeck-backend.service"
+      ;;
+    *) die "未知のサーバサービス \"${1:-}\" (backend|webui)" ;;
+  esac
+  SVC_UNIT_PATH="$UNIT_DIR/$SVC_NAME"
+}
+
+do_build() {
+  # 全ワークスペースパッケージをビルドする (quickstart の `pnpm -r build` と同一・冪等)。
+  # sidecar/webui だけでは不十分: backend (tsx) は @actradeck/event-model / @actradeck/projection の
+  # **dist** を runtime import し、webui の next build も @actradeck/projection / @actradeck/design-tokens
+  # の dist を解決する。sidecar の `tsc -b` は event-model しか transitive ビルドせず、projection /
+  # design-tokens の dist を作る経路が無かったため、fresh clone で `actradeck up` 単独だと next build /
+  # backend 起動が ERR_MODULE_NOT_FOUND で落ちていた。`pnpm -r` は workspace dep graph の
+  # topological 順でビルドするため event-model→projection→sidecar/webui の順序も担保される。
+  err "[actradeck] 全ワークスペースパッケージをビルドします (pnpm -r build)…"
+  ( cd "$REPO_ROOT" && pnpm -r --if-present run build )
+}
+
+# 選択サービスの systemd unit を実パスで生成 (秘匿は .env を node --env-file が読む・unit に値を書かない)。
+generate_unit() {
+  local node_bin
+  node_bin="$(resolve_node)"
+  cat <<UNIT
+[Unit]
+Description=$SVC_DESC
+Documentation=file://$REPO_ROOT/docs/attach-mode.md
+After=$SVC_AFTER
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$SVC_WORKDIR
+# 秘匿は <repo>/.env から node の --env-file-if-exists が読む (unit 本体・argv には値を書かない=path のみ)。
+ExecStart=$node_bin --env-file-if-exists=$ENV_FILE --import tsx $SVC_ENTRY
+UNIT
+  # SEC-1: Environment= は **非秘匿変数専用** (NODE_ENV のみ)。秘匿 (token 等) は必ず .env 経由
+  # (--env-file-if-exists) で渡す。Environment= に値を inline すると systemctl show / journalctl で
+  # 平文露出するため禁止 (test-actradeck.sh が *_TOKEN/_SECRET/_KEY 不在を赤テストで固定)。
+  [ -n "$SVC_NODE_ENV" ] && printf 'Environment=NODE_ENV=%s\n' "$SVC_NODE_ENV"
+  cat <<UNIT
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+# サーバは権限昇格を要しない (攻撃面削減)。hook/state 書込・WS を壊す aggressive sandbox は入れない。
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
+UNIT
+}
+
+do_install() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (systemd --user 非対応)。"
+  [ -f "$ENV_FILE" ] || err "[actradeck] 警告: $ENV_FILE が無い。INGEST_TOKEN/REALTIME_TOKEN を含む .env を用意してください。"
+  mkdir -p "$UNIT_DIR"
+  generate_unit > "$SVC_UNIT_PATH"
+  chmod 600 "$SVC_UNIT_PATH"
+  err "[actradeck] unit を配置: $SVC_UNIT_PATH"
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$SVC_NAME"
+  err "[actradeck] 有効化しました ($SVC_NAME)。"
+  case "$(resolve_node)" in
+    *"/.nvm/"*) err "[actradeck] 注意: node が nvm パスです。node 更新後は \`actradeck up\` を再実行して unit を更新してください (203/EXEC 回避)。" ;;
+  esac
+}
+
+do_uninstall() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です。"
+  systemctl --user stop "$SVC_NAME" 2>/dev/null || true
+  systemctl --user disable "$SVC_NAME" 2>/dev/null || true
+  if [ -f "$SVC_UNIT_PATH" ]; then
+    rm -f "$SVC_UNIT_PATH"
+    err "[actradeck] unit を削除: $SVC_UNIT_PATH"
+  fi
+  systemctl --user daemon-reload
+  err "[actradeck] アンインストール完了 ($SVC_NAME)。"
+}
+
+# --- 全スタック操作 ------------------------------------------------------------------
+# up はプラットフォームで分岐する: systemd があれば 4 ティアを user daemon 常駐 (Linux)、
+# 無ければ (macOS 等) foreground supervisor で起動する。4 ティアの実体はいずれも node
+# プロセスで、systemd/launchd は監督機構にすぎない (ADR 019ef084)。
+do_up() {
+  if command -v systemctl >/dev/null 2>&1; then
+    do_up_systemd
+  else
+    err "[actradeck] systemctl が無い環境 (macOS 等) → foreground supervisor で起動します。"
+    err "[actradeck] (ログアウト跨ぎの常駐は Linux=systemd。macOS の launchd 常駐は planned。)"
+    do_up_foreground
+  fi
+}
+
+do_up_systemd() {
+  do_build
+  err "[actradeck] backend を常駐化…"
+  use_service backend; do_install
+  err "[actradeck] webui を常駐化 (backend の後)…"
+  use_service webui; do_install
+  err "[actradeck] 観測 daemon (attach + codex) を ad-attach へ委譲…"
+  bash "$AD_ATTACH" install-all
+  err "[actradeck] 全4ティアを常駐化しました。状態: actradeck status"
+  case "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || echo no)" in
+    yes) : ;;
+    *) err "[actradeck] 注意: linger 無効。ログアウト後も常駐させるには: loginctl enable-linger \"$USER\"" ;;
+  esac
+}
+
+# systemd 不在 (macOS 等) 向け: 4 ティアを foreground の子プロセスとして起動し、Ctrl-C /
+# SIGTERM で一括 teardown する supervisor。永続化はしない (このターミナルを維持する前提)。
+# macOS の bash 3.2 を考慮し setsid / wait -n / プロセスグループ kill には依存しない
+# (PID リスト + trap のみ)。秘匿は systemd と同じ規律: .env を子の env / --env-file へ渡し、
+# argv には値を書かない (unit/plist inline と同じ no-secret-in-argv 不変)。
+do_up_foreground() {
+  local node_bin cli bport wport
+  node_bin="$(resolve_node)"
+  cli="$REPO_ROOT/apps/sidecar/dist/cli.js"
+  bport="$(env_val ACTRADECK_BACKEND_PORT 55410)"
+  wport="$(env_val ACTRADECK_WEBUI_PORT 55400)"
+
+  do_build  # 全ワークスペース dist (共有 packages / sidecar / webui .next) を用意
+
+  # 秘匿を子プロセス env へ取り込む。これは ad-attach の load_env (ad-attach:93-101) /
+  # systemd unit の `EnvironmentFile=-$ENV_FILE` (ad-attach:156) と同じ parity であり、.env の
+  # **全キー** (INGEST_TOKEN/REALTIME_TOKEN だけでなく POSTGRES_PASSWORD/DATABASE_URL も) を
+  # 4 ティア全部へ配る (SEC-2)。per-tier の絞り込みは systemd 側でも未実施で新たな露出増ではない
+  # (attach/codex CLI は process.env から INGEST_TOKEN を読むため source が要る)。
+  # QA-4: source は set +e で囲い、malformed な .env の途中行 (KEY=$(failing) 等) が set -e で
+  # supervisor を不透明に abort させないよう best-effort 化する。未ロードの token は下流の backend
+  # 起動エラーとして可視化される (.env は operator 作の KEY=VALUE という trust model 前提)。
+  # well-formed な .env は従来どおり無影響。set +e/+a は直後に元へ戻す。
+  if [ -f "$ENV_FILE" ]; then
+    set -a
+    set +e
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set -e
+    set +a
+  else
+    err "[actradeck] 警告: $ENV_FILE が無い。INGEST_TOKEN/REALTIME_TOKEN 未設定だと backend が起動を拒否します。"
+  fi
+
+  local pids="" stopping=0
+  # teardown は INT/TERM のみに張る。EXIT trap は張らない — 関数 local (pids/stopping) を
+  # 参照する stop_all が関数スコープ消滅後 (EXIT) に再発火すると set -u で unbound variable
+  # となり、正常終了でも誤って exit 1 + エラー出力になるため (QA-1)。正常終了 (全ティアが
+  # 自走で終了) は子プロセスが既に死んでおり teardown 不要。シグナル停止のみ kill が要る。
+  # 参照は防御的に ${var:-} で囲い、万一の早期発火でも unbound にしない。
+  stop_all() {
+    [ "${stopping:-0}" = 1 ] && return 0
+    stopping=1
+    err ""
+    err "[actradeck] 停止中… (全ティアへ SIGTERM)"
+    # shellcheck disable=SC2086
+    { [ -n "${pids:-}" ] && kill $pids 2>/dev/null; } || true
+  }
+  trap 'stop_all' INT TERM
+
+  # TDA-2: 下の起動タプルは systemd 経路の twin。backend/webui は generate_unit の ExecStart
+  #   (この script・use_service の SVC_ENTRY/SVC_WORKDIR/NODE_ENV) と、attach/codex は ad-attach
+  #   の SVC_EXEC (`attach --scope user --yes` / `codex attach`) と一致させること。
+  #   いずれも `--env-file-if-exists=<path>` 形式で **argv に秘匿値を載せない** 不変を共有する
+  #   (no-secret-in-argv・test-actradeck.sh が foreground 分も固定)。entry/flag を変える時は
+  #   両所を同時に更新する (bash3.2 + set -u の空配列ハザードを避け、配列共通化はしない)。
+  err "[actradeck] backend を foreground 起動 (:$bport)…"
+  ( cd "$REPO_ROOT/apps/backend" && exec "$node_bin" --env-file-if-exists="$ENV_FILE" --import tsx src/index.ts ) &
+  pids="$pids $!"
+  err "[actradeck] webui を foreground 起動 (:$wport)…"
+  ( cd "$REPO_ROOT/apps/webui" && NODE_ENV=production exec "$node_bin" --env-file-if-exists="$ENV_FILE" --import tsx server.ts ) &
+  pids="$pids $!"
+  err "[actradeck] attach (Claude Code 観測) を foreground 起動…"
+  ( exec "$node_bin" "$cli" attach --scope user --yes ) &
+  pids="$pids $!"
+  err "[actradeck] codex (Codex 観測) を foreground 起動…"
+  ( exec "$node_bin" "$cli" codex attach ) &
+  pids="$pids $!"
+
+  err "[actradeck] 全4ティアを foreground 起動しました。"
+  err "[actradeck] Cockpit: http://localhost:$wport  (このターミナルを維持・停止は Ctrl-C)"
+  # いずれか 1 つが落ちても残りは生かしたまま Ctrl-C を待つ (foreground は best-effort・
+  # 自動再起動は systemd/launchd の役目)。全ティア終了 or シグナルで wait が返る。
+  wait
+}
+
+do_down() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (macOS 等)。foreground 起動 (actradeck up) は Ctrl-C で停止してください。"
+  use_service webui; do_uninstall
+  use_service backend; do_uninstall
+  bash "$AD_ATTACH" uninstall-all
+  err "[actradeck] 全4ティアをアンインストールしました。"
+}
+
+do_restart() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (macOS 等)。foreground 起動 (actradeck up) は Ctrl-C で停止→再実行してください。"
+  systemctl --user restart actradeck-backend.service 2>/dev/null || err "[actradeck] backend 未 install"
+  systemctl --user restart actradeck-webui.service 2>/dev/null || err "[actradeck] webui 未 install"
+  bash "$AD_ATTACH" service restart 2>/dev/null || true
+  bash "$AD_ATTACH" codex service restart 2>/dev/null || true
+  err "[actradeck] 再起動しました。状態: actradeck status"
+}
+
+do_status() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (macOS 等)。foreground 起動中は状態をそのターミナルで確認・doctor でポート到達性を点検できます。"
+  for n in actradeck-backend.service actradeck-webui.service; do
+    systemctl --user status "$n" --no-pager 2>/dev/null || true
+  done
+  bash "$AD_ATTACH" status-all
+}
+
+do_logs() {
+  command -v journalctl >/dev/null 2>&1 || die "journalctl が無い環境です。"
+  case "${1:-}" in
+    backend) journalctl --user -u actradeck-backend.service -f ;;
+    webui) journalctl --user -u actradeck-webui.service -f ;;
+    attach) journalctl --user -u actradeck-attach.service -f ;;
+    codex) journalctl --user -u actradeck-codex-attach.service -f ;;
+    *) die "logs の引数は backend|webui|attach|codex" ;;
+  esac
+}
+
+# --- doctor: 全スタック健全性点検 (秘匿値は表示しない) -------------------------------
+do_doctor() {
+  err "[doctor] repo: $REPO_ROOT"
+  local node_bin; node_bin="$(command -v node || echo MISSING)"
+  err "[doctor] node: $node_bin"
+  [ "$node_bin" = "MISSING" ] && err "[doctor] 警告: node が PATH に無い。起動できません。"
+  case "$node_bin" in
+    *"/.nvm/"*) err "[doctor] 注意: node が nvm パス。更新時は actradeck up を再実行 (203/EXEC 回避)。" ;;
+  esac
+  # 観測対象 agent の有無 (「sessions が出ない」時の一次切り分け)。cockpit 起動には不要だが、
+  # 無いと観測対象ゼロで一覧は空のまま。
+  local agents=""
+  command -v claude >/dev/null 2>&1 && agents="${agents:+$agents }claude"
+  command -v codex >/dev/null 2>&1 && agents="${agents:+$agents }codex"
+  err "[doctor] agents: ${agents:-なし — claude/codex 未導入。少なくとも1つ入れないと cockpit は空のままです}"
+  if [ -f "$ENV_FILE" ]; then
+    local perm; perm="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo '?')"
+    err "[doctor] .env: present (perm=$perm)"
+    case "$perm" in 600|400) : ;; *) err "[doctor] 警告: .env が $perm。\`chmod 600 $ENV_FILE\` を推奨。" ;; esac
+    for k in INGEST_TOKEN REALTIME_TOKEN; do
+      grep -q "^$k=" "$ENV_FILE" 2>/dev/null && err "[doctor] .env: $k 設定あり (値は非表示)" || err "[doctor] 警告: .env に $k がありません。"
+    done
+  else
+    err "[doctor] 警告: .env が無い ($ENV_FILE)。"
+  fi
+  if command -v loginctl >/dev/null 2>&1; then
+    local linger; linger="$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || echo '?')"
+    err "[doctor] linger: $linger$([ "$linger" = yes ] || echo '  (ログアウト後の常駐には loginctl enable-linger '"$USER"')')"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    local act ena
+    for n in actradeck-backend actradeck-webui actradeck-attach actradeck-codex-attach; do
+      # TDA-1: is-active/is-enabled は未ロード unit でも stdout に "inactive"/"disabled" を出し rc≠0 で抜ける。
+      # `$(... || echo ...)` だと stdout 値 + echo 値で二重出力し行が分裂する。`|| true` は stdout を保持
+      # しつつ exit 0 にする (set -e 下で rc≠0 の置換が do_doctor を中断するのも防ぐ)。空のみ unknown 補完。
+      act="$(systemctl --user is-active "$n.service" 2>/dev/null || true)"; act="${act:-unknown}"
+      ena="$(systemctl --user is-enabled "$n.service" 2>/dev/null || true)"; ena="${ena:-unknown}"
+      err "[doctor] $n: $act / $ena"
+    done
+  fi
+  # ポート到達性 (リスナー有無のみ・内容は見ない)。ポートは .env から読む (offset 運用に追従)。
+  # 検出手段の選択も 3 分岐 (listen/未listen/点検不能) も doctor_port_line→port_listening に集約。
+  local bport wport
+  bport="$(env_val ACTRADECK_BACKEND_PORT 55410)"
+  wport="$(env_val ACTRADECK_WEBUI_PORT 55400)"
+  doctor_port_line backend "$bport"
+  doctor_port_line webui "$wport"
+}
+
+main() {
+  local cmd="${1:-status}"
+  shift || true
+  case "$cmd" in
+    up) do_up ;;
+    down) do_down ;;
+    restart) do_restart ;;
+    status) do_status ;;
+    build) do_build ;;
+    logs) do_logs "${1:-}" ;;
+    doctor) do_doctor ;;
+    print-unit) use_service "${1:-}"; generate_unit ;;
+    -h|--help|help)
+      awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$SELF"
+      ;;
+    *) die "未知のサブコマンド \"$cmd\" ( -h で使い方)" ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,29 @@
+{
+  "name": "@actradeck/design-tokens",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Adaptive Clarity 2030 design tokens (DTCG 2025.10) — semantic/component/theme CSS custom properties + TS contrast utils",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tokens.css": "./dist/tokens.css"
+  },
+  "scripts": {
+    "build": "tsc -b && node ./build-tokens.mjs",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

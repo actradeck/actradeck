@@ -1,0 +1,47 @@
+{
+  "$description": "Adaptive Clarity 2030 — High Contrast テーマ。テキストペアは 7:1 超を目標（AA 超え）。",
+  "bg": {
+    "canvas": { "$type": "color", "$value": "#ffffff" },
+    "surface": { "$type": "color", "$value": "#ffffff" },
+    "layer": { "$type": "color", "$value": "#ffffff" },
+    "layer-raised": { "$type": "color", "$value": "#ffffff" },
+    "selected": { "$type": "color", "$value": "#d9e2ff" }
+  },
+  "fg": {
+    "primary": { "$type": "color", "$value": "#000000" },
+    "muted": { "$type": "color", "$value": "#000000" },
+    "on-action": { "$type": "color", "$value": "#ffffff" }
+  },
+  "border": {
+    "subtle": { "$type": "color", "$value": "#000000" },
+    "strong": { "$type": "color", "$value": "#000000" }
+  },
+  "focus": { "$type": "color", "$value": "#0000ff" },
+  "action": {
+    "primary": {
+      "bg": { "$type": "color", "$value": "#00008b" },
+      "bg-hover": { "$type": "color", "$value": "#00006b" }
+    },
+    "danger": {
+      "bg": { "$type": "color", "$value": "#a30000" }
+    }
+  },
+  "status": {
+    "success": {
+      "fg": { "$type": "color", "$value": "#006400" },
+      "bg": { "$type": "color", "$value": "#ffffff" }
+    },
+    "warn": {
+      "fg": { "$type": "color", "$value": "#6b4e00" },
+      "bg": { "$type": "color", "$value": "#ffffff" }
+    },
+    "danger": {
+      "fg": { "$type": "color", "$value": "#a30000" },
+      "bg": { "$type": "color", "$value": "#ffffff" }
+    },
+    "info": {
+      "fg": { "$type": "color", "$value": "#00008b" },
+      "bg": { "$type": "color", "$value": "#ffffff" }
+    }
+  }
+}

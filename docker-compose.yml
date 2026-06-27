@@ -1,0 +1,27 @@
+# ActraDeck local dev infra (Phase 0).
+# 秘匿情報は .env 経由 (.env はコミットしない / .gitignore 済み)。.env.example を参照。
+# Ports use a 554xx offset to avoid clashing with other local services.
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    container_name: actradeck-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-actradeck}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:-actradeck}
+    ports:
+      # host:container — host 側は ACTRADECK_PG_PORT (既定 55432) で offset 運用。
+      - "${ACTRADECK_PG_PORT:-55432}:5432"
+    volumes:
+      - actradeck_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-actradeck} -d ${POSTGRES_DB:-actradeck}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  actradeck_pgdata:
+    name: actradeck_pgdata

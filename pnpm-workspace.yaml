@@ -1,0 +1,10 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+  - "db"
+
+# Phase 2 Sidecar の native addon は明示的にビルド許可する
+# (pnpm 10 は既定で postinstall build を実行しない)。
+onlyBuiltDependencies:
+  - better-sqlite3
+  - node-pty

@@ -1,0 +1,240 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# SEC-1 (監査): least-privilege GITHUB_TOKEN。verify/e2e/migrations は repo を read するだけ
+#   (checkout/install/build/test/migrate を CI-local Postgres に対して実行・write/upload なし)。
+#   read に固定し、compromised な依存 lifecycle script が write スコープ token を得る経路を断つ。
+#   (CodeQL は codeql.yml 側で security-events:write を job スコープで持つ。)
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # 3#QA-1: 唯一の実DB INV (INV-EVENT-DB-INTEGRITY) を CI で実走させるため Postgres を起動。
+    #   DATABASE_URL 未供給だと db テストが describe.skipIf で常時 skip され不変条件が空振りする。
+    #   CI service は標準ポート 5432 で公開 (ローカル docker compose の host 55432 とは別。
+    #   DATABASE_URL を CI 用に 5432 で設定して整合させる)。migrations job と同一の接続規約。
+    services:
+      postgres:
+        image: postgres:17.5-alpine
+        env:
+          POSTGRES_USER: actradeck
+          POSTGRES_PASSWORD: ci_local_only
+          POSTGRES_DB: actradeck
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U actradeck -d actradeck"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://actradeck:ci_local_only@localhost:5432/actradeck
+      # PUBLIC OSS CI cannot install/auth the claude & codex binaries (install + API-key cost),
+      #   so the real-binary e2e (INV-ATTACH-E2E / INV-CODEX-E2E) opt out of their
+      #   CI-requires-binary guard and gracefully skip. DB-required e2e still run (Postgres
+      #   service above). Deterministic Attach/normalization is covered by the e2e job's
+      #   hook-replay (no real binary). No-op in jobs that don't run those tests.
+      ACTRADECK_SKIP_REAL_BIN_E2E: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 再#2 SEC-1: INV-DEP-AUDIT — 既知脆弱性 High/Critical=0 を CI で強制 (security.md)。
+      #   High/Critical advisory が transitive 依存に入ると exit≠0 で赤。moderate 以下は許容
+      #   (--audit-level=high)。誤検出の一時抑止は ADR + 期限付き allowlist のみ (accepted-risk 禁止)。
+      - name: Dependency audit (INV-DEP-AUDIT, fail on High/Critical)
+        run: pnpm audit --audit-level=high
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Format check
+        run: pnpm run format
+
+      # CI-BUILD (公開 CI 初回失敗の是正): workspace ライブラリ (event-model / projection /
+      #   design-tokens / backend / sidecar) は package exports が `./dist/*` のみ (src フォールバック
+      #   なし) のため、それらを import する type-check / test / e2e は **dist が無いと失敗する**
+      #   (projection の `tsc --noEmit` が @actradeck/event-model を解決できず exit2 / sidecar e2e が
+      #   dist/index.js を ERR_MODULE_NOT_FOUND)。消費ステップの前に topological order で全パッケージを
+      #   ビルドして dist を供給する。これにより後段の個別ビルド (backend:Build / design-tokens:Build /
+      #   webui:Build=BUILD-1 production build gate) は dist 供給としては冗長な no-op 再ビルドになる
+      #   (それぞれ step 順序契約 / 本番ビルドゲートとして残置)。重複(特に webui の二重 next build)解消は
+      #   tech-debt sweep 課題 (QA-1/TDA-1)。ローカル開発(dist 既存)では緑でも clean CI では未ビルドで
+      #   赤化する class を構造的に塞ぐことを優先する。
+      - name: Build workspace (provide dist for type-check/test/e2e; topological)
+        run: pnpm run build
+
+      - name: Type check
+        run: pnpm run type-check
+
+      # 3#QA-1: db テストが参照する events/sessions スキーマを用意 (実 Postgres)。
+      - name: Migrate up (provision schema for real-DB INV)
+        run: pnpm --filter @actradeck/db run migrate:up
+
+      # 3#QA-1: db の INV-EVENT-DB-INTEGRITY は DATABASE_URL 到達時に **実走** する
+      #   (skip ではなく pass)。skip を許さないため、実走を明示検証する guard を後段に置く。
+      - name: Test
+        run: pnpm run test
+
+      - name: Assert real-DB INV actually RAN (not skipped)
+        run: pnpm --filter @actradeck/db exec vitest run --reporter=json --outputFile=/tmp/db-test.json && node -e "const r=require('/tmp/db-test.json'); const names=r.testResults.flatMap(f=>f.assertionResults.map(a=>({n:a.fullName||a.title,s:a.status}))); const inv=names.filter(t=>/INV-EVENT-DB-INTEGRITY/.test(t.n)); if(inv.length===0){console.error('INV-EVENT-DB-INTEGRITY did not appear — test file missing?');process.exit(1);} const skipped=inv.filter(t=>t.s==='skipped'||t.s==='pending'); if(skipped.length){console.error('INV-EVENT-DB-INTEGRITY was SKIPPED in CI (DATABASE_URL not reaching the test):',skipped.map(s=>s.n));process.exit(1);} console.log('INV-EVENT-DB-INTEGRITY ran for real:',inv.length,'assertions, all passed/failed (none skipped).');"
+
+      # Phase3 ingestion: backend の実 PG INV (INV-IDEMPOTENCY / INV-EVENT-ORDER / WS server)
+      #   が DATABASE_URL 到達時に **実走** する (skip ではなく pass) ことを保証する。
+      #   db ガードと同型: skip を silent green にしないため、実走を明示検証する。
+      - name: Assert backend real-DB INV actually RAN (not skipped)
+        run: pnpm --filter @actradeck/backend exec vitest run --reporter=json --outputFile=/tmp/backend-test.json && node -e "const r=require('/tmp/backend-test.json'); const names=r.testResults.flatMap(f=>f.assertionResults.map(a=>({n:a.fullName||a.title,s:a.status}))); const inv=names.filter(t=>/INV-IDEMPOTENCY|INV-EVENT-ORDER|INV-EVENT-CONTRACT|INV-LIVENESS-PARITY|Ingestion server WS\+HTTP/.test(t.n)); if(inv.length===0){console.error('backend real-DB INV did not appear — test file missing?');process.exit(1);} const skipped=inv.filter(t=>t.s==='skipped'||t.s==='pending'); if(skipped.length){console.error('backend real-DB INV was SKIPPED in CI (DATABASE_URL not reaching the test):',skipped.map(s=>s.n));process.exit(1);} console.log('backend real-DB INV ran for real:',inv.length,'assertions, none skipped.');"
+
+      # QA-2: backend もカバレッジ閾値ゲート付きで実行 (testing.md 目標。閾値割れで赤)。
+      #   network 例外 (index.ts の listen / db.ts の pool 接続) は明示除外。コア
+      #   (reducer / liveness / ingest-store) は sink/store 並みに高く張る。
+      #   DATABASE_URL 到達下で実走し、実測直下の閾値割れを exit≠0 で赤判定する。
+      - name: Test (backend coverage gate)
+        run: pnpm --filter @actradeck/backend run test:coverage
+
+      # egress#QA-1: sidecar の貫通 e2e (inv-egress-e2e.test.ts) は実 backend
+      #   buildIngestionServer を **package entry (dist) 経由**で import する (test 専用 devDep)。
+      #   dist が新鮮であることを保証するため sidecar gate の直前に backend を build する
+      #   (Type check の tsc -b でも emit されるが、step 順序を契約として明示固定する)。
+      - name: Build backend (provide dist for sidecar e2e import)
+        run: pnpm --filter @actradeck/backend run build
+
+      # QA-3: sidecar はカバレッジ閾値ゲート付きで実行 (testing.md 目標。閾値割れで赤)。
+      #   egress#QA-1 の貫通 e2e (実 WsClient↔実 buildIngestionServer↔実 PG) も本ゲートが拾う
+      #   (DATABASE_URL は job env で到達)。
+      - name: Test (sidecar coverage gate)
+        run: pnpm --filter @actradeck/sidecar run test:coverage
+
+      # egress#QA-1: 貫通 e2e (INV-EGRESS-E2E) が DATABASE_URL 到達時に **実走** する
+      #   (skip ではなく pass/fail) ことを保証する。db/backend ガードと同型: skip を silent green
+      #   にしない。テストファイルがサイレント削除/skip されたら exit≠0 で赤。
+      #   この e2e は path 欠落 / session_id 分裂 / explicit-mode 分裂の 3 class を CI で固定する。
+      - name: Assert egress e2e actually RAN (not skipped)
+        run: pnpm --filter @actradeck/sidecar exec vitest run --reporter=json --outputFile=/tmp/sidecar-e2e.json && node -e "const r=require('/tmp/sidecar-e2e.json'); const names=r.testResults.flatMap(f=>f.assertionResults.map(a=>({n:a.fullName||a.title,s:a.status}))); const inv=names.filter(t=>/INV-EGRESS-E2E/.test(t.n)); if(inv.length===0){console.error('INV-EGRESS-E2E did not appear — test file missing/renamed?');process.exit(1);} const skipped=inv.filter(t=>t.s==='skipped'||t.s==='pending'); if(skipped.length){console.error('INV-EGRESS-E2E was SKIPPED in CI (DATABASE_URL not reaching the test):',skipped.map(s=>s.n));process.exit(1);} console.log('INV-EGRESS-E2E ran for real:',inv.length,'assertions, none skipped.');"
+
+      # 再#QA-4 (再監査 a547b9f2): webui の coverage 閾値 (vitest.config.ts: realtime core +
+      #   liveness-display) を CI で実評価する。plain `vitest run` は閾値を見ないため dormant
+      #   だった。--coverage 付きゲートで回帰時のカバレッジ低下を exit≠0 で赤判定する。
+      - name: Test (webui coverage gate)
+        run: pnpm --filter @actradeck/webui run test:coverage
+
+      # Adaptive Clarity (ADR 019ea263): webui は @actradeck/design-tokens の dist/tokens.css を
+      #   layout.tsx で import する。dist は gitignore のため、webui build/smoke の前にトークンを
+      #   生成する (DTCG .tokens.json → CSS custom properties + INV-A11Y-CONTRAST はビルド前に test 済)。
+      - name: Build design-tokens (generate --ad-* CSS for webui)
+        run: pnpm --filter @actradeck/design-tokens run build
+
+      # BUILD-1 (APPROVE 019e9307 検証ギャップの是正): tsc/test/eslint は通っても
+      #   `next build` (Turbopack 本番ビルド) は別経路で失敗しうる (実例: 相対 import の
+      #   `.js` 拡張子を Turbopack が解決できず build 不能だった)。成果物ビルドを CI ゲート化し、
+      #   bundler 解決・型・静的生成の退行を exit≠0 で赤判定する。
+      - name: Build (webui production build gate)
+        run: pnpm --filter @actradeck/webui run build
+
+      # BOOT-SMOKE (task 019e93e9 / QA-3 死角是正): 型/build/test 緑でも **実行時に server が
+      #   起動しない** class を防ぐ。実 PostgreSQL に対し backend を本番 start (main-guard 経由) で、
+      #   webui を本番 server.ts (prepare→listen) で **空きポートに実起動**し、
+      #     - POST /ingest 無認証 → 401 (認証ゲート生存)
+      #     - GET / → 200 / 配信 HTML に REALTIME_TOKEN/Bearer 非露出
+      #     - headerless browser WS → BFF Bearer 中継 → backend snapshot.list 受信
+      #   を検証する。DATABASE_URL は verify job の Postgres service。直前の build (.next) を再利用。
+      - name: Boot smoke (real server bring-up gate)
+        env:
+          ACTRADECK_WEBUI_DIST_DIR: .next
+        run: pnpm --filter @actradeck/webui run smoke:boot
+
+  # 再#QA-2: 決定的 hook-replay E2E を CI に配線。実 HTTP/実 SQLite/実 WS を貫通し、
+  # redaction 漏れ・最小タイムライン欠落を process.exit≠0 で赤判定する (REAL データ)。
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # CI-BUILD: e2e:replay は実 sidecar (→ @actradeck/event-model の dist) を import するため、
+      #   消費前に workspace をビルドして dist を供給する (verify ジョブと同じ理由・別ジョブなので再掲)。
+      - name: Build workspace (provide dist for e2e runtime imports; topological)
+        run: pnpm run build
+
+      - name: E2E hook-replay (REAL HTTP/SQLite/WS, redaction leak = fail)
+        run: pnpm --filter @actradeck/sidecar run e2e:replay
+
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.5-alpine
+        env:
+          POSTGRES_USER: actradeck
+          POSTGRES_PASSWORD: ci_local_only
+          POSTGRES_DB: actradeck
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U actradeck -d actradeck"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://actradeck:ci_local_only@localhost:5432/actradeck
+      # PUBLIC OSS CI cannot install/auth the claude & codex binaries (install + API-key cost),
+      #   so the real-binary e2e (INV-ATTACH-E2E / INV-CODEX-E2E) opt out of their
+      #   CI-requires-binary guard and gracefully skip. DB-required e2e still run (Postgres
+      #   service above). Deterministic Attach/normalization is covered by the e2e job's
+      #   hook-replay (no real binary). No-op in jobs that don't run those tests.
+      ACTRADECK_SKIP_REAL_BIN_E2E: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Migrate up
+        run: pnpm --filter @actradeck/db run migrate:up
+
+      - name: Migrate down (rollback verification)
+        run: pnpm --filter @actradeck/db run migrate:down
+
+      - name: Migrate up again (idempotent re-apply)
+        run: pnpm --filter @actradeck/db run migrate:up

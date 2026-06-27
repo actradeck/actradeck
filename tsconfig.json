@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "files": [],
+  "references": [
+    { "path": "./packages/event-model" },
+    { "path": "./packages/projection" },
+    { "path": "./packages/design-tokens" },
+    { "path": "./apps/sidecar" },
+    { "path": "./apps/backend" }
+  ]
+}

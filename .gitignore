@@ -1,0 +1,59 @@
+# Memorymcp MCP 設定（DB認証情報を含むためコミットしない）
+.mcp.json
+.mcp.local.json
+
+# OSS 公開ミラーの生成物 (scripts/prepare-oss.sh の出力) と sync 作業ツリー。
+# private repo には決してコミットしない (公開は scripts/sync-oss.sh が別 repo へ)。
+/oss/
+/.oss-sync/
+# landing 公開ミラーの生成物 (scripts/prepare-landing.sh の出力 → actradeck/website)。
+/oss-landing/
+
+# フック実行時の状態ファイル
+.claude/.checkpoint-hook-state.json
+.claude/scheduled_tasks.lock
+
+# Claude Code 個人設定
+.claude/settings.local.json
+# サブエージェント用の一時 git worktree (isolation: worktree)
+.claude/worktrees/
+
+# SEC-2 (Attach Mode): settings-merge の backup / atomic tmp。literal token-mode の nonce 平文を
+# 含みうるため tracked file に着地させない (どの scope の .claude/ 配下に作られても ignore)。
+*.actradeck-bak-*
+*.actradeck-tmp-*
+# SEC-1 (Attach Mode): file-lock の advisory lock file (holder pid を含む)。tracked にしない。
+*.actradeck-lock
+
+# 環境変数 / 秘匿情報（.env.example のみコミット）
+.env
+.env.*
+!.env.example
+
+# Node / ビルド成果物
+node_modules/
+dist/
+.next/
+# boot smoke が分離 distDir を使うときの成果物 (稼働中 dev の .next を壊さないため)
+.next-smoke/
+coverage/
+*.tsbuildinfo
+
+# ログ / OS
+*.log
+.DS_Store
+
+# 再#TDA-6: Sidecar ローカル SQLite event log / 実行時生成物 (redaction 済みでも端末ローカル)。
+sidecar.db
+sidecar.db-shm
+sidecar.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+apps/sidecar/*.db
+apps/sidecar/.data/
+
+# TDA-5: ローカル perf probe / ベンチ (使い捨て・コミット対象外)。残す場合は README + 汎用化。
+apps/backend/bench/
+probe-*.mts
+probe-*.mjs

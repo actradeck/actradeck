@@ -1,0 +1,33 @@
+{
+  "name": "@actradeck/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend (Phase 3): Fastify Ingestion(HTTP/WS) + State Engine + Realtime + PostgreSQL",
+  "main": "./dist/index.js",
+  "//types": "TDA-1 (019e92f2): workspace-internal の型解決を source に向け、gitignored dist/*.d.ts の鮮度に依存させない。runtime は main(dist) のまま。consumer (webui contract.ts) は type-only import のみ。",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "type-check": "tsc -b",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/index.ts",
+    "start": "node --env-file-if-exists=../../.env --import tsx src/index.ts"
+  },
+  "dependencies": {
+    "@actradeck/event-model": "workspace:*",
+    "@actradeck/projection": "workspace:*",
+    "@fastify/websocket": "^11.2.0",
+    "fastify": "5.8.5",
+    "pg": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.20.0",
+    "@types/ws": "8.18.1",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8",
+    "ws": "^8.21.0"
+  }
+}

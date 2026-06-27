@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# ActraDeck quickstart — one command from a fresh clone to a running cockpit.
+#
+# What it does (idempotent):
+#   1. Preflight: node / pnpm / docker compose (systemctl optional).
+#   2. .env: if absent, generate from .env.example with random secrets (0600).
+#      An existing .env is never overwritten.
+#   3. pnpm install (only if node_modules is missing), then build the workspace
+#      (pnpm -r build) — backend/webui import the compiled dist of @actradeck/* packages.
+#   4. Start Postgres via docker compose and wait until it is healthy.
+#   5. Run DB migrations (pnpm db:migrate).
+#   6. Bring up all tiers (scripts/actradeck up = backend + webui + attach + codex-attach).
+#   7. Verify (scripts/actradeck doctor).
+#
+# After this: open http://localhost:55400 (default; or your ACTRADECK_WEBUI_PORT),
+# then run `claude` / `codex` in any repo.
+#
+# Usage:  ./scripts/quickstart
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+say() { printf '\033[1;36m[quickstart]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[quickstart]\033[0m %s\n' "$*" >&2; }
+die() {
+  printf '\033[1;31m[quickstart] %s\033[0m\n' "$*" >&2
+  exit 1
+}
+
+# Random 256-bit hex secret (openssl preferred, /dev/urandom fallback).
+randhex() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+  else
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+  fi
+}
+
+# --- 1. preflight -----------------------------------------------------------
+say "Checking prerequisites…"
+command -v node >/dev/null 2>&1 || die "node is required. Install Node (see package.json engines) — e.g. 'nvm install 22'."
+command -v pnpm >/dev/null 2>&1 || die "pnpm is required: 'npm i -g pnpm'."
+
+# Enforce the documented minimum Node version. We do NOT hardcode the number here:
+# read it from package.json's engines.node so this gate never drifts from the source
+# of truth, and compare with node's own version fields. Without this, an old Node
+# passes `command -v node` and fails later inside `next build` with a cryptic error.
+if ! node -e '
+  const e = (require("./package.json").engines || {}).node || "";
+  // engines.node は ">=22.16.0" / "22.16.0 - 23" / "^22.16.0 <23" 等の幅がある。
+  // 区切りを一律除去すると "22.16.0 - 23"→"22.16.023" のように壊れる (QA-2) ため、
+  // 先頭の最初の semver トークン (X / X.Y / X.Y.Z) だけを最小要件として取り出す。
+  // マッチ無し (空/"*"/"latest"/engines 欠落) は制約なし扱いで fail-open ([0])。
+  const min = ((e.match(/\d+(?:\.\d+){0,2}/) || ["0"])[0]).split(".").map(Number);
+  const cur = process.versions.node.split(".").map(Number);
+  const ge = (a, b) => { for (let i = 0; i < 3; i++) { const x = a[i]||0, y = b[i]||0; if (x > y) return true; if (x < y) return false; } return true; };
+  process.exit(ge(cur, min) ? 0 : 1);
+'; then
+  die "Node $(node -v) is too old. ActraDeck needs Node $(node -p '(require("./package.json").engines||{}).node' 2>/dev/null || echo '>=22.16.0'). Try: 'nvm install 22 && nvm use 22'."
+fi
+
+COMPOSE=""
+if docker compose version >/dev/null 2>&1; then
+  COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE="docker-compose"
+else
+  die "docker compose is required (used to run Postgres)."
+fi
+
+# The compose CLI being present does not mean the daemon is reachable. Probe it now so
+# the failure is a clear message here, not an opaque error from `compose up` later.
+# Prefer `docker info` (works for the compose plugin); fall back to the resolved compose
+# CLI for a docker-compose v1 host that has no standalone `docker` binary (QA-3) — `ps`
+# still contacts the daemon (run from $ROOT, which holds the compose file).
+if command -v docker >/dev/null 2>&1; then
+  docker info >/dev/null 2>&1 || die "Docker is installed but the daemon is not reachable. Start it (Docker Desktop, or 'sudo systemctl start docker') and ensure your user can run docker (e.g. the 'docker' group), then re-run."
+elif ! $COMPOSE ps >/dev/null 2>&1; then
+  die "The Docker daemon is not reachable (checked via '$COMPOSE'). Start Docker and ensure your user can run it, then re-run."
+fi
+
+HAVE_SYSTEMD=0
+command -v systemctl >/dev/null 2>&1 && HAVE_SYSTEMD=1
+[ "$HAVE_SYSTEMD" = 1 ] || warn "systemctl not found (e.g. macOS): tiers run in the foreground via './scripts/actradeck up' (see the final message)."
+
+# At least one agent (Claude Code / Codex) is needed to *see* sessions. The stack still
+# comes up without one, so warn (don't die) — otherwise the cockpit just stays empty and
+# a newcomer can't tell setup succeeded. (doctor reports this too.)
+if ! command -v claude >/dev/null 2>&1 && ! command -v codex >/dev/null 2>&1; then
+  warn "No agent found on PATH (claude / codex). Setup will still finish, but the cockpit stays empty until you install one and run it in a repo."
+fi
+
+# --- 2. .env ----------------------------------------------------------------
+if [ -f .env ]; then
+  say ".env already present — leaving it untouched."
+else
+  say ".env not found — generating it from .env.example with random secrets…"
+  [ -f .env.example ] || die ".env.example is missing; cannot generate .env."
+  pgpw="$(randhex)"
+  ingest="$(randhex)"
+  realtime="$(randhex)"
+  # Base from the template, then substitute the secret-bearing lines.
+  sed \
+    -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${pgpw}|" \
+    -e "s|^DATABASE_URL=.*|DATABASE_URL=postgresql://actradeck:${pgpw}@localhost:55432/actradeck|" \
+    .env.example >.env
+  # Token keys: replace if present in the template, otherwise append.
+  for kv in "INGEST_TOKEN=${ingest}" "REALTIME_TOKEN=${realtime}"; do
+    k="${kv%%=*}"
+    if grep -q "^${k}=" .env; then
+      sed -i "s|^${k}=.*|${kv}|" .env
+    else
+      printf '%s\n' "$kv" >>.env
+    fi
+  done
+  chmod 600 .env
+  say "Generated .env (0600, random secrets). Review it if you need non-default ports."
+fi
+
+# --- 3. dependencies --------------------------------------------------------
+if [ -d node_modules ]; then
+  say "Dependencies already installed — skipping pnpm install."
+else
+  say "Installing dependencies (pnpm install)…"
+  pnpm install
+fi
+
+# --- 3b. build workspace packages -------------------------------------------
+# pnpm install だけでは workspace パッケージの dist は生成されない。backend (tsx) は
+# @actradeck/event-model 等の **dist** を import するため、未ビルドだと起動時に
+# ERR_MODULE_NOT_FOUND になる。systemd 経路の webui (本番 prebuilt) も .next が要る。
+# ここで全パッケージを一括ビルドしておく (冪等)。
+say "Building workspace packages (pnpm -r build)…"
+pnpm -r --if-present run build
+
+# --- 4. Postgres ------------------------------------------------------------
+say "Starting Postgres ($COMPOSE up -d)…"
+$COMPOSE up -d
+
+say "Waiting for Postgres to become healthy…"
+ok=0
+for _ in $(seq 1 30); do
+  if $COMPOSE exec -T postgres pg_isready -U actradeck -d actradeck >/dev/null 2>&1; then
+    ok=1
+    break
+  fi
+  sleep 2
+done
+[ "$ok" = 1 ] || die "Postgres did not become ready. Check: $COMPOSE ps && $COMPOSE logs postgres"
+say "Postgres is ready."
+
+# --- 5. migrations ----------------------------------------------------------
+say "Running database migrations (pnpm db:migrate)…"
+pnpm db:migrate
+
+# --- 6. bring up tiers ------------------------------------------------------
+# Cockpit URL follows the .env port (the template recommends an offset to avoid clashes).
+webui_port="$(grep -E '^ACTRADECK_WEBUI_PORT=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+webui_port="${webui_port:-55400}"
+
+if [ "$HAVE_SYSTEMD" = 1 ]; then
+  say "Bringing up all tiers as user daemons (scripts/actradeck up)…"
+  ./scripts/actradeck up
+
+  # --- 7. verify ------------------------------------------------------------
+  say "Verifying…"
+  ./scripts/actradeck doctor || true
+
+  cat <<DONE
+
+[quickstart] Done — the cockpit is running as user daemons.
+  Cockpit:  http://localhost:${webui_port}
+  Next:     cd ~/your/project && claude     # or: codex
+            -> your session shows up in the cockpit.
+  Manage:   ./scripts/actradeck status | restart | down
+  Demo:     see docs/demo-90s.md to record the 90-second walkthrough.
+  Trouble?  see docs/getting-started.md
+DONE
+else
+  # No systemd (e.g. macOS): we do NOT auto-start here, because the foreground
+  # supervisor blocks (it must stay attached to this terminal). Tell the user the
+  # one command that brings the stack up, and do NOT claim the cockpit is ready —
+  # it is not yet. (A persistent launchd path for macOS is planned.)
+  cat <<DONE
+
+[quickstart] Setup complete — but the cockpit is NOT running yet (no systemd on this machine).
+  Start it (foreground; keeps running, Ctrl-C stops all tiers):
+      ./scripts/actradeck up
+  Then open:  http://localhost:${webui_port}
+  Next:       cd ~/your/project && claude     # or: codex
+              -> your session shows up in the cockpit.
+  Demo:       see docs/demo-90s.md to record the 90-second walkthrough.
+  Trouble?    see docs/getting-started.md
+DONE
+fi

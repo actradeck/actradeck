@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+#
+# ad-attach — ActraDeck Attach Mode を「どのディレクトリからでも」常駐させる薄いランチャ。
+#
+# 2 つの観測 daemon を同一機構 (サービスレジストリ) で systemd --user 常駐管理する (ADR 019ee134):
+#   - attach: `agentmon attach --scope user`。CC が必ず読む ~/.claude/settings.json に hook を
+#             非破壊配線し、以後どのディレクトリで `claude` を起動しても ActraDeck が観測する。
+#   - codex : `agentmon codex attach`。素の Codex TUI の rollout JSONL を passive tail して観測する
+#             (ADR 019ed59f / 019ed8cf)。codex を spawn/kill しない純観測 daemon。
+# sidecar 本体コードは一切変更しない (ADR 019eac8a / 019ea476 / 019ee134)。
+#
+# セキュリティ:
+#   - INGEST_TOKEN 等の秘匿は <repo>/.env から読む (このスクリプトにも unit 本体にも値を書かない)。
+#     unit は `EnvironmentFile=-<repo>/.env` 参照のみ。.env は chmod 600 推奨 (下記 do_doctor で警告)。
+#   - attach の user scope settings 改変は可逆 (停止時に ActraDeck hooks のみ detach、ユーザー hooks 温存)。
+#     codex は settings 配線を持たない純 tailer ゆえ detach 不要。
+#   - hardening: 両 unit に TimeoutStopSec=30 (SIGTERM→graceful flush の猶予) + NoNewPrivileges=yes。
+#
+# 使い方:
+#   ad-attach                       attach を foreground 常駐 (Ctrl-C で detach)。テスト/単発監視向け。
+#   ad-attach start|stop|status     attach の foreground 起動 / 停止+detach / 稼働状況表示。
+#   ad-attach build                 sidecar をビルド (dist/cli.js を生成)。
+#   ad-attach install|uninstall     attach の systemd --user サービスを配置/削除 (ログイン時自動起動)。
+#   ad-attach service <cmd>         attach の systemctl --user ラッパ (start|stop|restart|status|logs)。
+#   ad-attach print-unit            attach の systemd unit を標準出力 (確認用・単一ソース)。
+#   ad-attach codex <verb>          codex daemon を操作 (start|stop|status|install|uninstall|service <cmd>|print-unit)。
+#   ad-attach install-all           attach + codex の両サービスを配置・自動起動。
+#   ad-attach uninstall-all         両サービスを停止・無効化・削除。
+#   ad-attach status-all            両サービスの systemd 状態を表示。
+#   ad-attach doctor                .env / node パス / unit の健全性を点検 (秘匿は表示しない)。
+#
+# 注意:
+#   - .env は秘匿を含む。chmod 600 <repo>/.env 推奨 (ad-attach doctor が緩い権限を警告)。
+#   - systemd unit には実 node 絶対パスが焼き込まれる。node を更新 (nvm install 等) したら
+#     `ad-attach install` / `ad-attach codex install` を再実行して unit を更新すること
+#     (旧パス消滅で 203/EXEC の無言停止を防ぐ)。
+#   - codex の CODEX_HOME / poll 間隔等は .env または drop-in (override.conf) で渡す
+#     (unit 本体は既定の `codex attach` のみ)。
+#
+set -euo pipefail
+
+# --- パス解決 (このスクリプトの位置から repo root を機械的に決める) ---
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+CLI="$REPO_ROOT/apps/sidecar/dist/cli.js"
+ENV_FILE="$REPO_ROOT/.env"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+err() { printf '%s\n' "$*" >&2; }
+die() { err "ad-attach: $*"; exit 1; }
+
+# --- サービスレジストリ (ADR 019ee134・generalize-reusable-tooling) -------------------
+# use_service <attach|codex> が選択サービスの記述子を globals へ展開する。
+# generate_unit / do_install / do_uninstall / do_service はこの globals でパラメータ化され、
+# サービス固有のハードコードを持たない。
+SVC_KEY="" SVC_NAME="" SVC_EXEC="" SVC_DESC="" SVC_DOC="" SVC_UNIT_PATH=""
+
+use_service() {
+  case "${1:-}" in
+    attach)
+      SVC_KEY="attach"
+      SVC_NAME="actradeck-attach.service"
+      SVC_EXEC="attach --scope user --yes"
+      SVC_DESC="ActraDeck Attach daemon (observe all Claude Code sessions via user-scope hooks)"
+      SVC_DOC="file://$REPO_ROOT/docs/attach-mode.md"
+      ;;
+    codex)
+      SVC_KEY="codex"
+      SVC_NAME="actradeck-codex-attach.service"
+      SVC_EXEC="codex attach"
+      SVC_DESC="ActraDeck Codex Attach daemon (observe standard Codex TUI via rollout JSONL tail)"
+      SVC_DOC="file://$REPO_ROOT/docs/attach-mode.md"
+      ;;
+    *) die "未知のサービス \"${1:-}\" (attach|codex)" ;;
+  esac
+  SVC_UNIT_PATH="$UNIT_DIR/$SVC_NAME"
+}
+
+resolve_node() {
+  local n
+  n="$(command -v node || true)"
+  [ -n "$n" ] || die "node が PATH に見つかりません。Node.js を入れてください。"
+  printf '%s' "$n"
+}
+
+ensure_built() {
+  if [ ! -f "$CLI" ]; then
+    err "[ad-attach] dist/cli.js が無いのでビルドします…"
+    do_build
+  fi
+}
+
+# .env を環境へ取り込む (foreground 起動時のみ。systemd は EnvironmentFile で読む)。
+load_env() {
+  if [ -f "$ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+  else
+    err "[ad-attach] 警告: $ENV_FILE が無い。INGEST_TOKEN 未設定だと backend が 401 で ingestion を拒否します。"
+  fi
+}
+
+do_build() {
+  ( cd "$REPO_ROOT" && pnpm --filter @actradeck/sidecar build )
+}
+
+# --- foreground 起動 (attach は rich CLI・codex は純 tailer) -------------------------
+do_start() {
+  ensure_built
+  load_env
+  if [ "$SVC_KEY" = "codex" ]; then
+    err "[ad-attach] codex rollout を foreground tail (Ctrl-C で停止)。codex を spawn/kill しません。"
+    exec node "$CLI" codex attach
+  fi
+  err "[ad-attach] user scope で attach 常駐 (Ctrl-C で detach)。CC をどのディレクトリで起動しても観測されます。"
+  exec node "$CLI" attach --scope user --yes
+}
+
+# attach の foreground/CLI 停止 (settings detach 込み)。codex は settings を持たないため systemd 専管。
+do_stop() {
+  if [ "$SVC_KEY" = "codex" ]; then
+    err "[ad-attach] codex は純 tailer で foreground 停止コマンドを持ちません。systemd 配下なら \`ad-attach codex service stop\` を使ってください。"
+    return 0
+  fi
+  ensure_built
+  load_env
+  node "$CLI" daemon stop --scope user
+}
+
+do_status() {
+  if [ "$SVC_KEY" = "codex" ]; then
+    do_service status
+    return 0
+  fi
+  ensure_built
+  load_env
+  node "$CLI" daemon status --scope user
+}
+
+# systemd unit を実パスで生成する (絶対パスはマシン依存ゆえ install 時に確定・選択サービス依存)。
+generate_unit() {
+  local node_bin
+  node_bin="$(resolve_node)"
+  cat <<UNIT
+[Unit]
+Description=$SVC_DESC
+Documentation=$SVC_DOC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 秘匿は .env から (unit 本体には値を書かない)。先頭の '-' は欠落許容。
+EnvironmentFile=-$ENV_FILE
+ExecStart=$node_bin $CLI $SVC_EXEC
+# SIGTERM で CLI の shutdown ハンドラが graceful flush (attach は runStop→detach も) を実行する。
+# TimeoutStopSec で flush の猶予を与えてから SIGKILL する (graceful-drain delay を考慮)。
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+# 観測 daemon は権限昇格を要しない (攻撃面削減)。hook/state 書込・WS を壊す aggressive sandbox は入れない。
+NoNewPrivileges=yes
+# daemon が ~/.actradeck に state(0600) を書くため HOME を尊重 (--user なので既定で OK)。
+
+[Install]
+WantedBy=default.target
+UNIT
+}
+
+do_install() {
+  ensure_built
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (systemd --user 非対応)。foreground 起動を使ってください。"
+  [ -f "$ENV_FILE" ] || err "[ad-attach] 警告: $ENV_FILE が無い。INGEST_TOKEN を含む .env を用意してから start してください。"
+  mkdir -p "$UNIT_DIR"
+  generate_unit > "$SVC_UNIT_PATH"
+  chmod 600 "$SVC_UNIT_PATH"
+  err "[ad-attach] unit を配置: $SVC_UNIT_PATH"
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$SVC_NAME"
+  err "[ad-attach] 有効化しました ($SVC_NAME)。状態: systemctl --user status $SVC_NAME"
+  err "[ad-attach] 以後ログイン時に自動起動します。"
+  err "[ad-attach] (ログイン外でも常駐させたい場合は: loginctl enable-linger $USER)"
+  # TDA-A2: nvm 等の version 固有 node を pin した場合、node 更新で ExecStart が壊れる (203/EXEC)。
+  local reinstall_hint; [ "$SVC_KEY" = "codex" ] && reinstall_hint="ad-attach codex install" || reinstall_hint="ad-attach install"
+  case "$(resolve_node)" in
+    *"/.nvm/"*) err "[ad-attach] 注意: node が nvm パスです。node を更新したら \`$reinstall_hint\` を再実行して unit を更新してください (旧パス消滅で無言停止しないため)。" ;;
+  esac
+}
+
+do_uninstall() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です。"
+  # stop の SIGTERM が (attach なら) settings を detach する。disable で自動起動解除。
+  systemctl --user stop "$SVC_NAME" 2>/dev/null || true
+  systemctl --user disable "$SVC_NAME" 2>/dev/null || true
+  if [ -f "$SVC_UNIT_PATH" ]; then
+    rm -f "$SVC_UNIT_PATH"
+    err "[ad-attach] unit を削除: $SVC_UNIT_PATH"
+  fi
+  systemctl --user daemon-reload
+  # attach のみ: settings 残骸を detach (service が SIGKILL 等で detach を逃した場合の保険)。
+  # cleanup は常に成功すべきなので build に依存しない (TDA-A3): cli.js があれば detach、無ければ skip。
+  if [ "$SVC_KEY" = "attach" ] && [ -f "$CLI" ]; then
+    load_env
+    node "$CLI" daemon stop --scope user 2>/dev/null || true
+  fi
+  err "[ad-attach] アンインストール完了 ($SVC_NAME)。"
+}
+
+do_service() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です。"
+  local sub="${1:-status}"
+  case "$sub" in
+    start|stop|restart|status) systemctl --user "$sub" "$SVC_NAME" ;;
+    logs) journalctl --user -u "$SVC_NAME" -f ;;
+    *) die "service の引数は start|stop|restart|status|logs" ;;
+  esac
+}
+
+# codex 名前空間: codex サービスへ verb をディスパッチ (top-level verb のミラー)。
+do_codex() {
+  use_service codex
+  local verb="${1:-status}"
+  shift || true
+  case "$verb" in
+    start|"") do_start ;;
+    stop) do_stop ;;
+    status) do_status ;;
+    install) do_install ;;
+    uninstall) do_uninstall ;;
+    print-unit) generate_unit ;;
+    service) do_service "${1:-status}" ;;
+    *) die "未知の codex verb \"$verb\" (start|stop|status|install|uninstall|service <cmd>|print-unit)" ;;
+  esac
+}
+
+# --- 両サービス一括 ----------------------------------------------------------------
+do_install_all() {
+  use_service attach; do_install
+  # TDA-2: attach は enable --now で起動済。codex install が失敗 (set -e で中断) しても、
+  # attach は常駐したままで個別再試行できることを先に案内し partial-state を分かりやすくする。
+  err "[ad-attach] attach 配置完了。続けて codex を配置します (失敗時は \`ad-attach codex install\` で個別再試行可)。"
+  use_service codex;  do_install
+  err "[ad-attach] attach + codex を常駐化しました。状態: ad-attach status-all"
+}
+
+do_uninstall_all() {
+  use_service attach; do_uninstall
+  use_service codex;  do_uninstall
+  err "[ad-attach] attach + codex をアンインストールしました。"
+}
+
+do_status_all() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です。"
+  use_service attach; systemctl --user status "$SVC_NAME" --no-pager || true
+  use_service codex;  systemctl --user status "$SVC_NAME" --no-pager || true
+}
+
+# --- doctor: 健全性点検 (秘匿値は表示しない) ---------------------------------------
+do_doctor() {
+  err "[doctor] repo: $REPO_ROOT"
+  err "[doctor] cli : $CLI ($([ -f "$CLI" ] && echo present || echo MISSING-run-build))"
+  # TDA-1: doctor は診断ツールゆえ node 欠落でも中断しない (非致死・以降の .env/unit 点検まで到達する)。
+  local node_bin; node_bin="$(command -v node || echo MISSING)"
+  err "[doctor] node: $node_bin"
+  if [ "$node_bin" = "MISSING" ]; then
+    err "[doctor] 警告: node が PATH に無い。foreground/systemd 起動できません。Node.js を入れてください。"
+  fi
+  case "$node_bin" in
+    *"/.nvm/"*) err "[doctor] 注意: node が nvm パス。更新時は install を再実行 (203/EXEC 回避)。" ;;
+  esac
+  if [ -f "$ENV_FILE" ]; then
+    # 秘匿値は出さない。パーミッションのみ点検 (chmod 600 推奨・ADR 019eac91 SEC-1 L)。
+    local perm; perm="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo '?')"
+    err "[doctor] .env: present (perm=$perm)"
+    case "$perm" in
+      600|400) : ;;
+      *) err "[doctor] 警告: .env が $perm。秘匿を含むため \`chmod 600 $ENV_FILE\` を推奨します。" ;;
+    esac
+    grep -q '^INGEST_TOKEN=' "$ENV_FILE" 2>/dev/null \
+      && err "[doctor] .env: INGEST_TOKEN 設定あり (値は非表示)" \
+      || err "[doctor] 警告: .env に INGEST_TOKEN がありません (backend が 401 で ingestion を拒否します)。"
+  else
+    err "[doctor] 警告: .env が無い ($ENV_FILE)。INGEST_TOKEN を含む .env を用意してください。"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    use_service attach
+    err "[doctor] attach unit: $([ -f "$SVC_UNIT_PATH" ] && echo installed || echo not-installed) ($SVC_UNIT_PATH)"
+    use_service codex
+    err "[doctor] codex  unit: $([ -f "$SVC_UNIT_PATH" ] && echo installed || echo not-installed) ($SVC_UNIT_PATH)"
+  else
+    err "[doctor] systemctl 無し: foreground 起動のみ利用可。"
+  fi
+}
+
+main() {
+  local cmd="${1:-start}"
+  shift || true
+  case "$cmd" in
+    codex) do_codex "$@" ;;
+    install-all) do_install_all ;;
+    uninstall-all) do_uninstall_all ;;
+    status-all) do_status_all ;;
+    doctor) do_doctor ;;
+    *)
+      # top-level verb は attach を対象 (後方互換)。
+      use_service attach
+      case "$cmd" in
+        start|"") do_start ;;
+        stop) do_stop ;;
+        status) do_status ;;
+        build) do_build ;;
+        install) do_install ;;
+        uninstall) do_uninstall ;;
+        print-unit) generate_unit ;;
+        service) do_service "${1:-status}" ;;
+        -h|--help|help)
+          # 先頭コメントブロック (shebang を除く) を最初の非コメント行まで表示。
+          awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$SELF"
+          ;;
+        *) die "未知のサブコマンド \"$cmd\" ( -h で使い方)" ;;
+      esac
+      ;;
+  esac
+}
+
+main "$@"

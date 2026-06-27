@@ -1,0 +1,55 @@
+{
+  "$description": "Adaptive Clarity 2030 — component tier. semantic を参照。テーマ上書きは semantic 側で吸収。",
+  "button": {
+    "primary": {
+      "bg": { "$type": "color", "$value": "{action.primary.bg}" },
+      "bg-hover": { "$type": "color", "$value": "{action.primary.bg-hover}" },
+      "fg": { "$type": "color", "$value": "{fg.on-action}" }
+    },
+    "danger": {
+      "bg": { "$type": "color", "$value": "{action.danger.bg}" },
+      "fg": { "$type": "color", "$value": "{fg.on-action}" }
+    },
+    "ghost": {
+      "fg": { "$type": "color", "$value": "{fg.primary}" },
+      "bg-hover": { "$type": "color", "$value": "{bg.layer}" }
+    }
+  },
+  "tag": {
+    "neutral": {
+      "bg": { "$type": "color", "$value": "{bg.layer}" },
+      "fg": { "$type": "color", "$value": "{fg.primary}" }
+    },
+    "muted": {
+      "bg": { "$type": "color", "$value": "{bg.layer}" },
+      "fg": { "$type": "color", "$value": "{fg.muted}" }
+    },
+    "success": {
+      "bg": { "$type": "color", "$value": "{status.success.bg}" },
+      "fg": { "$type": "color", "$value": "{status.success.fg}" }
+    },
+    "warn": {
+      "bg": { "$type": "color", "$value": "{status.warn.bg}" },
+      "fg": { "$type": "color", "$value": "{status.warn.fg}" }
+    },
+    "danger": {
+      "bg": { "$type": "color", "$value": "{status.danger.bg}" },
+      "fg": { "$type": "color", "$value": "{status.danger.fg}" }
+    },
+    "info": {
+      "bg": { "$type": "color", "$value": "{status.info.bg}" },
+      "fg": { "$type": "color", "$value": "{status.info.fg}" }
+    }
+  },
+  "card": {
+    "bg": { "$type": "color", "$value": "{bg.surface}" },
+    "bg-elevated": { "$type": "color", "$value": "{bg.layer-raised}" },
+    "border": { "$type": "color", "$value": "{border.subtle}" },
+    "radius": { "$type": "dimension", "$value": "{radius.12}" }
+  },
+  "input": {
+    "border": { "$type": "color", "$value": "{border.strong}" },
+    "border-error": { "$type": "color", "$value": "{status.danger.fg}" },
+    "radius": { "$type": "dimension", "$value": "{radius.8}" }
+  }
+}

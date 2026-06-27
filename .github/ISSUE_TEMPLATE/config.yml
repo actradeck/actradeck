@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability (do NOT open a public issue)
+    url: https://github.com/actradeck/actradeck/security/advisories/new
+    about: >-
+      Report a redaction bypass, approval-gate bypass, SSRF, or any secret reaching
+      disk/network privately. See SECURITY.md. Please never include real secrets.
+  - name: Setup help & troubleshooting
+    url: https://github.com/actradeck/actradeck/blob/main/docs/getting-started.md
+    about: Installation, quickstart, and common setup issues.

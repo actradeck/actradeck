@@ -1,0 +1,2351 @@
+// Adaptive Clarity 2030: Carbon を全面置換し、デザイントークン（@actradeck/design-tokens の
+// --ad-*、layout.tsx で import）と kit プリミティブのみで構成する。Semantic First: 直値色/px は
+// 使わず var(--ad-*) を経由する（test/inv-semantic-first.test.ts が .ad-* 内の生 hex を禁止）。
+
+// color-scheme はテーマに追従させる（フォーム既定色・スクロールバー等を整合）。
+// 明示テーマ未指定時は OS 設定（prefers-color-scheme）に委ねる。
+:root {
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+[data-theme="light"],
+[data-theme="hc"] {
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+  }
+}
+
+// スクリーンリーダ専用（視覚的に隠すがフォーカス/読み上げ可能）。
+.ad-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+// セッション検索（ネイティブ input[type=search]・token 駆動）。
+.ad-search__input {
+  width: 100%;
+  min-height: var(--ad-size-target-min);
+  padding: var(--ad-space-2) var(--ad-space-3);
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-input-border);
+  border-radius: var(--ad-input-radius);
+}
+
+// ヘッダ右寄せアクション領域（テーマ切替などの常設操作）。
+// 通知有効化等で操作が増えても溢れず折返す（ヘッダのバランスを保つ）。
+.ad-header__actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ad-space-2);
+  margin-left: auto;
+  padding-right: var(--ad-space-4);
+}
+
+// テーマ切替（最初のトークン消費要素）。Carbon 非依存・ネイティブ select。
+.ad-theme-toggle {
+  display: inline-flex;
+  align-items: center;
+}
+
+.ad-theme-select {
+  min-height: var(--ad-size-target-min);
+  padding: 0 var(--ad-space-2);
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-border-strong);
+  border-radius: var(--ad-radius-8);
+}
+
+// 通知トグル — 有効化でカテゴリ fieldset が現れてもヘッダのバランスを崩さない。
+.ad-notify-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ad-space-2);
+  min-width: 0;
+}
+
+.ad-notify-toggle__status {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+// ネイティブ fieldset の既定 border/margin/padding を打ち消し、コンパクトな inline 群へ。
+.ad-notify-toggle__cats {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ad-space-1) var(--ad-space-3);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
+}
+
+.ad-notify-toggle__cat {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ad-space-1);
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+// ===== Adaptive Clarity kit (PR-C0) — token 駆動の独立コンポーネント層 =====
+
+// 共通フォーカス可視（WCAG 2.4.13 Focus Appearance: 2px・focus 色）。
+:where(a, button, select, input, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--ad-focus);
+  outline-offset: 2px;
+}
+
+// モーション抑制（OS 設定尊重・Neutral Intelligence）。
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+.ad-icon {
+  display: inline-block;
+  vertical-align: -0.125em;
+  flex: none;
+}
+
+.ad-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ad-space-2);
+  min-height: var(--ad-size-target-min);
+  padding: var(--ad-space-2) var(--ad-space-3);
+  font-size: 0.875rem;
+  line-height: 1.4;
+  border: 1px solid transparent;
+  border-radius: var(--ad-radius-8);
+  cursor: pointer;
+  transition: background-color var(--ad-motion-duration-fast) ease;
+}
+
+.ad-btn--sm {
+  padding: var(--ad-space-1) var(--ad-space-2);
+  font-size: 0.8125rem;
+}
+
+.ad-btn[disabled] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ad-btn--primary {
+  color: var(--ad-button-primary-fg);
+  background: var(--ad-button-primary-bg);
+}
+
+.ad-btn--primary:hover:not([disabled]) {
+  background: var(--ad-button-primary-bg-hover);
+}
+
+.ad-btn--danger {
+  color: var(--ad-button-danger-fg);
+  background: var(--ad-button-danger-bg);
+}
+
+.ad-btn--secondary {
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-layer);
+  border-color: var(--ad-border-subtle);
+}
+
+.ad-btn--secondary:hover:not([disabled]) {
+  background: var(--ad-bg-selected);
+}
+
+.ad-btn--ghost {
+  color: var(--ad-button-ghost-fg);
+  background: transparent;
+}
+
+.ad-btn--ghost:hover:not([disabled]) {
+  background: var(--ad-button-ghost-bg-hover);
+}
+
+.ad-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--ad-size-target-min);
+  min-height: var(--ad-size-target-min);
+  padding: var(--ad-space-1);
+  font-size: 1rem;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ad-radius-8);
+  cursor: pointer;
+}
+
+.ad-icon-btn[disabled] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ad-icon-btn:hover:not([disabled]) {
+  background: var(--ad-button-ghost-bg-hover);
+}
+
+.ad-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ad-space-1);
+  min-height: 1.25rem;
+  padding: 0 var(--ad-space-2);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  border-radius: var(--ad-radius-pill);
+  white-space: nowrap;
+}
+
+.ad-tag--sm {
+  font-size: 0.6875rem;
+}
+
+.ad-tag--neutral {
+  color: var(--ad-tag-neutral-fg);
+  background: var(--ad-tag-neutral-bg);
+}
+
+.ad-tag--muted {
+  color: var(--ad-tag-muted-fg);
+  background: var(--ad-tag-muted-bg);
+}
+
+.ad-tag--success {
+  color: var(--ad-tag-success-fg);
+  background: var(--ad-tag-success-bg);
+}
+
+.ad-tag--warn {
+  color: var(--ad-tag-warn-fg);
+  background: var(--ad-tag-warn-bg);
+}
+
+.ad-tag--danger {
+  color: var(--ad-tag-danger-fg);
+  background: var(--ad-tag-danger-bg);
+}
+
+.ad-tag--info {
+  color: var(--ad-tag-info-fg);
+  background: var(--ad-tag-info-bg);
+}
+
+.ad-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.ad-table__th {
+  padding: var(--ad-space-2) var(--ad-space-3);
+  text-align: left;
+  font-weight: 600;
+  color: var(--ad-fg-muted);
+  border-bottom: 1px solid var(--ad-border-subtle);
+}
+
+.ad-table__td {
+  padding: var(--ad-space-2) var(--ad-space-3);
+  color: var(--ad-fg-primary);
+  border-bottom: 1px solid var(--ad-border-subtle);
+}
+
+.ad-table__row {
+  min-height: var(--ad-size-target-min);
+}
+
+.ad-card {
+  padding: var(--ad-space-4);
+  background: var(--ad-card-bg);
+  border: 1px solid var(--ad-card-border);
+  border-radius: var(--ad-card-radius);
+}
+
+.ad-card--danger {
+  border-color: var(--ad-status-danger-fg);
+}
+
+.ad-card--warn {
+  border-color: var(--ad-status-warn-fg);
+}
+
+.ad-alert {
+  display: flex;
+  gap: var(--ad-space-2);
+  padding: var(--ad-space-3);
+  border: 1px solid transparent;
+  border-radius: var(--ad-radius-8);
+}
+
+.ad-alert__icon {
+  flex: none;
+  margin-top: 0.1em;
+}
+
+.ad-alert__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ad-space-1);
+}
+
+.ad-alert__title {
+  font-weight: 600;
+}
+
+.ad-alert--info {
+  color: var(--ad-status-info-fg);
+  background: var(--ad-status-info-bg);
+}
+
+.ad-alert--success {
+  color: var(--ad-status-success-fg);
+  background: var(--ad-status-success-bg);
+}
+
+.ad-alert--warning {
+  color: var(--ad-status-warn-fg);
+  background: var(--ad-status-warn-bg);
+}
+
+.ad-alert--error {
+  color: var(--ad-status-danger-fg);
+  background: var(--ad-status-danger-bg);
+}
+
+.ad-select {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ad-space-2);
+}
+
+.ad-select__label {
+  font-size: 0.8125rem;
+  color: var(--ad-fg-muted);
+}
+
+.ad-select__control {
+  min-height: var(--ad-size-target-min);
+  padding: 0 var(--ad-space-2);
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-input-border);
+  border-radius: var(--ad-input-radius);
+}
+
+.ad-range {
+  width: 100%;
+  accent-color: var(--ad-action-primary-bg);
+}
+
+.ad-range::-webkit-slider-thumb {
+  width: var(--ad-size-target-min);
+  height: var(--ad-size-target-min);
+}
+
+.ad-range::-moz-range-thumb {
+  width: var(--ad-size-target-min);
+  height: var(--ad-size-target-min);
+}
+
+// ヘッダ — 操作とステータスを常に手元に置くため sticky（スクロールしても追従）。
+.ad-appheader {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--ad-space-3);
+  min-height: var(--ad-size-header);
+  padding: 0 var(--ad-space-4);
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-layer);
+  border-bottom: 1px solid var(--ad-border-subtle);
+  box-shadow: 0 1px 2px var(--ad-border-subtle);
+}
+
+.ad-appheader__brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--ad-space-2);
+  min-width: 0;
+}
+
+// プロダクト識別マーク（装飾・aria-hidden）。markSrc 指定時はブランドアイコン画像、
+// 未指定時はアクセントドットへ縮退する。
+.ad-appheader__mark {
+  flex: none;
+  align-self: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: var(--ad-radius-8);
+}
+
+// 画像マーク以外（span 縮退）のときだけ小型ドット表現に戻す。
+span.ad-appheader__mark {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: var(--ad-radius-pill);
+  background: var(--ad-action-primary-bg);
+}
+
+.ad-appheader__product {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.ad-appheader__tagline {
+  padding-left: var(--ad-space-2);
+  color: var(--ad-fg-muted);
+  font-size: 0.8125rem;
+  border-left: 1px solid var(--ad-border-subtle);
+}
+
+// スキップリンク — フォーカス時のみ可視（2.4.1）。
+.ad-skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  z-index: 100;
+  padding: var(--ad-space-2) var(--ad-space-3);
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-border-strong);
+  border-radius: var(--ad-radius-8);
+}
+
+.ad-skip-link:focus {
+  left: var(--ad-space-2);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+  background: var(--ad-bg-surface);
+}
+
+body {
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-canvas);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.ad-shell {
+  min-height: 100vh;
+  background: var(--ad-bg-canvas);
+}
+
+.ad-content {
+  min-height: calc(100vh - 3rem);
+  padding: 1rem;
+  background: var(--ad-bg-canvas);
+}
+
+.ad-board {
+  display: grid;
+  gap: 1rem;
+  max-width: 112rem;
+  margin: 0 auto;
+}
+
+.ad-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  background: var(--ad-border-subtle);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-metric {
+  min-height: 5.25rem;
+  padding: 1rem;
+  background: var(--ad-bg-surface);
+}
+
+.ad-metric__label {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.ad-metric__value {
+  display: block;
+  color: var(--ad-fg-primary);
+  font-size: 1.75rem;
+  line-height: 2.25rem;
+  font-weight: 400;
+}
+
+.ad-workspace {
+  display: grid;
+  grid-template-columns: minmax(20rem, 29rem) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+// セッション一覧 (左) と Workspace (右) を viewport 高に収め、それぞれ独立スクロールさせる。
+// 一覧が長くても Workspace が画面外へ流れない (ユーザー指摘)。sticky 起点はヘッダー
+// (--ad-size-header) + .ad-content の上 padding(1rem)。狭幅 (≤900px) では下の媒体クエリで解除。
+.ad-workspace > .ad-panel {
+  position: sticky;
+  top: calc(var(--ad-size-header) + 1rem);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - var(--ad-size-header) - 2rem);
+  overflow: hidden;
+}
+// 固定したいヘッダー類は縮めない。
+.ad-workspace > .ad-panel > .ad-panel__header,
+.ad-workspace > aside.ad-panel > .ad-search {
+  flex: none;
+}
+// 左: 一覧本体だけスクロール。
+.ad-sessions-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+// 右: 本文だけスクロール (min-height:0 で flex 子を縮ませ overflow を効かせる)。
+.ad-workspace > section.ad-panel > .ad-panel__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.ad-panel {
+  min-width: 0;
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-panel__header {
+  display: flex;
+  min-height: 3rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0 1rem;
+  border-bottom: 1px solid var(--ad-border-subtle);
+}
+
+.ad-panel__title {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.125rem;
+}
+
+.ad-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ad-panel__body {
+  min-width: 0;
+  min-height: 32rem;
+}
+
+.ad-search {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--ad-border-subtle);
+}
+
+.ad-empty {
+  min-height: 10rem;
+  display: grid;
+  gap: 0.75rem;
+  place-items: center;
+  padding: 2rem;
+  color: var(--ad-fg-muted);
+  text-align: center;
+}
+
+.ad-session-table {
+  table-layout: fixed;
+}
+
+.ad-session-table th:nth-child(1),
+.ad-session-table td:nth-child(1) {
+  // liveness バッジ列。最長ラベル "STALLED?"/"UNKNOWN"/"OFFLINE"(icon+gap+text+padding ≈ 5.5rem)
+  // + セル横 padding(space-3 ×2 = 1.5rem) を border-box で収め、隣の action 列へはみ出さない幅。
+  width: 7rem;
+}
+
+// liveness セルはバッジ列内で完結させ、万一ラベルが伸びても action テキストに被せない。
+.ad-session-table td:nth-child(1) {
+  overflow: hidden;
+}
+
+.ad-session-table th:nth-child(3),
+.ad-session-table td:nth-child(3) {
+  // 要対応(attention)列。danger タグ "⚠ attention"/"⚠ 承認待ち"(icon+text+padding ≈ 5rem)が
+  // セル横 padding(space-3 ×2 = 1.5rem) 込みで border-box に収まる幅。4.75rem だと age 列へ被った。
+  width: 6.5rem;
+  overflow: hidden;
+}
+
+.ad-session-table th:nth-child(4),
+.ad-session-table td:nth-child(4),
+.ad-session-table th:nth-child(6),
+.ad-session-table td:nth-child(6) {
+  display: none;
+}
+
+.ad-session-table th:nth-child(5),
+.ad-session-table td:nth-child(5) {
+  width: 4rem;
+}
+
+.ad-session-row {
+  cursor: pointer;
+}
+
+.ad-session-row[data-selected="true"] td {
+  background: var(--ad-bg-selected);
+  box-shadow: inset 0.25rem 0 0 var(--ad-focus);
+}
+
+.ad-session-row[data-attention="true"] .ad-session-action {
+  font-weight: 600;
+}
+
+.ad-session-action {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ad-session-meta {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.ad-segment {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-segment .ad-btn {
+  border-right: 1px solid var(--ad-border-subtle);
+}
+
+.ad-segment .ad-btn:last-child {
+  border-right: 0;
+}
+
+.ad-segment .ad-btn[aria-pressed="true"] {
+  color: var(--ad-fg-on-action);
+  background: var(--ad-action-primary-bg);
+}
+
+.ad-detail {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.ad-detail-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: start;
+}
+
+.ad-detail-summary__title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.ad-detail-action {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.25rem;
+  line-height: 1.625rem;
+}
+
+.ad-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  background: var(--ad-border-subtle);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-detail-grid > div {
+  min-width: 0;
+  padding: 0.75rem 1rem;
+  background: var(--ad-bg-layer-raised);
+}
+
+.ad-kv-label {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.ad-kv-value {
+  display: block;
+  overflow: hidden;
+  color: var(--ad-fg-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* セッション詳細4ペイン (ADR 019ea4ba 段階1): 中央=現在作業 / 左=タイムライン / 右=git・risk。
+   status-bar/liveness/承認は上に積み、ここで 3 列グリッドを並べる (中央を広めに)。 */
+.ad-detail-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  grid-template-areas:
+    "current risk"
+    "timeline timeline";
+  gap: 1rem;
+}
+
+.ad-current-action {
+  grid-area: current;
+  display: grid;
+  gap: 0.5rem;
+  align-content: start;
+  padding: 0.75rem 1rem;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: 4px;
+}
+
+.ad-current-action__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.ad-current-action__primary {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.875rem;
+}
+
+.ad-current-action__empty {
+  margin: 0;
+  color: var(--ad-fg-muted);
+}
+
+.ad-current-action__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  margin: 0;
+}
+
+.ad-risk {
+  grid-area: risk;
+  display: grid;
+  gap: 0.5rem;
+  align-content: start;
+  padding: 0.75rem 1rem;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: 4px;
+}
+
+.ad-risk__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ad-risk__note {
+  margin: 0;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+/* redaction kind 別内訳 (強み(a)③)。secret 検出バッジの下に種類別タグを列挙する。 */
+.ad-risk__redaction {
+  display: grid;
+  gap: 0.375rem;
+}
+
+.ad-risk__redaction-title {
+  margin: 0;
+  color: var(--ad-fg-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ad-risk__redaction-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* diff / stdout 本文コンテナ。親ペイン (.ad-risk / .ad-current-action) は grid item
+   (min-width: auto 既定) のため、子の <pre> が長行で列ごと viewport 外へ押し広げないよう
+   min-width: 0 で収縮を許可する。 */
+.ad-risk__diff,
+.ad-current-action__output {
+  min-width: 0;
+}
+
+/* diff / stdout 本文 (.ad-modal__pre と同規約): 長行は折返し + 縦は max-height でスクロール。
+   従来は未定義 (ブラウザ既定 white-space: pre) で、長行が grid 列ごと viewport 外へ
+   はみ出していた (ユーザー報告 2026-06-13)。 */
+.ad-output-pre,
+.ad-diff-pre {
+  margin: 0;
+  padding: var(--ad-space-3);
+  max-height: 22rem;
+  overflow: auto;
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: var(--ad-radius-8);
+}
+
+.ad-pane-title {
+  margin: 0 0 0.25rem;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ad-timeline {
+  grid-area: timeline;
+}
+
+.ad-timeline__list {
+  display: grid;
+  gap: 1px;
+  max-height: 24rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  background: var(--ad-border-subtle);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: 4px;
+}
+
+.ad-timeline__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.75rem;
+  background: var(--ad-bg-layer-raised);
+  font-size: 0.8125rem;
+}
+
+.ad-timeline__empty {
+  padding: 0.75rem;
+  background: var(--ad-bg-layer-raised);
+  color: var(--ad-fg-muted);
+}
+
+.ad-timeline__time {
+  flex: 0 0 auto;
+  color: var(--ad-fg-muted);
+  font-family: var(--ad-font-mono, monospace);
+}
+
+.ad-timeline__kind {
+  flex: 0 0 auto;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+.ad-timeline__text {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.ad-timeline__elapsed {
+  flex: 0 0 auto;
+  color: var(--ad-fg-muted);
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.75rem;
+}
+
+.ad-approval-list {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.ad-approval-card {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-approval-card__header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ad-approval-card code {
+  display: block;
+  max-width: 100%;
+  padding: 0.5rem;
+  overflow: auto;
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-layer);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-approval-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* 段階2 (INV-INBOX-HIGHRISK-DENY-DEFAULT): 高リスク承認を視覚的に優先強調する。 */
+.ad-approval-card--highrisk {
+  border-color: var(--ad-status-danger-fg);
+  border-left-width: 3px;
+}
+
+.ad-approval-card__highrisk-ack {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem;
+  color: var(--ad-status-danger-fg);
+  background: var(--ad-status-danger-bg);
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+/* Approval Inbox (ADR 019ead14): 横断集約ビューのグループ枠・空状態 (TDA-2)。 */
+.ad-inbox {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.ad-inbox__groups {
+  display: grid;
+  gap: 1rem;
+}
+
+.ad-inbox__group {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-inbox__group-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ad-inbox__group-id {
+  padding: 0.125rem 0.375rem;
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-layer);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-inbox__empty {
+  margin: 0;
+  color: var(--ad-fg-muted);
+}
+
+/* Live Wall (ADR 019ead7a): 横断ウォーターフォール。共通時間軸のレーン壁。 */
+.ad-wall {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.ad-wall__controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ad-wall__empty {
+  margin: 0;
+  color: var(--ad-fg-muted);
+}
+
+.ad-wall__lanes {
+  display: grid;
+  gap: 0.5rem;
+  /* 段階2 描画スケール: 多 session でも DOM 上限に当たらないよう縦に有界スクロール
+     (canvas/仮想化は ADR D6 で full 再監査になるため段階2 では採らない)。 */
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.ad-wall__lane {
+  display: grid;
+  gap: 0.375rem;
+  padding: 0.75rem;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+  position: relative; /* ドロップインジケータ (::after) の基準。 */
+}
+
+/* 行全体がドラッグ可能なとき、掴めることを示す grab カーソル (ボタン等は各自 pointer に戻す)。 */
+.ad-wall__lane[draggable="true"] {
+  cursor: grab;
+}
+.ad-wall__lane[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* ドラッグ中: フロー側に残る元レーンは「着地先プレビュー」として淡い破線枠の placeholder にする
+   (実体は指へ追従する overlay ゴーストが担う)。他レーンはここへ寄って避ける。 */
+.ad-wall__lane[data-dragging] {
+  opacity: 0.35;
+  border-style: dashed;
+  background: transparent;
+}
+
+/* ドラッグ中はコンテナ全体を grabbing カーソルに (どこへ動かしてもプレビューされる感覚)。 */
+.ad-wall__lanes[data-dragging] {
+  cursor: grabbing;
+}
+
+/* 指へ追従する overlay ゴースト: 持ち上がった影 + わずかな傾き/拡大で「掴んでいる」立体感を出す。
+   位置 (fixed top/left/width) は LiveWall が pointer に追従して与える。 */
+.ad-wall__drag-ghost {
+  opacity: 0.95;
+  box-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.32),
+    0 2px 6px rgba(0, 0, 0, 0.24);
+  transform: scale(1.02) rotate(-0.4deg);
+  transform-origin: left center;
+}
+.ad-wall__drag-ghost .ad-wall__lane {
+  cursor: grabbing;
+  border-color: var(--ad-action-primary-bg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ad-wall__drag-ghost {
+    transform: none; /* 立体演出は抑止し、追従と影のみ残す。 */
+  }
+}
+
+/* ドロップ位置インジケータ: ドラッグ中、対象レーンの上半分=before / 下半分=after に太線を出す。 */
+.ad-wall__lane[data-drop]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--ad-action-primary-bg);
+  pointer-events: none;
+  z-index: 1;
+}
+.ad-wall__lane[data-drop="before"]::after {
+  top: -2px;
+}
+.ad-wall__lane[data-drop="after"]::after {
+  bottom: -2px;
+}
+
+/* ドラッグ並べ替えの掴みどころ (視覚的アフォーダンス)。キーボード代替は ↑/↓ ボタン。 */
+.ad-wall__drag-handle {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.25rem;
+  color: var(--ad-fg-muted);
+  cursor: grab;
+  user-select: none;
+  line-height: 1;
+}
+
+/* レーン上下移動ボタン群 (キーボード/クリック操作の並べ替え)。 */
+.ad-wall__lane-move {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+/* レーンヘッダは 2 行構成: main (識別+状態+操作) / meta (cwd・repo・経過・現在アクション)。
+   1 行詰め込みをやめ、多セッション時に視線が泳がないようにする。 */
+.ad-wall__lane-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ad-wall__lane-header-main,
+.ad-wall__lane-header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ad-wall__lane-header-meta:empty {
+  display: none;
+}
+
+/* main 行の右端操作グループ (詳細へ / 折りたたみ / ↑↓)。 */
+.ad-wall__lane-actions {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+  margin-left: auto;
+}
+
+/* 要対応 (承認/入力待ち) レーンの強制可視化: 左端アクセント + 枠色。並び順は変えない
+   (DnD のユーザー並びを尊重し、視覚だけで浮かせる)。 */
+.ad-wall__lane[data-attention] {
+  border-color: var(--ad-status-danger-fg);
+}
+.ad-wall__lane[data-attention]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--ad-status-danger-fg);
+  pointer-events: none;
+}
+
+/* 折りたたみレーン: track を隠しヘッダのみ (密度制御)。 */
+.ad-wall__lane[data-collapsed] {
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+
+/* 共通時間軸ルーラー: lanes スクロール内に sticky。track と同じ水平パディングで目盛りを揃える。 */
+.ad-wall__ruler {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 0 0.75rem;
+  background: var(--ad-bg-canvas);
+}
+
+.ad-wall__ruler-track {
+  position: relative;
+  height: 1.25rem;
+  border-bottom: 1px solid var(--ad-border-subtle);
+}
+
+.ad-wall__ruler-tick {
+  position: absolute;
+  bottom: 0.125rem;
+  transform: translateX(-50%);
+  font-size: 0.6875rem;
+  color: var(--ad-fg-muted);
+  white-space: nowrap;
+}
+.ad-wall__ruler-tick[data-edge="start"] {
+  transform: none;
+}
+.ad-wall__ruler-tick[data-edge="end"] {
+  transform: translateX(-100%);
+  color: var(--ad-fg-primary);
+}
+
+.ad-wall__lane-id {
+  padding: 0.125rem 0.375rem;
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-layer);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+/* どのディレクトリで動いているか (cwd) を各レーンで明示する。full path は title 属性に出す。 */
+.ad-wall__lane-cwd {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+  padding: 0.125rem 0.375rem;
+  color: var(--ad-fg-muted);
+  background: var(--ad-bg-layer);
+  border: 1px solid var(--ad-border-subtle);
+  max-width: 22rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 共通時間軸トラック: 右端=now、左へ windowMs 遡る。bar は left/width(%) で配置。 */
+.ad-wall__track {
+  position: relative;
+  width: 100%;
+  height: 1.5rem;
+  background: var(--ad-bg-layer);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+/* Wall インライン承認: レーン直下の承認カード列 (ApprovalCard を Inbox と共有)。 */
+.ad-wall__approvals {
+  margin-top: 0.5rem;
+}
+
+/* track の縦グリッド線 (ルーラー目盛りと同一値源) と右端の now 線。bar より背面 (DOM 順)。 */
+.ad-wall__gridline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--ad-border-subtle);
+  pointer-events: none;
+}
+
+.ad-wall__nowline {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--ad-action-primary-bg);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.ad-wall__bar {
+  position: absolute;
+  top: 0.25rem;
+  height: 1rem;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--ad-action-primary-bg);
+}
+
+.ad-wall__bar--command {
+  background: var(--ad-status-info-fg);
+}
+
+.ad-wall__bar--file {
+  background: var(--ad-status-warn-fg);
+}
+
+.ad-wall__bar--approval {
+  background: var(--ad-status-danger-fg);
+}
+
+.ad-wall__bar--error {
+  background: var(--ad-status-danger-fg);
+}
+
+.ad-wall__bar--liveness {
+  background: var(--ad-border-strong);
+}
+
+/* 色の凡例: bar 色 = アクション種別 (kind)。swatch は ad-wall__bar--<kind> の背景を再利用する
+   (base には背景を置かず specificity 衝突を避ける)。default は tool/mcp/web/turn/session/other。 */
+.ad-wall__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0 0.25rem;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+.ad-wall__legend-item {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.ad-wall__legend-swatch {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 2px;
+}
+
+.ad-wall__legend-swatch--default {
+  background: var(--ad-action-primary-bg);
+}
+
+.ad-wall__lane-empty {
+  display: inline-flex;
+  gap: 0.375rem;
+  align-items: center;
+  color: var(--ad-fg-muted);
+  font-size: 0.8125rem;
+}
+
+/* 段階2 motion=alive (ADR 019ead7a D2・INV-WALL-MOTION-LIVENESS-MAP): live-ongoing バーのみ脈動。
+   stalled/idle/完了バーには ad-wall__bar--pulse を付けない (barMotion の決定論写像) ため静止する。 */
+@keyframes ad-wall-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.ad-wall__bar--pulse {
+  animation: ad-wall-pulse 1.4s ease-in-out infinite;
+}
+
+/* reduced-motion 代替 (INV-WALL-REDUCED-MOTION-ALT): 脈動は global @media
+   (prefers-reduced-motion) で無効化される (L83-91)。動が止まっても「実行中・経過」が伝わるよう、
+   live-ongoing レーンには常にこの静的経過カウンタを DOM に出す (motion 非依存)。 */
+.ad-wall__lane-elapsed {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+  color: var(--ad-status-success-fg);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.ad-liveness-reason {
+  margin: 0;
+  color: var(--ad-fg-muted);
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.ad-replay {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.ad-replay__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: center;
+}
+
+.ad-replay__heading {
+  display: grid;
+  gap: 0.375rem;
+  min-width: 0;
+}
+
+.ad-replay__title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ad-replay__title strong {
+  font-size: 1.25rem;
+  line-height: 1.625rem;
+}
+
+/* 「いま何を再生しているか」識別行: repo@branch / provider / cwd(~短縮) / session 短縮 id。 */
+.ad-replay__identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
+  color: var(--ad-fg-muted);
+}
+
+.ad-replay__replaying {
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ad-fg-muted);
+}
+
+.ad-replay__repo {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  font-family: var(--ad-font-mono, monospace);
+  font-weight: 600;
+  color: var(--ad-fg-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ad-replay__branch {
+  font-weight: 400;
+  color: var(--ad-fg-muted);
+}
+
+.ad-replay__cwd {
+  min-width: 0;
+  max-width: 32ch;
+  overflow: hidden;
+  font-family: var(--ad-font-mono, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ad-replay__sid-label {
+  margin-right: 0.25rem;
+  color: var(--ad-fg-muted);
+}
+
+.ad-replay__sid-value {
+  font-family: var(--ad-font-mono, monospace);
+  color: var(--ad-fg-primary);
+}
+
+.ad-replay__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: end;
+}
+
+.ad-replay__scrubber {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.ad-replay__scrubber input[type="range"] {
+  width: 100%;
+  accent-color: var(--ad-action-primary-bg);
+}
+
+.ad-replay-state {
+  display: grid;
+  grid-template-columns: 1.1fr 2fr 0.8fr;
+  gap: 1px;
+  overflow: hidden;
+  background: var(--ad-border-subtle);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-replay-state > div {
+  min-width: 0;
+  padding: 0.75rem 1rem;
+  background: var(--ad-bg-layer-raised);
+}
+
+.ad-replay-timeline {
+  display: grid;
+  gap: 0.25rem;
+  max-height: 31rem;
+  padding: 0;
+  margin: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.ad-replay-event button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 4.5rem minmax(8rem, 14rem) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: center;
+  padding: 0.625rem 0.75rem;
+  color: var(--ad-fg-primary);
+  text-align: left;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid transparent;
+}
+
+.ad-replay-event button:hover,
+.ad-replay-event[data-active="true"] button {
+  background: var(--ad-bg-selected);
+  border-color: var(--ad-focus);
+}
+
+.ad-replay-event time,
+.ad-replay-event span {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+.ad-replay-event strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// ===== 監査ビュー（AuditView・強み(a) audit view/export） =====
+.ad-audit {
+  display: grid;
+  // 単一列を明示し全幅へ伸ばす (列未定義だと implicit auto 列が中身幅に縮み、margin:auto で
+  // ツールバーだけが中央に小さく浮く初期表示になる)。
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ad-space-4);
+  max-width: 112rem;
+  margin: 0 auto;
+}
+
+// クライアント側フィルタ行 (プロジェクト選択 + 横断テキスト + 件数)。
+.ad-audit__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ad-space-3);
+  padding: var(--ad-space-3) var(--ad-space-4);
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+// kit Select を他フィールド (開始日/終了日/絞り込み) と同じ「ラベル上・コントロール下」体裁へ揃える。
+.ad-audit__filters .ad-select {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--ad-space-1);
+}
+
+.ad-audit__filters .ad-select__label {
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+// select の高さを入力欄 (date / search) と同一構成へ揃える (既定 padding:0 だと低く下端揃えで段差)。
+.ad-audit__filters .ad-select__control {
+  min-height: var(--ad-size-target-min);
+  padding: var(--ad-space-2) var(--ad-space-3);
+}
+
+.ad-audit__search-input {
+  min-width: 16rem;
+  min-height: var(--ad-size-target-min);
+  padding: var(--ad-space-2) var(--ad-space-3);
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-input-border);
+  border-radius: var(--ad-input-radius);
+}
+
+.ad-audit__count {
+  margin-left: auto;
+  align-self: center;
+  color: var(--ad-fg-muted);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+// 期間指定 + 集計/出力ツールバー（パネルと同じ枠付き面）。
+.ad-audit__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ad-space-3);
+  padding: var(--ad-space-3) var(--ad-space-4);
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+// 集計（左）と出力（右）を分離する伸縮スペーサ。
+.ad-audit__controls-spacer {
+  flex: 1 1 var(--ad-space-4);
+}
+
+// 主アクション「集計」: 大きな日付入力の隣で主 CTA として読めるよう最小幅を確保する
+// (高さは .ad-btn の min-height で日付入力と既に揃う)。
+.ad-audit__load {
+  min-width: 7rem;
+}
+
+.ad-audit__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ad-space-1);
+}
+
+.ad-audit__field > span {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.ad-audit__field input {
+  min-height: var(--ad-size-target-min);
+  padding: var(--ad-space-2) var(--ad-space-3);
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-input-border);
+  border-radius: var(--ad-input-radius);
+  // 日付は locale 非依存の ISO テキスト入力 (YYYY-MM-DD)。Chromium はネイティブ
+  // <input type=date> の表示書式をブラウザ/OS ロケールで決め、ページからは上書き
+  // できない (lang 属性も html lang も無視) ため、英語 UI でも 年/月/日 が出ていた。
+  // それを避けるため text 入力 + ISO プレースホルダで全言語・全ブラウザ統一する。
+  font-variant-numeric: tabular-nums;
+}
+
+// 集計サマリ KPI ストリップ（上部 overview と同じ 1px グリッド線手法）。
+.ad-audit__summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  background: var(--ad-border-subtle);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+.ad-audit__kpi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ad-space-1);
+  min-height: 5.25rem;
+  padding: var(--ad-space-4);
+  background: var(--ad-bg-surface);
+}
+
+.ad-audit__kpi-label {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.ad-audit__kpi-value {
+  color: var(--ad-fg-primary);
+  font-size: 1.75rem;
+  line-height: 2.25rem;
+  font-variant-numeric: tabular-nums;
+}
+
+// 値の tone（>0 のとき注意/危険色で強調・neutral は既定色）。
+.ad-audit__kpi[data-tone="warn"] .ad-audit__kpi-value {
+  color: var(--ad-status-warn-fg);
+}
+
+.ad-audit__kpi[data-tone="danger"] .ad-audit__kpi-value {
+  color: var(--ad-status-danger-fg);
+}
+
+// セッション別証跡リスト（1px グリッド線で行を区切る）。
+.ad-audit__list {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  background: var(--ad-border-subtle);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+// 行はクリックで詳細モーダルを開くボタン (button reset + 全幅)。
+.ad-audit__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ad-space-3);
+  width: 100%;
+  padding: var(--ad-space-3) var(--ad-space-4);
+  color: inherit;
+  text-align: left;
+  background: var(--ad-bg-surface);
+  border: 0;
+  cursor: pointer;
+}
+
+.ad-audit__row:hover {
+  background: var(--ad-bg-layer-raised);
+}
+
+// 行の主情報 (プロジェクト見出し + パス/時刻メタ)。
+.ad-audit__row-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ad-space-1);
+  min-width: 0;
+}
+
+// 「どのプロジェクトか」見出し行 (project + provider badge + branch + state)。
+.ad-audit__row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ad-space-2);
+  min-width: 0;
+}
+
+.ad-audit__project {
+  color: var(--ad-fg-primary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ad-audit__branch {
+  color: var(--ad-fg-muted);
+  font-size: 0.8125rem;
+}
+
+.ad-audit__state {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+// 「どこで・いつ」メタ行 (cwd パス + 最終イベント時刻)。
+.ad-audit__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ad-space-1) var(--ad-space-3);
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.ad-audit__when {
+  font-variant-numeric: tabular-nums;
+}
+
+.ad-audit__row-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ad-space-2);
+}
+
+.ad-audit__empty {
+  margin: 0;
+  padding: var(--ad-space-6);
+  color: var(--ad-fg-muted);
+  text-align: center;
+  background: var(--ad-bg-surface);
+  border: 1px solid var(--ad-border-subtle);
+}
+
+// 監査詳細モーダルの承認イベント (メタ行 + 承認対象 command/path を全幅で表示)。
+.ad-audit-detail__event {
+  display: grid;
+  gap: var(--ad-space-1);
+  padding: var(--ad-space-2) var(--ad-space-3);
+  background: var(--ad-bg-layer-raised);
+  font-size: 0.75rem;
+}
+
+.ad-audit-detail__event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ad-space-2);
+}
+
+.ad-audit-detail__event-time {
+  color: var(--ad-fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+// 承認対象コマンド (redaction 済み)。折返して全文を見せる。
+.ad-audit-detail__cmd {
+  margin: 0;
+  color: var(--ad-fg-primary);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.ad-audit__more {
+  margin: 0;
+  padding: var(--ad-space-2) var(--ad-space-3);
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+@media (max-width: 66rem) {
+  .ad-overview,
+  .ad-detail-grid,
+  .ad-replay-state {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ad-audit__summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .ad-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  // 狭幅では1カラム積み上げ。viewport 拘束/独立スクロールを解除し自然なページスクロールに戻す。
+  .ad-workspace > .ad-panel {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .ad-sessions-scroll,
+  .ad-workspace > section.ad-panel > .ad-panel__body {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 42rem) {
+  .ad-content {
+    padding: 0.5rem;
+  }
+
+  .ad-panel__body {
+    min-height: 18rem;
+  }
+
+  .ad-panel__header {
+    min-height: auto;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    padding-block: 0.75rem;
+  }
+
+  .ad-segment {
+    width: 100%;
+  }
+
+  .ad-segment .ad-btn {
+    flex: 1 1 0;
+    justify-content: center;
+    max-width: none;
+  }
+
+  .ad-detail-grid,
+  .ad-replay-state,
+  .ad-detail-summary,
+  .ad-replay__header {
+    grid-template-columns: 1fr;
+  }
+
+  .ad-detail-panes {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "current"
+      "risk"
+      "timeline";
+  }
+
+  .ad-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ad-metric {
+    min-height: 4rem;
+    padding: 0.75rem;
+  }
+
+  // 狭幅ではタグラインを畳んでブランドを優先。
+  .ad-appheader__tagline {
+    display: none;
+  }
+
+  .ad-audit__summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ad-audit__row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ad-audit__row-tags {
+    justify-content: flex-start;
+  }
+
+  .ad-replay-event button {
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+  }
+
+  .ad-replay-event strong {
+    grid-column: 1 / -1;
+  }
+
+  .ad-session-table {
+    width: 100%;
+  }
+
+  .ad-session-table th,
+  .ad-session-table td {
+    padding-inline: 0.5rem;
+  }
+
+  .ad-session-table th:nth-child(3),
+  .ad-session-table td:nth-child(3) {
+    display: none;
+  }
+
+  .ad-session-table th:nth-child(1),
+  .ad-session-table td:nth-child(1) {
+    // モバイルはセル横 padding が space-2(0.5rem ×2) なので desktop より狭めで同ラベルが収まる。
+    width: 6.5rem;
+  }
+
+  .ad-session-table th:nth-child(5),
+  .ad-session-table td:nth-child(5) {
+    width: 3.5rem;
+  }
+
+  [data-testid="liveness-evidence"] {
+    table-layout: fixed;
+    width: 100%;
+  }
+
+  [data-testid="liveness-evidence"] th,
+  [data-testid="liveness-evidence"] td {
+    padding-inline: 0.5rem;
+    overflow-wrap: anywhere;
+  }
+
+  [data-testid="liveness-evidence"] th:nth-child(5),
+  [data-testid="liveness-evidence"] td:nth-child(5) {
+    display: none;
+  }
+}
+
+/* ── アクション単位タイムライン (設計裁定 019eb981) ─────────────────────────── */
+.ad-action-timeline {
+  display: grid;
+  gap: var(--ad-space-2);
+  min-width: 0;
+}
+
+.ad-action-timeline__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--ad-space-2);
+}
+
+.ad-action-timeline__toolbar-label {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+.ad-action-timeline__toggle {
+  display: inline-flex;
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: var(--ad-radius-8);
+  overflow: hidden;
+}
+
+.ad-toggle-btn {
+  padding: var(--ad-space-1) var(--ad-space-3);
+  font-size: 0.75rem;
+  color: var(--ad-fg-muted);
+  background: var(--ad-bg-layer-raised);
+  border: 0;
+  cursor: pointer;
+}
+
+.ad-toggle-btn[aria-pressed="true"] {
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-selected);
+}
+
+.ad-action-timeline__list {
+  display: grid;
+  gap: 1px;
+  max-height: 28rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  background: var(--ad-border-subtle);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: var(--ad-radius-8);
+}
+
+.ad-action-timeline__empty {
+  padding: var(--ad-space-3);
+  background: var(--ad-bg-layer-raised);
+  color: var(--ad-fg-muted);
+}
+
+.ad-action-row {
+  background: var(--ad-bg-layer-raised);
+}
+
+/* 未解決の介入待ち行のみ強調 (解決済みはトーンを落とす)。 */
+.ad-action-row[data-attention="true"] {
+  background: var(--ad-bg-selected);
+  box-shadow: inset 3px 0 0 var(--ad-focus);
+}
+
+.ad-action-row__btn {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--ad-space-3);
+  width: 100%;
+  padding: var(--ad-space-2) var(--ad-space-3);
+  color: var(--ad-fg-primary);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.ad-action-row__btn--static {
+  cursor: default;
+}
+
+.ad-action-row__btn:hover {
+  background: var(--ad-bg-selected);
+}
+
+.ad-action-row__time {
+  flex: 0 0 auto;
+  color: var(--ad-fg-muted);
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.75rem;
+  padding-top: 0.1rem;
+}
+
+/* 対象は切詰めず折返し (対象を隠さない・KPI)。 */
+.ad-action-row__target {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.8125rem;
+}
+
+.ad-action-row__target[data-empty="true"] {
+  color: var(--ad-fg-muted);
+  font-style: italic;
+}
+
+.ad-action-row__rawtype {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+.ad-action-row__verb {
+  align-self: start;
+}
+
+.ad-action-row__result {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--ad-space-1);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.ad-action-row__elapsed {
+  color: var(--ad-fg-muted);
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.75rem;
+}
+
+/* ── 詳細モーダル (native dialog) ──────────────────────────────────────────── */
+.ad-modal {
+  width: min(46rem, 92vw);
+  max-height: 86vh;
+  padding: 0;
+  color: var(--ad-fg-primary);
+  background: var(--ad-bg-layer);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: var(--ad-radius-8);
+  overflow: hidden;
+}
+
+.ad-modal::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.ad-modal__panel {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  max-height: 86vh;
+}
+
+.ad-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ad-space-3);
+  padding: var(--ad-space-3) var(--ad-space-4);
+  border-bottom: 1px solid var(--ad-border-subtle);
+}
+
+// モーダル見出し右側のボタン群 (例: 「このセッションを再生」+ 閉じる)。
+.ad-modal__header-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--ad-space-2);
+  align-items: center;
+}
+
+.ad-modal__title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+// モーダル見出しの副題 (例 監査詳細 — プロジェクト名)。
+.ad-modal__title-sub {
+  color: var(--ad-fg-muted);
+  font-weight: 400;
+}
+
+.ad-modal__body {
+  display: grid;
+  gap: var(--ad-space-4);
+  padding: var(--ad-space-4);
+  overflow-y: auto;
+}
+
+.ad-modal__section {
+  display: grid;
+  gap: var(--ad-space-2);
+}
+
+.ad-modal__label {
+  margin: 0;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ad-modal__target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--ad-space-2);
+}
+
+.ad-modal__code {
+  flex: 1 1 16rem;
+  min-width: 0;
+  padding: var(--ad-space-2) var(--ad-space-3);
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: var(--ad-radius-8);
+}
+
+.ad-modal__code-inline {
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.ad-modal__kv {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ad-space-2);
+  align-items: baseline;
+}
+
+.ad-modal__kv-label {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+.ad-modal__muted {
+  margin: 0;
+  color: var(--ad-fg-muted);
+}
+
+.ad-modal__note {
+  margin: 0;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+.ad-modal__error {
+  margin: 0;
+  color: var(--ad-status-danger-fg);
+  font-size: 0.8125rem;
+}
+
+.ad-modal__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ad-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+// ガバナンス証跡 drill-down (decision 019f03cc): クリック可能な kind チップ (tag 見た目の button)。
+// focus-visible は globals の :where(button) ルールが付与する。
+.ad-kind-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ad-space-1);
+  min-height: 1.25rem;
+  padding: 0 var(--ad-space-2);
+  font: inherit;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  color: var(--ad-tag-muted-fg);
+  background: var(--ad-tag-muted-bg);
+  border: 1px solid transparent;
+  border-radius: var(--ad-radius-pill);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.ad-kind-chip:hover {
+  border-color: var(--ad-border-strong);
+}
+
+.ad-kind-chip[data-active="true"] {
+  color: var(--ad-tag-warn-fg);
+  background: var(--ad-tag-warn-bg);
+  border-color: var(--ad-tag-warn-fg);
+}
+
+// 発生イベントパネル (選択 kind の occurrence 一覧)。
+.ad-occ {
+  display: grid;
+  gap: var(--ad-space-2);
+  margin-top: var(--ad-space-3);
+}
+
+.ad-occ__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ad-space-2);
+  margin: 0;
+}
+
+.ad-occ__title {
+  font-size: 0.8125rem;
+  color: var(--ad-fg-primary);
+}
+
+.ad-occ__meta {
+  font-size: 0.75rem;
+  color: var(--ad-fg-muted);
+}
+
+.ad-modal__events {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--ad-border-subtle);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: var(--ad-radius-8);
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.ad-modal__event {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(8rem, 14rem) minmax(0, 1fr);
+  gap: var(--ad-space-3);
+  padding: var(--ad-space-1) var(--ad-space-3);
+  background: var(--ad-bg-layer-raised);
+  font-size: 0.75rem;
+}
+
+.ad-modal__event-time {
+  color: var(--ad-fg-muted);
+  font-family: var(--ad-font-mono, monospace);
+}
+
+.ad-modal__event-type {
+  color: var(--ad-fg-muted);
+}
+
+.ad-modal__event-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ad-modal__pre {
+  margin: 0;
+  padding: var(--ad-space-3);
+  max-height: 22rem;
+  overflow: auto;
+  font-family: var(--ad-font-mono, monospace);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: var(--ad-radius-8);
+}
