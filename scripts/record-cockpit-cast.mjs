@@ -200,6 +200,17 @@ await ctx.addInitScript((lang) => {
     /* private mode: ignore */
   }
 }, LANG);
+// Keep the Next.js dev-mode tools indicator / error overlay OUT of the recording. In dev it
+// renders inside a <nextjs-portal> host in the light DOM (its UI lives in that host's shadow
+// root), so hiding the host hides everything inside regardless of shadow DOM. A transient
+// hydration toast ("1 Issue") otherwise flashed in the first ~3s of the cut; production builds
+// never show this indicator, so suppressing it on camera matches what real users see. Injected
+// from documentElement at init time so it applies before first paint, on every navigation.
+await ctx.addInitScript(() => {
+  const s = document.createElement("style");
+  s.textContent = "nextjs-portal{display:none!important}";
+  (document.head || document.documentElement).appendChild(s);
+});
 const p = await ctx.newPage();
 
 // --- caption overlay (annotation only; the data underneath is real) ---------
