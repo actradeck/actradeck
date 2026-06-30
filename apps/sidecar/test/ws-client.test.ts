@@ -152,6 +152,36 @@ describe("WsClient: inbound dispatch + publish", () => {
     store.close();
   });
 
+  // SEC-R2-1 (decision 019f0d22) 構造 backstop: 制御 handler の同期 throw が handleInbound の emit を貫通
+  // して ws message コールバック → uncaughtException → daemon crash になるのを防ぐ。throw する handler の
+  // 後も後続の制御メッセージが処理されることで、handleInbound が throw で死んでいないことを固定する。
+  // mutation: handleInbound の emit try/catch を外すと policy.request の throw が貫通し RED。
+  it("a throwing control handler does not break handleInbound (SEC-R2-1 backstop)", async () => {
+    const { port, conns } = await startServer();
+    const store = new EventStore(":memory:");
+    const TOKEN = "test-control-token-boom";
+    client = new WsClient({ url: `ws://127.0.0.1:${port}`, store, controlToken: TOKEN });
+    client.on("policyRequest", () => {
+      throw new Error("handler boom (e.g. disk persist failure)");
+    });
+    const interrupt = vi.fn();
+    client.on("interrupt", interrupt);
+    client.connect();
+    for (let i = 0; i < 50 && conns.length === 0; i++) await sleep(10);
+    expect(conns.length).toBe(1);
+
+    // throw する policy.request → chokepoint が捕捉 (daemon は生存)。
+    conns[0]!.send(
+      JSON.stringify({ type: "policy.request", request_id: "r1", op: "get", token: TOKEN }),
+    );
+    // 後続の制御メッセージが依然 dispatch される (handleInbound が貫通 throw で死んでいない)。
+    conns[0]!.send(JSON.stringify({ type: "interrupt", session_id: "s1", token: TOKEN }));
+    await sleep(40);
+
+    expect(interrupt, "throw する handler の後も後続制御が処理される").toHaveBeenCalledTimes(1);
+    store.close();
+  });
+
   // 再#SEC-2: publish() は削除済み。emit 経路 (EventSink → store.append → notifyAppended → flush)
   // のみで store/WS へ到達する。store.append の唯一の本番 caller が sink であることをこの
   // 経路テストで固定する (publish の迂回路は存在しない)。

@@ -13,6 +13,8 @@ import { EventEmitter } from "node:events";
 
 import { WebSocket } from "ws";
 
+import type { PolicyCategory } from "@actradeck/event-model";
+
 import type { EventStore } from "./store.js";
 
 export type ApprovalDecisionMsg = {
@@ -70,7 +72,64 @@ export type AllowlistRequestMsg = {
   /** 3#SEC-1: per-session 制御トークン。 */
   readonly token?: string;
 };
-export type InboundMsg = ApprovalDecisionMsg | InterruptMsg | DiffRequestMsg | AllowlistRequestMsg;
+/**
+ * ADR 019f0c3e Phase 2: bypass/YOLO 承認ポリシー (どの high-risk カテゴリを明示承認に落とすか) の
+ * get/set 要求 (UI→backend→sidecar)。allowlist.request と同じ controlToken 認可境界を通す
+ * (不一致/不在は破棄=fail-safe)。`categories` は **closed enum (PolicyCategory) 文字列のみ**で生コマンドを
+ * 構造的に含まない (NO-RAW)。受信側は未知値を sanitize で捨てる。policy は **machine-global**
+ * (~/.actradeck/approvals/policy.json) ゆえ session_id は relay の宛先解決のみに使う。
+ */
+export type PolicyRequestMsg = {
+  readonly type: "policy.request";
+  /** 応答を突合する相関 ID (backend が採番)。 */
+  readonly request_id?: string;
+  /**
+   * "get" | "set" | "unset" | "list" | "resolve"。未知/不在は "get" 扱い (**変更しない方向**の fail-safe)。
+   * ADR 019f0eca: "unset"=repo_scope の override 削除 (default 継承へ)。"list"=default + 全 repo override 一覧。
+   * "resolve"=操作者入力の絶対パス (path) を git root 解決し scope+effective policy を返す (方式B・読取りのみ)。
+   */
+  readonly op?: string;
+  /** set 時の新カテゴリ集合 (closed enum 文字列・未知値は受信側で破棄)。 */
+  readonly categories?: readonly string[];
+  /** set 時の **file-level** enabled (env kill-switch は別概念・非永続)。 */
+  readonly enabled?: boolean;
+  /**
+   * ADR 019f0eca: get/set/unset 対象の repo スコープ (省略=default/マシン基準)。allowlist.request の
+   * repo_scope と同じ検証境界 (受信側 /^[0-9a-f]{1,64}$/)。raw コマンド/絶対パスは構造的に含まない。
+   */
+  readonly repo_scope?: string;
+  /** ADR 019f0eca: set 時の表示用 repo basename (任意・表示専用)。 */
+  readonly repo_label?: string;
+  /**
+   * ADR 019f0eca 方式B: op="resolve" 専用の操作者入力**絶対パス**。git root 解決にのみ使い **保存しない**。
+   * project-scope 封じ込め検証は backend (ACTRADECK_PROJECT_SCOPE) が済ませる。他 op では無視。
+   */
+  readonly path?: string;
+  /**
+   * ADR 019f0eca 方式B + SEC-1 (decision 019f0f2f): op="resolve" 専用の project-scope prefix 群
+   * (backend の ACTRADECK_PROJECT_SCOPE・絶対パス前方一致)。sidecar が解決済の **物理 git root** を
+   * この scope と再照合し、symlink/ancestor で root が scope 外へ抜けるのを拒否する (二段封じ込めの第二段)。
+   * 入力 path の lexical 第一段は backend が済ませる。空/省略=封じ込め無し (backend が default-off のとき)。
+   * 値は operator 設定の project ディレクトリ prefix (secret でない)・request のみ・保存も echo もしない。
+   */
+  readonly resolve_scope?: readonly string[];
+  /**
+   * ADR 019f0eca multi-daemon fan-out (TDA-1・decision 019f0f2f): false のとき set/unset を
+   * **memory のみ**反映し disk へ永続しない。backend の fanOutPolicyMutation が他 daemon へ伝播する
+   * コピーにのみ false を載せる。owner daemon (操作者の relay 直送) は省略=true で唯一 disk を書く。
+   * これにより、再接続後に stale な受信 daemon が full layered を disk へ書戻して厳格 override を黙って
+   * 消す silent security-control downgrade を構造的に防ぐ (authoritative な disk 書込は owner 一点に限定)。
+   */
+  readonly persist?: boolean;
+  /** 3#SEC-1: per-session 制御トークン。 */
+  readonly token?: string;
+};
+export type InboundMsg =
+  | ApprovalDecisionMsg
+  | InterruptMsg
+  | DiffRequestMsg
+  | AllowlistRequestMsg
+  | PolicyRequestMsg;
 
 /** PAL-v2: allowlist エントリの NO-RAW ワイヤ形 (生コマンドは構造的に含まない・sha256/scope/label のみ)。 */
 export type AllowlistEntryWire = {
@@ -95,6 +154,43 @@ export type AllowlistResponseMsg = {
   readonly entries: readonly AllowlistEntryWire[];
   /** revoke のとき除去件数 (list は省略)。 */
   readonly removed?: number;
+};
+
+/**
+ * ADR 019f0c3e Phase 2: 承認ポリシー get/set 応答 (sidecar→backend)。closed enum のみ (構造的 NO-RAW)。
+ */
+/**
+ * ADR 019f0eca: per-repo オーバーライド 1 件のワイヤ形 (policy.response の repos[] 要素・UI 左ペイン用)。
+ * NO-RAW: repo_scope=sha256短縮 / repo_label=basename / categories=closed enum のみ (生コマンド/絶対パス非含)。
+ */
+export type PolicyRepoWire = {
+  readonly repo_scope: string;
+  readonly repo_label?: string;
+  readonly enabled: boolean;
+  readonly categories: readonly PolicyCategory[];
+};
+
+export type PolicyResponseMsg = {
+  readonly type: "policy.response";
+  readonly request_id: string;
+  /** file-level enabled (operator 設定値・UI チェックボックスが反映する状態)。 */
+  readonly enabled: boolean;
+  /** ゲート対象カテゴリ (PolicyCategory.options の安定順・NO-RAW)。 */
+  readonly categories: readonly PolicyCategory[];
+  /** env kill-switch 状態 (false=全体パススルー中・UI 警告用)。既定 true。 */
+  readonly env_gate_enabled?: boolean;
+  /**
+   * ADR 019f0eca: get/set/unset が指す repo スコープ (省略=default)。UI が「どの scope を表示中か」を知る。
+   */
+  readonly repo_scope?: string;
+  /** ADR 019f0eca: 当該 repo の表示用 basename (override が存在する場合のみ)。 */
+  readonly repo_label?: string;
+  /** ADR 019f0eca: repo_scope 指定時に override が存在するか (true=override / false=default 継承)。 */
+  readonly is_override?: boolean;
+  /** ADR 019f0eca: op="list" 時のみ。default + 全 repo override の一覧 (左ペイン)。 */
+  readonly repos?: readonly PolicyRepoWire[];
+  /** 失敗時のみ (検証エラー等・原文非依存の短文)。 */
+  readonly error?: string;
 };
 
 /** diff 本文応答 (sidecar→backend)。本文は redaction 済み (生 diff は決して載せない)。 */
@@ -143,6 +239,13 @@ export interface WsClientOptions {
    * `observeSession` で canonical 所有を学習するため relay は壊れない (ADR enabler)。
    */
   readonly sessionIdsProvider?: () => readonly string[];
+  /**
+   * ADR 019f1582 follow-up: この daemon が policy.request を処理して応答できるか。true のとき hello に
+   * `policy_capable: true` を載せ、backend が connectedDaemons (UI の daemon-addressed policy 宛先) に
+   * 含める。policyRequest ハンドラを wire する daemon (managed sidecar / attach) のみ true。observe-only
+   * の codex-rollout daemon は false (既定) で、policy 非対応 daemon を addressing した timeout を防ぐ。
+   */
+  readonly policyCapable?: boolean;
   /** 再接続バックオフ初期値 (ms)。 */
   readonly reconnectBaseMs?: number;
   readonly reconnectMaxMs?: number;
@@ -158,6 +261,8 @@ export interface WsClientEvents {
   diffRequest: (msg: DiffRequestMsg) => void;
   /** PAL-v2: token 検証済みの allowlist list/revoke 要求。上流が ApprovalBridge 経由で応答する。 */
   allowlistRequest: (msg: AllowlistRequestMsg) => void;
+  /** ADR 019f0c3e Phase 2: token 検証済みの承認ポリシー get/set 要求。上流が ApprovalBridge で応答する。 */
+  policyRequest: (msg: PolicyRequestMsg) => void;
   connected: () => void;
   disconnected: () => void;
 }
@@ -170,6 +275,7 @@ export class WsClient extends EventEmitter {
   private readonly ingestToken: string | undefined;
   private readonly sessionIds: readonly string[];
   private readonly sessionIdsProvider: (() => readonly string[]) | undefined;
+  private readonly policyCapable: boolean;
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
   private reconnectAttempts = 0;
@@ -185,6 +291,7 @@ export class WsClient extends EventEmitter {
     this.ingestToken = opts.ingestToken;
     this.sessionIds = opts.sessionIds ?? [];
     this.sessionIdsProvider = opts.sessionIdsProvider;
+    this.policyCapable = opts.policyCapable ?? false;
     this.reconnectBaseMs = opts.reconnectBaseMs ?? 500;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 10_000;
   }
@@ -226,18 +333,9 @@ export class WsClient extends EventEmitter {
       // (backend 未統合検証) なら hello を送らない (fail-safe 設計と整合)。
       // control_token は送信フレームにのみ載せ、ログ・throw には出さない。
       if (this.controlToken !== undefined && this.controlToken.length > 0) {
-        // ADR 019e9462: provider があれば hello 送信時点で canonical を動的解決する
-        // (未確定時は fallback id)。無ければ構成時の固定 sessionIds を載せる (後方互換)。
-        const sessionIds = this.sessionIdsProvider
-          ? [...this.sessionIdsProvider()]
-          : [...this.sessionIds];
-        this.sendRaw(
-          JSON.stringify({
-            type: "hello",
-            control_token: this.controlToken,
-            session_ids: sessionIds,
-          }),
-        );
+        // connect-open と reannounce は同一 builder を共有し control_token / session_ids /
+        // policy_capable を一様に載せる (TDA-1: 片方欠落だと reannounce で capability 降格する H 回帰)。
+        this.sendRaw(this.buildHelloFrame());
       }
       void this.flush();
     });
@@ -268,20 +366,31 @@ export class WsClient extends EventEmitter {
     } catch {
       return;
     }
-    // 3#SEC-1: 制御チャネル (approval/interrupt/diff.request/allowlist.request) は認証必須。
+    // 3#SEC-1: 制御チャネル (approval/interrupt/diff.request/allowlist.request/policy.request) は認証必須。
     // token 不一致/不在はここで破棄し、emit に至らせない (= 各ハンドラへ到達不能)。
     if (
       msg.type === "approval" ||
       msg.type === "interrupt" ||
       msg.type === "diff.request" ||
-      msg.type === "allowlist.request"
+      msg.type === "allowlist.request" ||
+      msg.type === "policy.request"
     ) {
       if (!this.isAuthorizedControl(msg.token)) return; // fail-safe deny
     }
-    if (msg.type === "approval") this.emit("approval", msg);
-    else if (msg.type === "interrupt") this.emit("interrupt", msg);
-    else if (msg.type === "diff.request") this.emit("diffRequest", msg);
-    else if (msg.type === "allowlist.request") this.emit("allowlistRequest", msg);
+    // SEC-R2-1 (decision 019f0d22) 構造 backstop: 制御 handler は同期 emit で呼ばれるため、handler 内の
+    // 想定外 throw (例: 永続の disk 失敗) がここを貫通すると ws message コールバックへ伝播し
+    // uncaughtException → daemon crash になる。emit を try/catch で囲い、いかなる listener throw でも
+    // daemon を落とさない (現行 5 handler + 将来追加も自動で網羅し per-site 漏れを構造的に防ぐ)。
+    // 各 handler 側の graceful 化 (ApprovalBridge.safePersist 等) と二段構え (最終 crash net)。
+    try {
+      if (msg.type === "approval") this.emit("approval", msg);
+      else if (msg.type === "interrupt") this.emit("interrupt", msg);
+      else if (msg.type === "diff.request") this.emit("diffRequest", msg);
+      else if (msg.type === "allowlist.request") this.emit("allowlistRequest", msg);
+      else if (msg.type === "policy.request") this.emit("policyRequest", msg);
+    } catch {
+      // graceful 層が処理しない想定外 throw のみ到達する最終 crash net。daemon を生存させる。
+    }
   }
 
   /**
@@ -300,6 +409,15 @@ export class WsClient extends EventEmitter {
    * ビューを渡す)。本クラスは生コマンドを組み立てない。接続断時は backend 側がタイムアウトで安全側 reject。
    */
   respondAllowlist(msg: AllowlistResponseMsg): void {
+    this.sendRaw(JSON.stringify(msg));
+  }
+
+  /**
+   * ADR 019f0c3e Phase 2: 承認ポリシー get/set 応答を backend へ返す (egress WS の fire-and-forget)。
+   * categories は **closed enum (PolicyCategory) のみ**で生コマンドを構造的に含まない (NO-RAW)。
+   * 接続断時は応答が届かず backend 側がタイムアウトで安全側 reject する。
+   */
+  respondPolicy(msg: PolicyResponseMsg): void {
     this.sendRaw(JSON.stringify(msg));
   }
 
@@ -358,12 +476,31 @@ export class WsClient extends EventEmitter {
    */
   reannounce(): void {
     if (this.controlToken === undefined || this.controlToken.length === 0) return;
+    // TDA-1 (decision 019f1859): connect-open と同一 builder を共有し policy_capable を一様に載せる。
+    // 以前は reannounce が policy_capable を落とし、backend handleHello の無条件上書きで capability が
+    // false へ降格 → connectedDaemons 脱落 → daemon-addressed policy 宛先消失する H 回帰があった。
+    this.sendRaw(this.buildHelloFrame());
+  }
+
+  /**
+   * hello frame を組む単一出所 (connect-open と reannounce で共有・TDA-2 drift 根治)。
+   * control_token / session_ids / policy_capable を一様に載せる。session_ids は ADR 019e9462 の
+   * provider があれば送信時点で canonical を動的解決し (未確定時は fallback)、無ければ固定値 (後方互換)。
+   * 呼び元が controlToken 確立済みを保証する (本メソッドは frame 文字列を返すのみ)。
+   */
+  private buildHelloFrame(): string {
     const sessionIds = this.sessionIdsProvider
       ? [...this.sessionIdsProvider()]
       : [...this.sessionIds];
-    this.sendRaw(
-      JSON.stringify({ type: "hello", control_token: this.controlToken, session_ids: sessionIds }),
-    );
+    return JSON.stringify({
+      type: "hello",
+      control_token: this.controlToken,
+      session_ids: sessionIds,
+      // ADR 019f1582 follow-up: policy.request を処理できる daemon のみ広告 (managed/attach=true)。
+      // 載せない (=false) と backend は connectedDaemons から除外し UI が addressing しない。
+      // connect/reannounce 両経路で一様に載せる (TDA-1: 片方欠落だと reannounce で capability 降格)。
+      ...(this.policyCapable ? { policy_capable: true } : {}),
+    });
   }
 
   close(): void {

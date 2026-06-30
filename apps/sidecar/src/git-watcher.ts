@@ -66,6 +66,9 @@ export async function findRepoRoot(cwd: string): Promise<string | undefined> {
       cwd,
       // SEC-1: git 子も allowlist env で起動 (rev-parse でも config 経由 hook 駆動の余地を断つ)。
       env: buildChildEnv(),
+      // SEC-3 (decision 019f0f2f): resolve endpoint は任意絶対パスで本関数を呼ぶ。rev-parse は有界だが、
+      // 念のため短い timeout を付し (defense-in-depth)、異常 fs/network mount での hang を防ぐ。
+      timeout: 5_000,
     });
     const root = stdout.trim();
     return root.length > 0 ? root : undefined;

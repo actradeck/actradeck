@@ -6,6 +6,9 @@
  */
 import {
   isAllowlistRevokePath,
+  isPolicyResolvePath,
+  isPolicySetPath,
+  isPolicyUnsetPath,
   normalizeReplayRequestPath,
   resolveReplayHttpConfig,
 } from "../realtime/bff.js";
@@ -50,12 +53,19 @@ function headerVal(req: IncomingMessage, name: string): string | undefined {
 }
 
 /**
- * PAL-v2 CSRF 緩和 (SEC-1): mutating POST (revoke) を same-origin のみ許す **二段チェック**。
+ * PAL-v2 + ADR 019f0c3e Phase 2 CSRF 緩和: mutating POST (allowlist revoke / policy set) を
+ * same-origin のみ許す **二段チェック**。
  * 1. Sec-Fetch-Site (現代ブラウザの Fetch Metadata): cross-site/same-site は拒否。同一オリジン fetch は
  *    "same-origin"、ナビゲーションは "none"、非ブラウザ (curl 等) はヘッダ無し。
  * 2. Origin が在れば Host と一致必須 (Fetch Metadata 非対応ブラウザの二段目)。壊れた Origin は拒否。
- * 非ブラウザ (Sec-Fetch-Site も Origin も無い・curl 等の運用経路) は通す。これが唯一の残余で、
- * revoke が除去のみ + 既定 loopback bind ゆえ accepted-risk (ADR 019ee164/SEC-1: LAN bind 時 revisit)。
+ * 非ブラウザ (Sec-Fetch-Site も Origin も無い・curl 等の運用経路) は通す。これが唯一の残余。
+ *
+ * accepted-risk の scope (SEC-3/QA-1・decision 019f0d07): cross-site ブラウザ POST は上記で構造遮断され、
+ * 残余は **no-header の非ブラウザ local client** のみ。revoke は除去のみで安全方向だが、**policy set は
+ * gate を弱める方向** (enabled=false / category 削減) も可能で revoke の「除去のみ」論拠は転用できない。
+ * それでも残余は loopback bind + single-operator 信頼境界内に閉じ (remote exploit 不能・bypass policy の
+ * memory-authoritative 床が既に前提とする境界と同一)、policy set 自体は backend で REALTIME_TOKEN +
+ * sidecar の controlToken により別途認証される。LAN bind / multi-operator へ広げる際は revisit 必須。
  */
 function isSameOriginPost(req: IncomingMessage): boolean {
   const sfs = headerVal(req, "sec-fetch-site");
@@ -106,16 +116,22 @@ export async function proxyReplayHistory(
     return;
   }
 
-  // PAL-v2: method↔path の整合を厳格化する。revoke のみ POST 可・他の allow-list path は GET-only。
+  // PAL-v2 + ADR 019f0c3e Phase 2 + 019f0eca: method↔path の整合を厳格化する。POST 可は mutating
+  //   (allowlist revoke / policy set / policy unset) と path-carrying read (policy resolve) のみ。
+  //   後者は policy を変えないが path を body で運び (query へ載せない=SEC-1)、cross-site の任意パス探索を
+  //   防ぐため set/unset と同じ POST-only + CSRF ゲートへ服させる。他の read path は GET-only。
   const isRevoke = isAllowlistRevokePath(req.url ?? "");
-  if (method === "POST" && !isRevoke) {
+  const isPolicyMutating = isPolicySetPath(req.url ?? "") || isPolicyUnsetPath(req.url ?? "");
+  const isPolicyResolve = isPolicyResolvePath(req.url ?? "");
+  const isMutating = isRevoke || isPolicyMutating || isPolicyResolve;
+  if (method === "POST" && !isMutating) {
     res.writeHead(405, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "method not allowed" }));
     return;
   }
-  if (method === "GET" && isRevoke) {
+  if (method === "GET" && isMutating) {
     res.writeHead(405, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "method not allowed (revoke is POST)" }));
+    res.end(JSON.stringify({ error: "method not allowed (mutating path is POST)" }));
     return;
   }
   // CSRF 緩和: mutating POST は same-origin のみ (cross-site ブラウザ POST を拒否)。

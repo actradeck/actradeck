@@ -11,7 +11,7 @@
  * ⚠️ ここで作る候補は EventSink.emit() に渡され、その中で redaction されてから
  *    parse/persist/send される。normalize 自体は redaction しない (choke point は一箇所)。
  */
-import type { EventType, RiskLevel, State } from "@actradeck/event-model";
+import type { EventType, PolicyCategory, RiskLevel, State } from "@actradeck/event-model";
 
 import { type BuildEventInput, buildEvent } from "./event-factory.js";
 import { redactString } from "./redactor.js";
@@ -305,8 +305,8 @@ function writesBlockDevice(command: string, tokens: string[]): boolean {
  * ディスク / ファイルシステム / パーティション / 暗号デバイス / LVM・RAID を**不可逆に破壊しうる**
  * プログラム (basename, 正規化後)。SEC-7。
  *
- * 背景: `\bmkfs\b` (HIGH_RISK_LITERAL_RE) は `mkfs.ext4` を捕捉するが、同等に破壊的な兄弟ツール
- * (`mke2fs` = mkfs.ext* の実体 / `wipefs` / `blkdiscard` / `sfdisk` 等) を取りこぼし、`wipefs -a /dev/sda`
+ * 背景: `\bmkfs\b` (LITERAL_RULES の high エントリ・旧 HIGH_RISK_LITERAL_RE) は `mkfs.ext4` を捕捉するが、
+ * 同等に破壊的な兄弟ツール (`mke2fs` = mkfs.ext* の実体 / `wipefs` / `blkdiscard` / `sfdisk` 等) を取りこぼし、`wipefs -a /dev/sda`
  * のような不可逆操作が low → 承認ゲート素通り (auto/bypassPermissions で無承認実行) になっていた。
  *
  * 構造ゲート (memory security-gate-reuse-canonical-parser): literal 正規表現への列挙追記 (いたちごっこ)
@@ -646,6 +646,7 @@ function unanalyzableSegmentRisk(
   rawSegment: string,
   depth: number,
   suppressMediumFloor: boolean,
+  categories?: Set<PolicyCategory>,
 ): "high" | "medium" | undefined {
   const startIdx = skipLeadingAssignments(rawTokens);
   const first = rawTokens[startIdx];
@@ -657,7 +658,7 @@ function unanalyzableSegmentRisk(
     const unwrapped = rawSegment.replace(LEADING_GROUPING_RE, "").replace(TRAILING_GROUPING_RE, "");
     // 剥がしで実際に変化したときのみ再分類 (無限ループ防止)。
     if (unwrapped.length > 0 && unwrapped !== rawSegment) {
-      const inner = classifyCommandRiskInternal(unwrapped, depth + 1);
+      const inner = classifyCommandRiskInternal(unwrapped, depth + 1, categories);
       if (inner === "high") return "high";
     }
   }
@@ -680,21 +681,26 @@ function inlineCodeRisk(
   tokens: string[],
   rawSegment: string,
   depth: number,
+  categories?: Set<PolicyCategory>,
 ): "high" | "medium" | undefined {
   const name = commandName(tokens);
 
   // eval "..." → 内側は任意コマンド。再パースは困難なので medium 以上 (over-gate)。
-  if (name === "eval") return "medium";
+  if (name === "eval") {
+    categories?.add("inline-code");
+    return "medium";
+  }
 
   // シェルのインラインコード (sh -c "..." 等)。SEC-1 #5: python3.11 等のバージョン付きでも拾う。
   if (isInlineShell(name)) {
     const flagIdx = tokens.findIndex((t, i) => i > 0 && SHELL_INLINE_FLAG_RE.test(t));
     if (flagIdx >= 0) {
+      categories?.add("inline-code");
       // クォートは tokenize で剥がれているため、フラグ以降のトークンが内側コードの語列。
       const inner = tokens.slice(flagIdx + 1);
       if (inner.length > 0 && depth < MAX_INLINE_DEPTH) {
         // 内側を再帰再分類: high を拾えれば high、そうでなければ fail-safe で medium に床上げ。
-        const innerRisk = classifyCommandRiskInternal(inner.join(" "), depth + 1);
+        const innerRisk = classifyCommandRiskInternal(inner.join(" "), depth + 1, categories);
         return innerRisk === "high" ? "high" : "medium";
       }
       // 内側が抽出できない (クォート/エスケープで再パース不能) → fail-safe medium。
@@ -702,7 +708,10 @@ function inlineCodeRisk(
     }
     // インラインフラグが無い場合: ファイル実行 (`sh script.sh`) なら low、stdin からコードを
     // 読む形 (`echo ... | sh` / 引数なし `sh`) なら中身を再分類できない → fail-safe medium (#1-3)。
-    if (!hasScriptFileOperand(tokens)) return "medium"; // 非フラグ operand 無し = stdin/対話 → gated。
+    if (!hasScriptFileOperand(tokens)) {
+      categories?.add("inline-code"); // stdin/対話シェル = 動的コード実行。
+      return "medium"; // 非フラグ operand 無し = stdin/対話 → gated。
+    }
     // -c 等のインラインフラグが無い `sh script.sh` はファイル実行 → ゲート対象外 (over-gate 防止)。
   }
 
@@ -710,16 +719,23 @@ function inlineCodeRisk(
   // インラインフラグがあれば一律 medium 以上 (fail-safe; over-gate を許容)。SEC-1 #5: バージョン付き対応。
   if (isInlineInterpreter(name)) {
     const hasInlineFlag = tokens.slice(1).some((t) => INTERPRETER_INLINE_FLAGS.has(t));
-    if (hasInlineFlag) return "medium";
+    if (hasInlineFlag) {
+      categories?.add("inline-code");
+      return "medium";
+    }
     // pipe-to-interpreter (`cat foo | python` 引数なし = stdin からコードを読む) → fail-safe medium。
-    if (!hasScriptFileOperand(tokens)) return "medium";
+    if (!hasScriptFileOperand(tokens)) {
+      categories?.add("inline-code");
+      return "medium";
+    }
     // `node app.js` / `python manage.py runserver` のようなファイル実行は low のまま。
   }
 
   // コマンド置換 `$(...)` / backtick。可能なら内側を再帰再分類して high を拾う。
   if (hasCommandSubstitution(rawSegment)) {
+    categories?.add("inline-code");
     if (depth < MAX_INLINE_DEPTH) {
-      const innerRisk = reclassifySubstitution(rawSegment, depth + 1);
+      const innerRisk = reclassifySubstitution(rawSegment, depth + 1, categories);
       if (innerRisk === "high") return "high";
     }
     return "medium"; // 置換あり = 中身が再分類で確定しなくてもゲート対象。
@@ -733,7 +749,11 @@ function inlineCodeRisk(
  * 文字走査でネスト無視の素朴抽出 (最外の開き〜対応する閉じ)。over-extraction しても
  * classifyCommandRisk が安全側に倒すため許容。high を拾えればそれを返す。
  */
-function reclassifySubstitution(rawSegment: string, depth: number): "high" | "medium" | undefined {
+function reclassifySubstitution(
+  rawSegment: string,
+  depth: number,
+  categories?: Set<PolicyCategory>,
+): "high" | "medium" | undefined {
   const inners: string[] = [];
   // $(...) 抽出 (ネストは無視し、最初の ) で閉じる素朴版)。
   let i = 0;
@@ -753,13 +773,15 @@ function reclassifySubstitution(rawSegment: string, depth: number): "high" | "me
     const seg = bt[k];
     if (seg !== undefined && seg.length > 0) inners.push(seg);
   }
-  let medium = false;
+  // ADR 019f0c3e: high で early-return せず全 inner を走査して category を漏れなく集約する
+  // (戻り値は従来「high が1つでもあれば high」と同値)。
+  let risk: "high" | "medium" | undefined;
   for (const inner of inners) {
-    const r = classifyCommandRiskInternal(inner, depth + 1);
-    if (r === "high") return "high";
-    if (r === "medium") medium = true;
+    const r = classifyCommandRiskInternal(inner, depth + 1, categories);
+    if (r === "high") risk = "high";
+    else if (r === "medium" && risk !== "high") risk = "medium";
   }
-  return medium ? "medium" : undefined;
+  return risk;
 }
 
 /**
@@ -770,6 +792,7 @@ function reclassifySubstitution(rawSegment: string, depth: number): "high" | "me
 function reclassifyProcessSubstitution(
   command: string,
   depth: number,
+  categories?: Set<PolicyCategory>,
 ): "high" | "medium" | undefined {
   const inners: string[] = [];
   let i = 0;
@@ -784,13 +807,14 @@ function reclassifyProcessSubstitution(
     }
     i++;
   }
-  let medium = false;
+  // ADR 019f0c3e: high で early-return せず全 inner を走査して category を漏れなく集約する。
+  let risk: "high" | "medium" | undefined;
   for (const inner of inners) {
-    const r = classifyCommandRiskInternal(inner, depth + 1);
-    if (r === "high") return "high";
-    if (r === "medium") medium = true;
+    const r = classifyCommandRiskInternal(inner, depth + 1, categories);
+    if (r === "high") risk = "high";
+    else if (r === "medium" && risk !== "high") risk = "medium";
   }
-  return medium ? "medium" : undefined;
+  return risk;
 }
 
 /**
@@ -821,12 +845,123 @@ function launchesShellWithProcessSubstitution(command: string): boolean {
   return isProcessSubstitutionExecutor(name);
 }
 
-/** 字面で確実に high な操作 (構造判定の補完)。 */
-const HIGH_RISK_LITERAL_RE =
-  /\bmkfs\b|\bdd\s+if=|:\(\)\s*\{|\bdrop\s+table\b|\btruncate\s+table\b|\bmigrate\b|\bproduction\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-[a-z]*f/i;
+/**
+ * 字面 high リテラル → PolicyCategory の **単一テーブル** (TDA-1)。
+ *
+ * 従来は risk 判定 (HIGH_RISK_LITERAL_RE) と category 付与 (addCommandLevelCategories) が**並置正規表現**で、
+ * 片方だけ更新すると drift する潜在ハザードがあった (high⟹≥1 backstop が high-risk-other で誤分類を覆い隠す)。
+ * 本テーブルを risk・category の **唯一の出所**にして、両者を機械的に同一ソースから導出する
+ * (consolidation-invariant-sweep / security-gate-reuse-canonical-parser の教訓)。
+ *
+ * - `high: true` … risk を high に押し上げ (旧 HIGH_RISK_LITERAL_RE 相当) かつ category を付与。
+ * - `high: false` … **category-only** (gate を catastrophic へ届かせるが risk は不変)。`drop database` は
+ *   分類器を high にしないが db-drop category は付ける (superset・risk 非退行)。
+ *
+ * ReDoS 安全: 各 re は固定 alternation + 単純 `\s+`/`[a-z]*` (入れ子量化なし・redaction-redos 教訓)。
+ */
+interface LiteralRule {
+  readonly re: RegExp;
+  readonly category: PolicyCategory;
+  /** risk を high へ押し上げるか (false=category-only)。 */
+  readonly high: boolean;
+}
+export const LITERAL_RULES: readonly LiteralRule[] = [
+  { re: /\bmkfs\b/i, category: "disk-destroy", high: true },
+  { re: /\bdd\s+if=/i, category: "disk-destroy", high: true },
+  { re: /:\(\)\s*\{/, category: "fork-bomb", high: true },
+  { re: /\bdrop\s+table\b/i, category: "db-drop", high: true },
+  { re: /\btruncate\s+table\b/i, category: "db-drop", high: true },
+  { re: /\bdrop\s+database\b/i, category: "db-drop", high: false }, // category-only (risk 不変)
+  { re: /\bmigrate\b/i, category: "migrate-prod", high: true },
+  { re: /\bproduction\b/i, category: "migrate-prod", high: true },
+  { re: /\bgit\s+reset\s+--hard\b/i, category: "history-rewrite", high: true },
+  { re: /\bgit\s+clean\s+-[a-z]*f/i, category: "history-rewrite", high: true },
+];
+
+/** 字面 high リテラルにマッチするか (LITERAL_RULES の high エントリの論理和・旧 HIGH_RISK_LITERAL_RE と同値)。 */
+function matchesHighRiskLiteral(command: string): boolean {
+  return LITERAL_RULES.some((rule) => rule.high && rule.re.test(command));
+}
 
 export function classifyCommandRisk(command: string): RiskLevel {
   return classifyCommandRiskInternal(command, 0);
+}
+
+/**
+ * 承認ポリシー (ADR 019f0c3e) 用: コマンドの risk と該当 high-risk カテゴリを **同一走査**で算出する。
+ *
+ * カテゴリは `classifyCommandRisk` と同じ検出点・同じ述語・同じ正規化から収集する単一ソースで、別パーサを
+ * 並置しない (memory consolidation-invariant-sweep / security-gate-reuse-canonical-parser)。
+ * **high⟹必ず≥1 category** (named に該当しない high は high-risk-other を付与) を backstop で保証し、
+ * 「high だが無カテゴリ＝ポリシーゲート素通り」の silent hole を構造的に不能にする。
+ *
+ * risk は `classifyCommandRisk` と同値 (内部の early-return を full-scan へ変えても「high が1つでもあれば
+ * high」という戻り値は不変)。
+ */
+export function classifyCommandWithCategories(command: string): {
+  risk: RiskLevel;
+  categories: Set<PolicyCategory>;
+} {
+  const categories = new Set<PolicyCategory>();
+  const risk = classifyCommandRiskInternal(command, 0, categories);
+  // backstop: high と判定されたのに named category が付かなかった残余を取りこぼさない (silent hole 防止)。
+  if (risk === "high" && categories.size === 0) categories.add("high-risk-other");
+  return { risk, categories };
+}
+
+/** コマンドの high-risk カテゴリ集合のみを返す薄 wrap (approval-bridge のポリシー照合用)。 */
+export function classifyCommandCategories(command: string): Set<PolicyCategory> {
+  return classifyCommandWithCategories(command).categories;
+}
+
+/**
+ * network-egress (外部へデータを送出しうる) program を起動するか (secret-egress カテゴリの composite 片側)。
+ * approval-bridge が `isNetworkEgressCommand(cmd) && detectSecretInInput(...)` で secret-egress を確定する。
+ * 分類器と同一の tokenize/skipLeadingAssignments/stripRunnerWrappers/commandName/normalizeCommandName で
+ * 正規化し、path/quote/wrapper/version 接尾辞 非依存に basename を照合する (`/usr/bin/curl`/`'curl'`/`sudo curl`)。
+ */
+/**
+ * network-exec program (basename) の **単一ソース** (TDA-2)。外部へ到達/データ送出しうる転送・リモート
+ * 実行ツール。secret-egress 判定 (`isNetworkEgressCommand` / NETWORK_EGRESS_PROGRAMS) と永続化 deny
+ * (`PERSIST_DENY_PROGRAMS` の network-exec 区画) が **この同一配列**を参照し、逐語複製による drift を排除する。
+ * 追加/削除は本配列のみで行う (両 consumer が自動追随・INV-NETWORK-EXEC-SINGLE-SOURCE が ⊆ を固定)。
+ */
+export const NETWORK_EXEC_PROGRAMS: readonly string[] = [
+  "curl",
+  "wget",
+  "nc",
+  "ncat",
+  "netcat",
+  "socat",
+  "ssh",
+  "scp",
+  "sftp",
+  "ftp",
+  "telnet",
+];
+const NETWORK_EGRESS_PROGRAMS: ReadonlySet<string> = new Set(NETWORK_EXEC_PROGRAMS);
+export function isNetworkEgressCommand(command: string): boolean {
+  if (typeof command !== "string" || command.length === 0) return false;
+  for (const seg of splitSegments(command)) {
+    const raw = tokenize(seg);
+    const { tokens } = stripRunnerWrappers(raw.slice(skipLeadingAssignments(raw)));
+    if (tokens.length === 0) continue;
+    if (NETWORK_EGRESS_PROGRAMS.has(normalizeCommandName(commandName(tokens)))) return true;
+  }
+  return false;
+}
+
+/**
+ * 字面 high と同等の command-level カテゴリを付与する (ADR 019f0c3e / TDA-1)。
+ * risk 判定 (`matchesHighRiskLiteral`) と **同一の LITERAL_RULES テーブル**を走査するため、片方だけ更新
+ * する drift が構造的に不能 (字面 high⟹≥1 category を同テーブルで担保)。category-only エントリ
+ * (`drop database`) も含む superset。categories 未指定時 (classifyCommandRisk 経路) は no-op (behavior 非退行)。
+ */
+function addCommandLevelCategories(command: string, categories?: Set<PolicyCategory>): void {
+  if (categories === undefined) return;
+  for (const rule of LITERAL_RULES) {
+    if (rule.re.test(command)) categories.add(rule.category);
+  }
 }
 
 /**
@@ -927,18 +1062,9 @@ const PERSIST_DENY_PROGRAMS: ReadonlySet<string> = new Set([
   "kubectl",
   "helm",
   "compose",
-  // network-exec (供給鎖 / リモート実行)。
-  "curl",
-  "wget",
-  "nc",
-  "ncat",
-  "netcat",
-  "socat",
-  "ssh",
-  "scp",
-  "sftp",
-  "ftp",
-  "telnet",
+  // network-exec (供給鎖 / リモート実行)。TDA-2: NETWORK_EXEC_PROGRAMS を単一ソースとして spread
+  //   (secret-egress 判定 isNetworkEgressCommand と同一集合・逐語複製しない)。
+  ...NETWORK_EXEC_PROGRAMS,
   // 破壊的ファイルシステム / システム mutator (SEC-5/SEC-6・ADR 019ee0c0)。
   //   chown/chgrp は唯一の medium-destructive 操作で**不可逆** (元の所有者マップ喪失) → 永続不可必須 (SEC-5)。
   //   他は現状 high で非 persistable だが、将来の risk 再分類に対する防御多層 backstop (SEC-6)。
@@ -1022,27 +1148,42 @@ export function isPersistDeniedCommand(command: string): boolean {
  * depth: SEC-1 のインラインコード/コマンド置換の内側を再帰再分類する際の深さ。
  * MAX_INLINE_DEPTH で有界化し、`$(...)` をネストした病的入力でも無限再帰しない。
  */
-function classifyCommandRiskInternal(command: string, depth: number): RiskLevel {
+function classifyCommandRiskInternal(
+  command: string,
+  depth: number,
+  categories?: Set<PolicyCategory>,
+): RiskLevel {
   if (typeof command !== "string" || command.length === 0) return "high"; // fail-safe
   if (command.length > 16 * 1024) return "high"; // 解析不能に巨大 → fail-safe high
   if (depth >= MAX_INLINE_DEPTH) return "medium"; // 再帰上限到達 → 分類不能を gated に倒す。
 
-  if (HIGH_RISK_LITERAL_RE.test(command)) return "high";
-  if (BLOCK_DEVICE_RE.test(command) && /[<>]|dd\b/i.test(command)) return "high";
+  // ADR 019f0c3e: category 収集を完全にするため high で **early-return せず full-scan** で risk を集約する。
+  //   戻り値は従来 (high が1つでも見つかれば high) と**同値**＝classifyCommandRisk 非退行 (既存テストが guard)。
+  //   `categories?.add(...)` は categories 未指定 (classifyCommandRisk 経路) では no-op ゆえ副作用ゼロ。
+  let risk: RiskLevel = "low";
+  const bump = (r: RiskLevel | undefined): void => {
+    if (r === "high") risk = "high";
+    else if (r === "medium" && risk !== "high") risk = "medium";
+  };
 
-  // 構造判定: medium は「ゲート対象だが high まで断定しない」もの。high が見つかれば即返す。
-  let medium = false;
+  // 字面 high (LITERAL_RULES の high エントリ)。risk と category を**同一テーブル**から付与する (TDA-1)。
+  //   category 側は DROP DATABASE 等 risk 非 high も含む superset・risk は不変。
+  if (matchesHighRiskLiteral(command)) bump("high");
+  addCommandLevelCategories(command, categories);
+  if (BLOCK_DEVICE_RE.test(command) && /[<>]|dd\b/i.test(command)) {
+    bump("high");
+    categories?.add("disk-destroy");
+  }
 
   // SEC-1 #4: シェル/インタプリタ + プロセス置換 `<(...)`/`>(...)`。splitSegments が `<`/`>` で
   //   分割するため起動シェルが裸セグメント化して (B) でも拾えるが、ここで明示的に中身を再分類し
   //   破壊的なら high を拾う。再分類不能でも medium に床上げ (fail-safe)。
   const procSubExecutor = launchesShellWithProcessSubstitution(command);
   if (procSubExecutor) {
-    if (depth < MAX_INLINE_DEPTH) {
-      const inner = reclassifyProcessSubstitution(command, depth + 1);
-      if (inner === "high") return "high";
-    }
-    medium = true;
+    categories?.add("inline-code"); // プロセス置換を実行/source するシェル起動 = 動的コード実行。
+    if (depth < MAX_INLINE_DEPTH)
+      bump(reclassifyProcessSubstitution(command, depth + 1, categories));
+    bump("medium");
   }
   // process-sub があるが起動がベニーン (diff/cat 等 = 中身を実行しない) なら、`<(`/`>( ` の split で
   //   生じる `(ls)` 断片に対する (D) の medium 床上げを抑止して low を維持する (over-gate 防止)。
@@ -1053,54 +1194,74 @@ function classifyCommandRiskInternal(command: string, depth: number): RiskLevel 
     const rawTokens = tokenize(seg);
     if (rawTokens.length === 0) {
       // トークンが無くても置換 `$(...)`/backtick だけのセグメントは SEC-1 でゲートする。
-      if (hasCommandSubstitution(seg)) medium = true;
+      if (hasCommandSubstitution(seg)) {
+        bump("medium");
+        categories?.add("inline-code");
+      }
       continue;
     }
     // 再監査#4 round2 (D): 先頭がシェルメタ文字 ( { $ < > 等でクリーンな実行可能名に正規化できない
     //   セグメントは構造判定不能 → grouping を剥がして内側を再分類 (high を拾う)、不能なら medium 床上げ。
     //   `(rm -rf /)` / `{ rm -rf /; }` / `(sh)` / `$X -rf /` を一括捕捉。
-    const unanalyzable = unanalyzableSegmentRisk(rawTokens, seg, depth, suppressGroupingMedium);
-    if (unanalyzable === "high") return "high";
-    if (unanalyzable === "medium") medium = true;
+    bump(unanalyzableSegmentRisk(rawTokens, seg, depth, suppressGroupingMedium, categories));
     // SEC-1 (round D 再監査): bare な先頭 env 代入 (`FOO=bar rm -rf /`) は RUNNER_WRAPPERS に無く
     //   commandName が `FOO=bar` を返すため、全構造述語が実コマンドを取りこぼし承認ゲートを素通り
-    //   させていた (ラッパ経由 `env FOO=bar rm` は捕捉できるのに bare 代入が素通りする非対称が証拠)。
-    //   構造判定の前に先頭代入を skip し、ラッパ剥がしと同列に正規化する。skip 後に runner ラッパを剥がす
-    //   (`FOO=bar sudo rm -rf /` の順序も成立)。
+    //   させていた。構造判定の前に先頭代入を skip し、ラッパ剥がしと同列に正規化する (skip 後に剥がす)。
     const deassigned = rawTokens.slice(skipLeadingAssignments(rawTokens));
-    // 再#3 QA-1/QA-3: env / timeout / sudo 等の runner ラッパを再帰的に剥がし、配下の実コマンドを
-    //   構造判定の対象にする。剥がす前後で対象同定が変わらないものはそのまま (剥がし=no-op)。
+    // 再#3 QA-1/QA-3: env / timeout / sudo 等の runner ラッパを再帰的に剥がし、配下の実コマンドを判定対象に。
     const { tokens, capExhausted } = stripRunnerWrappers(deassigned);
     if (tokens.length === 0) continue;
     // 多重ラッパで実コマンドを剥がし上限の奥に隠した疑い → 分類不能として gated (medium) に倒す。
-    if (capExhausted) medium = true;
-    if (
-      isRecursiveForcedRm(tokens) ||
-      isForcedGitPush(tokens) ||
-      isDangerousChmod(tokens) ||
-      writesBlockDevice(seg, tokens) ||
-      isDestructiveDiskProgram(tokens) || // SEC-7: wipefs/mke2fs/blkdiscard/sfdisk/parted/cryptsetup…
-      isDestructiveDiskSubcommand(tokens) // SEC-3: nvme format / zpool destroy / zfs destroy / hdparm --security-erase…
-    ) {
-      return "high";
+    if (capExhausted) bump("medium");
+    // 各破壊述語を個別評価し category を付与する (短絡せず・どの述語が当たったか category へ反映)。
+    let segHigh = false;
+    if (isRecursiveForcedRm(tokens)) {
+      categories?.add("recursive-rm");
+      segHigh = true;
     }
-    // QA-3: find の破壊オプション / chown -R はゲート対象 (medium 以上)。
+    if (isForcedGitPush(tokens)) {
+      categories?.add("history-rewrite");
+      segHigh = true;
+    }
+    if (isDangerousChmod(tokens)) {
+      categories?.add("perm-change");
+      segHigh = true;
+    }
+    if (writesBlockDevice(seg, tokens)) {
+      categories?.add("disk-destroy");
+      segHigh = true;
+    }
+    if (isDestructiveDiskProgram(tokens)) {
+      categories?.add("disk-destroy"); // SEC-7: wipefs/mke2fs/blkdiscard/sfdisk/parted/cryptsetup…
+      segHigh = true;
+    }
+    if (isDestructiveDiskSubcommand(tokens)) {
+      categories?.add("disk-destroy"); // SEC-3: nvme format / zpool destroy / zfs destroy / hdparm --security-erase…
+      segHigh = true;
+    }
+    if (segHigh) bump("high");
+    // QA-3: find の破壊オプション (-delete / -exec) / chown -R はゲート対象 (medium 以上)。
     const findRisk = findDestructiveRisk(tokens);
-    if (findRisk === "high") return "high";
-    if (findRisk === "medium" || isRecursiveChown(tokens)) medium = true;
-    // SEC-1: シェル/インタプリタのインラインコード + コマンド置換。
-    //   stripRunnerWrappers 後の実コマンドに対して判定する (env X=1 bash -c "..." 等を拾う)。
-    const inlineRisk = inlineCodeRisk(tokens, seg, depth);
-    if (inlineRisk === "high") return "high";
-    if (inlineRisk === "medium") medium = true;
+    if (findRisk !== undefined) {
+      categories?.add("recursive-rm"); // mass file 削除 / 任意 exec を recursive-rm カテゴリに集約。
+      bump(findRisk);
+    }
+    if (isRecursiveChown(tokens)) {
+      categories?.add("perm-change");
+      bump("medium");
+    }
+    // SEC-1: シェル/インタプリタのインラインコード + コマンド置換 (stripRunnerWrappers 後の実コマンドに対して)。
+    bump(inlineCodeRisk(tokens, seg, depth, categories));
   }
 
-  if (medium) return "medium";
+  if (risk !== "low") return risk;
   // SEC-11 (round D 再監査): 権限昇格ラッパは sudo と対称に medium 床上げする (doas/pkexec/run0 を追加)。
   //   `su` は短く一般語 (su.txt 等) の部分一致で誤爆するため字面床上げには含めない (配下が破壊的なら
   //   構造述語が high を返すので leak にはならない・昇格自体の per-invocation 床上げのみの差)。
-  if (/\b(sudo|doas|pkexec|run0)\b|\bcurl\b.*\|\s*(sh|bash)|npm\s+publish/i.test(command))
+  if (/\b(sudo|doas|pkexec|run0)\b|\bcurl\b.*\|\s*(sh|bash)|npm\s+publish/i.test(command)) {
+    if (/\bcurl\b.*\|\s*(sh|bash)/i.test(command)) categories?.add("inline-code"); // 供給鎖 RCE (`curl … | sh`)。
     return "medium";
+  }
   return "low";
 }
 

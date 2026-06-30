@@ -21,7 +21,9 @@ import { randomBytes } from "node:crypto";
 import { AttachSessionRegistry } from "./attach-session-registry.js";
 import { ApprovalBridge } from "./approval-bridge.js";
 import { buildApprovalPersistConfig } from "./approval-persist-config.js";
+import { buildBridgePolicyOptions } from "./approval-policy-store.js";
 import { buildAllowlistResponse } from "./allowlist-relay.js";
+import { buildPolicyResponse } from "./policy-relay.js";
 import { generateRedactedDiff } from "./diff-provider.js";
 import { buildEvent } from "./event-factory.js";
 import { HookReceiver } from "./hook-receiver.js";
@@ -45,6 +47,8 @@ export interface AttachDaemonOptions {
   readonly onOutOfOrder?: (obs: OutOfOrderObservation) => void;
   /** interrupt 要求の観測フック (no-kill を可視化, INV-ATTACH-NO-KILL)。 */
   readonly onInterruptIgnored?: (sessionId: string | undefined) => void;
+  /** L2(b) (decision 019f0e5d): 承認 disk-write 失敗の operator 可視化フック (件数のみ・NO-RAW)。 */
+  readonly onPersistFailure?: (count: number) => void;
   /**
    * idle reaper の idle-TTL (ms)。省略時 registry 既定 (DEFAULT_ATTACH_IDLE_TTL_MS=30min)。
    * env ACTRADECK_ATTACH_IDLE_TTL_MS から cli が解決 (QA-2 / ADR 019eb448, 誤 reap 窓の運用調整)。
@@ -85,6 +89,9 @@ export class AttachDaemon {
       url: opts.wsUrl,
       store: this.store,
       controlToken: this.controlToken,
+      // ADR 019f1582 follow-up: attach daemon は policyRequest を処理する (下記 wsClient.on("policyRequest"))
+      // ゆえ policy 対応を広告し、backend の connectedDaemons に含めて daemon-addressed policy 設定を受ける。
+      policyCapable: true,
       // hello.session_ids = 観測中の全 attach canonical (ADR D1: 複数 id 可)。
       sessionIdsProvider: () => this.registry.sessionIds(),
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
@@ -96,6 +103,12 @@ export class AttachDaemon {
       ...(opts.approvalTimeoutMs !== undefined ? { timeoutMs: opts.approvalTimeoutMs } : {}),
       // ADR 019ee0c0: 承認の再起動跨ぎ永続化。env 既定 OFF (ACTRADECK_PERSIST_APPROVALS で opt-in)。
       persist: buildApprovalPersistConfig(),
+      // ADR 019f0c3e: bypass/YOLO の high-risk カテゴリ承認ポリシー (既定 ON・既定プリセット・
+      //   ACTRADECK_BYPASS_CATASTROPHIC_GATE=0 で純パススルー)。memory-authoritative (起動時 once load)。
+      //   Phase 2: file-level + env を分離して渡し、認証済 relay の setPolicyConfig が memory+disk 追従する。
+      ...buildBridgePolicyOptions(),
+      // L2(b): persist 失敗 (allowlist/policy disk-write) を operator へ件数のみ surface。
+      ...(opts.onPersistFailure !== undefined ? { onPersistFailure: opts.onPersistFailure } : {}),
     });
 
     this.sink = new EventSink({
@@ -183,6 +196,38 @@ export class AttachDaemon {
     this.wsClient.on("allowlistRequest", (msg) => {
       const res = buildAllowlistResponse(this.approvalBridge, msg);
       if (res !== undefined) this.wsClient.respondAllowlist(res);
+    });
+
+    // ADR 019f0c3e Phase 2: 承認ポリシー get/set 要求。controlToken 検証済みのみ emit される。
+    // policy は machine-global ゆえ managed (sidecar.ts) と同一の buildPolicyResponse を共有 (closed-enum
+    // NO-RAW 単一出所)。attach 独自の get/set 経路を作らない。
+    this.wsClient.on("policyRequest", (msg) => {
+      // TDA-R3-1 (decision 019f0e2d): crash 防止の最終 net は WsClient.handleInbound の構造 backstop。
+      // この per-handler try/catch の主目的は **graceful error 応答** — 想定外 throw 時に request_id へ
+      // error を返し backend の timeout 待ちを避ける (diff handler と同方針)。setPolicyConfig は disk 失敗を
+      // safePersist で吸収済ゆえ通常ここには到達しない。op="resolve" は async (findRepoRoot) ゆえ await。
+      void (async () => {
+        try {
+          const res = await buildPolicyResponse(this.approvalBridge, msg);
+          if (res !== undefined) this.wsClient.respondPolicy(res);
+        } catch {
+          if (typeof msg.request_id === "string" && msg.request_id.length > 0) {
+            this.wsClient.respondPolicy({
+              type: "policy.response",
+              request_id: msg.request_id,
+              enabled: false,
+              categories: [],
+              env_gate_enabled: true,
+              error: "policy request failed",
+            });
+          }
+        }
+      })().catch(() => {
+        // SEC-2 (decision 019f0f2f): 構造 backstop (WsClient.handleInbound の同期 try/catch) は async IIFE の
+        // 本体/catch を覆わない (microtask は handleInbound 復帰後に走る)。catch 内 respondPolicy 等が throw
+        // すると void では unhandledRejection が escape し、global net 無しの attach daemon がプロセス死する。
+        // この .catch が非同期版の最終 net (構造 backstop 等価) — daemon は落とさない (deny-safe・観測も諦める)。
+      });
     });
   }
 

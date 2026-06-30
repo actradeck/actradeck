@@ -48,6 +48,10 @@ export {
   ApprovalDecision,
   ApprovalTrigger,
   SecretKind,
+  PolicyCategory,
+  DEFAULT_GATED_CATEGORIES,
+  projectPolicyCategories,
+  orderPolicyCategories,
 } from "./payload.js";
 
 // redaction kind vocabulary (T1 single source of truth for "種類" of redaction)
@@ -68,6 +72,9 @@ export type { RedactionKind } from "./redaction-kinds.js";
 // action kind vocabulary (T1 single source of truth for current_action 表示時ローカライズ)
 export { ACTION_KINDS, ActionKindSet, isActionKind, eventTypeToActionKind } from "./action-kind.js";
 export type { ActionKind } from "./action-kind.js";
+
+// project-scope path containment + repo_label sanitize (T1 single source: backend gate + sidecar NO-RAW 境界)
+export { normalizeScopePath, isPathWithinScope, sanitizeRepoLabel } from "./path-scope.js";
 
 // event id (UUIDv7)
 export { EventId, newEventId, isUuidV7 } from "./id.js";

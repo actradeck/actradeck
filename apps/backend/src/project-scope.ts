@@ -26,14 +26,34 @@
  * - ⚠ 共有先が **非信頼の第三者** になる (閲覧者へ REALTIME_TOKEN や by-id URL を渡す) 運用へ変えるなら、
  *   by-id 経路にも scope を transitive 適用し、本件 severity を H へ昇格させること (reachability 走査必須)。
  */
+import { isPathWithinScope, normalizeScopePath } from "@actradeck/event-model";
 
-/** env 値 (カンマ区切り) を prefix 配列へ。空 / undefined は `[]` (= scope なし)。 */
+/**
+ * ADR 019f0eca 方式B: 操作者入力の絶対パスが project-scope 配下かを判定する (resolve endpoint の
+ * 入口 lexical gate)。判定ロジックは event-model の **正準 isPathWithinScope** へ委譲する (手書きコピー禁止・
+ * security-gate-reuse-canonical-parser)。sidecar の解決済 root 再照合 (SEC-1・二段封じ込め) も同一 helper を
+ * 共有し、JS 側の prefix-match 意味論を 1 箇所へ集約する (TDA-6・decision 019f0f2f Conflicts#3)。
+ *
+ * 注意: これは入力 path の **lexical 第一段 deny** にすぎない (symlink/ancestor で git root が scope 外へ
+ * 抜けうる)。authoritative な封じ込めは sidecar が解決済 git root を同 helper で再照合する第二段で担う。
+ */
+export function isPathWithinProjectScope(rawPath: unknown, scope: readonly string[]): boolean {
+  return isPathWithinScope(rawPath, scope);
+}
+
+/**
+ * env 値 (カンマ区切り) を prefix 配列へ。空 / undefined は `[]` (= scope なし)。
+ * prefix は **一度 canonical 化** する (TDA-6・decision 019f0f2f): isPathWithinScope (candidate を normalize) と
+ * cwdScopeClause (SQL・prefix を生で消費) が同一 canonical 入力を読むようにし、trailing-slash 等の
+ * JS↔SQL 非対称を構造的に解消する。空文字や非絶対は除外する (resolve 封じ込めの prefix は絶対パスのみ)。
+ */
 export function parseProjectScope(raw: string | undefined): string[] {
   if (raw === undefined) return [];
   return raw
     .split(",")
     .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+    .filter((s) => s.length > 0)
+    .map((s) => normalizeScopePath(s));
 }
 
 /** LIKE パターンのメタ文字を escape する (Postgres LIKE の default escape `\`)。 */

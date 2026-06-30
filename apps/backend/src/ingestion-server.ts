@@ -38,6 +38,7 @@ import {
   isAllowlistResponseFrame,
   isDiffResponseFrame,
   isHelloFrame,
+  isPolicyResponseFrame,
   SidecarRegistry,
   type SidecarLink,
 } from "./sidecar-registry.js";
@@ -353,6 +354,13 @@ async function handleWsMessage(
   //   (要求元の HTTP endpoint が Promise 解決で応答する)。event ingest 経路には載せない。
   if (isAllowlistResponseFrame(parsed)) {
     registry.resolveAllowlist(parsed);
+    return;
+  }
+  // ADR 019f0c3e Phase 2: sidecar からの policy.response を pending 要求へ解決する。
+  //   categories は closed enum (NO-RAW)・backend は closed enum へ投影する。ack 不要
+  //   (要求元の HTTP endpoint が Promise 解決で応答する)。event ingest 経路には載せない。
+  if (isPolicyResponseFrame(parsed)) {
+    registry.resolvePolicy(parsed);
     return;
   }
   const ack = await ingestOne(store, parsed);

@@ -54,6 +54,7 @@ const ja = {
   "tab.inboxCount": "承認 Inbox ({count})",
   "tab.wall": "Live Wall",
   "tab.audit": "監査",
+  "tab.policy": "承認ポリシー",
 
   // ── 監査ビュー (強み(a) audit view) ─────────────────────────────────────
   "audit.title": "監査ビュー",
@@ -212,6 +213,85 @@ const ja = {
   "allowlist.revoke.title": "この永続承認を失効します（次回から再承認が必要になります）。",
   "allowlist.revoking": "失効中…",
   "allowlist.aria": "この端末の永続承認一覧",
+
+  // ── 承認ポリシー設定 (PolicySettingsPanel・ADR 019f0c3e Phase 2) ─────────────
+  "policy.title": "承認ポリシー（この端末・YOLO 時）",
+  "policy.desc":
+    "--dangerously-skip-permissions / --yolo の実行時でも、チェックしたカテゴリの操作は明示承認を求めます。この端末全体に適用されます。",
+  "policy.load": "ポリシーを表示",
+  "policy.reload": "再読み込み",
+  "policy.loading": "読み込み中…",
+  "policy.error": "取得に失敗しました（{error}）",
+  "policy.enabledLabel": "このポリシーを有効化",
+  "policy.enabledHint": "OFF にすると YOLO 時は従来どおり全操作を素通しします（純パススルー）。",
+  "policy.envDisabled":
+    "環境変数 ACTRADECK_BYPASS_CATASTROPHIC_GATE で全体が無効化されています。以下の設定は反映されません。",
+  "policy.categoriesLegend": "ゲートするカテゴリ",
+  "policy.defaultTag": "既定",
+  "policy.save": "保存",
+  "policy.saving": "保存中…",
+  "policy.aria": "この端末の承認ポリシー設定",
+  "policy.cat.recursive-rm": "再帰削除（rm -rf）",
+  "policy.cat.disk-destroy": "ディスク破壊（mkfs / dd）",
+  "policy.cat.history-rewrite": "履歴改変（git reset --hard 等）",
+  "policy.cat.db-drop": "DB 削除（DROP / TRUNCATE）",
+  "policy.cat.fork-bomb": "fork 爆弾",
+  "policy.cat.secret-egress": "秘匿情報の外部送出（inline）",
+  "policy.cat.perm-change": "権限変更（chmod -R 等）",
+  "policy.cat.inline-code": "インラインコード実行",
+  "policy.cat.secret-file-edit": "秘匿ファイル編集（.env 等）",
+  "policy.cat.external-tool": "外部ツール（MCP / WebFetch）",
+  "policy.cat.migrate-prod": "本番マイグレーション",
+  "policy.cat.high-risk-other": "その他 high-risk（backstop）",
+
+  // ── per-repo 承認ポリシー設定画面 (ApprovalPolicyView・ADR 019f0eca) ─────────────
+  "approvalPolicy.title": "承認ポリシー（この端末・YOLO 時）",
+  "approvalPolicy.desc":
+    "--dangerously-skip-permissions / --yolo の実行時に明示承認を求めるカテゴリを、Default（マシン基準）と repo ごとに設定します。この端末全体に適用されます。",
+  "approvalPolicy.aria": "per-repo 承認ポリシー設定",
+  "approvalPolicy.scopesAria": "ポリシー対象（Default と repo）",
+  "approvalPolicy.noSession": "接続中のセッションがありません",
+  "approvalPolicy.noSessionHint":
+    "ポリシーの確認・変更には稼働中のデーモン（接続中の live セッション）が必要です。エージェントを起動してください。",
+  "approvalPolicy.offline": "接続中のセッションがありません（最後に取得した設定を表示中）",
+  "approvalPolicy.offlineHint":
+    "読み取り専用です。最新化・変更・repo の追加には稼働中のデーモン（接続中の live セッション）が必要です。",
+  "approvalPolicy.offlineHintCached":
+    "読み取り専用（最終取得: {when}）。実際のゲート状態と異なる場合があります。最新化・変更には接続が必要です。",
+  "approvalPolicy.loading": "読み込み中…",
+  "approvalPolicy.reload": "再読み込み",
+  "approvalPolicy.loadHint": "対象を選択してください。",
+  "approvalPolicy.error": "取得に失敗しました（{error}）",
+  "approvalPolicy.default": "Default",
+  "approvalPolicy.defaultSub": "マシン基準（全 repo の既定）",
+  "approvalPolicy.unknownRepo": "（不明な repo）",
+  "approvalPolicy.badge.override": "Override",
+  "approvalPolicy.badge.default": "Default 継承",
+  "approvalPolicy.badge.observed": "観測（クリックで設定）",
+  "approvalPolicy.observed.legend": "観測された作業ディレクトリ",
+  "approvalPolicy.observed.hint":
+    "クリックすると git ルートを解決して対象に追加します（パスは保存されません）。",
+  "approvalPolicy.observed.note":
+    "起動中・過去のセッションの作業場所です。同じ repo のサブディレクトリは、設定すると 1 つの repo にまとまります。",
+  "approvalPolicy.add.legend": "repo を追加（パス指定）",
+  "approvalPolicy.add.placeholder": "/絶対パス/to/repo",
+  "approvalPolicy.add.button": "解決して追加",
+  "approvalPolicy.add.resolving": "解決中…",
+  "approvalPolicy.add.hint":
+    "絶対パスを入力すると、サーバ側で git ルートを解決して対象に追加します（パスは保存されません）。",
+  "approvalPolicy.add.error": "解決に失敗しました（{error}）",
+  "approvalPolicy.detail.defaultTitle": "Default（マシン基準）",
+  "approvalPolicy.detail.repoTitle": "{repo}",
+  "approvalPolicy.loosenWarning":
+    "この repo は Default より緩い設定です（Default が止める操作の一部を素通しします）。",
+  "approvalPolicy.enabledLabel": "このポリシーを有効化",
+  "approvalPolicy.enabledHint":
+    "OFF にすると、この対象では YOLO 時に全操作を素通しします（純パススルー）。",
+  "approvalPolicy.categoriesLegend": "ゲートするカテゴリ",
+  "approvalPolicy.save": "保存",
+  "approvalPolicy.saving": "保存中…",
+  "approvalPolicy.resetToDefault": "Default に戻す",
+  "approvalPolicy.resetHint": "この repo の上書きを削除し、Default を継承します。",
 
   // ── 承認 Inbox (ApprovalInbox) ──────────────────────────────────────────
   "inbox.title": "承認 Inbox",
@@ -567,6 +647,7 @@ const en: Record<MessageKey, string> = {
   "tab.inboxCount": "Approvals ({count})",
   "tab.wall": "Live Wall",
   "tab.audit": "Audit",
+  "tab.policy": "Approval policy",
 
   // ── audit view (strength a) ──
   "audit.title": "Audit",
@@ -726,6 +807,86 @@ const en: Record<MessageKey, string> = {
     "Revoke this persisted approval (re-approval will be required next time).",
   "allowlist.revoking": "Revoking…",
   "allowlist.aria": "persisted approvals for this machine",
+
+  // ── approval policy settings (PolicySettingsPanel) ──
+  "policy.title": "Approval policy (this machine, under YOLO)",
+  "policy.desc":
+    "Even when running --dangerously-skip-permissions / --yolo, checked categories still require explicit approval. Applies to this whole machine.",
+  "policy.load": "Show policy",
+  "policy.reload": "Reload",
+  "policy.loading": "Loading…",
+  "policy.error": "Failed to load ({error})",
+  "policy.enabledLabel": "Enable this policy",
+  "policy.enabledHint":
+    "When OFF, YOLO runs pass through every operation as before (pure passthrough).",
+  "policy.envDisabled":
+    "Disabled globally via env ACTRADECK_BYPASS_CATASTROPHIC_GATE; the settings below have no effect.",
+  "policy.categoriesLegend": "Gated categories",
+  "policy.defaultTag": "default",
+  "policy.save": "Save",
+  "policy.saving": "Saving…",
+  "policy.aria": "approval policy for this machine",
+  "policy.cat.recursive-rm": "Recursive delete (rm -rf)",
+  "policy.cat.disk-destroy": "Disk destruction (mkfs / dd)",
+  "policy.cat.history-rewrite": "History rewrite (git reset --hard, etc.)",
+  "policy.cat.db-drop": "Database drop (DROP / TRUNCATE)",
+  "policy.cat.fork-bomb": "Fork bomb",
+  "policy.cat.secret-egress": "Secret egress (inline)",
+  "policy.cat.perm-change": "Permission change (chmod -R, etc.)",
+  "policy.cat.inline-code": "Inline code execution",
+  "policy.cat.secret-file-edit": "Secret file edit (.env, etc.)",
+  "policy.cat.external-tool": "External tool (MCP / WebFetch)",
+  "policy.cat.migrate-prod": "Production migration",
+  "policy.cat.high-risk-other": "Other high-risk (backstop)",
+
+  // ── per-repo approval policy view (ApprovalPolicyView) ──
+  "approvalPolicy.title": "Approval policy (this machine, under YOLO)",
+  "approvalPolicy.desc":
+    "Choose which categories require explicit approval under --dangerously-skip-permissions / --yolo, per Default (machine baseline) and per repo. Applies to this whole machine.",
+  "approvalPolicy.aria": "per-repo approval policy settings",
+  "approvalPolicy.scopesAria": "policy scopes (Default and repos)",
+  "approvalPolicy.noSession": "No connected session",
+  "approvalPolicy.noSessionHint":
+    "Viewing or changing the policy needs a running daemon (a connected live session). Start an agent first.",
+  "approvalPolicy.offline": "No connected session (showing last-known settings)",
+  "approvalPolicy.offlineHint":
+    "Read-only. Refreshing, changing, or adding a repo needs a running daemon (a connected live session).",
+  "approvalPolicy.offlineHintCached":
+    "Read-only (last fetched: {when}). May differ from the actual gate state. Refreshing or changing needs a connection.",
+  "approvalPolicy.loading": "Loading…",
+  "approvalPolicy.reload": "Reload",
+  "approvalPolicy.loadHint": "Select a scope.",
+  "approvalPolicy.error": "Failed to load ({error})",
+  "approvalPolicy.default": "Default",
+  "approvalPolicy.defaultSub": "Machine baseline (default for all repos)",
+  "approvalPolicy.unknownRepo": "(unknown repo)",
+  "approvalPolicy.badge.override": "Override",
+  "approvalPolicy.badge.default": "Inherits Default",
+  "approvalPolicy.badge.observed": "Observed (click to configure)",
+  "approvalPolicy.observed.legend": "Observed working directories",
+  "approvalPolicy.observed.hint":
+    "Click to resolve its git root and add it as a scope (the path is not stored).",
+  "approvalPolicy.observed.note":
+    "Working dirs of running/past sessions. Sub-dirs of the same repo collapse into one repo once configured.",
+  "approvalPolicy.add.legend": "Add repo by path",
+  "approvalPolicy.add.placeholder": "/absolute/path/to/repo",
+  "approvalPolicy.add.button": "Resolve & add",
+  "approvalPolicy.add.resolving": "Resolving…",
+  "approvalPolicy.add.hint":
+    "Enter an absolute path; the server resolves its git root and adds it as a scope (the path is not stored).",
+  "approvalPolicy.add.error": "Failed to resolve ({error})",
+  "approvalPolicy.detail.defaultTitle": "Default (machine baseline)",
+  "approvalPolicy.detail.repoTitle": "{repo}",
+  "approvalPolicy.loosenWarning":
+    "This repo is looser than Default (it lets through some operations Default would gate).",
+  "approvalPolicy.enabledLabel": "Enable this policy",
+  "approvalPolicy.enabledHint":
+    "When off, this scope lets all operations through under YOLO (pure passthrough).",
+  "approvalPolicy.categoriesLegend": "Gated categories",
+  "approvalPolicy.save": "Save",
+  "approvalPolicy.saving": "Saving…",
+  "approvalPolicy.resetToDefault": "Reset to Default",
+  "approvalPolicy.resetHint": "Remove this repo's override and inherit Default.",
 
   // ── inbox ──
   "inbox.title": "Approvals",

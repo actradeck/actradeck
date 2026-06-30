@@ -18,6 +18,11 @@ export interface PersistedApprovalsPanelProps {
   readonly sessionId: string;
   /** 残り期限算出の基準時刻 (テスト決定論化用・既定 Date.now)。 */
   readonly nowMs?: number;
+  /**
+   * ADR 019f0eca: 指定時は当該 repo_scope のエントリのみ表示する (per-repo 設定画面での co-location)。
+   * allowlist は machine-global ゆえ pull は全件だが、表示を 1 repo へ client-side で絞る (revoke は不変)。
+   */
+  readonly filterScope?: string;
 }
 
 /** 残り期限を人間可読に (分→時→日)。期限切れは null (呼び元が i18n の「期限切れ」を出す)。 */
@@ -31,10 +36,19 @@ function formatRemaining(expiresAtMs: number, nowMs: number): string | null {
   return `${Math.round(hours / 24)}d`;
 }
 
-export function PersistedApprovalsPanel({ sessionId, nowMs }: PersistedApprovalsPanelProps) {
+export function PersistedApprovalsPanel({
+  sessionId,
+  nowMs,
+  filterScope,
+}: PersistedApprovalsPanelProps) {
   const { t } = useLocale();
   const now = nowMs ?? Date.now();
   const { view, loading, error, load, revoke, revoking } = useAllowlist(sessionId);
+  // ADR 019f0eca: filterScope 指定時は当該 repo のエントリのみ表示 (per-repo 設定画面の co-location)。
+  const entries =
+    view !== undefined && filterScope !== undefined
+      ? view.entries.filter((e) => e.repo_scope === filterScope)
+      : (view?.entries ?? []);
 
   return (
     <section
@@ -68,7 +82,7 @@ export function PersistedApprovalsPanel({ sessionId, nowMs }: PersistedApprovals
               {loading ? t("allowlist.loading") : t("allowlist.reload")}
             </Button>
             <span className="ad-allowlist__count" data-testid="allowlist-count">
-              {t("allowlist.count", { count: view.entries.length })}
+              {t("allowlist.count", { count: entries.length })}
             </span>
           </div>
 
@@ -80,13 +94,13 @@ export function PersistedApprovalsPanel({ sessionId, nowMs }: PersistedApprovals
             />
           ) : null}
 
-          {view.entries.length === 0 ? (
+          {entries.length === 0 ? (
             <p className="ad-allowlist__empty" data-testid="allowlist-empty">
               {t("allowlist.empty")}
             </p>
           ) : (
             <ul className="ad-allowlist__list" data-testid="allowlist-list">
-              {view.entries.map((e) => {
+              {entries.map((e) => {
                 const remaining = formatRemaining(e.expires_at_ms, now);
                 return (
                   <li

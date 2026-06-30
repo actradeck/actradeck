@@ -9,9 +9,30 @@
  * TTL: `ACTRADECK_PERSIST_APPROVALS_TTL_MS` (既定 7 日・[1分, 90日] に clamp)。
  */
 import { ApprovalAllowlistStore, repoLabelOf } from "./approval-allowlist-store.js";
-import type { ApprovalPersistConfig } from "./approval-bridge.js";
+import type { ApprovalPersistConfig, RepoScopeResolver } from "./approval-bridge.js";
 import { scopeHash } from "./daemon-state.js";
 import { findRepoRoot } from "./git-watcher.js";
+
+/**
+ * cwd → repo スコープ解決器を組む (ADR 019ee0c0 永続 allowlist / ADR 019f0eca per-repo policy 共有)。
+ * findRepoRoot で git root を解決し `{ scope: scopeHash(root) (12 hex), label: basename, root }` を返す。
+ * cwd 無し / git 管理外は undefined。**永続 allowlist と per-repo policy が同一の repo 同定器を共有**する
+ * ことで scope キーの drift を防ぐ (security-gate-reuse-canonical-parser)。
+ *
+ * `root` (SEC-1・decision 019f0f2f): findRepoRoot は `git rev-parse --show-toplevel` の **物理 (symlink
+ * 解決済み) git root** を返す。resolve 二段封じ込めが「解決済 root が project-scope 配下か」を再照合するのに
+ * 使う (符号化前の生 root を渡すのは containment 判定のためで、echo/永続はしない)。
+ */
+export function makeRepoScopeResolver(
+  resolveRepoRoot: (cwd: string) => Promise<string | undefined> = findRepoRoot,
+): RepoScopeResolver {
+  return async (cwd) => {
+    if (cwd === undefined || cwd.length === 0) return undefined;
+    const root = await resolveRepoRoot(cwd);
+    if (root === undefined) return undefined;
+    return { scope: scopeHash(root), label: repoLabelOf(root), root };
+  };
+}
 
 /** 永続 grant の既定 TTL = 7 日。 */
 export const DEFAULT_PERSIST_TTL_MS = 7 * 24 * 60 * 60_000;
@@ -57,11 +78,6 @@ export function buildApprovalPersistConfig(
     store,
     enabled: isPersistApprovalsEnabled(env),
     ttlMs: resolvePersistTtlMs(env),
-    resolveRepoScope: async (cwd) => {
-      if (cwd === undefined || cwd.length === 0) return undefined;
-      const root = await resolveRepoRoot(cwd);
-      if (root === undefined) return undefined;
-      return { scope: scopeHash(root), label: repoLabelOf(root) };
-    },
+    resolveRepoScope: makeRepoScopeResolver(resolveRepoRoot),
   };
 }

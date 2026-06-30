@@ -13,7 +13,9 @@ import { findRepoRoot, GitWatcher } from "./git-watcher.js";
 import { HookReceiver } from "./hook-receiver.js";
 import { ApprovalBridge } from "./approval-bridge.js";
 import { buildApprovalPersistConfig } from "./approval-persist-config.js";
+import { buildBridgePolicyOptions } from "./approval-policy-store.js";
 import { buildAllowlistResponse } from "./allowlist-relay.js";
+import { buildPolicyResponse } from "./policy-relay.js";
 import { SessionIdentity } from "./session-identity.js";
 import { generateHookToken } from "./settings-injection.js";
 import { EventSink, type OutOfOrderObservation } from "./sink.js";
@@ -57,6 +59,8 @@ export interface SidecarOptions {
   readonly onValidationError?: (eventType: string, message: string) => void;
   /** 3#QA-2: out-of-order 観測フック (INV-EVENT-ORDER 可視化)。 */
   readonly onOutOfOrder?: (obs: OutOfOrderObservation) => void;
+  /** L2(b) (decision 019f0e5d): 承認 disk-write 失敗の operator 可視化フック (件数のみ・NO-RAW)。 */
+  readonly onPersistFailure?: (count: number) => void;
 }
 
 export class Sidecar {
@@ -105,6 +109,9 @@ export class Sidecar {
       url: opts.wsUrl,
       store: this.store,
       controlToken: this.controlToken,
+      // ADR 019f1582 follow-up: managed sidecar は policyRequest を処理する (buildPolicyResponse) ゆえ
+      // policy 対応を広告する (attach と対称・connectedDaemons に含める)。
+      policyCapable: true,
       // ADR 019e9462: hello は送信時点で canonical を動的解決する (未確定時は fallback)。
       // 確定前に hello を送っても backend は ingest 流の observeSession で canonical 所有を
       // 学習するため relay は壊れない。
@@ -118,6 +125,12 @@ export class Sidecar {
       ...(opts.approvalTimeoutMs !== undefined ? { timeoutMs: opts.approvalTimeoutMs } : {}),
       // ADR 019ee0c0: 承認の再起動跨ぎ永続化。env 既定 OFF (ACTRADECK_PERSIST_APPROVALS で opt-in)。
       persist: buildApprovalPersistConfig(),
+      // ADR 019f0c3e: bypass/YOLO の high-risk カテゴリ承認ポリシー (既定 ON・既定プリセット・
+      //   ACTRADECK_BYPASS_CATASTROPHIC_GATE=0 で純パススルー)。memory-authoritative (起動時 once load)。
+      //   Phase 2: file-level + env を分離して渡し、認証済 relay の setPolicyConfig が memory+disk 追従する。
+      ...buildBridgePolicyOptions(),
+      // L2(b): persist 失敗 (allowlist/policy disk-write) を operator へ件数のみ surface。
+      ...(opts.onPersistFailure !== undefined ? { onPersistFailure: opts.onPersistFailure } : {}),
     });
     this.sink = new EventSink({
       store: this.store,
@@ -196,6 +209,37 @@ export class Sidecar {
     this.wsClient.on("allowlistRequest", (msg) => {
       const res = buildAllowlistResponse(this.approvalBridge, msg);
       if (res !== undefined) this.wsClient.respondAllowlist(res);
+    });
+
+    // ADR 019f0c3e Phase 2: 承認ポリシー get/set 要求。controlToken 検証済みのみ emit される。
+    // policy は machine-global ゆえ attach と同一の buildPolicyResponse を共有 (closed-enum NO-RAW 単一出所)。
+    this.wsClient.on("policyRequest", (msg) => {
+      // TDA-R3-1 (decision 019f0e2d): crash 防止の最終 net は WsClient.handleInbound の構造 backstop。
+      // この per-handler try/catch の主目的は **graceful error 応答** — 想定外 throw 時に request_id へ
+      // error を返し backend の timeout 待ちを避ける (diff handler と同方針)。setPolicyConfig は disk 失敗を
+      // safePersist で吸収済ゆえ通常ここには到達しない。op="resolve" は async (findRepoRoot) ゆえ await。
+      void (async () => {
+        try {
+          const res = await buildPolicyResponse(this.approvalBridge, msg);
+          if (res !== undefined) this.wsClient.respondPolicy(res);
+        } catch {
+          if (typeof msg.request_id === "string" && msg.request_id.length > 0) {
+            this.wsClient.respondPolicy({
+              type: "policy.response",
+              request_id: msg.request_id,
+              enabled: false,
+              categories: [],
+              env_gate_enabled: true,
+              error: "policy request failed",
+            });
+          }
+        }
+      })().catch(() => {
+        // SEC-2 (decision 019f0f2f): 構造 backstop (WsClient.handleInbound の同期 try/catch) は async IIFE の
+        // 本体/catch を覆わない (microtask は handleInbound 復帰後に走る)。catch 内 respondPolicy 等が throw
+        // すると void では unhandledRejection が escape する。この .catch が非同期版の最終 net — daemon は
+        // 落とさない (deny-safe)。managed は onFatal 経由だが本 net で異常終了自体を未然に防ぐ。
+      });
     });
   }
 

@@ -28,6 +28,7 @@ import {
 import { Button, Icon, InlineAlert, Table, TBody, Tag, Td, Th, THead, Tr, type Tone } from "./kit";
 import { useLocale } from "./LocaleProvider";
 import { PersistedApprovalsPanel } from "./PersistedApprovalsPanel";
+import { PolicySettingsPanel } from "./PolicySettingsPanel";
 import {
   effectiveLivenessState,
   heartbeatRows,
@@ -722,6 +723,9 @@ export function SessionDetailView({
 
       {/* PAL-v2 (ADR 019ee147): 永続承認 allowlist の in-UI 一覧 + 失効 (machine-global・lazy pull)。 */}
       <PersistedApprovalsPanel sessionId={detail.session_id} />
+
+      {/* ADR 019f0c3e Phase 2: bypass/YOLO 承認ポリシー設定 (machine-global・lazy pull・allowlist と対称)。 */}
+      <PolicySettingsPanel sessionId={detail.session_id} />
     </section>
   );
 }

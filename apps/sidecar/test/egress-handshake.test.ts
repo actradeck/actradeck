@@ -139,6 +139,81 @@ describe("INV egress: Bearer auth + hello handshake (real ws server)", () => {
     expect(ev.event_type).toBe("heartbeat");
   });
 
+  it("(2b) hello carries policy_capable:true only when the daemon advertises it (ADR 019f1582 follow-up)", async () => {
+    // managed sidecar / attach daemon は policyRequest を処理するため policy_capable:true を広告し、
+    // backend が connectedDaemons (UI の daemon-addressed policy 宛先) に含める。
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-cap",
+      sessionIds: ["s1"],
+      policyCapable: true,
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length < 1; i++) await sleep(10);
+    const hello = cap.frames[0] as { type?: string; policy_capable?: unknown };
+    expect(hello.type).toBe("hello");
+    expect(hello.policy_capable).toBe(true);
+  });
+
+  it("(2d) reannounce re-sends hello WITH policy_capable (TDA-1: capability は降格しない)", async () => {
+    // 回帰: reannounce() の hello が policy_capable を落とすと backend handleHello の無条件上書きで
+    // capability が false へ降格し connectedDaemons から脱落する H 回帰があった (decision 019f1859)。
+    // connect と reannounce は buildHelloFrame を共有し policy_capable を一様に載せることを実 ws で固定。
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-reann",
+      sessionIds: ["s1"],
+      policyCapable: true,
+    });
+    client.connect();
+    // connect-hello を待つ。
+    for (let i = 0; i < 100 && cap.frames.length < 1; i++) await sleep(10);
+    expect((cap.frames[0] as { policy_capable?: unknown }).policy_capable).toBe(true);
+    // session 集合変化を模して reannounce → 2 通目の hello も policy_capable を保持する。
+    client.reannounce();
+    for (
+      let i = 0;
+      i < 100 && cap.frames.filter((f) => (f as { type?: string }).type === "hello").length < 2;
+      i++
+    )
+      await sleep(10);
+    const helloFrames = cap.frames.filter((f) => (f as { type?: string }).type === "hello");
+    expect(helloFrames.length).toBeGreaterThanOrEqual(2);
+    const reann = helloFrames[helloFrames.length - 1] as { policy_capable?: unknown };
+    expect(reann.policy_capable).toBe(true); // 降格しない (buildHelloFrame 未共有だと undefined→RED)。
+  });
+
+  it("(2c) hello omits policy_capable when not advertised (observe-only codex daemon・既定 false)", async () => {
+    // codex-rollout daemon は policyRequest 非対応。policy_capable を載せないことで backend は
+    // connectedDaemons から除外し、UI が addressing して timeout する事故を防ぐ。
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-nocap",
+      sessionIds: ["s1"],
+      // policyCapable 未指定 = 既定 false。
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length < 1; i++) await sleep(10);
+    const hello = cap.frames[0] as { type?: string; policy_capable?: unknown };
+    expect(hello.type).toBe("hello");
+    expect("policy_capable" in hello).toBe(false); // 載せない (backend で除外される)。
+  });
+
   it("(3) without ingestToken, no Authorization header (backward compat)", async () => {
     const cap = freshCapture();
     const port = await startServer(cap);

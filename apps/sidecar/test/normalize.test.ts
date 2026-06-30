@@ -413,15 +413,15 @@ describe("risk + tool classification", () => {
  * INV-DESTRUCTIVE-DISK-GATE (SEC-7): 不可逆なディスク/FS/パーティション/暗号/LVM・RAID 破壊ツールを
  * 承認ゲート (classifyCommandRisk=high) で確実に捕捉する。
  *
- * 背景: `\bmkfs\b` (HIGH_RISK_LITERAL_RE) は `mkfs.ext4` を捕捉するが、同等に破壊的な兄弟ツール
- * (`mke2fs` / `wipefs` / `blkdiscard` / `sfdisk` / `parted` / `cryptsetup` …) を取りこぼし、
+ * 背景: `\bmkfs\b` (LITERAL_RULES の high エントリ・旧 HIGH_RISK_LITERAL_RE) は `mkfs.ext4` を捕捉するが、
+ * 同等に破壊的な兄弟ツール (`mke2fs` / `wipefs` / `blkdiscard` / `sfdisk` / `parted` / `cryptsetup` …) を取りこぼし、
  * `wipefs -a /dev/sda` のような不可逆操作が low → 承認ゲート素通り (auto/bypassPermissions で無承認実行)
  * になっていた (実測で確証)。構造ゲート (memory security-gate-reuse-canonical-parser): 分類器が共有する
  * tokenize → stripRunnerWrappers → commandName → normalizeCommandName と同一正規化で basename 照合する。
  *
  * falsifiability: isDestructiveDiskProgram を classify 高ブロックから外す (mutation) と、本 describe の
  * `*` ケース (mkfs ファミリ以外の全ツール) が high→low に落ちて赤化する。`mkfs.ext4` のみ既存
- * HIGH_RISK_LITERAL_RE に残り緑のままなので、retention 力は兄弟ツール群が担う。
+ * LITERAL_RULES (high・旧 HIGH_RISK_LITERAL_RE) に残り緑のままなので、retention 力は兄弟ツール群が担う。
  */
 describe("INV-DESTRUCTIVE-DISK-GATE: destructive disk/fs tools gated as high (SEC-7)", () => {
   it.each([

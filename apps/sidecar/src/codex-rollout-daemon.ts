@@ -41,6 +41,9 @@ export class CodexRolloutDaemon {
       url: opts.wsUrl,
       store: this.store,
       controlToken: this.controlToken,
+      // ADR 019f1582 follow-up: codex-rollout は observe-only で policyRequest ハンドラを持たない
+      // (interrupt のみ wire)。policyCapable は既定 false のまま広告せず、backend の connectedDaemons から
+      // 除外させる (UI が policy 非対応 daemon を addressing して timeout する事故を防ぐ)。
       sessionIdsProvider: () => this.registry.sessionIds(),
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }

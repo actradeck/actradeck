@@ -42,6 +42,88 @@ export const SecretKind = z.enum(REDACTION_KINDS);
 export type SecretKind = z.infer<typeof SecretKind>;
 
 /**
+ * 承認ポリシーの high-risk カテゴリ (ADR 019f0c3e・T1 単一ソース).
+ *
+ * operator が設定ページ (Phase 2) のチェックボックスで「YOLO/bypassPermissions でも明示承認を要する」
+ * カテゴリを選ぶ。sidecar の分類器 (normalize.ts `classifyCommandCategories`) が各操作の該当カテゴリを
+ * 算出し、approval-bridge が **enabled-categories と交差したらゲート**する (それ以外は従来どおり defer)。
+ *
+ * - recursive-rm:     rm -rf / find -delete・-exec 等の再帰強制削除・mass file 削除
+ * - disk-destroy:     mkfs/dd/shred/wipefs/parted/cryptsetup/nvme format/zfs destroy/block-device 書込
+ * - history-rewrite:  git push --force / git reset --hard / git clean -f
+ * - db-drop:          DROP TABLE / DROP DATABASE / TRUNCATE TABLE
+ * - fork-bomb:        `:(){ :|:& };:` 等の自己増殖
+ * - secret-egress:    network-egress program (curl/wget/nc/scp…) に secret を同梱 (composite・approval-bridge)
+ * - perm-change:      chmod -R / world-writable chmod / recursive chown
+ * - inline-code:      sh -c / python -c / eval / `curl|sh` / `$(...)` / `<(...)` の動的コード実行
+ * - secret-file-edit: .env / *.pem / id_rsa / kubeconfig 等の秘匿ファイル編集 (approval-bridge)
+ * - external-tool:    MCP 呼び出し / WebFetch (approval-bridge)
+ * - migrate-prod:     DB マイグレーション / "production" 言及 (曖昧・既定 OFF)
+ * - high-risk-other:  上記 named に該当しないが分類器が high と判定した残余 (silent hole 防止 backstop)
+ *
+ * 後方互換 additive。値は公開可能 enum (原文非依存・redaction 件数と同カテゴリの安全な enum)。
+ */
+export const PolicyCategory = z.enum([
+  "recursive-rm",
+  "disk-destroy",
+  "history-rewrite",
+  "db-drop",
+  "fork-bomb",
+  "secret-egress",
+  "perm-change",
+  "inline-code",
+  "secret-file-edit",
+  "external-tool",
+  "migrate-prod",
+  "high-risk-other",
+]);
+export type PolicyCategory = z.infer<typeof PolicyCategory>;
+
+/**
+ * 既定でゲートする (チェック ON) カテゴリ (ADR 019f0c3e). 設定ファイル欠落/不正時の **fail-safe 既定**でもある。
+ *
+ * 不可逆×ブラスト半径大の「最も危険」群のみ既定 ON。perm-change / inline-code / secret-file-edit /
+ * external-tool / migrate-prod は誤検知寄りゆえ既定 OFF (operator が必要なら設定ページで ON)。
+ * secret-egress は leak 製品ゆえ既定 ON (operator は外せるが UI が強警告)。high-risk-other は high と
+ * 判定された残余を取りこぼさない backstop ゆえ既定 ON。
+ */
+export const DEFAULT_GATED_CATEGORIES: readonly PolicyCategory[] = [
+  "recursive-rm",
+  "disk-destroy",
+  "history-rewrite",
+  "db-drop",
+  "fork-bomb",
+  "secret-egress",
+  "high-risk-other",
+];
+
+/**
+ * TDA-S1-3 (decision 019f0e5d): categories 集合を `PolicyCategory.options` の安定順へ整列する **単一出所**。
+ * 投影 (projectPolicyCategories) とは別操作 — 既に typed な `ReadonlySet<PolicyCategory>` の serialize
+ * (approval-policy-store.saveApprovalPolicy / policy-relay.buildPolicyResponse) と、投影の最終整列の両方が
+ * 本関数を共有し、順序規則の 3 箇所重複を排除する。`ReadonlySet<string>` を受け PolicyCategory ⊆ string で
+ * typed-Set も present-set も渡せる (戻りは常に closed enum・order/membership は options に従う)。
+ */
+export function orderPolicyCategories(set: ReadonlySet<string>): PolicyCategory[] {
+  return PolicyCategory.options.filter((c) => set.has(c));
+}
+
+/**
+ * TDA-1 (decision 019f0e2d): untrusted 入力を closed-enum `PolicyCategory[]` へ投影する **単一出所**。
+ * `PolicyCategory.options` の安定順を保ち、非配列→`[]`・非 string・未知値を構造的に落とす (NO-RAW)。
+ *
+ * 3 トラスト境界 — sidecar `sanitizeCategories` (disk/wire load) / backend `resolvePolicy` (sidecar relay) /
+ * webui `parsePolicy` (BFF 応答) — が本関数を共有し、投影ロジックの drift を防ぐ (純関数ゆえ境界ごとの
+ * 多層防御は保たれる)。各境界固有の前段ガード (例: webui の「非配列は応答全棄却」) は呼び元に残す。
+ * 最終整列は orderPolicyCategories に委譲 (TDA-S1-3・順序規則の単一出所)。
+ */
+export function projectPolicyCategories(raw: unknown): PolicyCategory[] {
+  if (!Array.isArray(raw)) return [];
+  const present = new Set<string>(raw.filter((c): c is string => typeof c === "string"));
+  return orderPolicyCategories(present);
+}
+
+/**
  * variant ビルダー: `kind` リテラル + 固有フィールド。
  * looseObject で「正規化済みの追加キー」を許容する (MVP の前方互換)。
  */

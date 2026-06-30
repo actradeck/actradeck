@@ -14,7 +14,11 @@ import { Pool } from "pg";
 import { AuditStore } from "../src/audit-store.js";
 import { IngestStore } from "../src/ingest-store.js";
 import { RealtimeStore } from "../src/realtime-store.js";
-import { cwdScopeClause, parseProjectScope } from "../src/project-scope.js";
+import {
+  cwdScopeClause,
+  isPathWithinProjectScope,
+  parseProjectScope,
+} from "../src/project-scope.js";
 import { cleanupSessions, dbReachable, iso, makeEvent } from "./helpers.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -48,6 +52,111 @@ describe("project-scope 純ロジック (parseProjectScope / cwdScopeClause)", (
     // exact はそのまま、subdir パターンのみ escape + '/%'。
     expect(params[0]).toEqual(["/tmp/a_b%c"]);
     expect(params[1]).toEqual(["/tmp/a\\_b\\%c/%"]);
+  });
+
+  // ADR 019f0eca 方式B: resolve endpoint の path 封じ込め (cwdScopeClause と同一意味論を JS で)。
+  describe("isPathWithinProjectScope (方式B resolve 封じ込め)", () => {
+    const SCOPE = ["/home/me/work", "/tmp/ad-demo"];
+    it("scope 空は無制限 (default-off・他経路と整合)", () => {
+      expect(isPathWithinProjectScope("/anywhere/at/all", [])).toBe(true);
+      expect(isPathWithinProjectScope("/etc/passwd", [])).toBe(true);
+    });
+    it("完全一致 + 配下のみ true (兄弟/scope外は false)", () => {
+      expect(isPathWithinProjectScope("/home/me/work", SCOPE)).toBe(true);
+      expect(isPathWithinProjectScope("/home/me/work/repo", SCOPE)).toBe(true);
+      expect(isPathWithinProjectScope("/tmp/ad-demo/x/y", SCOPE)).toBe(true);
+      // 兄弟 (prefix を共有するが配下でない) は false。
+      expect(isPathWithinProjectScope("/home/me/work-other", SCOPE)).toBe(false);
+      expect(isPathWithinProjectScope("/home/me/workshop", SCOPE)).toBe(false);
+      // scope 外。
+      expect(isPathWithinProjectScope("/home/me/secret", SCOPE)).toBe(false);
+      expect(isPathWithinProjectScope("/etc", SCOPE)).toBe(false);
+    });
+    it("`..` traversal を normalize で畳んでから判定する (scope 脱出を防ぐ)", () => {
+      // /home/me/work/../secret → /home/me/secret (scope 外) → false。
+      expect(isPathWithinProjectScope("/home/me/work/../secret", SCOPE)).toBe(false);
+      // /home/me/work/sub/.. → /home/me/work (一致) → true。
+      expect(isPathWithinProjectScope("/home/me/work/sub/..", SCOPE)).toBe(true);
+      // 末尾スラッシュ・重複スラッシュは正規化して一致。
+      expect(isPathWithinProjectScope("/home/me/work/", SCOPE)).toBe(true);
+      expect(isPathWithinProjectScope("/tmp/ad-demo//pkg", SCOPE)).toBe(true);
+    });
+    it("非絶対 / 空 / 非 string / NUL 含みは false (安全側)", () => {
+      expect(isPathWithinProjectScope("relative/path", SCOPE)).toBe(false);
+      expect(isPathWithinProjectScope("", SCOPE)).toBe(false);
+      expect(isPathWithinProjectScope(undefined, SCOPE)).toBe(false);
+      expect(isPathWithinProjectScope(123, SCOPE)).toBe(false);
+      expect(isPathWithinProjectScope("/home/me/work\0/etc", SCOPE)).toBe(false);
+    });
+  });
+
+  // TDA-6 / QA-5 (decision 019f0f2f): JS (isPathWithinProjectScope) ↔ SQL (cwdScopeClause) の封じ込め契約を
+  // 共有 fixture で pin する。cwdScopeClause の実 params から Postgres LIKE 意味論を忠実にエミュレートし、
+  // **canonical 入力で両者が一致**することを固定する (parseProjectScope の prefix canonical 化が SQL へ流れる)。
+  describe("INV-SCOPE-JS-SQL-AGREEMENT (TDA-6): JS と SQL 封じ込めが canonical 入力で一致", () => {
+    // Postgres LIKE (default escape `\`) を正規表現で忠実にエミュレートする。
+    function likeToRegex(pattern: string): RegExp {
+      let re = "^";
+      for (let i = 0; i < pattern.length; i += 1) {
+        const ch = pattern[i]!;
+        if (ch === "\\") {
+          i += 1;
+          re += pattern[i]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        } else if (ch === "%") {
+          re += "[\\s\\S]*";
+        } else if (ch === "_") {
+          re += "[\\s\\S]";
+        } else {
+          re += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        }
+      }
+      return new RegExp(re + "$");
+    }
+    // cwdScopeClause の params (= ANY exact / LIKE ANY subdir) を実際に評価する SQL 等価判定。
+    function sqlMatches(scope: string[], cwd: string): boolean {
+      const { params } = cwdScopeClause(scope, "cwd", 1);
+      if (params.length === 0) return true; // 空 scope → clause 無し → 全通し。
+      const [exact, subdir] = params;
+      if (exact!.includes(cwd)) return true;
+      return subdir!.some((pat) => likeToRegex(pat).test(cwd));
+    }
+
+    it("canonical な (scope, cwd) 組で JS と SQL が完全一致する", () => {
+      const scope = parseProjectScope("/home/me/work,/tmp/a_b%c"); // メタ文字込み + canonical 化。
+      // すべて canonical (末尾スラッシュ/.. 無し) な cwd — 実 cwd はこの形 (物理絶対パス)。
+      const cwds = [
+        "/home/me/work", // 完全一致
+        "/home/me/work/repo/src", // 配下
+        "/home/me/work-other", // 兄弟
+        "/home/me", // 上位
+        "/tmp/a_b%c/pkg", // メタ文字 prefix の配下 (literal 一致)
+        "/tmp/aXbYc/pkg", // メタ文字を誤ワイルドカード解釈すると一致してしまう罠
+        "/etc/passwd", // scope 外
+      ];
+      for (const cwd of cwds) {
+        expect(isPathWithinProjectScope(cwd, scope)).toBe(sqlMatches(scope, cwd));
+      }
+      // 誤ワイルドカードが無いことを明示 (escape が効いている)。
+      expect(isPathWithinProjectScope("/tmp/aXbYc/pkg", scope)).toBe(false);
+      expect(sqlMatches(scope, "/tmp/aXbYc/pkg")).toBe(false);
+    });
+
+    it("空 scope は両者とも全通し (off = no-op)", () => {
+      for (const cwd of ["/a", "/b/c", "/etc"]) {
+        expect(isPathWithinProjectScope(cwd, [])).toBe(true);
+        expect(sqlMatches([], cwd)).toBe(true);
+      }
+    });
+
+    it("既知の意図的差異: 非 canonical cwd では JS が normalize し SQL より厳格 (安全側)", () => {
+      const scope = parseProjectScope("/home/me/work");
+      // 実 cwd には現れない traversal 入り (resolve は任意入力を受けるため JS が防御)。
+      const traversal = "/home/me/work/../secret";
+      // SQL は col を raw 比較するため LIKE '/home/me/work/%' に literal 一致して **通してしまう**。
+      expect(sqlMatches(scope, traversal)).toBe(true);
+      // JS は normalize で /home/me/secret へ畳み scope 外と判定 → 拒否 (危険判定はこちらを使う)。
+      expect(isPathWithinProjectScope(traversal, scope)).toBe(false);
+    });
   });
 });
 

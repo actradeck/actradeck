@@ -9,11 +9,13 @@
  * - INV-ATTACH-REDACTION: diff/command の ghp_/AKIA が SQLite で [REDACTED:*] (choke 透過)。
  * - INV-ATTACH-NO-KILL: interrupt 要求で PID kill が一切起きない (managed runner 不在)。
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { PolicyCategory } from "@actradeck/event-model";
 
 import { AttachDaemon } from "../src/attach-daemon.js";
 import { normalizeHook } from "../src/normalize.js";
@@ -213,5 +215,122 @@ describe("INV-ATTACH-NO-KILL: 非所有 PID を kill しない", () => {
     expect(killSpy).not.toHaveBeenCalled();
     expect(ignored).toHaveBeenCalledWith("sessA");
     killSpy.mockRestore();
+  });
+});
+
+/**
+ * QA-1 (ADR 019f0c3e Phase 2 4面監査・decision 019f0e7d): onPersistFailure が daemon→bridge→cli へ
+ * 配線され、実際に発火することを daemon レベルで pin する (bridge 単体 pin=L2(a) に加えた forward の
+ * firing テスト・onInterruptIgnored と parity)。disk-persist 失敗を強制する: HOME を temp に向け
+ * `$HOME/.actradeck` を **ファイル**にしておくと saveApprovalPolicy の mkdir($HOME/.actradeck/approvals)
+ * が ENOTDIR で同期 throw する (非 root でも確実)。forward の spread を外す mutation で surfaced 空 → RED。
+ */
+describe("QA-1: onPersistFailure が daemon→bridge→cli 配線経由で発火する", () => {
+  it("policy 永続 (persistDelta→applyPolicyDelta) が disk 失敗すると onPersistFailure(count) が daemon forward 経由で発火し live gate は保持", () => {
+    const origHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), "actradeck-qa1-home-"));
+    try {
+      process.env.HOME = home;
+      const surfaced: number[] = [];
+      // 構築時点では $HOME/.actradeck 不在 → loadApprovalPolicy は ENOENT→既定プリセット (構築成功)。
+      daemon = new AttachDaemon({
+        wsUrl: "ws://127.0.0.1:1/ingest/ws",
+        dbPath: join(dir, "qa1.db"),
+        hookToken: "tok-fixed",
+        host: "127.0.0.1",
+        onPersistFailure: (count) => surfaced.push(count),
+      });
+      // $HOME/.actradeck を **ファイル**化 → 以降 saveApprovalPolicy の mkdir が ENOTDIR throw。
+      writeFileSync(join(home, ".actradeck"), "not-a-dir");
+      // attach-daemon.ts の onPersistFailure forward spread を外す mutation だと surfaced 空で RED。
+      daemon.approvalBridge.setPolicyConfig({
+        categories: new Set<PolicyCategory>(["disk-destroy"]),
+      });
+      // 件数 (非負整数) が cli 配線へ届く (NO-RAW)。
+      expect(surfaced).toEqual([1]);
+      // primary 効果 (live gate=memory) は disk 失敗でも保持 (deny-safe)。
+      expect([...daemon.approvalBridge.getPolicyConfig().categories]).toEqual(["disk-destroy"]);
+    } finally {
+      if (origHome === undefined) delete process.env.HOME;
+      else process.env.HOME = origHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * SEC-2 + QA-2 (ADR 019f0eca full 監査・decision 019f0f2f): policy handler の async 化で、構造 backstop
+ * (WsClient.handleInbound の同期 try/catch) が async IIFE の本体/catch を覆わなくなった。catch 内 respondPolicy
+ * が throw すると void では unhandledRejection が escape し、global net 無しの attach daemon がプロセス死する。
+ * IIFE 末尾の `.catch(()=>{})` が非同期版の最終 net。以下を falsifiable に pin する:
+ *  - SEC-2 crash-safety: respondPolicy が常に throw しても policyRequest 処理で unhandledRejection が発火せず
+ *    daemon は生存する (.catch を外すと unhandledRejection が漏れて RED)。
+ *  - QA-2 graceful-error: buildPolicyResponse が throw (resolveRepoScope 例外) しても、handler の inner catch が
+ *    request_id へ error 応答を返し、unhandledRejection も出ない (graceful 縮退)。
+ */
+describe("SEC-2/QA-2: async policy handler の crash-safety + graceful-error", () => {
+  /** policyRequest emit 後の async IIFE / microtask を確実に走らせる。 */
+  async function flush(): Promise<void> {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+
+  it("SEC-2: respondPolicy が throw しても unhandledRejection を出さず daemon は生存する", async () => {
+    daemon = makeDaemon().daemon;
+    const rejections: unknown[] = [];
+    const onRej = (e: unknown): void => {
+      rejections.push(e);
+    };
+    process.on("unhandledRejection", onRej);
+    try {
+      // 最悪ケース: 成功側 respondPolicy も inner catch の respondPolicy も throw する。
+      daemon.wsClient.respondPolicy = () => {
+        throw new Error("respond boom (sentinel)");
+      };
+      daemon.wsClient.emit("policyRequest", {
+        type: "policy.request",
+        request_id: "r1",
+        op: "get",
+      });
+      await flush();
+      // .catch(()=>{}) が IIFE の reject を飲む → unhandledRejection 0 (外すと sentinel が漏れて RED)。
+      expect(rejections).toHaveLength(0);
+      // daemon は生存 (別イベントを処理できる)。
+      expect(() => daemon.wsClient.emit("policyRequest", { type: "policy.request" })).not.toThrow();
+    } finally {
+      process.off("unhandledRejection", onRej);
+    }
+  });
+
+  it("QA-2: buildPolicyResponse が throw しても inner catch が error 応答を返し unhandledRejection は出ない", async () => {
+    daemon = makeDaemon().daemon;
+    const rejections: unknown[] = [];
+    const onRej = (e: unknown): void => {
+      rejections.push(e);
+    };
+    process.on("unhandledRejection", onRej);
+    try {
+      // resolveRepoScope 例外を模す: getPolicyConfigForPath を throw させる (op=resolve がこれを await)。
+      daemon.approvalBridge.getPolicyConfigForPath = async () => {
+        throw new Error("resolver boom");
+      };
+      const sent: Array<Record<string, unknown>> = [];
+      daemon.wsClient.respondPolicy = (res: Record<string, unknown>) => {
+        sent.push(res);
+      };
+      daemon.wsClient.emit("policyRequest", {
+        type: "policy.request",
+        request_id: "r2",
+        op: "resolve",
+        path: "/some/path",
+      });
+      await flush();
+      // graceful: request_id へ error 応答 (backend の timeout 待ちを避ける)。
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.request_id).toBe("r2");
+      expect(sent[0]!.error).toBeDefined();
+      expect(rejections).toHaveLength(0);
+    } finally {
+      process.off("unhandledRejection", onRej);
+    }
   });
 });

@@ -6,10 +6,11 @@
  *
  * Adaptive Clarity: Carbon Header/Content/Search/Button/Tag を kit/AppHeader（token 駆動）へ置換。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { formatCurrentAction } from "./action-units-display";
 import { ApprovalInbox } from "./ApprovalInbox";
+import { ApprovalPolicyView } from "./ApprovalPolicyView";
 import { AuditView } from "./AuditView";
 import { LiveWall } from "./LiveWall";
 import { AppHeader, Button, Tag, type Tone } from "./kit";
@@ -21,6 +22,8 @@ import { SessionDetailView } from "./SessionDetail";
 import { SessionList } from "./SessionList";
 import { SessionReplayView } from "./SessionReplay";
 import { ThemeToggle } from "./ThemeToggle";
+import { useDaemons } from "./use-daemons";
+import type { PolicyRelayTarget } from "./use-policy-admin";
 import { useRealtime } from "./use-realtime";
 import { useSessionEvents } from "./use-session-events";
 import { useSessionBody } from "./use-session-body";
@@ -70,6 +73,15 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
     url,
     onListDelta: notifications.notify,
   });
+  // ADR 019f0eca §8: 承認ポリシー画面の「観測 repo」サジェスト材料。既知セッションの distinct cwd
+  // (空/欠落は除外)。webui が既に保持する一覧から導出 (新規取得なし)。生パスは panel が basename へ畳む。
+  const observedCwds = useMemo(
+    () =>
+      [
+        ...new Set(sessions.map((s) => s.cwd).filter((c): c is string => !!c && c.length > 0)),
+      ].sort(),
+    [sessions],
+  );
   // 相対時刻表示を 1 秒粒度で更新 (受け入れ基準: heartbeat/最終イベントの新鮮さを刻む)。
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [view, setView] = useState<"detail" | "replay">("detail");
@@ -80,7 +92,25 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
   const requestedViewRef = useRef<"replay" | null>(null);
   const pinnedSelectionRef = useRef<string | null>(null);
   // トップレベルビュー: 通常ボード ↔ 横断 Approval Inbox (ADR 019ead14 D2) ↔ Live Wall (ADR 019ead7a D3)。
-  const [topView, setTopView] = useState<"board" | "inbox" | "wall" | "audit">("board");
+  const [topView, setTopView] = useState<"board" | "inbox" | "wall" | "audit" | "policy">("board");
+  // ADR 019f1582: 承認ポリシー設定の relay-target。接続中エージェントセッションがあればそれを使い (従来経路・
+  // 既存 e2e/INV 温存)、無ければ接続中 daemon (常時接続の attach daemon) を直指定する (エージェント未稼働でも
+  // per-repo 設定可)。policy は machine-global ゆえどちらでも fan-out で全 daemon へ収束する。daemon 一覧は
+  // policy タブ表示中のみ pull し、接続数変化で再取得する (daemonId churn は use-daemons の poll が吸収)。
+  const policyActive = topView === "policy";
+  const connectedSessionId = sessions.find((s) => s.connected)?.session_id ?? null;
+  // sweep 019f15a9 (TDA-2 副): session が relay-target のとき daemon 一覧は不要 (firstDaemonId 不使用)。
+  // policy タブ表示中 **かつ session 未接続** のときだけ /realtime/daemons を pull し、接続中の無駄 pull を抑える。
+  const { daemonIds } = useDaemons({
+    enabled: policyActive && connectedSessionId === null,
+    refreshKey: connectedCount,
+  });
+  const firstDaemonId = daemonIds[0];
+  const policyRelayTarget: PolicyRelayTarget | null = connectedSessionId
+    ? { kind: "session", id: connectedSessionId }
+    : firstDaemonId !== undefined
+      ? { kind: "daemon", id: firstDaemonId }
+      : null;
   const [query, setQuery] = useState("");
   // セッション詳細4ペイン (ADR 019ea4ba 段階1) の素材。詳細表示中のみ取得する
   // (replay 表示中は SessionReplayView が独自に取得するため二重取得を避ける)。
@@ -252,6 +282,16 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
               >
                 {t("tab.audit")}
               </Button>
+              <Button
+                kind="ghost"
+                size="sm"
+                data-testid="open-policy"
+                aria-pressed={topView === "policy"}
+                data-active={topView === "policy"}
+                onClick={() => setTopView("policy")}
+              >
+                {t("tab.policy")}
+              </Button>
             </div>
           </section>
 
@@ -283,6 +323,13 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
             />
           ) : topView === "audit" ? (
             <AuditView active={topView === "audit"} onReplay={openSessionReplay} />
+          ) : topView === "policy" ? (
+            <ApprovalPolicyView
+              active={topView === "policy"}
+              relayTarget={policyRelayTarget}
+              nowMs={nowMs}
+              observedCwds={observedCwds}
+            />
           ) : (
             <section className="ad-workspace">
               <aside className="ad-panel" aria-label="sessions">

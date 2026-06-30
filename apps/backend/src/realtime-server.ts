@@ -19,7 +19,7 @@
  */
 import { timingSafeEqual } from "node:crypto";
 
-import { ApprovalDecision } from "@actradeck/event-model";
+import { ApprovalDecision, sanitizeRepoLabel } from "@actradeck/event-model";
 
 import type { ClientFrame, RealtimeHub, RealtimeSink } from "./realtime-hub.js";
 import {
@@ -39,8 +39,14 @@ import {
 } from "./audit-contract.js";
 import type { AuditRangeReport } from "./audit-contract.js";
 import type { AuditStore } from "./audit-store.js";
+import { isPathWithinProjectScope, parseProjectScope } from "./project-scope.js";
 import type { RealtimeStore } from "./realtime-store.js";
-import type { SidecarRegistry } from "./sidecar-registry.js";
+import type {
+  PolicyRelayOp,
+  PolicyRelayParams,
+  PolicyRelayResult,
+  SidecarRegistry,
+} from "./sidecar-registry.js";
 import type { FastifyInstance, FastifyReply } from "fastify";
 
 export interface RealtimeRouteOptions {
@@ -50,6 +56,11 @@ export interface RealtimeRouteOptions {
   readonly replayStore: ReplayStore;
   readonly auditStore: AuditStore;
   readonly sidecarRegistry: SidecarRegistry;
+  /**
+   * ADR 019f0eca 方式B: policy resolve endpoint の path 封じ込め scope。省略時は
+   * env ACTRADECK_PROJECT_SCOPE をパースする (audit/list 系と同一出所)。空=無制限 (default-off)。
+   */
+  readonly projectScope?: readonly string[];
 }
 
 const VALID_DECISIONS: ReadonlySet<string> = new Set(ApprovalDecision.options);
@@ -68,6 +79,9 @@ function realtimeTokenEquals(expected: string, provided: string | undefined): bo
  * 認証フック: /realtime で始まる URL に Bearer token を要求し、不一致は 401 で upgrade させない。
  */
 export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteOptions): void {
+  // ADR 019f0eca 方式B: resolve endpoint の path 封じ込め scope (一度だけ解決)。
+  const policyResolveScope =
+    opts.projectScope ?? parseProjectScope(process.env.ACTRADECK_PROJECT_SCOPE);
   // upgrade 前認証 (ingestion の onRequest とは別経路・別 token)。
   app.addHook("onRequest", async (req, reply) => {
     if (!req.url.startsWith("/realtime")) return;
@@ -226,6 +240,183 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
     return reply.send({ enabled: res.enabled, entries: res.entries, removed: res.removed ?? 0 });
   });
 
+  // ADR 019f0c3e Phase 2 + 019f0eca per-repo: bypass/YOLO 承認ポリシーの in-UI 取得 (get)。
+  //   REALTIME_TOKEN gate 背後 + SidecarRegistry の controlToken relay (登録済 session 限定・SSRF/任意
+  //   PID 不可)。policy は machine-global ゆえ session_id は宛先解決のみに使う。categories は closed enum
+  //   (NO-RAW)。backend は policy を生成も永続もしない (sidecar が authoritative・直渡し)。
+  //   ?repo_scope=<sha256 短縮 hex> 指定時は当該 repo の effective policy (override 在れば override・
+  //   無ければ default 継承) を返す。省略時は default。repo_scope は hex のみ許容しそれ以外は default 扱い。
+  app.get<{ Params: { sessionId: string }; Querystring: { repo_scope?: string } }>(
+    "/realtime/sessions/:sessionId/approvals/policy",
+    async (req, reply) => {
+      const sessionId = req.params.sessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        return reply.code(400).send({ error: "missing session_id" });
+      }
+      return handlePolicyGet(
+        (op, params) => opts.sidecarRegistry.requestPolicy(sessionId, op, params),
+        req.query.repo_scope,
+        reply,
+      );
+    },
+  );
+
+  // ADR 019f0eca per-repo: default + 全 repo override 一覧 (list)。read-only ゆえ GET。
+  //   master-detail UI が「どの repo が override 済みか」を 1 応答で取得する。repos[] は NO-RAW
+  //   (repo_scope=sha256 短縮 / repo_label=basename / enabled / closed enum categories のみ)。
+  app.get<{ Params: { sessionId: string } }>(
+    "/realtime/sessions/:sessionId/approvals/policy/list",
+    async (req, reply) => {
+      const sessionId = req.params.sessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        return reply.code(400).send({ error: "missing session_id" });
+      }
+      return handlePolicyList(
+        (op, params) => opts.sidecarRegistry.requestPolicy(sessionId, op, params),
+        reply,
+      );
+    },
+  );
+
+  // ADR 019f0c3e Phase 2 + 019f0eca per-repo: 承認ポリシーの in-UI 更新 (set)。enabled / categories の
+  //   partial update。allowlist (list GET / revoke POST) と対称に **method-pure な別 path** (.../policy/set)
+  //   で mutating を分離する (proxy の method↔path 整合ゲートが緩まない)。categories は **配列のみ**受け付け
+  //   非 string を落とす (closed enum 投影の最終 sanitize は sidecar)。
+  //   ?repo_scope (body) 指定時は当該 repo の override を作成/更新する (省略=default を更新)。repo_label は
+  //   override の表示用 basename (任意)。set 後の最新状態を 1 応答で返す。env kill-switch は非永続。
+  app.post<{
+    Params: { sessionId: string };
+    Body: { enabled?: unknown; categories?: unknown; repo_scope?: unknown; repo_label?: unknown };
+  }>("/realtime/sessions/:sessionId/approvals/policy/set", async (req, reply) => {
+    const sessionId = req.params.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      return reply.code(400).send({ error: "missing session_id" });
+    }
+    return handlePolicySet(
+      (op, params) => opts.sidecarRegistry.requestPolicy(sessionId, op, params),
+      req.body ?? {},
+      reply,
+    );
+  });
+
+  // ADR 019f0eca per-repo: repo override を削除し default 継承へ戻す (unset)。除去のみで安全方向だが
+  //   set と同様 mutating ゆえ method-pure な別 path (.../policy/unset) で POST-only に分離する。
+  //   repo_scope 必須 (default は unset 不可)。unset 後の (default 継承後の) 最新状態を 1 応答で返す。
+  app.post<{
+    Params: { sessionId: string };
+    Body: { repo_scope?: unknown };
+  }>("/realtime/sessions/:sessionId/approvals/policy/unset", async (req, reply) => {
+    const sessionId = req.params.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      return reply.code(400).send({ error: "missing session_id" });
+    }
+    return handlePolicyUnset(
+      (op, params) => opts.sidecarRegistry.requestPolicy(sessionId, op, params),
+      req.body ?? {},
+      reply,
+    );
+  });
+
+  // ADR 019f0eca per-repo 方式B (repo 追加導線): 操作者入力の絶対パスを git root 解決し、その repo の
+  //   scope(sha256短縮)+label(basename)+effective policy を返す (override 作成の前段)。読取りのみだが path を
+  //   body で運ぶため POST (query へ載せない=SEC-1 ログ漏れ回避)。proxy 側で POST-only + CSRF (same-origin)。
+  //   **封じ込め**: ACTRADECK_PROJECT_SCOPE 設定時は配下のパスのみ許可 (兄弟/scope 外は 403)。**生 path は
+  //   永続も echo もしない** (sidecar が hash 化・NO-RAW)。git 管理外/解決不能は 404 (固定文言)。
+  app.post<{
+    Params: { sessionId: string };
+    Body: { path?: unknown };
+  }>("/realtime/sessions/:sessionId/approvals/policy/resolve", async (req, reply) => {
+    const sessionId = req.params.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      return reply.code(400).send({ error: "missing session_id" });
+    }
+    return handlePolicyResolve(
+      (op, params) => opts.sidecarRegistry.requestPolicy(sessionId, op, params),
+      req.body ?? {},
+      reply,
+      policyResolveScope,
+    );
+  });
+
+  // ─── ADR 019f1582: daemon-addressed policy relay (エージェント未稼働でも設定可) ───────────────
+  // policy は machine-global config ゆえ「接続中の任意 daemon」へ中継すれば live 反映 + owner disk 永続 +
+  // fan-out で全 daemon へ伝播する (requestPolicyByDaemon → 同一 fanOutPolicyMutation)。session を所有しない
+  // attach daemon の制御チャネル経由で、エージェント未稼働時も per-repo policy を設定できる導線。
+  // **approve/interrupt の daemon 宛 route は作らない** (session-semantic ゆえ session-scoped 維持・
+  // INV-REALTIME-RELAY-SCOPE)。body 検証/応答整形は session ルートと **同一ヘルパを共有** (drift なし・
+  // security-gate-reuse-canonical-parser)。認可は session ルートと同一 (REALTIME_TOKEN gate + same-origin
+  // CSRF(POST) + per-connection controlToken は server 側で conn から付与・daemonId は credential でない)。
+
+  // 接続中 daemon の id 一覧 (relay 可能 = open + controlToken 受領済みのみ)。webui が relay-target を選ぶ。
+  app.get("/realtime/daemons", async (_req, reply) => {
+    return reply.send({ daemons: opts.sidecarRegistry.connectedDaemons() });
+  });
+
+  app.get<{ Params: { daemonId: string }; Querystring: { repo_scope?: string } }>(
+    "/realtime/daemons/:daemonId/approvals/policy",
+    async (req, reply) => {
+      const daemonId = req.params.daemonId;
+      if (!isDaemonId(daemonId)) return reply.code(400).send({ error: "invalid daemon id" });
+      return handlePolicyGet(
+        (op, params) => opts.sidecarRegistry.requestPolicyByDaemon(daemonId, op, params),
+        req.query.repo_scope,
+        reply,
+      );
+    },
+  );
+
+  app.get<{ Params: { daemonId: string } }>(
+    "/realtime/daemons/:daemonId/approvals/policy/list",
+    async (req, reply) => {
+      const daemonId = req.params.daemonId;
+      if (!isDaemonId(daemonId)) return reply.code(400).send({ error: "invalid daemon id" });
+      return handlePolicyList(
+        (op, params) => opts.sidecarRegistry.requestPolicyByDaemon(daemonId, op, params),
+        reply,
+      );
+    },
+  );
+
+  app.post<{
+    Params: { daemonId: string };
+    Body: { enabled?: unknown; categories?: unknown; repo_scope?: unknown; repo_label?: unknown };
+  }>("/realtime/daemons/:daemonId/approvals/policy/set", async (req, reply) => {
+    const daemonId = req.params.daemonId;
+    if (!isDaemonId(daemonId)) return reply.code(400).send({ error: "invalid daemon id" });
+    return handlePolicySet(
+      (op, params) => opts.sidecarRegistry.requestPolicyByDaemon(daemonId, op, params),
+      req.body ?? {},
+      reply,
+    );
+  });
+
+  app.post<{
+    Params: { daemonId: string };
+    Body: { repo_scope?: unknown };
+  }>("/realtime/daemons/:daemonId/approvals/policy/unset", async (req, reply) => {
+    const daemonId = req.params.daemonId;
+    if (!isDaemonId(daemonId)) return reply.code(400).send({ error: "invalid daemon id" });
+    return handlePolicyUnset(
+      (op, params) => opts.sidecarRegistry.requestPolicyByDaemon(daemonId, op, params),
+      req.body ?? {},
+      reply,
+    );
+  });
+
+  app.post<{
+    Params: { daemonId: string };
+    Body: { path?: unknown };
+  }>("/realtime/daemons/:daemonId/approvals/policy/resolve", async (req, reply) => {
+    const daemonId = req.params.daemonId;
+    if (!isDaemonId(daemonId)) return reply.code(400).send({ error: "invalid daemon id" });
+    return handlePolicyResolve(
+      (op, params) => opts.sidecarRegistry.requestPolicyByDaemon(daemonId, op, params),
+      req.body ?? {},
+      reply,
+      policyResolveScope,
+    );
+  });
+
   // 段階1 (ADR 019ead14 D1): 横断 Approval Inbox の集約 pull。
   //   connected(接続在席)かつ pending_approvals 非空の全 session の承認待ちを 1 応答へ集約する。
   //   REALTIME_TOKEN gate (上の onRequest) 背後。session_state.pending_approvals(sidecar redaction
@@ -367,6 +558,150 @@ function sendAudit(
     return sendCsv(reply, auditReportToCsv(report), basename);
   }
   return reply.send(report);
+}
+
+/**
+ * ADR 019f0eca: repo_scope (sha256 短縮 hex) を検証する。string かつ `[0-9a-f]{1,64}` のみ受理し、
+ * それ以外 (undefined / 非 string / 非 hex) は undefined を返す (= default スコープ扱い)。
+ * 生 path は decode しない (NO-RAW: wire には scope hash のみ載る)。
+ */
+function normalizeRepoScope(v: unknown): string | undefined {
+  return typeof v === "string" && /^[0-9a-f]{1,64}$/.test(v) ? v : undefined;
+}
+
+/**
+ * ADR 019f0eca: policy relay の成功応答を HTTP body へ投影する。enabled/categories/env_gate_enabled は
+ * 常に載せ、per-repo フィールド (repo_scope/repo_label/is_override) は relay が返したときのみ載せる
+ * (NO-RAW: categories は closed enum・repo_scope は hash・原文非載せ)。
+ */
+function policyResponseBody(res: {
+  readonly enabled: boolean;
+  readonly categories: readonly string[];
+  readonly env_gate_enabled: boolean;
+  readonly repo_scope?: string;
+  readonly repo_label?: string;
+  readonly is_override?: boolean;
+}): Record<string, unknown> {
+  return {
+    enabled: res.enabled,
+    categories: res.categories,
+    env_gate_enabled: res.env_gate_enabled,
+    ...(res.repo_scope !== undefined ? { repo_scope: res.repo_scope } : {}),
+    ...(res.repo_label !== undefined ? { repo_label: res.repo_label } : {}),
+    ...(res.is_override !== undefined ? { is_override: res.is_override } : {}),
+  };
+}
+
+/**
+ * ADR 019f1582: policy relay の宛先解決後の中継関数。session 所有 daemon (requestPolicy) と接続中
+ * daemon 直指定 (requestPolicyByDaemon) の **どちらに束縛されても同一の body 検証/応答整形**を共有する
+ * ための関数型。これにより daemon-addressed ルートが session ルートと検証ロジックを **複製せず** (drift =
+ * security gate のずれを防ぐ・security-gate-reuse-canonical-parser)。
+ */
+type PolicyRelayFn = (op: PolicyRelayOp, params?: PolicyRelayParams) => Promise<PolicyRelayResult>;
+
+/** policy relay 結果を HTTP へ写像する (失敗: timeout/disconnect→503・他→404 / 成功: NO-RAW 投影)。 */
+function sendPolicyRelayResult(reply: FastifyReply, res: PolicyRelayResult): unknown {
+  if (!res.ok) {
+    const transient =
+      res.error === "policy request timed out" || res.error === "sidecar disconnected";
+    return reply.code(transient ? 503 : 404).send({ error: res.error });
+  }
+  return reply.send(policyResponseBody(res));
+}
+
+/** get: ?repo_scope (hex のみ・他は default) の effective policy を中継。 */
+async function handlePolicyGet(
+  relay: PolicyRelayFn,
+  repoScopeRaw: unknown,
+  reply: FastifyReply,
+): Promise<unknown> {
+  const repoScope = normalizeRepoScope(repoScopeRaw);
+  const res = await relay("get", repoScope !== undefined ? { repo_scope: repoScope } : {});
+  return sendPolicyRelayResult(reply, res);
+}
+
+/** list: default + 全 repo override 一覧 (repos[] は NO-RAW)。 */
+async function handlePolicyList(relay: PolicyRelayFn, reply: FastifyReply): Promise<unknown> {
+  const res = await relay("list");
+  if (!res.ok) return sendPolicyRelayResult(reply, res);
+  return reply.send({ ...policyResponseBody(res), repos: res.repos ?? [] });
+}
+
+/**
+ * set: enabled/categories の partial update + repo_scope/repo_label。検証は session/daemon 両ルート共通
+ * (非 boolean enabled / 非配列 categories / 非 hex repo_scope → 400・categories は非 string を落とし closed
+ * enum 最終 sanitize は sidecar・repo_label は正準 sanitizeRepoLabel で basename へ畳む NO-RAW)。
+ */
+async function handlePolicySet(
+  relay: PolicyRelayFn,
+  body: { enabled?: unknown; categories?: unknown; repo_scope?: unknown; repo_label?: unknown },
+  reply: FastifyReply,
+): Promise<unknown> {
+  if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+    return reply.code(400).send({ error: "invalid enabled (expected boolean)" });
+  }
+  if (body.categories !== undefined && !Array.isArray(body.categories)) {
+    return reply.code(400).send({ error: "invalid categories (expected array)" });
+  }
+  if (body.repo_scope !== undefined && normalizeRepoScope(body.repo_scope) === undefined) {
+    return reply.code(400).send({ error: "invalid repo_scope (expected sha256 hex)" });
+  }
+  const params: PolicyRelayParams = {};
+  if (typeof body.enabled === "boolean") params.enabled = body.enabled;
+  if (Array.isArray(body.categories)) {
+    params.categories = body.categories.filter((c): c is string => typeof c === "string");
+  }
+  const repoScope = normalizeRepoScope(body.repo_scope);
+  if (repoScope !== undefined) params.repo_scope = repoScope;
+  const label = sanitizeRepoLabel(body.repo_label);
+  if (label !== undefined) params.repo_label = label;
+  const res = await relay("set", params);
+  return sendPolicyRelayResult(reply, res);
+}
+
+/** unset: repo override を削除し default 継承へ (repo_scope 必須・default は unset 不可)。 */
+async function handlePolicyUnset(
+  relay: PolicyRelayFn,
+  body: { repo_scope?: unknown },
+  reply: FastifyReply,
+): Promise<unknown> {
+  const repoScope = normalizeRepoScope(body.repo_scope);
+  if (repoScope === undefined) {
+    return reply.code(400).send({ error: "invalid or missing repo_scope (expected sha256 hex)" });
+  }
+  const res = await relay("unset", { repo_scope: repoScope });
+  return sendPolicyRelayResult(reply, res);
+}
+
+/**
+ * resolve (方式B): 操作者入力の絶対パスを git root 解決し scope+label+effective を返す前段。封じ込め第一段
+ * (入口 lexical: project-scope 配下のみ) + 第二段 (sidecar が解決済 root を resolveScope と再照合)。生 path は
+ * 永続も echo もしない (NO-RAW)。session/daemon 両ルート共通。
+ */
+async function handlePolicyResolve(
+  relay: PolicyRelayFn,
+  body: { path?: unknown },
+  reply: FastifyReply,
+  resolveScope: readonly string[],
+): Promise<unknown> {
+  const rawPath = body.path;
+  if (typeof rawPath !== "string" || rawPath.length === 0) {
+    return reply.code(400).send({ error: "missing path" });
+  }
+  if (!isPathWithinProjectScope(rawPath, resolveScope)) {
+    return reply.code(403).send({ error: "path outside project scope" });
+  }
+  const res = await relay("resolve", { path: rawPath, resolveScope });
+  return sendPolicyRelayResult(reply, res);
+}
+
+/**
+ * ADR 019f1582: daemonId の軽量形式検証 (randomUUID 形 8-4-4-4-12 hex)。未知 id は byDaemon.get が undefined
+ * → "daemon not registered" で 404 になるため本検証は defense-in-depth (奇形入力を route 入口で弾く)。
+ */
+function isDaemonId(v: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v);
 }
 
 /** CSV を text/csv + ダウンロード Content-Disposition で返す。 */

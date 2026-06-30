@@ -133,7 +133,29 @@ export function normalizeReplayRequestPath(requestPath: string): string {
     //   session セグメントは `[^/]+`。revoke は mutating ゆえ proxy 側で method=POST を厳格に絞る
     //   (isAllowlistRevokePath)。allowlist (一覧) は GET-only。allowlist を緩めない (anchored)。
     /^\/realtime\/sessions\/[^/]+\/approvals\/allowlist$/.test(parsed.pathname) ||
-    /^\/realtime\/sessions\/[^/]+\/approvals\/allowlist\/revoke$/.test(parsed.pathname);
+    /^\/realtime\/sessions\/[^/]+\/approvals\/allowlist\/revoke$/.test(parsed.pathname) ||
+    // ADR 019f0c3e Phase 2 + 019f0eca per-repo: bypass/YOLO 承認ポリシーの取得 (GET) / 一覧 (GET) /
+    //   更新 (POST) / 削除 (POST)。allowlist と対称に method-pure な別 path で mutating を分離する
+    //   (get/list は GET-only・set/unset は POST-only=isPolicySetPath/isPolicyUnsetPath)。
+    //   session セグメントは `[^/]+`。anchored で緩めない (SSRF/path-confusion 防止)。
+    /^\/realtime\/sessions\/[^/]+\/approvals\/policy$/.test(parsed.pathname) ||
+    /^\/realtime\/sessions\/[^/]+\/approvals\/policy\/list$/.test(parsed.pathname) ||
+    /^\/realtime\/sessions\/[^/]+\/approvals\/policy\/set$/.test(parsed.pathname) ||
+    /^\/realtime\/sessions\/[^/]+\/approvals\/policy\/unset$/.test(parsed.pathname) ||
+    // ADR 019f0eca 方式B: repo 追加導線の path→scope 解決。読取りのみだが path を body で運ぶため POST
+    //   (query へ載せない=SEC-1)。proxy が POST-only + CSRF を強制 (isPolicyResolvePath)。anchored。
+    /^\/realtime\/sessions\/[^/]+\/approvals\/policy\/resolve$/.test(parsed.pathname) ||
+    // ADR 019f1582: daemon-addressed policy relay (エージェント未稼働でも設定可)。接続中 daemon の id 一覧
+    //   (GET 固定 path) + daemon 宛 policy get/list/set/unset/resolve。daemonId セグメントは `[^/]+`
+    //   (traversal は `/` 不在で構造遮断)。set/unset/resolve は session 版と同じ method-pure POST 分離
+    //   (isPolicySetPath/Unset/Resolve が `(?:sessions|daemons)` 両方を拾う)。**approve/interrupt の daemon
+    //   path は存在しない** (session-scoped 維持・INV-REALTIME-RELAY-SCOPE)。
+    /^\/realtime\/daemons$/.test(parsed.pathname) ||
+    /^\/realtime\/daemons\/[^/]+\/approvals\/policy$/.test(parsed.pathname) ||
+    /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/list$/.test(parsed.pathname) ||
+    /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/set$/.test(parsed.pathname) ||
+    /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/unset$/.test(parsed.pathname) ||
+    /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/resolve$/.test(parsed.pathname);
   if (!allowed) {
     throw new InvalidReplayRequestPathError(requestPath);
   }
@@ -153,6 +175,58 @@ export function isAllowlistRevokePath(requestPath: string): boolean {
     return false;
   }
   return /^\/realtime\/sessions\/[^/]+\/approvals\/allowlist\/revoke$/.test(parsed.pathname);
+}
+
+/**
+ * ADR 019f0c3e Phase 2: POST (mutating) を許す承認ポリシー更新 path = `.../approvals/policy/set`。
+ * allowlist revoke と同じく method-pure に分離し、proxy が「policy set のみ POST 可・policy get は
+ * GET-only」を強制できるようにする (mutating endpoint を最小化・他経路への POST 注入を構造的に塞ぐ)。
+ */
+export function isPolicySetPath(requestPath: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestPath, "http://local");
+  } catch {
+    return false;
+  }
+  // ADR 019f1582: session 版に加え daemon-addressed (`/realtime/daemons/:id/...`) も mutating-POST 扱い。
+  return /^\/realtime\/(?:sessions|daemons)\/[^/]+\/approvals\/policy\/set$/.test(parsed.pathname);
+}
+
+/**
+ * ADR 019f0eca per-repo: POST (mutating) を許す承認ポリシー削除 path = `.../approvals/policy/unset`。
+ * set と同じく method-pure に分離し、proxy が「unset のみ POST 可・policy get/list は GET-only」を
+ * 強制できるようにする (mutating endpoint を最小化・他経路への POST 注入を構造的に塞ぐ)。
+ */
+export function isPolicyUnsetPath(requestPath: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestPath, "http://local");
+  } catch {
+    return false;
+  }
+  // ADR 019f1582: session 版に加え daemon-addressed も mutating-POST 扱い。
+  return /^\/realtime\/(?:sessions|daemons)\/[^/]+\/approvals\/policy\/unset$/.test(
+    parsed.pathname,
+  );
+}
+
+/**
+ * ADR 019f0eca 方式B: POST (path を body で運ぶ) repo 解決 path = `.../approvals/policy/resolve`。
+ * 読取りのみだが path を query に載せないため POST。proxy が「resolve のみ POST 可・CSRF 同一オリジン」を
+ * 強制する (set/unset と同じ mutating-class ゲート扱い・cross-site の任意パス探索を構造遮断)。
+ */
+export function isPolicyResolvePath(requestPath: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestPath, "http://local");
+  } catch {
+    return false;
+  }
+  // ADR 019f1582: session 版に加え daemon-addressed も mutating-class (POST-only + CSRF) 扱い。
+  return /^\/realtime\/(?:sessions|daemons)\/[^/]+\/approvals\/policy\/resolve$/.test(
+    parsed.pathname,
+  );
 }
 
 /**

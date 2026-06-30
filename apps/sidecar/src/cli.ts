@@ -215,6 +215,9 @@ async function mainDaemon(): Promise<void> {
             `[attach] interrupt 無視 (Attach は停止制御非対応 / 非所有 PID を kill しない) session=${sid ?? "?"}\n`,
           ),
         onValidationError: (et, msg) => process.stderr.write(`[validation-error] ${et}: ${msg}\n`),
+        // L2(b): 承認 disk-write 失敗を operator へ件数のみ surface (NO-RAW・生 fs エラー非表示)。
+        onPersistFailure: (count) =>
+          process.stderr.write(`[approval-persist] disk persist failed (count=${count})\n`),
         ...reaperConfig,
       });
       const { hookEndpoint } = await daemon.start();
@@ -385,6 +388,9 @@ async function main(): Promise<void> {
       process.stderr.write(
         `[out-of-order] session=${o.session_id} type=${o.event_type} regression_ms=${o.regression_ms} (hwm=${o.high_water_mark_ms})\n`,
       ),
+    // L2(b): 承認 disk-write 失敗を operator へ件数のみ surface (NO-RAW・生 fs エラー非表示)。
+    onPersistFailure: (count) =>
+      process.stderr.write(`[approval-persist] disk persist failed (count=${count})\n`),
   });
 
   const { hookEndpoint } = await sidecar.start();

@@ -187,6 +187,15 @@ describe("ApprovalAllowlistStore (ADR 019ee0c0)", () => {
     expect(repoLabelOf("/home/user/projects/myrepo")).toBe("myrepo");
     expect(repoLabelOf("/home/user/projects/myrepo/")).toBe("myrepo");
   });
+
+  it("SEC-R3-1: resolver 導出 label も sanitizeRepoLabel parity (制御文字除去 + 64cap)", () => {
+    // git root basename に制御文字 (0x01) が混ざっても表示へ生で出さない (client 由来 label と同一意味論)。
+    // 旧実装 (素の basename) なら "repo\x01name" がそのまま返り RED。
+    const ctrl = String.fromCharCode(1);
+    expect(repoLabelOf("/home/me/repo" + ctrl + "name")).toBe("reponame");
+    // 過長 basename は 64 字へ cap (旧実装は 100 字を返し RED)。
+    expect(repoLabelOf("/home/me/" + "z".repeat(100))).toHaveLength(64);
+  });
 });
 
 /**

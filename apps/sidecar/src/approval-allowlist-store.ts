@@ -23,6 +23,8 @@ import { existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
+import { sanitizeRepoLabel } from "@actradeck/event-model";
+
 import { withFileLock } from "./file-lock.js";
 import { readJsonObject, writeJson0600 } from "./fs-atomic.js";
 
@@ -58,10 +60,15 @@ export function approvalsStorePath(home: string = homedir()): string {
   return join(approvalsStoreDir(home), "allowlist.json");
 }
 
-/** repo root の絶対パスから表示用 basename を導出 (絶対パスは保存しない)。 */
+/**
+ * repo root の絶対パスから表示用 basename を導出 (絶対パスは保存しない)。
+ * SEC-R3-1 (decision 019f0f82): basename 抽出後、client 由来 repo_label と同じ正準 `sanitizeRepoLabel`
+ * で制御文字除去 + 64cap を適用し parity 化する (resolve-preview / allowlist 表示の NO-RAW。resolver 導出
+ * 経路も client 入力経路と同一意味論へ揃える)。全制御文字/空の退化入力は "" (生パスを表示へ持ち込まない)。
+ */
 export function repoLabelOf(repoRoot: string): string {
   const b = basename(repoRoot);
-  return b.length > 0 ? b : repoRoot;
+  return sanitizeRepoLabel(b.length > 0 ? b : repoRoot) ?? "";
 }
 
 /** 1 エントリが構造的に妥当か (壊れたファイル/敵対入力を弾く)。 */
