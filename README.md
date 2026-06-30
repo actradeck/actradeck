@@ -33,17 +33,17 @@ Agent View). ActraDeck deliberately does **not** try to win the "overview of my
 parallel sessions" race for a single vendor. Instead it owns the slice a model
 vendor structurally will not build: **neutral governance across competing agents.**
 
-- **Cross-vendor.** One event model and one audit trail spanning Claude Code _and_
-  Codex, surfaced in one approval inbox (see the support matrix for what each mode
-  relays — more agents over time).
-- **Secrets never hit disk.** Redaction runs _before_ persist/transmit — secret
-  keys, tokens, `.env` contents are masked at the choke point, with per-kind counts
-  shown in the UI (the values themselves are never stored).
 - **Approval governance, not just a prompt.** A structural risk classifier gates
   high-risk commands; an opt-in persistent allowlist lets you skip re-approving
   _safe_ operations without ever auto-allowing dangerous ones.
+- **Secrets never hit disk.** Redaction runs _before_ persist/transmit — secret
+  keys, tokens, `.env` contents are masked at the choke point, with per-kind counts
+  shown in the UI (the values themselves are never stored).
 - **Audit & replay.** Every session can be replayed after the fact for review,
   incident analysis, or compliance.
+- **Cross-vendor.** One event model and one audit trail spanning Claude Code _and_
+  Codex, surfaced in one approval inbox (see the support matrix for what each mode
+  relays — more agents over time).
 
 ## What works today
 
