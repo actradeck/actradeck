@@ -352,6 +352,14 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
     return reply.send({ daemons: opts.sidecarRegistry.connectedDaemons() });
   });
 
+  // ADR 019f1972 §2b (decision 019f1a29): first-run readiness。全 open conn の agent 観測可能性を OR 集約し、
+  //   観測 daemon 数とともに返す (cockpit 空状態の per-agent ✓/✗ パネル用)。REALTIME_TOKEN gate 背後・method
+  //   GET (純読取り)。応答は **NO-RAW** (boolean + 非負整数のみ・path/settings/token を載せない)。集約は
+  //   SidecarRegistry に閉じ (event-model の正準 aggregate を共有)、ここは整形のみ。
+  app.get("/realtime/readiness", async (_req, reply) => {
+    return reply.send(opts.sidecarRegistry.agentReadiness());
+  });
+
   app.get<{ Params: { daemonId: string }; Querystring: { repo_scope?: string } }>(
     "/realtime/daemons/:daemonId/approvals/policy",
     async (req, reply) => {

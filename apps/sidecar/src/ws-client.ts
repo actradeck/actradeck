@@ -13,7 +13,7 @@ import { EventEmitter } from "node:events";
 
 import { WebSocket } from "ws";
 
-import type { PolicyCategory } from "@actradeck/event-model";
+import type { AgentVisibilityWire, PolicyCategory } from "@actradeck/event-model";
 
 import type { EventStore } from "./store.js";
 
@@ -246,6 +246,15 @@ export interface WsClientOptions {
    * の codex-rollout daemon は false (既定) で、policy 非対応 daemon を addressing した timeout を防ぐ。
    */
   readonly policyCapable?: boolean;
+  /**
+   * ADR 019f1972 §2b (decision 019f1a29): hello に optional `agent_visibility` を相乗りさせるための
+   * provider。**送信直前に毎回呼ぶ** (accepted-staleness 最小化: hook 配線/binary 設置がランタイム中に
+   * 変わっても次の hello で反映)。返り値が undefined なら field を省略する (provider 未注入と同じ後方互換)。
+   * NO-RAW: 値は `AgentVisibilityWire` (boolean 4 個のみ・event-model 正準型)。fs I/O は **provider 内**で
+   * 行い buildHelloFrame の純粋性を保つ (fs 直書き禁止)。provider は fail-safe に undefined を返す
+   * (computeAgentVisibilityWire が throw を握る)。
+   */
+  readonly agentVisibilityProvider?: () => AgentVisibilityWire | undefined;
   /** 再接続バックオフ初期値 (ms)。 */
   readonly reconnectBaseMs?: number;
   readonly reconnectMaxMs?: number;
@@ -276,6 +285,7 @@ export class WsClient extends EventEmitter {
   private readonly sessionIds: readonly string[];
   private readonly sessionIdsProvider: (() => readonly string[]) | undefined;
   private readonly policyCapable: boolean;
+  private readonly agentVisibilityProvider: (() => AgentVisibilityWire | undefined) | undefined;
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
   private reconnectAttempts = 0;
@@ -292,6 +302,7 @@ export class WsClient extends EventEmitter {
     this.sessionIds = opts.sessionIds ?? [];
     this.sessionIdsProvider = opts.sessionIdsProvider;
     this.policyCapable = opts.policyCapable ?? false;
+    this.agentVisibilityProvider = opts.agentVisibilityProvider;
     this.reconnectBaseMs = opts.reconnectBaseMs ?? 500;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 10_000;
   }
@@ -492,6 +503,9 @@ export class WsClient extends EventEmitter {
     const sessionIds = this.sessionIdsProvider
       ? [...this.sessionIdsProvider()]
       : [...this.sessionIds];
+    // ADR 019f1972 §2b: 送信直前に毎回 visibility を解決 (provider 未注入 / undefined なら field 省略)。
+    // provider が fs I/O を担い (fail-safe に undefined)、buildHelloFrame は純粋なまま。
+    const agentVisibility = this.agentVisibilityProvider?.();
     return JSON.stringify({
       type: "hello",
       control_token: this.controlToken,
@@ -500,6 +514,9 @@ export class WsClient extends EventEmitter {
       // 載せない (=false) と backend は connectedDaemons から除外し UI が addressing しない。
       // connect/reannounce 両経路で一様に載せる (TDA-1: 片方欠落だと reannounce で capability 降格)。
       ...(this.policyCapable ? { policy_capable: true } : {}),
+      // ADR 019f1972 §2b: agent 観測可能性 (NO-RAW boolean 4 個)。policy_capable と同じ conditional field
+      // (値があるときだけ載せる)。connect/reannounce 両経路を本 builder が単一出所として通る。
+      ...(agentVisibility !== undefined ? { agent_visibility: agentVisibility } : {}),
     });
   }
 

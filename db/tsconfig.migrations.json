@@ -1,0 +1,15 @@
+{
+  "//": "migrations を dist/migrations/*.js へコンパイルする (programmatic runMigrations 用・埋込 PGlite)。CLI (pnpm db:migrate) は src の .ts + tsx を使うので、これは埋込経路専用の同期コピー。",
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./migrations",
+    "outDir": "./dist/migrations",
+    "types": ["node"],
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["migrations/**/*.ts"],
+  "exclude": ["dist", "node_modules"]
+}

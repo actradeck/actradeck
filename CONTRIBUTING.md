@@ -16,7 +16,9 @@ changes. Issues, fixes, and focused improvements are very welcome.
 ## Prerequisites
 
 - **Node.js** v22.16+ and **pnpm** v10.28+ (`npm i -g pnpm`).
-- **Docker** with `docker compose` (runs Postgres locally).
+- **No database to install** — the default is an embedded PostgreSQL (PGlite) at
+  `~/.actradeck/pgdata` (no Docker, no separate service). Docker with `docker compose`
+  is needed **only** if you opt into an external Postgres (`ACTRADECK_DB_MODE=postgres`).
 - At least one agent installed to see live data: **Claude Code** (`claude`) and/or
   **Codex** (`codex`).
 
@@ -25,7 +27,7 @@ changes. Issues, fixes, and focused improvements are very welcome.
 ```bash
 git clone https://github.com/actradeck/actradeck.git
 cd ActraDeck
-./scripts/quickstart        # .env + Postgres + migrate + all tiers, one command
+./scripts/quickstart        # .env + embedded DB + all tiers, one command
 ```
 
 `quickstart` is idempotent and generates a `.env` with random local secrets on first

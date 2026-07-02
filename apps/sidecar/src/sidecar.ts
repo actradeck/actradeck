@@ -8,6 +8,7 @@
  */
 import { randomBytes } from "node:crypto";
 
+import { computeAgentVisibilityWire } from "./agent-visibility.js";
 import { generateRedactedDiff } from "./diff-provider.js";
 import { findRepoRoot, GitWatcher } from "./git-watcher.js";
 import { HookReceiver } from "./hook-receiver.js";
@@ -116,6 +117,9 @@ export class Sidecar {
       // 確定前に hello を送っても backend は ingest 流の observeSession で canonical 所有を
       // 学習するため relay は壊れない。
       sessionIdsProvider: () => [this.identity.currentSessionId()],
+      // ADR 019f1972 §2b: agent 観測可能性を hello に相乗り (machine-global 純ローカル検査・fresh per send・
+      // fail-safe undefined)。computeAgentVisibilityWire は CODEX_HOME 等を process.env から正準解決する。
+      agentVisibilityProvider: () => computeAgentVisibilityWire(),
       // SEC-2 (egress): env 由来の Bearer トークン (未設定なら付けない = 後方互換)。
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }

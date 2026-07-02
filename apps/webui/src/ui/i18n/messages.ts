@@ -143,6 +143,22 @@ const ja = {
   "list.attention": "attention",
   "list.clear": "clear",
 
+  // ── 初回 readiness パネル (SessionList 真の空状態・観測 daemon 数のみ既出データ) ─────────
+  "readiness.connected":
+    "ActraDeck は接続中です（観測デーモン {count} 件）。Claude Code か Codex をリポジトリで起動すると、最初のセッションがここに表示されます。",
+  "readiness.connected.hint":
+    "エージェントごとの配線（hook 注入・rollout 検出）は `actradeck doctor` で確認できます。",
+  "readiness.disconnected":
+    "観測デーモンが未接続です。`./scripts/actradeck up`（または `./scripts/ad-attach install-all`）を実行してください。",
+  // ── per-agent 配線状態 (ADR 019f1972 §2b・観測値であり「リアルタイム」ではない) ─────────
+  "readiness.agent.claude.wired": "Claude Code: 配線済み（セッションが表示されます）",
+  "readiness.agent.claude.detected":
+    "Claude Code: 検出済みだが未配線（actradeck doctor で hook 注入）",
+  "readiness.agent.claude.missing": "Claude Code: 未検出",
+  "readiness.agent.codex.observable": "Codex: 観測可能",
+  "readiness.agent.codex.detected": "Codex: 検出済みだが rollout 未解決",
+  "readiness.agent.codex.missing": "Codex: 未検出",
+
   // ── liveness バッジ (liveness-display) ──────────────────────────────────
   "liveness.live": "LIVE",
   "liveness.idle": "IDLE",
@@ -735,6 +751,22 @@ const en: Record<MessageKey, string> = {
   "list.col.provider": "provider",
   "list.attention": "attention",
   "list.clear": "clear",
+
+  // ── first-run readiness panel (SessionList true-empty; observer daemon count only) ──
+  "readiness.connected":
+    "ActraDeck is connected ({count} observer daemon(s)). Start Claude Code or Codex in a repository and the first session will appear here.",
+  "readiness.connected.hint":
+    "Check per-agent wiring (hook injection, rollout detection) with `actradeck doctor`.",
+  "readiness.disconnected":
+    "No observer daemon is connected. Run `./scripts/actradeck up` (or `./scripts/ad-attach install-all`).",
+  // ── per-agent wiring state (ADR 019f1972 §2b; observed value, not "real-time") ──
+  "readiness.agent.claude.wired": "Claude Code: wired up (sessions will appear here)",
+  "readiness.agent.claude.detected":
+    "Claude Code: detected but not wired (inject the hook with actradeck doctor)",
+  "readiness.agent.claude.missing": "Claude Code: not detected",
+  "readiness.agent.codex.observable": "Codex: observable",
+  "readiness.agent.codex.detected": "Codex: detected but rollout dir unresolved",
+  "readiness.agent.codex.missing": "Codex: not detected",
 
   // ── liveness ──
   "liveness.live": "LIVE",

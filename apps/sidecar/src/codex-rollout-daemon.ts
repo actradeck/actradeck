@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 
+import { computeAgentVisibilityWire } from "./agent-visibility.js";
 import { AttachSessionRegistry } from "./attach-session-registry.js";
 import { CodexRolloutTailer } from "./codex-rollout-tailer.js";
 import { buildEvent } from "./event-factory.js";
@@ -45,6 +46,15 @@ export class CodexRolloutDaemon {
       // (interrupt のみ wire)。policyCapable は既定 false のまま広告せず、backend の connectedDaemons から
       // 除外させる (UI が policy 非対応 daemon を addressing して timeout する事故を防ぐ)。
       sessionIdsProvider: () => this.registry.sessionIds(),
+      // ADR 019f1972 §2b: observe-only daemon だが visibility は machine-global ゆえ供給して良い
+      // (OR 集約で冪等)。明示 codexHome があれば rolloutDirResolved 検査を daemon が実際に tail する
+      // dir へ揃えるため env.CODEX_HOME を上書きする (既存 resolveCodexHome の解決を流用・fresh per send)。
+      agentVisibilityProvider: () =>
+        computeAgentVisibilityWire(
+          opts.codexHome !== undefined && opts.codexHome.length > 0
+            ? { env: { ...process.env, CODEX_HOME: opts.codexHome } }
+            : {},
+        ),
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }
         : {}),

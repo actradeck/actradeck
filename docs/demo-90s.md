@@ -23,7 +23,7 @@ What the viewer should walk away believing:
 ## Prerequisites (one-time, off camera)
 
 ```bash
-# Cockpit (backend :55410 + web UI :55400). Needs Postgres; see .env.example.
+# Cockpit (backend :55410 + web UI :55400). Embedded DB by default (no Docker); see .env.example.
 ./scripts/actradeck up
 ./scripts/actradeck doctor      # confirm :55410 and :55400 are LISTENing
 

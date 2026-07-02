@@ -12,6 +12,7 @@ set -uo pipefail
 
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 AD="$(cd "$(dirname "$SELF")" && pwd)/ad-attach"
+ENV_FILE="$(cd "$(dirname "$SELF")/.." && pwd)/.env"
 fail=0
 
 ok()   { printf 'PASS  %s\n' "$1"; }
@@ -62,6 +63,49 @@ assert_contains "NoNewPrivileges=yes" "hardening: NoNewPrivileges (codex)" -- ba
 assert_contains "EnvironmentFile=-" "attach unit は EnvironmentFile 参照" -- bash "$AD" print-unit
 assert_absent "INGEST_TOKEN" "attach unit に INGEST_TOKEN を書かない" -- bash "$AD" print-unit
 assert_absent "INGEST_TOKEN" "codex unit に INGEST_TOKEN を書かない" -- bash "$AD" codex print-unit
+
+# 6. Phase 2 launchd: print-plist の no-secret-in-argv + XML well-formed (print-unit ゲートの twin)。
+#    launchd には EnvironmentFile 相当が無いため、秘匿は node の --env-file-if-exists=<path> で渡す
+#    (argv には path のみ・値を書かない)。attach/codex 両方が well-formed かつ token 非混入であること。
+assert_contains "--env-file-if-exists=" "attach plist は --env-file 参照 (path のみで秘匿)" -- bash "$AD" print-plist
+assert_contains "--env-file-if-exists=" "codex plist は --env-file 参照 (path のみで秘匿)" -- bash "$AD" codex print-plist
+assert_contains "<string>attach</string>" "attach plist の exec word (attach)" -- bash "$AD" print-plist
+assert_contains "<string>--scope</string>" "attach plist の exec word (--scope)" -- bash "$AD" print-plist
+assert_contains "<string>codex</string>" "codex plist の exec word (codex)" -- bash "$AD" codex print-plist
+assert_contains "KeepAlive" "attach plist に KeepAlive (Restart mirror)" -- bash "$AD" print-plist
+# TDA-1: ExitTimeOut は systemd TimeoutStopSec=30 の mirror (graceful flush/detach 猶予)。
+assert_contains "ExitTimeOut" "attach plist に ExitTimeOut (TimeoutStopSec=30 mirror)" -- bash "$AD" print-plist
+assert_contains "ExitTimeOut" "codex plist に ExitTimeOut (TimeoutStopSec=30 mirror)" -- bash "$AD" codex print-plist
+assert_absent "INGEST_TOKEN" "attach plist に INGEST_TOKEN を書かない" -- bash "$AD" print-plist
+assert_absent "INGEST_TOKEN" "codex plist に INGEST_TOKEN を書かない" -- bash "$AD" codex print-plist
+# 秘匿名 (_TOKEN/_SECRET/_KEY/PASSWORD) が plist 本体に出ない。
+# QA-1: 外部プロセス直パイプ (bash print-plist | grep -q) は pipefail×SIGPIPE で秘匿存在時に
+#   偽 PASS するため、出力を変数へ捕捉してから printf で grep する (安全形)。
+attach_plist="$(bash "$AD" print-plist 2>/dev/null)"
+codex_plist="$(bash "$AD" codex print-plist 2>/dev/null)"
+if printf '%s\n' "$attach_plist" | grep -qiE '_TOKEN|_SECRET|_KEY|PASSWORD'; then
+  ng "attach plist に秘匿名が混入 (no-secret-in-argv 違反)"
+else ok "attach plist に秘匿名なし"; fi
+if printf '%s\n' "$codex_plist" | grep -qiE '_TOKEN|_SECRET|_KEY|PASSWORD'; then
+  ng "codex plist に秘匿名が混入 (no-secret-in-argv 違反)"
+else ok "codex plist に秘匿名なし"; fi
+# XML well-formed: python3 plistlib で parse 成功。
+if bash "$AD" print-plist 2>/dev/null | python3 -c 'import plistlib,sys; plistlib.loads(sys.stdin.buffer.read())' 2>/dev/null; then
+  ok "attach plist は well-formed (plistlib parse)"
+else ng "attach plist が plistlib で parse できない (XML 不正)"; fi
+if bash "$AD" codex print-plist 2>/dev/null | python3 -c 'import plistlib,sys; plistlib.loads(sys.stdin.buffer.read())' 2>/dev/null; then
+  ok "codex plist は well-formed (plistlib parse)"
+else ng "codex plist が plistlib で parse できない (XML 不正)"; fi
+# 実 .env の token 値が plist に一切出ない。
+if [ -f "$ENV_FILE" ]; then
+  for k in INGEST_TOKEN REALTIME_TOKEN POSTGRES_PASSWORD; do
+    val="$(grep -E "^$k=" "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    if [ -n "$val" ]; then
+      assert_absent "$val" "$k 値が attach plist に出ない" -- bash "$AD" print-plist
+      assert_absent "$val" "$k 値が codex plist に出ない" -- bash "$AD" codex print-plist
+    fi
+  done
+fi
 
 echo
 if [ "$fail" = 0 ]; then echo "ad-attach smoke: ALL PASS"; else echo "ad-attach smoke: FAILURES"; fi

@@ -16,8 +16,11 @@
     "start": "node --env-file-if-exists=../../.env --import tsx src/index.ts"
   },
   "dependencies": {
+    "@actradeck/db": "workspace:*",
     "@actradeck/event-model": "workspace:*",
     "@actradeck/projection": "workspace:*",
+    "@electric-sql/pglite": "0.5.3",
+    "@electric-sql/pglite-socket": "0.2.6",
     "@fastify/websocket": "^11.2.0",
     "fastify": "5.8.5",
     "pg": "8.21.0"

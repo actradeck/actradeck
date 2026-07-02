@@ -61,10 +61,28 @@ const DEFAULT_PRESENCE_RECENCY_MS = 5 * 60_000;
 /** session_meta 読取りの先頭バイト上限 (maxTailChunk が小さければ更に min で抑える)。 */
 const PRESENCE_HEAD_READ_BYTES = 64 * 1024;
 
+/**
+ * CODEX_HOME の解決 (runtime と診断で **単一出所**)。
+ * env.CODEX_HOME が非空ならそれ、無ければ `<home>/.codex`。
+ * env / home は注入可能 (agentmon doctor の純検査・unit テストで temp dir を使うため)。
+ */
+export function resolveCodexHome(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  return env.CODEX_HOME && env.CODEX_HOME.length > 0 ? env.CODEX_HOME : join(home, ".codex");
+}
+
+/**
+ * rollout JSONL が住むディレクトリ (`<codexHome>/sessions`)。tailer の走査根と
+ * agentmon doctor の存在検査が同一パスを指すための単一出所 (ドリフト防止)。
+ */
+export function rolloutSessionsDir(codexHome: string): string {
+  return join(codexHome, "sessions");
+}
+
 function defaultCodexHome(): string {
-  return process.env.CODEX_HOME && process.env.CODEX_HOME.length > 0
-    ? process.env.CODEX_HOME
-    : join(homedir(), ".codex");
+  return resolveCodexHome();
 }
 
 function defaultStatePath(): string {
@@ -111,7 +129,7 @@ async function listRolloutFiles(root: string): Promise<string[]> {
     }
     return files;
   }
-  return walk(join(root, "sessions"));
+  return walk(rolloutSessionsDir(root));
 }
 
 export class CodexRolloutTailer {

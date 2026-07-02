@@ -23,6 +23,7 @@ import { SessionList } from "./SessionList";
 import { SessionReplayView } from "./SessionReplay";
 import { ThemeToggle } from "./ThemeToggle";
 import { useDaemons } from "./use-daemons";
+import { useReadiness } from "./use-readiness";
 import type { PolicyRelayTarget } from "./use-policy-admin";
 import { useRealtime } from "./use-realtime";
 import { useSessionEvents } from "./use-session-events";
@@ -99,13 +100,24 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
   // policy タブ表示中のみ pull し、接続数変化で再取得する (daemonId churn は use-daemons の poll が吸収)。
   const policyActive = topView === "policy";
   const connectedSessionId = sessions.find((s) => s.connected)?.session_id ?? null;
+  // 初回 readiness パネル (board の真の空状態) でも接続中 observer daemon 数を出すため pull する。
+  // 既出 /realtime/daemons の再利用 (新 endpoint なし)。session が 1 つでも観測されれば不要。
+  const boardEmpty = topView === "board" && sessions.length === 0;
   // sweep 019f15a9 (TDA-2 副): session が relay-target のとき daemon 一覧は不要 (firstDaemonId 不使用)。
-  // policy タブ表示中 **かつ session 未接続** のときだけ /realtime/daemons を pull し、接続中の無駄 pull を抑える。
+  // policy タブ表示中 **かつ session 未接続**、または board 空状態のときだけ /realtime/daemons を pull し、
+  // 接続中の無駄 pull を抑える。
   const { daemonIds } = useDaemons({
-    enabled: policyActive && connectedSessionId === null,
+    enabled: (policyActive && connectedSessionId === null) || boardEmpty,
     refreshKey: connectedCount,
   });
   const firstDaemonId = daemonIds[0];
+  // ADR 019f1972 §2b: board 空状態のとき per-agent 観測可能性 (Claude/Codex が配線されているか) を pull する。
+  // /realtime/readiness は全 open daemon の OR 集約 (観測 daemon 数 + per-agent boolean)。取得前は use-daemons の
+  // daemonIds.length を count フォールバックに使う (どちらか取れた方で connected gate を満たす)。
+  const { readiness: agentReadiness } = useReadiness({
+    enabled: boardEmpty,
+    refreshKey: connectedCount,
+  });
   const policyRelayTarget: PolicyRelayTarget | null = connectedSessionId
     ? { kind: "session", id: connectedSessionId }
     : firstDaemonId !== undefined
@@ -189,6 +201,10 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
     filteredSessions.length === 0 &&
     !showHistory &&
     totalCount > connectedCount;
+  // 真の初回/空状態: 検索一致0 でも 履歴OFF (過去 session 隠し) でもなく、観測 session が 0 のとき。
+  // emptyLabel===undefined はこの 2 文脈を既に除外している (検索→noMatch / 履歴OFF→noLive で defined)。
+  // 既存の noMatch / noLive 文言は不変のまま、ここでは readiness パネルを優先描画する。
+  const showReadiness = emptyLabel === undefined && filteredSessions.length === 0;
   const selectedLabel =
     formatCurrentAction(
       {
@@ -381,6 +397,13 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
                     nowMs={nowMs}
                     onSelect={select}
                     {...(emptyLabel !== undefined ? { emptyLabel } : {})}
+                    {...(showReadiness
+                      ? {
+                          // per-agent 取得済みならそれを (count + Claude/Codex ✓/✗)、未取得なら daemonIds.length を
+                          // count フォールバック (2a coarse 形・後方互換)。
+                          readiness: agentReadiness ?? { daemonCount: daemonIds.length },
+                        }
+                      : {})}
                     {...(canSearchHistory
                       ? {
                           emptyAction: {

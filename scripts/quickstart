@@ -2,20 +2,24 @@
 # ActraDeck quickstart — one command from a fresh clone to a running cockpit.
 #
 # What it does (idempotent):
-#   1. Preflight: node / pnpm / docker compose (systemctl optional).
+#   1. Preflight: node / pnpm (systemctl optional). Docker only in Postgres mode.
 #   2. .env: if absent, generate from .env.example with random secrets (0600).
 #      An existing .env is never overwritten.
 #   3. pnpm install (only if node_modules is missing), then build the workspace
 #      (pnpm -r build) — backend/webui import the compiled dist of @actradeck/* packages.
-#   4. Start Postgres via docker compose and wait until it is healthy.
-#   5. Run DB migrations (pnpm db:migrate).
-#   6. Bring up all tiers (scripts/actradeck up = backend + webui + attach + codex-attach).
-#   7. Verify (scripts/actradeck doctor).
+#   4. Database:
+#      - embedded (default): nothing here — backend starts an embedded PostgreSQL
+#        (PGlite) at ~/.actradeck/pgdata and migrates it in-process on boot (no Docker).
+#      - external Postgres (ACTRADECK_DB_MODE=postgres, or an existing DATABASE_URL in
+#        .env): start Postgres via docker compose, wait for health, run pnpm db:migrate.
+#   5. Bring up all tiers (scripts/actradeck up = backend + webui + attach + codex-attach).
+#   6. Verify (scripts/actradeck doctor).
 #
 # After this: open http://localhost:55400 (default; or your ACTRADECK_WEBUI_PORT),
 # then run `claude` / `codex` in any repo.
 #
-# Usage:  ./scripts/quickstart
+# Usage:  ./scripts/quickstart                       # embedded DB (no Docker)
+#         ACTRADECK_DB_MODE=postgres ./scripts/quickstart   # external Postgres via Docker
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -60,24 +64,41 @@ if ! node -e '
   die "Node $(node -v) is too old. ActraDeck needs Node $(node -p '(require("./package.json").engines||{}).node' 2>/dev/null || echo '>=22.16.0'). Try: 'nvm install 22 && nvm use 22'."
 fi
 
-COMPOSE=""
-if docker compose version >/dev/null 2>&1; then
-  COMPOSE="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-  COMPOSE="docker-compose"
-else
-  die "docker compose is required (used to run Postgres)."
+# --- DB mode: embedded PGlite (default) or external Postgres ----------------
+# ActraDeck は既定で埋込 PostgreSQL (PGlite) を使う (Docker 不要・ADR 019f1b71)。
+# 次のいずれかで外部 Postgres (docker compose) 経路を選ぶ:
+#   - ACTRADECK_DB_MODE=postgres
+#   - 既存 .env に (コメントでない) DATABASE_URL がある (後方互換: 既存ユーザは従来どおり)
+DB_MODE="embedded"
+if [ "${ACTRADECK_DB_MODE:-}" = "postgres" ]; then
+  DB_MODE="postgres"
+elif [ -f .env ] && grep -qE '^[[:space:]]*DATABASE_URL=.' .env; then
+  DB_MODE="postgres"
 fi
 
-# The compose CLI being present does not mean the daemon is reachable. Probe it now so
-# the failure is a clear message here, not an opaque error from `compose up` later.
-# Prefer `docker info` (works for the compose plugin); fall back to the resolved compose
-# CLI for a docker-compose v1 host that has no standalone `docker` binary (QA-3) — `ps`
-# still contacts the daemon (run from $ROOT, which holds the compose file).
-if command -v docker >/dev/null 2>&1; then
-  docker info >/dev/null 2>&1 || die "Docker is installed but the daemon is not reachable. Start it (Docker Desktop, or 'sudo systemctl start docker') and ensure your user can run docker (e.g. the 'docker' group), then re-run."
-elif ! $COMPOSE ps >/dev/null 2>&1; then
-  die "The Docker daemon is not reachable (checked via '$COMPOSE'). Start Docker and ensure your user can run it, then re-run."
+COMPOSE=""
+if [ "$DB_MODE" = "postgres" ]; then
+  say "Database: external Postgres (docker compose)."
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE="docker-compose"
+  else
+    die "docker compose is required for ACTRADECK_DB_MODE=postgres. Omit it to use the embedded database (no Docker)."
+  fi
+
+  # The compose CLI being present does not mean the daemon is reachable. Probe it now so
+  # the failure is a clear message here, not an opaque error from `compose up` later.
+  # Prefer `docker info` (works for the compose plugin); fall back to the resolved compose
+  # CLI for a docker-compose v1 host that has no standalone `docker` binary (QA-3) — `ps`
+  # still contacts the daemon (run from $ROOT, which holds the compose file).
+  if command -v docker >/dev/null 2>&1; then
+    docker info >/dev/null 2>&1 || die "Docker is installed but the daemon is not reachable. Start it (Docker Desktop, or 'sudo systemctl start docker') and ensure your user can run docker (e.g. the 'docker' group), then re-run."
+  elif ! $COMPOSE ps >/dev/null 2>&1; then
+    die "The Docker daemon is not reachable (checked via '$COMPOSE'). Start Docker and ensure your user can run it, then re-run."
+  fi
+else
+  say "Database: embedded PostgreSQL (PGlite) — no Docker required. Data persists in ~/.actradeck/pgdata."
 fi
 
 HAVE_SYSTEMD=0
@@ -97,15 +118,13 @@ if [ -f .env ]; then
 else
   say ".env not found — generating it from .env.example with random secrets…"
   [ -f .env.example ] || die ".env.example is missing; cannot generate .env."
-  pgpw="$(randhex)"
   ingest="$(randhex)"
   realtime="$(randhex)"
-  # Base from the template, then substitute the secret-bearing lines.
-  sed \
-    -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${pgpw}|" \
-    -e "s|^DATABASE_URL=.*|DATABASE_URL=postgresql://actradeck:${pgpw}@localhost:55432/actradeck|" \
-    .env.example >.env
-  # Token keys: replace if present in the template, otherwise append.
+  # Base from the template (DATABASE_URL / POSTGRES_* are commented = embedded default).
+  cp .env.example .env
+  # 実 secret を書き込む前に 0600 を確立する (テンプレは placeholder のみ・実 token は下で書く)。
+  chmod 600 .env
+  # Token keys (present & uncommented in the template): replace, else append.
   for kv in "INGEST_TOKEN=${ingest}" "REALTIME_TOKEN=${realtime}"; do
     k="${kv%%=*}"
     if grep -q "^${k}=" .env; then
@@ -114,8 +133,22 @@ else
       printf '%s\n' "$kv" >>.env
     fi
   done
+  if [ "$DB_MODE" = "postgres" ]; then
+    # 外部 Postgres 経路のみ: 活性の DB 変数を追記する。テンプレの commented 行は無視され、
+    # 後勝ち (シェル source / Node --env-file とも) で活性値が効く。埋込既定では追記しない
+    # → DATABASE_URL 不在で backend が埋込 PGlite を起動する。
+    pgpw="$(randhex)"
+    pgport="${ACTRADECK_PG_PORT:-55432}"
+    {
+      printf 'POSTGRES_USER=actradeck\n'
+      printf 'POSTGRES_PASSWORD=%s\n' "$pgpw"
+      printf 'POSTGRES_DB=actradeck\n'
+      printf 'ACTRADECK_PG_PORT=%s\n' "$pgport"
+      printf 'DATABASE_URL=postgresql://actradeck:%s@localhost:%s/actradeck\n' "$pgpw" "$pgport"
+    } >>.env
+  fi
   chmod 600 .env
-  say "Generated .env (0600, random secrets). Review it if you need non-default ports."
+  say "Generated .env (0600, random secrets, DB mode: $DB_MODE). Review it if you need non-default ports."
 fi
 
 # --- 3. dependencies --------------------------------------------------------
@@ -134,25 +167,31 @@ fi
 say "Building workspace packages (pnpm -r build)…"
 pnpm -r --if-present run build
 
-# --- 4. Postgres ------------------------------------------------------------
-say "Starting Postgres ($COMPOSE up -d)…"
-$COMPOSE up -d
+# --- 4. Postgres + migrations (external Postgres mode only) -----------------
+# 埋込モードでは backend が起動時に ~/.actradeck/pgdata で PGlite を立ち上げ、in-process で
+# migration を適用する (ADR 019f1b71) — ここでは何もしない。外部 Postgres モードのみ
+# docker compose で Postgres を立て、node-pg-migrate で migration を流す。
+if [ "$DB_MODE" = "postgres" ]; then
+  say "Starting Postgres ($COMPOSE up -d)…"
+  $COMPOSE up -d
 
-say "Waiting for Postgres to become healthy…"
-ok=0
-for _ in $(seq 1 30); do
-  if $COMPOSE exec -T postgres pg_isready -U actradeck -d actradeck >/dev/null 2>&1; then
-    ok=1
-    break
-  fi
-  sleep 2
-done
-[ "$ok" = 1 ] || die "Postgres did not become ready. Check: $COMPOSE ps && $COMPOSE logs postgres"
-say "Postgres is ready."
+  say "Waiting for Postgres to become healthy…"
+  ok=0
+  for _ in $(seq 1 30); do
+    if $COMPOSE exec -T postgres pg_isready -U actradeck -d actradeck >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$ok" = 1 ] || die "Postgres did not become ready. Check: $COMPOSE ps && $COMPOSE logs postgres"
+  say "Postgres is ready."
 
-# --- 5. migrations ----------------------------------------------------------
-say "Running database migrations (pnpm db:migrate)…"
-pnpm db:migrate
+  say "Running database migrations (pnpm db:migrate)…"
+  pnpm db:migrate
+else
+  say "Skipping Docker/migrations — the embedded database migrates itself on backend start."
+fi
 
 # --- 6. bring up tiers ------------------------------------------------------
 # Cockpit URL follows the .env port (the template recommends an offset to avoid clashes).

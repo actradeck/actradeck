@@ -151,6 +151,9 @@ export function normalizeReplayRequestPath(requestPath: string): string {
     //   (isPolicySetPath/Unset/Resolve が `(?:sessions|daemons)` 両方を拾う)。**approve/interrupt の daemon
     //   path は存在しない** (session-scoped 維持・INV-REALTIME-RELAY-SCOPE)。
     /^\/realtime\/daemons$/.test(parsed.pathname) ||
+    // ADR 019f1972 §2b: first-run readiness。全 open daemon の agent 観測可能性 OR 集約 (GET 固定 path・
+    //   segment/query なし)。NO-RAW (boolean + 観測 daemon 数のみ)。anchored・traversal 不可。
+    /^\/realtime\/readiness$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/list$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/set$/.test(parsed.pathname) ||

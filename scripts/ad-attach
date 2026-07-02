@@ -20,10 +20,11 @@
 #   ad-attach                       attach を foreground 常駐 (Ctrl-C で detach)。テスト/単発監視向け。
 #   ad-attach start|stop|status     attach の foreground 起動 / 停止+detach / 稼働状況表示。
 #   ad-attach build                 sidecar をビルド (dist/cli.js を生成)。
-#   ad-attach install|uninstall     attach の systemd --user サービスを配置/削除 (ログイン時自動起動)。
-#   ad-attach service <cmd>         attach の systemctl --user ラッパ (start|stop|restart|status|logs)。
+#   ad-attach install|uninstall     attach のサービスを配置/削除 (systemd=Linux / launchd=macOS・自動起動)。
+#   ad-attach service <cmd>         attach の systemctl/launchctl ラッパ (start|stop|restart|status|logs)。
 #   ad-attach print-unit            attach の systemd unit を標準出力 (確認用・単一ソース)。
-#   ad-attach codex <verb>          codex daemon を操作 (start|stop|status|install|uninstall|service <cmd>|print-unit)。
+#   ad-attach print-plist           attach の launchd LaunchAgent plist を標準出力 (print-unit の twin)。
+#   ad-attach codex <verb>          codex daemon を操作 (start|stop|status|install|uninstall|service <cmd>|print-unit|print-plist)。
 #   ad-attach install-all           attach + codex の両サービスを配置・自動起動。
 #   ad-attach uninstall-all         両サービスを停止・無効化・削除。
 #   ad-attach status-all            両サービスの systemd 状態を表示。
@@ -45,21 +46,45 @@ REPO_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 CLI="$REPO_ROOT/apps/sidecar/dist/cli.js"
 ENV_FILE="$REPO_ROOT/.env"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+# launchd (macOS) 常駐用 (Phase 2・ADR 019ef084 Track B・actradeck と同一 LOG_DIR)。
+LAUNCHD_DIR="$HOME/Library/LaunchAgents"
+LOG_DIR="$HOME/.actradeck/logs"
 
 err() { printf '%s\n' "$*" >&2; }
 die() { err "ad-attach: $*"; exit 1; }
+
+# 常駐機構を 3-way 検出 (actradeck と同一規約): systemctl→systemd / launchctl→launchd / どちらも無し→foreground。
+supervisor() {
+  if command -v systemctl >/dev/null 2>&1; then printf 'systemd'
+  elif command -v launchctl >/dev/null 2>&1; then printf 'launchd'
+  else printf 'foreground'; fi
+}
+
+# plist 値の最小限 XML エスケープ (& < >・& を最初に置換)。
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+# launchd の1サービス状態を1行に要約 (NO-RAW: loaded/not-loaded + plist installed のみ)。
+launchd_status_line() {
+  local label="$1" plist="$2" domain loaded
+  domain="gui/$(id -u)"
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then loaded="loaded"; else loaded="not-loaded"; fi
+  err "[ad-attach] $label: $loaded (plist: $([ -f "$plist" ] && echo installed || echo not-installed))"
+}
 
 # --- サービスレジストリ (ADR 019ee134・generalize-reusable-tooling) -------------------
 # use_service <attach|codex> が選択サービスの記述子を globals へ展開する。
 # generate_unit / do_install / do_uninstall / do_service はこの globals でパラメータ化され、
 # サービス固有のハードコードを持たない。
 SVC_KEY="" SVC_NAME="" SVC_EXEC="" SVC_DESC="" SVC_DOC="" SVC_UNIT_PATH=""
+# launchd 用 (systemd の SVC_NAME/SVC_UNIT_PATH の twin)。label は reverse-DNS。
+SVC_LABEL="" SVC_PLIST_PATH=""
 
 use_service() {
   case "${1:-}" in
     attach)
       SVC_KEY="attach"
       SVC_NAME="actradeck-attach.service"
+      SVC_LABEL="io.actradeck.attach"
       SVC_EXEC="attach --scope user --yes"
       SVC_DESC="ActraDeck Attach daemon (observe all Claude Code sessions via user-scope hooks)"
       SVC_DOC="file://$REPO_ROOT/docs/attach-mode.md"
@@ -67,6 +92,7 @@ use_service() {
     codex)
       SVC_KEY="codex"
       SVC_NAME="actradeck-codex-attach.service"
+      SVC_LABEL="io.actradeck.codex-attach"
       SVC_EXEC="codex attach"
       SVC_DESC="ActraDeck Codex Attach daemon (observe standard Codex TUI via rollout JSONL tail)"
       SVC_DOC="file://$REPO_ROOT/docs/attach-mode.md"
@@ -74,6 +100,7 @@ use_service() {
     *) die "未知のサービス \"${1:-}\" (attach|codex)" ;;
   esac
   SVC_UNIT_PATH="$UNIT_DIR/$SVC_NAME"
+  SVC_PLIST_PATH="$LAUNCHD_DIR/$SVC_LABEL.plist"
 }
 
 resolve_node() {
@@ -169,9 +196,67 @@ WantedBy=default.target
 UNIT
 }
 
+# launchd (macOS) LaunchAgent plist を生成する (systemd generate_unit の twin)。
+# 秘匿規律は systemd と同一だが機構が異なる: systemd は EnvironmentFile=-$ENV_FILE で .env を読む一方、
+# launchd には EnvironmentFile 相当が無い。よって node の --env-file-if-exists=<path> を ProgramArguments
+# の先頭 (CLI の前) に置き、node 自身が <repo>/.env を読む。argv には **path のみ**で token/password 値を
+# 書かない (no-secret-in-argv)。launchctl print に env 値を晒さないため EnvironmentFile より厳格。
+# SVC_EXEC ("attach --scope user --yes" / "codex attach") は語ごとに個別 <string> へ分割する
+# (systemd の ExecStart=$node_bin $CLI $SVC_EXEC と同じ語分割)。WorkingDirectory/NODE_ENV は持たない
+# (systemd unit も持たない=parity)。秘匿名 (_TOKEN/_SECRET/_KEY/PASSWORD) は plist に一切 inline しない。
+generate_plist() {
+  local node_bin log_path word
+  node_bin="$(resolve_node)"
+  log_path="$LOG_DIR/$SVC_LABEL.log"
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "$SVC_LABEL")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml_escape "$node_bin")</string>
+    <string>--env-file-if-exists=$(xml_escape "$ENV_FILE")</string>
+    <string>$(xml_escape "$CLI")</string>
+PLIST
+  # SVC_EXEC を語ごとに <string> へ (意図的に unquoted で word-split・set -u でも SVC_EXEC は常に設定済)。
+  for word in $SVC_EXEC; do
+    printf '    <string>%s</string>\n' "$(xml_escape "$word")"
+  done
+  cat <<PLIST
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "$log_path")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "$log_path")</string>
+</dict>
+</plist>
+PLIST
+}
+
 do_install() {
   ensure_built
-  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (systemd --user 非対応)。foreground 起動を使ってください。"
+  case "$(supervisor)" in
+    systemd) do_install_systemd ;;
+    launchd) do_install_launchd ;;
+    *) die "systemctl も launchctl も無い環境です (systemd/launchd 非対応)。foreground 起動を使ってください。" ;;
+  esac
+}
+
+do_install_systemd() {
   [ -f "$ENV_FILE" ] || err "[ad-attach] 警告: $ENV_FILE が無い。INGEST_TOKEN を含む .env を用意してから start してください。"
   mkdir -p "$UNIT_DIR"
   generate_unit > "$SVC_UNIT_PATH"
@@ -189,8 +274,32 @@ do_install() {
   esac
 }
 
+do_install_launchd() {
+  [ -f "$ENV_FILE" ] || err "[ad-attach] 警告: $ENV_FILE が無い。INGEST_TOKEN を含む .env を用意してから start してください。"
+  mkdir -p "$LAUNCHD_DIR" "$LOG_DIR"
+  chmod 700 "$LOG_DIR"  # ログは uid 境界で保護 (state dir と同型)
+  generate_plist > "$SVC_PLIST_PATH"
+  chmod 600 "$SVC_PLIST_PATH"
+  err "[ad-attach] plist を配置: $SVC_PLIST_PATH"
+  local domain; domain="gui/$(id -u)"
+  launchctl bootout "$domain/$SVC_LABEL" 2>/dev/null || true  # 旧 instance を除去 (冪等)
+  launchctl bootstrap "$domain" "$SVC_PLIST_PATH"             # RunAtLoad で起動
+  err "[ad-attach] 有効化しました ($SVC_LABEL)。以後ログイン時に自動起動します。"
+  local reinstall_hint; [ "$SVC_KEY" = "codex" ] && reinstall_hint="ad-attach codex install" || reinstall_hint="ad-attach install"
+  case "$(resolve_node)" in
+    *"/.nvm/"*) err "[ad-attach] 注意: node が nvm パスです。node を更新したら \`$reinstall_hint\` を再実行して plist を更新してください (旧パス消滅で無言停止しないため)。" ;;
+  esac
+}
+
 do_uninstall() {
-  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です。"
+  case "$(supervisor)" in
+    systemd) do_uninstall_systemd ;;
+    launchd) do_uninstall_launchd ;;
+    *) die "systemctl も launchctl も無い環境です。" ;;
+  esac
+}
+
+do_uninstall_systemd() {
   # stop の SIGTERM が (attach なら) settings を detach する。disable で自動起動解除。
   systemctl --user stop "$SVC_NAME" 2>/dev/null || true
   systemctl --user disable "$SVC_NAME" 2>/dev/null || true
@@ -208,12 +317,43 @@ do_uninstall() {
   err "[ad-attach] アンインストール完了 ($SVC_NAME)。"
 }
 
+do_uninstall_launchd() {
+  local domain; domain="gui/$(id -u)"
+  launchctl bootout "$domain/$SVC_LABEL" 2>/dev/null || true
+  if [ -f "$SVC_PLIST_PATH" ]; then
+    rm -f "$SVC_PLIST_PATH"
+    err "[ad-attach] plist を削除: $SVC_PLIST_PATH"
+  fi
+  # attach のみ: settings detach fallback (bootout の SIGKILL で detach を逃した場合の保険・systemd と同一)。
+  if [ "$SVC_KEY" = "attach" ] && [ -f "$CLI" ]; then
+    load_env
+    node "$CLI" daemon stop --scope user 2>/dev/null || true
+  fi
+  err "[ad-attach] アンインストール完了 ($SVC_LABEL)。"
+}
+
 do_service() {
-  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です。"
   local sub="${1:-status}"
+  case "$(supervisor)" in
+    systemd)
+      case "$sub" in
+        start|stop|restart|status) systemctl --user "$sub" "$SVC_NAME" ;;
+        logs) journalctl --user -u "$SVC_NAME" -f ;;
+        *) die "service の引数は start|stop|restart|status|logs" ;;
+      esac ;;
+    launchd) do_service_launchd "$sub" ;;
+    *) die "systemctl も launchctl も無い環境です。" ;;
+  esac
+}
+
+do_service_launchd() {
+  local sub="$1" domain; domain="gui/$(id -u)"
   case "$sub" in
-    start|stop|restart|status) systemctl --user "$sub" "$SVC_NAME" ;;
-    logs) journalctl --user -u "$SVC_NAME" -f ;;
+    start)   launchctl bootstrap "$domain" "$SVC_PLIST_PATH" 2>/dev/null || launchctl kickstart "$domain/$SVC_LABEL" ;;
+    stop)    launchctl bootout "$domain/$SVC_LABEL" 2>/dev/null || true ;;
+    restart) launchctl kickstart -k "$domain/$SVC_LABEL" ;;
+    status)  launchd_status_line "$SVC_LABEL" "$SVC_PLIST_PATH" ;;
+    logs)    tail -f "$LOG_DIR/$SVC_LABEL.log" ;;
     *) die "service の引数は start|stop|restart|status|logs" ;;
   esac
 }
@@ -230,8 +370,9 @@ do_codex() {
     install) do_install ;;
     uninstall) do_uninstall ;;
     print-unit) generate_unit ;;
+    print-plist) generate_plist ;;
     service) do_service "${1:-status}" ;;
-    *) die "未知の codex verb \"$verb\" (start|stop|status|install|uninstall|service <cmd>|print-unit)" ;;
+    *) die "未知の codex verb \"$verb\" (start|stop|status|install|uninstall|service <cmd>|print-unit|print-plist)" ;;
   esac
 }
 
@@ -252,9 +393,15 @@ do_uninstall_all() {
 }
 
 do_status_all() {
-  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です。"
-  use_service attach; systemctl --user status "$SVC_NAME" --no-pager || true
-  use_service codex;  systemctl --user status "$SVC_NAME" --no-pager || true
+  case "$(supervisor)" in
+    systemd)
+      use_service attach; systemctl --user status "$SVC_NAME" --no-pager || true
+      use_service codex;  systemctl --user status "$SVC_NAME" --no-pager || true ;;
+    launchd)
+      use_service attach; launchd_status_line "$SVC_LABEL" "$SVC_PLIST_PATH"
+      use_service codex;  launchd_status_line "$SVC_LABEL" "$SVC_PLIST_PATH" ;;
+    *) die "systemctl も launchctl も無い環境です。" ;;
+  esac
 }
 
 # --- doctor: 健全性点検 (秘匿値は表示しない) ---------------------------------------
@@ -289,8 +436,12 @@ do_doctor() {
     err "[doctor] attach unit: $([ -f "$SVC_UNIT_PATH" ] && echo installed || echo not-installed) ($SVC_UNIT_PATH)"
     use_service codex
     err "[doctor] codex  unit: $([ -f "$SVC_UNIT_PATH" ] && echo installed || echo not-installed) ($SVC_UNIT_PATH)"
+  elif command -v launchctl >/dev/null 2>&1; then
+    # launchd (macOS): plist の loaded/installed 状態 (NO-RAW enum・秘匿非表示)。
+    use_service attach; launchd_status_line "$SVC_LABEL" "$SVC_PLIST_PATH"
+    use_service codex;  launchd_status_line "$SVC_LABEL" "$SVC_PLIST_PATH"
   else
-    err "[doctor] systemctl 無し: foreground 起動のみ利用可。"
+    err "[doctor] systemctl も launchctl も無し: foreground 起動のみ利用可。"
   fi
 }
 
@@ -314,6 +465,7 @@ main() {
         install) do_install ;;
         uninstall) do_uninstall ;;
         print-unit) generate_unit ;;
+        print-plist) generate_plist ;;
         service) do_service "${1:-status}" ;;
         -h|--help|help)
           # 先頭コメントブロック (shebang を除く) を最初の非コメント行まで表示。

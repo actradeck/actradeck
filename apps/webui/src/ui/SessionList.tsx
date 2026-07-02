@@ -18,6 +18,8 @@ import {
 import { formatCurrentAction } from "./action-units-display";
 
 import type { SessionListItem } from "../realtime/contract";
+// 2b-TDA-2 (sweep 019f1991): per-agent の wire shape は正準型を参照する (inline 再宣言しない)。
+import type { AgentVisibilityWire } from "@actradeck/event-model";
 
 function relativeAge(iso: string | undefined, nowMs: number): string {
   if (!iso) return "—";
@@ -118,6 +120,43 @@ export interface SessionListProps {
    * 履歴ゲート(既定 起動中のみ)で過去 session が隠れる罠を、その場の1クリックで緩和する。
    */
   readonly emptyAction?: { readonly label: string; readonly onClick: () => void };
+  /**
+   * **真の初回/空状態**(検索一致0 でも 履歴OFF でもなく観測 session が 0)のとき出す readiness パネル。
+   * 既出データ(接続中 observer daemon 数)だけで「接続できているか・次に何をするか」を示す。
+   * 指定時は emptyLabel/emptyAction より優先して描画する(架空状態は出さない・実観測のみ)。
+   *
+   * ADR 019f1972 §2b: claude/codex があれば per-agent ✓/✗/— 行を描画する (Claude/Codex が個別に配線
+   * されているか)。**2a 後方互換**: 省略 (daemonCount のみ) なら従来の doctor ヒント文言へフォールバックする。
+   * すべて NO-RAW (boolean のみ・観測された配線状態であり「リアルタイム」ではない=hello 時点値)。
+   */
+  readonly readiness?: {
+    readonly daemonCount: number;
+    readonly claude?: AgentVisibilityWire["claude"];
+    readonly codex?: AgentVisibilityWire["codex"];
+  };
+}
+
+/** Claude の観測配線状態 3 値 (anyHook=配線済み / binary のみ=未配線 / 未検出)。 */
+type ClaudeState = "wired" | "detected" | "missing";
+function claudeState(c: AgentVisibilityWire["claude"]): ClaudeState {
+  if (c.anyHook) return "wired"; // hook 注入済み=セッションが cockpit に出る。
+  if (c.binaryOnPath) return "detected"; // binary はあるが未配線 (doctor で hook 注入)。
+  return "missing"; // 未検出。
+}
+
+/** Codex の観測配線状態 3 値 (rollout 解決=観測可能 / binary のみ=未解決 / 未検出)。 */
+type CodexState = "observable" | "detected" | "missing";
+function codexState(c: AgentVisibilityWire["codex"]): CodexState {
+  if (c.rolloutDirResolved) return "observable"; // rollout dir 解決=観測可能。
+  if (c.binaryOnPath) return "detected"; // binary はあるが rollout 未解決。
+  return "missing"; // 未検出。
+}
+
+/** ✓ (配線/観測可能) / ✗ (検出のみ) / — (未検出) のマーカー (NO-RAW: ユーザーデータでない記号)。 */
+function readinessMark(state: ClaudeState | CodexState): string {
+  if (state === "wired" || state === "observable") return "✓";
+  if (state === "detected") return "✗";
+  return "—";
 }
 
 export function SessionList({
@@ -127,9 +166,52 @@ export function SessionList({
   onSelect,
   emptyLabel,
   emptyAction,
+  readiness,
 }: SessionListProps) {
   const { t } = useLocale();
   if (sessions.length === 0) {
+    // 真の初回/空状態: 観測 daemon 数で「接続できているか・次に何をするか」を示す(実観測のみ)。
+    if (readiness) {
+      const connected = readiness.daemonCount > 0;
+      // ADR 019f1972 §2b: per-agent 情報が両方そろっていれば ✓/✗/— 行を出す。片方でも欠ければ 2a 文言へ
+      // フォールバック (後方互換・架空状態を出さない)。
+      const claude = readiness.claude;
+      const codex = readiness.codex;
+      const hasPerAgent = claude !== undefined && codex !== undefined;
+      const cl = claude ? claudeState(claude) : null;
+      const cd = codex ? codexState(codex) : null;
+      return (
+        <div className="ad-empty" data-testid="readiness" data-connected={connected}>
+          {connected ? (
+            <>
+              <span data-testid="readiness-connected">
+                {t("readiness.connected", { count: readiness.daemonCount })}
+              </span>
+              {hasPerAgent && cl !== null && cd !== null ? (
+                <ul className="ad-readiness__agents" data-testid="readiness-agents">
+                  <li data-testid="readiness-agent-claude" data-state={cl}>
+                    <span className="ad-readiness__mark" aria-hidden="true">
+                      {readinessMark(cl)}
+                    </span>
+                    <span>{t(`readiness.agent.claude.${cl}` as const)}</span>
+                  </li>
+                  <li data-testid="readiness-agent-codex" data-state={cd}>
+                    <span className="ad-readiness__mark" aria-hidden="true">
+                      {readinessMark(cd)}
+                    </span>
+                    <span>{t(`readiness.agent.codex.${cd}` as const)}</span>
+                  </li>
+                </ul>
+              ) : (
+                <span className="ad-readiness__hint">{t("readiness.connected.hint")}</span>
+              )}
+            </>
+          ) : (
+            <span data-testid="readiness-disconnected">{t("readiness.disconnected")}</span>
+          )}
+        </div>
+      );
+    }
     return (
       <div className="ad-empty" data-testid="empty-list">
         <span>{emptyLabel ?? t("list.empty")}</span>

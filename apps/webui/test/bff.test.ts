@@ -190,6 +190,27 @@ describe("BFF upstream config", () => {
     );
   });
 
+  // ADR 019f1972 §2b: first-run readiness pull path (固定 path・segment/query なし)。NO-RAW (boolean +
+  //   観測 daemon 数のみ)。anchored allowlist で prefix 偽装 / サブリソース捏造 / 別 origin 上書きを塞ぐ。
+  it("allows the readiness pull path and rejects near-miss variants (ADR 019f1972 §2b)", () => {
+    expect(normalizeReplayRequestPath("/realtime/readiness")).toBe("/realtime/readiness");
+    // 末尾に余計な segment は拒否 (anchored)。
+    expect(() => normalizeReplayRequestPath("/realtime/readiness/secret")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    // 接尾辞でのマッチ漏れ (anchor `$` 欠落の退行) は拒否。
+    expect(() => normalizeReplayRequestPath("/realtime/readinessX")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    // 別 origin への absolute-form / protocol-relative 上書きは拒否 (SSRF ガード維持)。
+    expect(() => normalizeReplayRequestPath("http://evil.invalid/realtime/readiness")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    expect(() => normalizeReplayRequestPath("//evil.invalid/realtime/readiness")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+  });
+
   it("allows the audit pull paths and rejects near-miss variants (強み(a) 監査ビュー)", () => {
     // 期間集計 (固定 path・query from/to/limit/format は search で保持)。
     expect(normalizeReplayRequestPath("/realtime/audit/sessions")).toBe("/realtime/audit/sessions");

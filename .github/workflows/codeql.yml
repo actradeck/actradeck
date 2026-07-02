@@ -17,8 +17,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Code scanning upload is only available where the feature is enabled — public repos
+  # get it for free; PRIVATE repos need GitHub Advanced Security. On the private source
+  # repo the analyze job would always fail at upload ("Code scanning is not enabled"),
+  # so gate on the repository's actual visibility. An API probe (not
+  # `github.event.repository.private`) because the `schedule` event carries no
+  # repository payload — the expression form would mis-skip the weekly re-scan on the
+  # public mirror. Skipped analyze = workflow success (not a red X) on the private repo.
+  gate:
+    name: Code-scanning availability
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - name: Check repository visibility
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          private="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)"
+          if [ "$private" = "false" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Public repository — code scanning available, running analysis."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Private repository — code scanning not available (needs GHAS); skipping analysis."
+          fi
+
   analyze:
     name: Analyze (${{ matrix.language }})
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     permissions:
       # Required by github/codeql-action to upload results to code scanning.

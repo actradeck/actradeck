@@ -76,6 +76,10 @@ export type { ActionKind } from "./action-kind.js";
 // project-scope path containment + repo_label sanitize (T1 single source: backend gate + sidecar NO-RAW 境界)
 export { normalizeScopePath, isPathWithinScope, sanitizeRepoLabel } from "./path-scope.js";
 
+// agent-visibility wire 射影 + 受信検証 + 集約 (T1 single source: sidecar 射影 / backend 検証+集約 / webui parse)
+export { parseAgentVisibilityWire, aggregateAgentReadiness } from "./agent-visibility-wire.js";
+export type { AgentVisibilityWire } from "./agent-visibility-wire.js";
+
 // event id (UUIDv7)
 export { EventId, newEventId, isUuidV7 } from "./id.js";
 

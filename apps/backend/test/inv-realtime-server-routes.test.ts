@@ -1330,4 +1330,73 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     });
     expect(post.statusCode).toBe(404);
   });
+
+  // ── ADR 019f1972 §2b: GET /realtime/readiness の auth gate + NO-RAW 応答形 (QA-2 / SEC-L1 landing) ──
+  //   集約ロジック自体は inv-agent-readiness.test.ts が registry 単体で固定。ここは HTTP 配線を pin する:
+  //   ① prefix Bearer gate が新 route も被覆 (無 token→401)、② 応答が NO-RAW (boolean 4 個 + 非負整数のみ・
+  //   敵対 daemon の余剰 field を endpoint まで運ばない)、③ query を無視する (SEC-L1: query passthrough latent)。
+  it("readiness: missing token → 401 (onRequest Bearer gate が /realtime/readiness を被覆)", async () => {
+    await mount({});
+    const res = await app.inject({ method: "GET", url: "/realtime/readiness" });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toMatchObject({ error: "unauthorized" });
+  });
+
+  it("readiness: authed → 200 NO-RAW 応答 (敵対 daemon の余剰 field を endpoint まで運ばない)", async () => {
+    // 余剰 field (パス/secret 様) を詰めた agent_visibility を持つ daemon を seed。
+    const link: SidecarLink = { open: true, send() {} };
+    registry.add(link);
+    registry.handleHello(link, {
+      type: "hello",
+      control_token: "c1",
+      session_ids: [],
+      agent_visibility: {
+        claude: {
+          binaryOnPath: true,
+          anyHook: true,
+          leakedPath: "/home/victim/.claude/settings.json",
+        },
+        codex: {
+          binaryOnPath: false,
+          rolloutDirResolved: false,
+          token: "glpat-XXXXXXXXXXXXXXXXXXXX",
+        },
+      },
+    });
+    await mount({});
+    const res = await app.inject({ method: "GET", url: "/realtime/readiness", headers: auth });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      daemonCount: number;
+      claude: Record<string, unknown>;
+      codex: Record<string, unknown>;
+    };
+    // NO-RAW: boolean 4 個 + 非負整数のみ。余剰 field は endpoint まで到達しない。
+    expect(body.daemonCount).toBe(1);
+    expect(body.claude).toEqual({ binaryOnPath: true, anyHook: true });
+    expect(body.codex).toEqual({ binaryOnPath: false, rolloutDirResolved: false });
+    expect(Object.keys(body.claude).sort()).toEqual(["anyHook", "binaryOnPath"]);
+    expect(res.body).not.toContain("settings.json");
+    expect(res.body).not.toContain("glpat-");
+    expect(res.body).not.toContain("/home/victim");
+  });
+
+  it("readiness: query string を無視し応答形に影響しない (SEC-L1: query passthrough latent)", async () => {
+    await mount({});
+    const res = await app.inject({
+      method: "GET",
+      url: "/realtime/readiness?probe=/etc/passwd&x=../../secret",
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { daemonCount: number; claude: unknown; codex: unknown };
+    // query は応答に echo されない・形は不変 (daemon 未 seed ゆえ 0 / all-false)。
+    expect(body).toEqual({
+      daemonCount: 0,
+      claude: { binaryOnPath: false, anyHook: false },
+      codex: { binaryOnPath: false, rolloutDirResolved: false },
+    });
+    expect(res.body).not.toContain("passwd");
+    expect(res.body).not.toContain("secret");
+  });
 });

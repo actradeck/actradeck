@@ -77,11 +77,30 @@ still happen in its own TUI. (Claude Code in Managed Mode is all ✅, omitted fo
 
 ## Quickstart
 
-From a fresh clone (needs Node 22.16+, pnpm, and Docker with `docker compose`):
+One line — fetch the source and bring up the cockpit (needs `git`, Node 22.16+, and
+pnpm; **no Docker**, the database is embedded):
 
 ```bash
-./scripts/quickstart      # .env + Postgres + migrate + all tiers, one command
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh | sh
 ```
+
+> This downloads a script and runs it. Prefer to read it first (a good habit for anything
+> piped into a shell)? Fetch it, `less` it, then run it — or skip it and use the manual
+> clone below. The installer handles no secrets (quickstart generates a local `.env` at
+> mode `0600`), needs no root, and clones to `~/actradeck` (override with
+> `ACTRADECK_INSTALL_DIR`; pin a ref with `ACTRADECK_REF`). It becomes live once the
+> repository is public — until the OSS release, use the manual steps.
+
+Already cloned, or prefer to do it by hand (needs Node 22.16+ and pnpm — **no Docker**):
+
+```bash
+./scripts/quickstart      # .env + embedded DB + all tiers, one command
+```
+
+The database is an embedded PostgreSQL (PGlite) at `~/.actradeck/pgdata` — no Docker, no
+separate service. To use an external Postgres instead (production or an existing DB), set
+`DATABASE_URL` in `.env`, or run `ACTRADECK_DB_MODE=postgres ./scripts/quickstart` to bring
+one up via `docker compose`.
 
 ![ActraDeck first-run: fresh clone → running cockpit, recorded on a clean machine](docs/media/first-run.gif)
 
@@ -98,9 +117,19 @@ cd ~/any/project && claude     # or: codex  → shows up in the cockpit
 > relay over Attach.
 
 `quickstart` is idempotent and generates a `.env` with random local secrets on first
-run. On Linux it daemonizes the tiers via `systemd --user`; on **macOS** (no systemd)
-it sets everything up and you start the stack in the foreground with
-`./scripts/actradeck up` (Ctrl-C stops it). Prefer to do it by hand, or hit a snag? See
+run. It daemonizes the four tiers via `systemd --user` (Linux) or **launchd
+LaunchAgents** (macOS) — `./scripts/actradeck up` picks the supervisor automatically.
+The macOS LaunchAgents run in your login session (always-on while logged in, and they
+auto-start on next login); a fully headless, survives-logout daemon would need a root
+`LaunchDaemon`, which is out of scope. On a host with neither systemd nor launchd,
+`up` falls back to a foreground supervisor (keep the terminal open; Ctrl-C stops it).
+
+> **macOS launchd is experimental.** The Linux `systemd` path is used daily; the launchd
+> path is structurally verified (plist generation, secret hygiene, XML well-formedness are
+> covered by the smoke tests) but its runtime — `launchctl bootstrap`, restart-on-crash,
+> and persistence across login — has not yet been exercised on a Mac. Report anything odd.
+
+Prefer to do it by hand, or hit a snag? See
 [`docs/getting-started.md`](./docs/getting-started.md) (manual steps +
 troubleshooting). The precision/limits of Attach Mode are in
 [`docs/attach-mode.md`](./docs/attach-mode.md).

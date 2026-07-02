@@ -9,6 +9,8 @@ dependency change.
 | (BSD-2-Clause OR MIT OR Apache-2.0) | rc | 1.2.8 |
 | (MIT OR WTFPL) | expand-template | 2.0.3 |
 | 0BSD | tslib | 2.8.1 |
+| Apache-2.0 | @electric-sql/pglite | 0.5.3 |
+| Apache-2.0 | @electric-sql/pglite-socket | 0.2.6 |
 | Apache-2.0 | @eslint/config-array | 0.21.2 |
 | Apache-2.0 | @eslint/config-helpers | 0.4.2 |
 | Apache-2.0 | @eslint/core | 0.17.0 |

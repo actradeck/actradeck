@@ -95,6 +95,8 @@ export async function startFromEnv(): Promise<{
   address: string;
   port: number;
   host: string;
+  /** "external" = 実 pg (DATABASE_URL) / "embedded" = 埋込 PGlite (Docker 不要・ADR 019f1b71)。 */
+  dbMode: "external" | "embedded";
   close: () => Promise<void>;
 }> {
   const ingestToken = process.env.INGEST_TOKEN;
@@ -104,7 +106,21 @@ export async function startFromEnv(): Promise<{
   // UI 向け realtime は別 token (REALTIME_TOKEN)。未設定なら /realtime/ws を生やさない
   // (sidecar token を UI に流用させない / 無認証配信を作らない)。
   const realtimeToken = process.env.REALTIME_TOKEN;
-  const pool = createPool();
+  // DATABASE_URL 有 → 実 pg (max:10・従来経路)。無 → 埋込 PGlite (ADR 019f1b71) を起動し
+  // socket へ pool(max:1) を向ける (Docker/Postgres を既定導線から外す)。埋込モジュールは
+  // PGlite(WASM) を eager load しないよう**動的 import** する (実 pg 運用者 + sidecar e2e の
+  // hot path から PGlite を外す)。
+  const dbUrl = process.env.DATABASE_URL;
+  const dbMode: "external" | "embedded" = dbUrl ? "external" : "embedded";
+  let embedded: import("./embedded-db.js").EmbeddedDb | undefined;
+  let pool: ReturnType<typeof createPool>;
+  if (dbUrl) {
+    pool = createPool();
+  } else {
+    const { startEmbeddedPg, defaultDataDir, EMBEDDED_POOL_MAX } = await import("./embedded-db.js");
+    embedded = await startEmbeddedPg(defaultDataDir());
+    pool = createPool({ connectionString: embedded.connectionString, max: EMBEDDED_POOL_MAX });
+  }
   const app = await buildIngestionServer({
     pool,
     ingestToken,
@@ -123,9 +139,12 @@ export async function startFromEnv(): Promise<{
     address,
     port: boundPort,
     host,
+    dbMode,
     close: async () => {
       await app.close();
       await pool.end();
+      // 埋込のときは socket サーバ + PGlite も閉じる (real pg のときは embedded=undefined)。
+      if (embedded) await embedded.close();
     },
   };
 }
@@ -177,8 +196,11 @@ export async function maybeStartFromCli(
 ): Promise<Awaited<ReturnType<typeof startFromEnv>> | null> {
   if (!isDirectEntrypoint(metaUrl, argv1)) return null;
   const server = await startFromEnv();
-  // secret は出さない (token / DATABASE_URL を出力しない)。実際に bind した host:port を出す。
-  console.log(`[backend] ingestion server ready on http://${server.host}:${server.port}`);
+  // secret は出さない (token / DATABASE_URL を出力しない)。実際に bind した host:port と DB モードを出す
+  // (dbMode は "external"/"embedded" の enum で原文非依存・接続文字列や dataDir 中身は出さない)。
+  console.log(
+    `[backend] ingestion server ready on http://${server.host}:${server.port} (db: ${server.dbMode})`,
+  );
   const shutdown = (signal: string): void => {
     console.log(`[backend] received ${signal}, shutting down`);
     void server.close().then(

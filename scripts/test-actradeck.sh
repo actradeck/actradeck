@@ -136,6 +136,48 @@ if grep -rnqF -e 'sidecar/webui build' -e 'sidecar(dist)/webui(next build)' -e '
   ng "build-graph: docs/landing/media に旧ビルド範囲の記述が残存 (sidecar/webui のみ)"
 else ok "build-graph: docs/landing/media に旧ビルド範囲の記述なし"; fi
 
+# 11. Phase 2 launchd: print-plist の no-secret-in-argv + XML well-formed (print-unit ゲートの twin)。
+#     macOS 実走は本機 (Linux) で不能ゆえ、生成 plist の構造契約と秘匿非混入を静的に固定する。
+assert_exit 1 "print-plist に未知サービスは exit 1" -- bash "$AC" print-plist bogus
+for svc in backend webui; do
+  assert_contains "<key>Label</key>" "$svc plist に Label" -- bash "$AC" print-plist "$svc"
+  assert_contains "--env-file-if-exists=" "$svc plist は --env-file 参照 (path のみで秘匿)" -- bash "$AC" print-plist "$svc"
+  assert_contains "KeepAlive" "$svc plist に KeepAlive (Restart=on-failure mirror)" -- bash "$AC" print-plist "$svc"
+  # TDA-1: ExitTimeOut は systemd TimeoutStopSec=15 の mirror (graceful drain 猶予)。非 mirror 退行を固定。
+  assert_contains "ExitTimeOut" "$svc plist に ExitTimeOut (TimeoutStopSec=15 mirror)" -- bash "$AC" print-plist "$svc"
+  assert_contains "StandardOutPath" "$svc plist に StandardOutPath" -- bash "$AC" print-plist "$svc"
+  assert_contains "RunAtLoad" "$svc plist に RunAtLoad" -- bash "$AC" print-plist "$svc"
+  # XML well-formed: python3 plistlib で parse 成功 (本機に python3 あり)。
+  if bash "$AC" print-plist "$svc" 2>/dev/null | python3 -c 'import plistlib,sys; plistlib.loads(sys.stdin.buffer.read())' 2>/dev/null; then
+    ok "$svc plist は well-formed (plistlib parse)"
+  else ng "$svc plist が plistlib で parse できない (XML 不正)"; fi
+  # 秘匿名 (_TOKEN/_SECRET/_KEY/PASSWORD) が plist 本体 (ProgramArguments/EnvironmentVariables) に出ない。
+  # QA-1: 外部プロセス直パイプ (bash print-plist | grep -q) は pipefail×SIGPIPE で秘匿**存在時に
+  #   偽 PASS** する (grep -q が一致→早期 close→上流 print-plist が SIGPIPE(141)→pipefail 非零→else)。
+  #   出力を変数へ捕捉してから printf で grep する (assert_contains/absent と同じ安全形・上流は
+  #   命令置換で完走し pipe に載らない)。
+  plistout="$(bash "$AC" print-plist "$svc" 2>/dev/null)"
+  if printf '%s\n' "$plistout" | grep -qiE '_TOKEN|_SECRET|_KEY|PASSWORD'; then
+    ng "$svc plist に秘匿名が混入 (no-secret-in-argv 違反)"
+  else ok "$svc plist に秘匿名なし"; fi
+done
+assert_contains "src/index.ts" "backend plist の entry" -- bash "$AC" print-plist backend
+assert_contains "server.ts" "webui plist の entry" -- bash "$AC" print-plist webui
+# backend は NODE_ENV を書かない・webui は NODE_ENV=production (systemd の QA-2 と同じ)。
+assert_absent "NODE_ENV" "backend plist に NODE_ENV を書かない (webui のみ prod)" -- bash "$AC" print-plist backend
+assert_contains "NODE_ENV" "webui plist に NODE_ENV" -- bash "$AC" print-plist webui
+assert_contains "<string>production</string>" "webui plist は NODE_ENV=production" -- bash "$AC" print-plist webui
+# 実 .env の token/password 値が plist に一切出ない (二重の保険)。
+if [ -f "$ENV_FILE" ]; then
+  for k in INGEST_TOKEN REALTIME_TOKEN POSTGRES_PASSWORD; do
+    val="$(grep -E "^$k=" "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    if [ -n "$val" ]; then
+      assert_absent "$val" "$k 値が backend plist に出ない" -- bash "$AC" print-plist backend
+      assert_absent "$val" "$k 値が webui plist に出ない" -- bash "$AC" print-plist webui
+    fi
+  done
+fi
+
 echo
 if [ "$fail" = 0 ]; then echo "actradeck smoke: ALL PASS"; else echo "actradeck smoke: FAILURES"; fi
 exit "$fail"

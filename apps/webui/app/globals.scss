@@ -606,6 +606,49 @@ textarea {
   text-align: center;
 }
 
+// 初回 readiness パネルの補助行 (doctor ヒント)。primary より控えめに。
+.ad-readiness__hint {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  max-width: 32rem;
+}
+
+// ADR 019f1972 §2b: per-agent ✓/✗/— 行 (Claude/Codex の観測配線状態)。左寄せの小さな縦リスト。
+.ad-readiness__agents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+  text-align: left;
+
+  li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+
+  // ✓=配線/観測可能 / ✗=検出のみ / —=未検出 を色で補強する (記号のみに依存しない・design token のみ)。
+  [data-state="wired"] .ad-readiness__mark,
+  [data-state="observable"] .ad-readiness__mark {
+    color: var(--ad-status-success-fg);
+  }
+  [data-state="detected"] .ad-readiness__mark {
+    color: var(--ad-status-warn-fg);
+  }
+  [data-state="missing"] .ad-readiness__mark {
+    color: var(--ad-fg-muted);
+  }
+}
+
+.ad-readiness__mark {
+  flex: 0 0 1rem;
+  font-weight: 600;
+  text-align: center;
+}
+
 .ad-session-table {
   table-layout: fixed;
 }

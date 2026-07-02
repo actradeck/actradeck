@@ -214,6 +214,94 @@ describe("INV egress: Bearer auth + hello handshake (real ws server)", () => {
     expect("policy_capable" in hello).toBe(false); // 載せない (backend で除外される)。
   });
 
+  it("(2e) hello carries agent_visibility when a provider is injected (ADR 019f1972 §2b)", async () => {
+    // daemon が agentVisibilityProvider を注入すると hello に NO-RAW boolean 4 個が相乗りする。
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-vis",
+      sessionIds: ["s1"],
+      agentVisibilityProvider: () => ({
+        claude: { binaryOnPath: true, anyHook: false },
+        codex: { binaryOnPath: false, rolloutDirResolved: true },
+      }),
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length < 1; i++) await sleep(10);
+    const hello = cap.frames[0] as { type?: string; agent_visibility?: unknown };
+    expect(hello.type).toBe("hello");
+    expect(hello.agent_visibility).toEqual({
+      claude: { binaryOnPath: true, anyHook: false },
+      codex: { binaryOnPath: false, rolloutDirResolved: true },
+    });
+  });
+
+  it("(2f) hello omits agent_visibility when no provider / provider returns undefined (backward compat)", async () => {
+    // provider 未注入は従来どおり field 省略。provider が undefined を返すとき (fail-safe) も省略。
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-novis",
+      sessionIds: ["s1"],
+      agentVisibilityProvider: () => undefined, // fail-safe (computeAgentVisibilityWire の throw 握り潰し相当)。
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length < 1; i++) await sleep(10);
+    const hello = cap.frames[0] as { type?: string };
+    expect(hello.type).toBe("hello");
+    expect("agent_visibility" in hello).toBe(false); // undefined → field 省略。
+  });
+
+  it("(2g) reannounce re-sends hello WITH agent_visibility, re-evaluated per send (single-source builder)", async () => {
+    // buildHelloFrame 単一出所: connect/reannounce 両方が provider を通る。provider は送信ごとに呼ばれ
+    // 最新値を載せる (accepted-staleness 最小化)。回帰: reannounce が field を落とすと RED。
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    let anyHook = false;
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-vis-reann",
+      sessionIds: ["s1"],
+      // fresh per send: 呼ばれるたびに現在値を返す (ランタイム中に hook 配線が変わるのを模す)。
+      agentVisibilityProvider: () => ({
+        claude: { binaryOnPath: true, anyHook },
+        codex: { binaryOnPath: false, rolloutDirResolved: false },
+      }),
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length < 1; i++) await sleep(10);
+    expect(
+      (cap.frames[0] as { agent_visibility?: { claude?: { anyHook?: unknown } } }).agent_visibility
+        ?.claude?.anyHook,
+    ).toBe(false);
+    // hook が後から配線された状況を模して値を変え reannounce → 2 通目は新値を載せる。
+    anyHook = true;
+    client.reannounce();
+    for (
+      let i = 0;
+      i < 100 && cap.frames.filter((f) => (f as { type?: string }).type === "hello").length < 2;
+      i++
+    )
+      await sleep(10);
+    const helloFrames = cap.frames.filter((f) => (f as { type?: string }).type === "hello");
+    expect(helloFrames.length).toBeGreaterThanOrEqual(2);
+    const reann = helloFrames[helloFrames.length - 1] as {
+      agent_visibility?: { claude?: { anyHook?: unknown } };
+    };
+    expect(reann.agent_visibility?.claude?.anyHook).toBe(true); // 再評価で新値 (fresh per send)。
+  });
+
   it("(3) without ingestToken, no Authorization header (backward compat)", async () => {
     const cap = freshCapture();
     const port = await startServer(cap);

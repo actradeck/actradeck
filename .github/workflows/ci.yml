@@ -88,6 +88,20 @@ jobs:
       - name: Type check
         run: pnpm run type-check
 
+      # SEC-1 (Phase 2 監査・decision 019f1c85 landing): shell orchestrator の CLI 契約 +
+      #   no-secret-in-argv/plist スモークを CI で実行する。これまで scripts/test-*.sh は
+      #   どこからも呼ばれず (ci.yml/Makefile/hook/pnpm script いずれも不在) = dead gate で、
+      #   systemd unit / launchd plist に秘匿が inline される回帰を CI が素通りさせていた。
+      #   print-unit / print-plist の秘匿非混入・XML well-formed (python3 plistlib)・verb dispatch を
+      #   静的に固定する (DB/network 不要・node + python3 のみ・build 後で dist 前提を満たす)。
+      #   QA-1: 秘匿名ゲートの vacuous 化 (pipefail×SIGPIPE 偽 PASS) を変数捕捉へ修正済。
+      - name: Orchestrator script smoke (no-secret-in-argv, unit/plist contracts)
+        run: |
+          bash scripts/test-actradeck.sh
+          bash scripts/test-ad-attach.sh
+          bash scripts/test-install.sh
+          bash scripts/test-install-e2e.sh
+
       # 3#QA-1: db テストが参照する events/sessions スキーマを用意 (実 Postgres)。
       - name: Migrate up (provision schema for real-DB INV)
         run: pnpm --filter @actradeck/db run migrate:up

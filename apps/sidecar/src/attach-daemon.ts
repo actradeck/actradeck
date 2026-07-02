@@ -18,6 +18,7 @@
  */
 import { randomBytes } from "node:crypto";
 
+import { computeAgentVisibilityWire } from "./agent-visibility.js";
 import { AttachSessionRegistry } from "./attach-session-registry.js";
 import { ApprovalBridge } from "./approval-bridge.js";
 import { buildApprovalPersistConfig } from "./approval-persist-config.js";
@@ -94,6 +95,8 @@ export class AttachDaemon {
       policyCapable: true,
       // hello.session_ids = 観測中の全 attach canonical (ADR D1: 複数 id 可)。
       sessionIdsProvider: () => this.registry.sessionIds(),
+      // ADR 019f1972 §2b: agent 観測可能性を hello に相乗り (machine-global・fresh per send・fail-safe)。
+      agentVisibilityProvider: () => computeAgentVisibilityWire(),
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }
         : {}),

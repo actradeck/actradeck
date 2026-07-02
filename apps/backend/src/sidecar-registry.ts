@@ -22,7 +22,13 @@
  */
 import { randomUUID } from "node:crypto";
 
-import { type PolicyCategory, projectPolicyCategories } from "@actradeck/event-model";
+import {
+  type AgentVisibilityWire,
+  aggregateAgentReadiness,
+  parseAgentVisibilityWire,
+  type PolicyCategory,
+  projectPolicyCategories,
+} from "@actradeck/event-model";
 
 /** sidecar 接続が握る downstream 制御チャネル (ws の最小抽象)。 */
 export interface SidecarLink {
@@ -54,8 +60,25 @@ interface SidecarConn {
    * 既定 false (未広告 daemon は安全側で policy 非対応扱い)。
    */
   policyCapable: boolean;
+  /**
+   * ADR 019f1972 §2b (decision 019f1a29): この daemon が hello に相乗りさせた agent 観測可能性
+   * (Claude/Codex が「セッションが cockpit に出る状態か」). NO-RAW (boolean のみ・parseAgentVisibilityWire で
+   * 検証済み射影)。未報告 (旧 dist / 非対応 daemon) は undefined のまま (agentReadiness の集約から除外)。
+   * accepted staleness: hello 時点値ゆえ hook を後から入れても次 reannounce / 再接続まで stale (真の証明は
+   * セッション出現で panel が消えること)。
+   */
+  agentVisibility?: AgentVisibilityWire;
   /** この接続が所有する session_id 群 (hello + ingest 観測で学習)。 */
   readonly sessions: Set<string>;
+}
+
+/**
+ * ADR 019f1972 §2b: 全 open conn を OR 集約した machine 全体の agent 観測可能性 + 観測 daemon 数。
+ * cockpit の first-run readiness パネルが per-agent ✓/✗ を出すための NO-RAW サマリ (boolean のみ)。
+ */
+export interface AgentReadinessSummary extends AgentVisibilityWire {
+  /** 観測している (open な) daemon の総数。policyCapable で絞らない=「観測しているか」に忠実。 */
+  readonly daemonCount: number;
 }
 
 /** sidecar が送る handshake フレーム形 (緩く検証する)。 */
@@ -65,6 +88,11 @@ interface HelloFrame {
   session_ids?: unknown;
   /** ADR 019f1582 follow-up: daemon が policy.request を処理できるか (true の daemon のみ policy addressing 対象)。 */
   policy_capable?: unknown;
+  /**
+   * ADR 019f1972 §2b: agent 観測可能性の相乗り (NO-RAW). unknown 受け — handleHello が
+   * parseAgentVisibilityWire で検証射影する (wire を盲信しない・多層防御)。
+   */
+  agent_visibility?: unknown;
 }
 
 /** sidecar handshake か判定する (ingest event と区別)。 */
@@ -380,6 +408,12 @@ export class SidecarRegistry {
     // observe-only daemon (codex-rollout) を connectedDaemons から除外し、UI が timeout する事故を防ぐ。
     // 未広告 (旧 dist / 非対応) は false のまま (安全側・除外)。
     conn.policyCapable = frame.policy_capable === true;
+    // ADR 019f1972 §2b: agent 観測可能性を hello から記録する。wire は untrusted (信頼境界 sidecar→backend)
+    // ゆえ event-model の正準パーサで再検証射影し (boolean のみ・余剰 field を構造的に落とす=NO-RAW)、
+    // 不正/未報告 (undefined) のときは前回値を保持する (= 上書きしない・最新の有効報告を残す)。reannounce で
+    // 有効な visibility が来れば最新へ更新される (policy_capable と同じく hello が権威)。
+    const visibility = parseAgentVisibilityWire(frame.agent_visibility);
+    if (visibility !== undefined) conn.agentVisibility = visibility;
     if (Array.isArray(frame.session_ids)) {
       // ADR 019eb365: hello は **この接続の権威的 membership**。新集合を claim し、この接続が
       // 所有していたが新集合に**無い** session は release (grace→presence false)。sidecar が reap して
@@ -555,6 +589,28 @@ export class SidecarRegistry {
       }
     }
     return out;
+  }
+
+  /**
+   * ADR 019f1972 §2b: 全 open conn の agent 観測可能性を OR 集約し、観測 daemon 数とともに返す。
+   * cockpit の first-run readiness パネルが per-agent ✓/✗ を出すための NO-RAW サマリ。
+   *
+   * - **daemonCount は open conn 総数**: visibility を報告しない (旧 dist) daemon も「観測している daemon」
+   *   として数える (connectedDaemons の policyCapable 絞りとは別概念=「観測しているか」に忠実)。
+   * - **集約対象は agentVisibility を持つ open conn のみ**: observe-only codex-rollout daemon も観測主体ゆえ
+   *   含める (policyCapable で絞らない)。visibility は machine-global (binary on PATH / user-scope hook /
+   *   codex rollout dir) ゆえ、いずれかの open daemon が見えていれば true (aggregateAgentReadiness の OR fold)。
+   * - 報告ゼロ → 全 false (誰も観測していない=未配線・安全側)。
+   */
+  agentReadiness(): AgentReadinessSummary {
+    let daemonCount = 0;
+    const reports: AgentVisibilityWire[] = [];
+    for (const conn of this.conns.values()) {
+      if (!conn.link.open) continue;
+      daemonCount++;
+      if (conn.agentVisibility !== undefined) reports.push(conn.agentVisibility);
+    }
+    return { daemonCount, ...aggregateAgentReadiness(reports) };
   }
 
   /**

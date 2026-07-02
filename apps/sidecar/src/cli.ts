@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 
 import { newEventId } from "@actradeck/event-model";
 
+import { runAgentDoctorCli } from "./agent-visibility.js";
 import { ApprovalAllowlistStore } from "./approval-allowlist-store.js";
 import { runApprovalsCli } from "./approvals-cli.js";
 import { Sidecar } from "./sidecar.js";
@@ -335,6 +336,16 @@ async function main(): Promise<void> {
   if (sub === "daemon" || sub === "attach") {
     await mainDaemon();
     return;
+  }
+
+  // agentmon doctor (ADR 019f1972 Phase 0): 観測可能性 / 接続証明を純ローカル検査で出力する。
+  // daemon を起動しない (binary on PATH + hook 注入 + codex rollout-dir の有無のみ)。
+  if (sub === "doctor") {
+    const code = runAgentDoctorCli(process.argv.slice(3), {
+      out: (s) => process.stdout.write(s),
+      err: (s) => process.stderr.write(s),
+    });
+    process.exit(code);
   }
 
   // ADR 019ee0c0: 永続承認 allowlist の閲覧/失効 (list|revoke|clear)。

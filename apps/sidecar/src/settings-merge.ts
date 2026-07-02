@@ -365,6 +365,55 @@ export function mergeAttachHooks(opts: MergeOptions): MergeResult {
   );
 }
 
+/**
+ * 診断 (agentmon doctor) 用: settings オブジェクトに ActraDeck hook が 1 つ以上配線されているか。
+ * 検出は canonical な {@link isActradeckEntry} / {@link groupHasActradeckEntry} を共有する
+ * (NO 二重実装 — `__actradeck` 検出器を別実装しない。security-gate-reuse-canonical-parser)。
+ *
+ * TDA-2 (sweep 019f1991): 唯一の呼び出しは同 module の {@link settingsFileHasActradeckHook} ゆえ
+ * **module-private** (非 export)。malformed hooks の非 throw 回帰 (SEC-1/QA-1/SEC-R1) は file 経由の
+ * settingsFileHasActradeckHook / computeAgentVisibility で transitive に固定済 (直 importer 不要)。
+ */
+function hasActradeckHookInSettings(settings: ClaudeSettingsFile): boolean {
+  // SEC-1≡QA-1 (decision 019f1991): readSettings はトップレベルが object かのみ検証し hooks の
+  // 型は見ない。hooks が object 非該当/配列、event 値が非配列、group 要素が null だと .some /
+  // group.hooks アクセスで TypeError が uncaught throw し doctor をクラッシュさせる (docstring が謳う
+  // 「非 throw で安全側に縮退」契約違反)。broad catch で本物の throw を握り潰さず、各層を型ガードで
+  // 「型を見て安全側 false / skip」する。canonical な groupHasActradeckEntry/isActradeckEntry 共有は維持。
+  const hooks: unknown = settings.hooks;
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) return false;
+  for (const groups of Object.values(hooks as Record<string, unknown>)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      if (
+        typeof group === "object" &&
+        group !== null &&
+        groupHasActradeckEntry(group as HookGroup)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * 診断 (agentmon doctor) 用: 指定 settings.json に ActraDeck hook が配線されているかを判定する
+ * (read-only・**非 throw**)。
+ * - ファイル無し / 空 → false (readSettings が {} を返す)。
+ * - JSON 不正 → false。doctor は完走必須ゆえ throw しない (merge 経路の readSettings は
+ *   誤上書き防止のため throw するが、診断は読むだけなので not-installed 扱いで安全側に縮退)。
+ */
+export function settingsFileHasActradeckHook(path: string): boolean {
+  let settings: ClaudeSettingsFile;
+  try {
+    settings = readSettings(path);
+  } catch {
+    return false;
+  }
+  return hasActradeckHookInSettings(settings);
+}
+
 export interface DetachResult {
   /** 何らかの ActraDeck entry を除去したか。 */
   readonly removed: boolean;

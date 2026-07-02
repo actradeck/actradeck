@@ -1,4 +1,7 @@
-# ActraDeck local dev infra (Phase 0).
+# ActraDeck local dev infra — **OPTIONAL** (外部 Postgres を使う場合のみ・ADR 019f1b71)。
+# 既定の ActraDeck は Docker 不要の埋込 PostgreSQL (PGlite) を使う (backend が
+# ~/.actradeck/pgdata で起動し migration も自動適用)。この compose は外部 Postgres 運用
+# (本番 / 既存 DB / `ACTRADECK_DB_MODE=postgres ./scripts/quickstart`) のためだけに使う。
 # 秘匿情報は .env 経由 (.env はコミットしない / .gitignore 済み)。.env.example を参照。
 # Ports use a 554xx offset to avoid clashing with other local services.
 services:

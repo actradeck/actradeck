@@ -16,20 +16,26 @@
 #   - unit は実 node 絶対パス + WorkingDirectory を install 時に確定。Restart=on-failure + TimeoutStopSec
 #     + NoNewPrivileges。hook/state 書込・WS を壊す aggressive sandbox は入れない。
 #
+# 常駐機構は 3-way で自動選択する: systemctl→systemd (Linux) / なくて launchctl→launchd (macOS・
+# LaunchAgent) / どちらも無し→foreground supervisor。down/restart/status/logs も同じ検出を共有する。
+#
 # 使い方:
-#   actradeck up            全ワークスペース build → 全4ティア起動。systemd があれば常駐 (Linux)、
-#                           無ければ (macOS 等) foreground supervisor で起動 (Ctrl-C で一括停止)。
-#   actradeck down          backend+webui を停止/無効化/削除 → ad-attach uninstall-all (systemd のみ)。
-#   actradeck restart       全4ティアを再起動 (systemctl restart + ad-attach service restart)。
-#   actradeck status        全4ティアの systemd 状態を表示。
-#   actradeck logs <svc>    journalctl -f (svc = backend|webui|attach|codex)。
+#   actradeck up            全ワークスペース build → 全4ティア起動。systemd (Linux) / launchd (macOS)
+#                           があれば常駐、無ければ foreground supervisor で起動 (Ctrl-C で一括停止)。
+#   actradeck down          backend+webui を停止/無効化/削除 → ad-attach uninstall-all (systemd/launchd)。
+#   actradeck restart       全4ティアを再起動 (systemctl restart / launchctl kickstart + ad-attach)。
+#   actradeck status        全4ティアの systemd/launchd 状態を表示。
+#   actradeck logs <svc>    journalctl -f (systemd) / tail -f (launchd) (svc = backend|webui|attach|codex)。
 #   actradeck build         全ワークスペースパッケージ (共有 packages dist / sidecar dist / webui .next) をビルド。
-#   actradeck print-unit <backend|webui>   生成 unit を標準出力 (確認用・単一ソース)。
-#   actradeck doctor        .env 権限 / node / linger / 4ティア unit / ポート到達性を点検 (秘匿非表示)。
+#   actradeck print-unit  <backend|webui>   生成 systemd unit を標準出力 (確認用・単一ソース)。
+#   actradeck print-plist <backend|webui>   生成 launchd LaunchAgent plist を標準出力 (print-unit の twin)。
+#   actradeck doctor        .env 権限 / node / linger / 4ティア unit・plist / ポート到達性を点検 (秘匿非表示)。
 #
 # 注意:
-#   - node を更新 (nvm install 等) したら `actradeck up` を再実行して unit を更新 (203/EXEC 回避)。
-#   - ログイン外でも常駐させるには linger: `loginctl enable-linger "$USER"` (doctor が確認)。
+#   - node を更新 (nvm install 等) したら `actradeck up` を再実行して unit/plist を更新 (203/EXEC 回避)。
+#   - Linux: ログイン外でも常駐させるには linger: `loginctl enable-linger "$USER"` (doctor が確認)。
+#   - macOS: LaunchAgent はログインセッションで起動 (ログイン中常駐 + 再ログイン自動起動)。ログアウト後も
+#     稼働する完全 headless 常駐は LaunchDaemon (root) が必要で本 scope 外。
 #   - webui は本番 prebuilt (.next) を配信するため、コード更新時は `actradeck up`/`build` で再ビルド要。
 #
 set -euo pipefail
@@ -40,9 +46,33 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 AD_ATTACH="$SCRIPT_DIR/ad-attach"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+# launchd (macOS) 常駐用 (Phase 2・ADR 019ef084 Track B)。LaunchAgent plist と daemon ログの置き場。
+LAUNCHD_DIR="$HOME/Library/LaunchAgents"
+LOG_DIR="$HOME/.actradeck/logs"
 
 err() { printf '%s\n' "$*" >&2; }
 die() { err "actradeck: $*"; exit 1; }
+
+# 常駐機構を 3-way 検出する: systemctl あり→systemd / なくて launchctl あり→launchd / どちらも
+# 無し→foreground。up/down/restart/status/logs/doctor が全てこの単一検出を共有する (drift 防止)。
+supervisor() {
+  if command -v systemctl >/dev/null 2>&1; then printf 'systemd'
+  elif command -v launchctl >/dev/null 2>&1; then printf 'launchd'
+  else printf 'foreground'; fi
+}
+
+# plist へ値を埋め込む前の最小限 XML エスケープ (& < >)。パスに通常これらは出ないが、`&`/`<`/`>`
+# を含むパスでも well-formed を保つための保険。& を最初に置換する (後続の実体参照を二重化しない)。
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+# launchd の1サービス状態を1行に要約する (NO-RAW: loaded/not-loaded + plist installed のみ・秘匿非表示)。
+# 生の `launchctl print` は冗長ゆえ status/doctor はこの enum 要約を使う。
+launchd_status_line() {
+  local label="$1" plist="$2" domain loaded
+  domain="gui/$(id -u)"
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then loaded="loaded"; else loaded="not-loaded"; fi
+  err "[actradeck] $label: $loaded (plist: $([ -f "$plist" ] && echo installed || echo not-installed))"
+}
 # .env から非秘匿の設定値 (ポート等) を読む。無ければ default。値は exec せず表示・比較のみに使う
 # (ハードコード回避: .env.example はポート offset を推奨するため doctor 等は実ポートを参照する)。
 env_val() {
@@ -92,11 +122,14 @@ resolve_node() {
 
 # --- サーバ層サービスレジストリ (backend / webui・generalize-reusable-tooling) ----------
 SVC_NAME="" SVC_DESC="" SVC_WORKDIR="" SVC_ENTRY="" SVC_NODE_ENV="" SVC_AFTER="" SVC_UNIT_PATH=""
+# launchd 用 (systemd の SVC_NAME/SVC_UNIT_PATH の twin)。label は reverse-DNS。
+SVC_LABEL="" SVC_PLIST_PATH=""
 
 use_service() {
   case "${1:-}" in
     backend)
       SVC_NAME="actradeck-backend.service"
+      SVC_LABEL="io.actradeck.backend"
       SVC_DESC="ActraDeck backend (ingestion + realtime cockpit server, :55410)"
       SVC_WORKDIR="$REPO_ROOT/apps/backend"
       SVC_ENTRY="src/index.ts"
@@ -105,6 +138,7 @@ use_service() {
       ;;
     webui)
       SVC_NAME="actradeck-webui.service"
+      SVC_LABEL="io.actradeck.webui"
       SVC_DESC="ActraDeck webui (Cockpit UI + BFF proxy, :55400)"
       SVC_WORKDIR="$REPO_ROOT/apps/webui"
       SVC_ENTRY="server.ts"
@@ -115,6 +149,7 @@ use_service() {
     *) die "未知のサーバサービス \"${1:-}\" (backend|webui)" ;;
   esac
   SVC_UNIT_PATH="$UNIT_DIR/$SVC_NAME"
+  SVC_PLIST_PATH="$LAUNCHD_DIR/$SVC_LABEL.plist"
 }
 
 do_build() {
@@ -189,18 +224,124 @@ do_uninstall() {
   err "[actradeck] アンインストール完了 ($SVC_NAME)。"
 }
 
+# --- launchd (macOS) 経路: generate_unit / do_install / do_uninstall の twin ----------
+# 選択サービスの LaunchAgent plist を実パスで生成する (systemd generate_unit の mirror)。
+# 秘匿は systemd と同一規律: backend/webui は node の --env-file-if-exists が <repo>/.env を読み、
+# argv (ProgramArguments) には .env の **path のみ** を載せる=値を書かない (no-secret-in-argv)。
+# EnvironmentVariables は非秘匿の NODE_ENV のみ (backend は書かない・webui=production)。
+# 秘匿名 (_TOKEN/_SECRET/_KEY/PASSWORD) は ProgramArguments にも EnvironmentVariables にも入れない。
+generate_plist() {
+  local node_bin log_path
+  node_bin="$(resolve_node)"
+  log_path="$LOG_DIR/$SVC_LABEL.log"
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "$SVC_LABEL")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml_escape "$node_bin")</string>
+    <string>--env-file-if-exists=$(xml_escape "$ENV_FILE")</string>
+    <string>--import</string>
+    <string>tsx</string>
+    <string>$(xml_escape "$SVC_ENTRY")</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$(xml_escape "$SVC_WORKDIR")</string>
+PLIST
+  # EnvironmentVariables は NODE_ENV 専用 (非秘匿)。SVC_NODE_ENV が空 (backend) なら block ごと省く
+  # =systemd の QA-2 (backend は unit に NODE_ENV を書かない) と同じ。秘匿は絶対に inline しない。
+  if [ -n "$SVC_NODE_ENV" ]; then
+    cat <<PLIST
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>$(xml_escape "$SVC_NODE_ENV")</string>
+  </dict>
+PLIST
+  fi
+  cat <<PLIST
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ExitTimeOut</key>
+  <integer>15</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "$log_path")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "$log_path")</string>
+</dict>
+</plist>
+PLIST
+}
+
+do_install_launchd() {
+  [ -f "$ENV_FILE" ] || err "[actradeck] 警告: $ENV_FILE が無い。INGEST_TOKEN/REALTIME_TOKEN を含む .env を用意してください。"
+  mkdir -p "$LAUNCHD_DIR" "$LOG_DIR"
+  # ログは uid 境界で保護 (embedded socket/state dir と同型の reachability==fs reachability)。
+  chmod 700 "$LOG_DIR"
+  generate_plist > "$SVC_PLIST_PATH"
+  chmod 600 "$SVC_PLIST_PATH"
+  err "[actradeck] plist を配置: $SVC_PLIST_PATH"
+  local domain; domain="gui/$(id -u)"
+  launchctl bootout "$domain/$SVC_LABEL" 2>/dev/null || true  # 旧 instance を除去 (冪等)
+  launchctl bootstrap "$domain" "$SVC_PLIST_PATH"             # RunAtLoad で起動
+  err "[actradeck] 有効化しました ($SVC_LABEL)。"
+  case "$(resolve_node)" in
+    *"/.nvm/"*) err "[actradeck] 注意: node が nvm パスです。node 更新後は \`actradeck up\` を再実行して plist を更新してください。" ;;
+  esac
+}
+
+do_uninstall_launchd() {
+  local domain; domain="gui/$(id -u)"
+  launchctl bootout "$domain/$SVC_LABEL" 2>/dev/null || true
+  if [ -f "$SVC_PLIST_PATH" ]; then
+    rm -f "$SVC_PLIST_PATH"
+    err "[actradeck] plist を削除: $SVC_PLIST_PATH"
+  fi
+  err "[actradeck] アンインストール完了 ($SVC_LABEL)。"
+}
+
 # --- 全スタック操作 ------------------------------------------------------------------
 # up はプラットフォームで分岐する: systemd があれば 4 ティアを user daemon 常駐 (Linux)、
 # 無ければ (macOS 等) foreground supervisor で起動する。4 ティアの実体はいずれも node
 # プロセスで、systemd/launchd は監督機構にすぎない (ADR 019ef084)。
 do_up() {
-  if command -v systemctl >/dev/null 2>&1; then
-    do_up_systemd
-  else
-    err "[actradeck] systemctl が無い環境 (macOS 等) → foreground supervisor で起動します。"
-    err "[actradeck] (ログアウト跨ぎの常駐は Linux=systemd。macOS の launchd 常駐は planned。)"
-    do_up_foreground
-  fi
+  case "$(supervisor)" in
+    systemd) do_up_systemd ;;
+    launchd)
+      err "[actradeck] systemctl 無し・launchctl あり (macOS) → launchd LaunchAgent で常駐化します。"
+      do_up_launchd ;;
+    *)
+      err "[actradeck] systemctl も launchctl も無い環境 → foreground supervisor で起動します (Ctrl-C で一括停止)。"
+      do_up_foreground ;;
+  esac
+}
+
+# launchd 経路 (do_up_systemd の twin): build → backend/webui plist install → ad-attach へ委譲。
+do_up_launchd() {
+  do_build
+  err "[actradeck] backend を常駐化 (launchd)…"
+  use_service backend; do_install_launchd
+  err "[actradeck] webui を常駐化 (backend の後)…"
+  use_service webui; do_install_launchd
+  err "[actradeck] 観測 daemon (attach + codex) を ad-attach へ委譲…"
+  bash "$AD_ATTACH" install-all
+  err "[actradeck] 全4ティアを常駐化しました。状態: actradeck status"
+  # 常駐範囲を正直に開示する (過大表示しない)。LaunchAgent (gui domain) はログインセッションで起動する:
+  # ログイン中は常駐し、再ログインで自動起動する (systemd --user の linger 無し相当)。完全な headless
+  # 常駐 (ログアウト後も稼働) は LaunchDaemon (root) が必要で本 scope 外。
+  err "[actradeck] 注意: LaunchAgent はログインセッションで起動します (ログイン中常駐 + 再ログイン自動起動)。"
+  err "[actradeck]        ログアウト後も稼働させる完全 headless 常駐は LaunchDaemon (root) が必要で本 scope 外です。"
 }
 
 do_up_systemd() {
@@ -268,12 +409,13 @@ do_up_foreground() {
   }
   trap 'stop_all' INT TERM
 
-  # TDA-2: 下の起動タプルは systemd 経路の twin。backend/webui は generate_unit の ExecStart
-  #   (この script・use_service の SVC_ENTRY/SVC_WORKDIR/NODE_ENV) と、attach/codex は ad-attach
-  #   の SVC_EXEC (`attach --scope user --yes` / `codex attach`) と一致させること。
-  #   いずれも `--env-file-if-exists=<path>` 形式で **argv に秘匿値を載せない** 不変を共有する
-  #   (no-secret-in-argv・test-actradeck.sh が foreground 分も固定)。entry/flag を変える時は
-  #   両所を同時に更新する (bash3.2 + set -u の空配列ハザードを避け、配列共通化はしない)。
+  # TDA-2/TDA-4: 下の起動タプルは exec **triplet** の 1 つ (systemd generate_unit の ExecStart /
+  #   launchd generate_plist の ProgramArguments / この foreground exec の 3 箇所)。backend/webui は
+  #   use_service の SVC_ENTRY/SVC_WORKDIR/NODE_ENV と、attach/codex は ad-attach の SVC_EXEC
+  #   (`attach --scope user --yes` / `codex attach`) と一致させること。いずれも
+  #   `--env-file-if-exists=<path>` 形式で **argv に秘匿値を載せない** 不変を共有する
+  #   (no-secret-in-argv・test-actradeck.sh が foreground/plist 分も固定)。entry/flag を変える時は
+  #   **3 箇所すべて** を同時に更新する (bash3.2 + set -u の空配列ハザードを避け、配列共通化はしない)。
   err "[actradeck] backend を foreground 起動 (:$bport)…"
   ( cd "$REPO_ROOT/apps/backend" && exec "$node_bin" --env-file-if-exists="$ENV_FILE" --import tsx src/index.ts ) &
   pids="$pids $!"
@@ -295,15 +437,36 @@ do_up_foreground() {
 }
 
 do_down() {
-  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (macOS 等)。foreground 起動 (actradeck up) は Ctrl-C で停止してください。"
+  case "$(supervisor)" in
+    systemd) do_down_systemd ;;
+    launchd) do_down_launchd ;;
+    *) die "systemctl も launchctl も無い環境です (foreground 起動 actradeck up は Ctrl-C で停止してください)。" ;;
+  esac
+}
+
+do_down_systemd() {
   use_service webui; do_uninstall
   use_service backend; do_uninstall
   bash "$AD_ATTACH" uninstall-all
   err "[actradeck] 全4ティアをアンインストールしました。"
 }
 
+do_down_launchd() {
+  use_service webui; do_uninstall_launchd
+  use_service backend; do_uninstall_launchd
+  bash "$AD_ATTACH" uninstall-all
+  err "[actradeck] 全4ティアをアンインストールしました。"
+}
+
 do_restart() {
-  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (macOS 等)。foreground 起動 (actradeck up) は Ctrl-C で停止→再実行してください。"
+  case "$(supervisor)" in
+    systemd) do_restart_systemd ;;
+    launchd) do_restart_launchd ;;
+    *) die "systemctl も launchctl も無い環境です (foreground 起動は Ctrl-C で停止→再実行してください)。" ;;
+  esac
+}
+
+do_restart_systemd() {
   systemctl --user restart actradeck-backend.service 2>/dev/null || err "[actradeck] backend 未 install"
   systemctl --user restart actradeck-webui.service 2>/dev/null || err "[actradeck] webui 未 install"
   bash "$AD_ATTACH" service restart 2>/dev/null || true
@@ -311,22 +474,63 @@ do_restart() {
   err "[actradeck] 再起動しました。状態: actradeck status"
 }
 
+# TDA-1: `kickstart -k` は即時 (SIGKILL) 再起動で graceful drain を待たない (systemd restart の
+#   SIGTERM→猶予 とは非対称)。graceful な flush/detach が要る場合は `actradeck down && actradeck up`
+#   を使う (down=bootout は plist の ExitTimeOut=15 を尊重し SIGTERM→猶予→SIGKILL する)。
+#   restart は「素早く回す」運用向けで、stop/uninstall 経路が graceful を担保する。
+do_restart_launchd() {
+  local domain; domain="gui/$(id -u)"
+  launchctl kickstart -k "$domain/io.actradeck.backend" 2>/dev/null || err "[actradeck] backend 未 install"
+  launchctl kickstart -k "$domain/io.actradeck.webui" 2>/dev/null || err "[actradeck] webui 未 install"
+  bash "$AD_ATTACH" service restart 2>/dev/null || true
+  bash "$AD_ATTACH" codex service restart 2>/dev/null || true
+  err "[actradeck] 再起動しました。状態: actradeck status"
+}
+
 do_status() {
-  command -v systemctl >/dev/null 2>&1 || die "systemctl が無い環境です (macOS 等)。foreground 起動中は状態をそのターミナルで確認・doctor でポート到達性を点検できます。"
+  case "$(supervisor)" in
+    systemd) do_status_systemd ;;
+    launchd) do_status_launchd ;;
+    *) die "systemctl も launchctl も無い環境です (foreground 起動中は状態をそのターミナルで確認・doctor でポート到達性を点検できます)。" ;;
+  esac
+}
+
+do_status_systemd() {
   for n in actradeck-backend.service actradeck-webui.service; do
     systemctl --user status "$n" --no-pager 2>/dev/null || true
   done
   bash "$AD_ATTACH" status-all
 }
 
+do_status_launchd() {
+  use_service backend; launchd_status_line "$SVC_LABEL" "$SVC_PLIST_PATH"
+  use_service webui;   launchd_status_line "$SVC_LABEL" "$SVC_PLIST_PATH"
+  bash "$AD_ATTACH" status-all
+}
+
 do_logs() {
-  command -v journalctl >/dev/null 2>&1 || die "journalctl が無い環境です。"
-  case "${1:-}" in
-    backend) journalctl --user -u actradeck-backend.service -f ;;
-    webui) journalctl --user -u actradeck-webui.service -f ;;
-    attach) journalctl --user -u actradeck-attach.service -f ;;
-    codex) journalctl --user -u actradeck-codex-attach.service -f ;;
-    *) die "logs の引数は backend|webui|attach|codex" ;;
+  local svc="${1:-}"
+  case "$svc" in backend|webui|attach|codex) : ;; *) die "logs の引数は backend|webui|attach|codex" ;; esac
+  case "$(supervisor)" in
+    systemd)
+      command -v journalctl >/dev/null 2>&1 || die "journalctl が無い環境です。"
+      case "$svc" in
+        backend) journalctl --user -u actradeck-backend.service -f ;;
+        webui) journalctl --user -u actradeck-webui.service -f ;;
+        attach) journalctl --user -u actradeck-attach.service -f ;;
+        codex) journalctl --user -u actradeck-codex-attach.service -f ;;
+      esac ;;
+    launchd)
+      # label は do_logs 内で保持 (systemd 経路が unit 名を直書きするのと同じ style)。
+      local label
+      case "$svc" in
+        backend) label="io.actradeck.backend" ;;
+        webui) label="io.actradeck.webui" ;;
+        attach) label="io.actradeck.attach" ;;
+        codex) label="io.actradeck.codex-attach" ;;
+      esac
+      tail -f "$LOG_DIR/$label.log" ;;
+    *) die "systemctl も launchctl も無い環境です (foreground 起動のログはそのターミナルに出ます)。" ;;
   esac
 }
 
@@ -345,6 +549,25 @@ do_doctor() {
   command -v claude >/dev/null 2>&1 && agents="${agents:+$agents }claude"
   command -v codex >/dev/null 2>&1 && agents="${agents:+$agents }codex"
   err "[doctor] agents: ${agents:-なし — claude/codex 未導入。少なくとも1つ入れないと cockpit は空のままです}"
+  # 接続証明 (connectivity proof): binary on PATH だけでは不十分。ActraDeck hook が実際に
+  # 配線されているか (claude) / rollout-dir が解決できるか (codex) まで点検する (ADR 019f1972 Phase 0)。
+  # 失敗しても doctor は止めない (NO-RAW: enum/✓✗ のみ・パスや settings 内容は出さない)。
+  local sc_cli="$REPO_ROOT/apps/sidecar/dist/cli.js"
+  if [ "$node_bin" = "MISSING" ] || [ ! -f "$sc_cli" ]; then
+    err "[doctor] connectivity proof skip: dist 未ビルド or node 無し — \`./scripts/actradeck build\`"
+  else
+    # TDA-1 (sweep 019f1991): verdict を bash で再実装せず TS human renderer (renderAgentVisibilityHuman)
+    #   を単一出所として直呼びする。以前は --json を bash が再 render し「claude binary」(bash) vs
+    #   「claude: binary」(TS) の文言ドリフトがあった。NO-RAW は TS 側が保証 (enum/✓✗ のみ・パス非出力)。
+    local sc_human
+    sc_human="$(node "$sc_cli" doctor 2>&1 || true)"
+    if [ -z "$sc_human" ]; then
+      err "[doctor] connectivity proof skip: 取得失敗 — \`./scripts/actradeck build\` で再ビルドしてください"
+    else
+      # human 出力は既に "[doctor] connectivity: …" prefix + 2 行 (claude/codex) 済。そのまま stderr へ。
+      printf '%s\n' "$sc_human" >&2
+    fi
+  fi
   if [ -f "$ENV_FILE" ]; then
     local perm; perm="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo '?')"
     err "[doctor] .env: present (perm=$perm)"
@@ -354,6 +577,13 @@ do_doctor() {
     done
   else
     err "[doctor] 警告: .env が無い ($ENV_FILE)。"
+  fi
+  # DB モード: 埋込 PGlite (既定) か 外部 Postgres か。DATABASE_URL が (コメントでなく) env or
+  # .env にあれば external、無ければ embedded (backend は DATABASE_URL 有無で分岐・ADR 019f1b71)。
+  if [ -n "${DATABASE_URL:-}" ] || grep -qE '^[[:space:]]*DATABASE_URL=.' "$ENV_FILE" 2>/dev/null; then
+    err "[doctor] db: external Postgres (DATABASE_URL set)"
+  else
+    err "[doctor] db: embedded PGlite (no Docker; data in ~/.actradeck/pgdata)"
   fi
   if command -v loginctl >/dev/null 2>&1; then
     local linger; linger="$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || echo '?')"
@@ -368,6 +598,15 @@ do_doctor() {
       act="$(systemctl --user is-active "$n.service" 2>/dev/null || true)"; act="${act:-unknown}"
       ena="$(systemctl --user is-enabled "$n.service" 2>/dev/null || true)"; ena="${ena:-unknown}"
       err "[doctor] $n: $act / $ena"
+    done
+  fi
+  # launchd (macOS) 経路の状態点検 (systemd ブロックの後・NO-RAW enum のみ・秘匿非表示)。4 label の
+  # loaded/not-loaded + plist installed/not-installed を出す (生 launchctl print は出さない)。
+  if command -v launchctl >/dev/null 2>&1; then
+    local domain ld_state; domain="gui/$(id -u)"
+    for label in io.actradeck.backend io.actradeck.webui io.actradeck.attach io.actradeck.codex-attach; do
+      if launchctl print "$domain/$label" >/dev/null 2>&1; then ld_state="loaded"; else ld_state="not-loaded"; fi
+      err "[doctor] $label: $ld_state (plist: $([ -f "$LAUNCHD_DIR/$label.plist" ] && echo installed || echo not-installed))"
     done
   fi
   # ポート到達性 (リスナー有無のみ・内容は見ない)。ポートは .env から読む (offset 運用に追従)。
@@ -391,6 +630,7 @@ main() {
     logs) do_logs "${1:-}" ;;
     doctor) do_doctor ;;
     print-unit) use_service "${1:-}"; generate_unit ;;
+    print-plist) use_service "${1:-}"; generate_plist ;;
     -h|--help|help)
       awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$SELF"
       ;;
