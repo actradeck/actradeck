@@ -86,6 +86,15 @@ export {
   type AllowlistRelayResult,
 } from "./sidecar-registry.js";
 export { registerRealtimeRoute, type RealtimeRouteOptions } from "./realtime-server.js";
+export {
+  SafetyDemoLauncher,
+  SAFETY_DEMO_SESSION_PREFIX,
+  resolveDefaultDriverPath,
+  type SafetyDemoLauncherOptions,
+  type SafetyDemoLaunchResult,
+  type DemoSpawner,
+  type DemoChildHandle,
+} from "./safety-demo.js";
 
 /**
  * 実プロセス起動 (env から構成)。tsx watch / node dist で使う。

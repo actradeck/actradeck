@@ -8,11 +8,67 @@ import {
   InvalidReplayRequestPathError,
   InvalidUpstreamUrlError,
   MissingRealtimeTokenError,
+  isAuditPacketVerifyPath,
+  isAuditVerifyPath,
   normalizeReplayRequestPath,
   publicClientConfig,
   resolveReplayHttpConfig,
   resolveUpstreamConfig,
 } from "../src/realtime/bff.js";
+
+describe("BFF audit verify path (ADR 6点強化 #1)", () => {
+  it("allow-list に /realtime/audit/verify が載る (anchored)", () => {
+    expect(normalizeReplayRequestPath("/realtime/audit/verify")).toBe("/realtime/audit/verify");
+  });
+  it("near-miss / traversal は拒否 (anchored で緩めない)", () => {
+    expect(() => normalizeReplayRequestPath("/realtime/audit/verifyX")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    expect(() => normalizeReplayRequestPath("/realtime/audit/verify/secret")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    expect(() => normalizeReplayRequestPath("http://evil.invalid/realtime/audit/verify")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+  });
+  it("isAuditVerifyPath: verify のみ true (mutating-class= POST-only + CSRF)", () => {
+    expect(isAuditVerifyPath("/realtime/audit/verify")).toBe(true);
+    expect(isAuditVerifyPath("/realtime/audit/verify?x=1")).toBe(true);
+    expect(isAuditVerifyPath("/realtime/audit/sessions/s1/report")).toBe(false);
+    expect(isAuditVerifyPath("/realtime/demo/safety")).toBe(false);
+  });
+});
+
+describe("BFF review packet path (ADR 6点強化 #2)", () => {
+  it("allow-list に packet (GET・query 保持) と packet/verify が載る (anchored)", () => {
+    expect(normalizeReplayRequestPath("/realtime/audit/packet?sessions=s1,s2&format=html")).toBe(
+      "/realtime/audit/packet?sessions=s1,s2&format=html",
+    );
+    expect(normalizeReplayRequestPath("/realtime/audit/packet/verify")).toBe(
+      "/realtime/audit/packet/verify",
+    );
+  });
+  it("near-miss / traversal は拒否 (anchored で緩めない)", () => {
+    expect(() => normalizeReplayRequestPath("/realtime/audit/packetX")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    expect(() => normalizeReplayRequestPath("/realtime/audit/packet/secret")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    expect(() => normalizeReplayRequestPath("/realtime/audit/packet/verify/x")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    expect(() => normalizeReplayRequestPath("http://evil.invalid/realtime/audit/packet")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+  });
+  it("isAuditPacketVerifyPath: packet/verify のみ true (packet GET は read-only ゆえ false)", () => {
+    expect(isAuditPacketVerifyPath("/realtime/audit/packet/verify")).toBe(true);
+    expect(isAuditPacketVerifyPath("/realtime/audit/packet/verify?x=1")).toBe(true);
+    expect(isAuditPacketVerifyPath("/realtime/audit/packet")).toBe(false);
+    expect(isAuditPacketVerifyPath("/realtime/audit/verify")).toBe(false);
+  });
+});
 
 describe("BFF upstream config", () => {
   it("throws when REALTIME_TOKEN is absent (no unauthenticated upstream)", () => {
@@ -250,5 +306,26 @@ describe("BFF upstream config", () => {
     expect(() => normalizeReplayRequestPath("//evil.invalid/realtime/audit/sessions")).toThrow(
       InvalidReplayRequestPathError,
     );
+  });
+
+  it("allows the P2 session report path and rejects near-miss variants (ADR 019f2326)", () => {
+    // 単一セッション詳細レポート (session セグメントは [^/]+・query format/diff は search で保持)。
+    expect(normalizeReplayRequestPath("/realtime/audit/sessions/sess_abc/report?format=html")).toBe(
+      "/realtime/audit/sessions/sess_abc/report?format=html",
+    );
+    expect(
+      normalizeReplayRequestPath("/realtime/audit/sessions/sess_abc/report?format=md&diff=1"),
+    ).toBe("/realtime/audit/sessions/sess_abc/report?format=md&diff=1");
+    // near-miss は拒否 (anchored・wildcard 化しない)。
+    expect(() => normalizeReplayRequestPath("/realtime/audit/sessions/s1/report/raw")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    expect(() => normalizeReplayRequestPath("/realtime/audit/sessions/s1/reportX")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    // 別 origin への上書きは拒否 (SSRF ガード維持)。
+    expect(() =>
+      normalizeReplayRequestPath("http://evil.invalid/realtime/audit/sessions/s1/report"),
+    ).toThrow(InvalidReplayRequestPathError);
   });
 });

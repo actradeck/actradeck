@@ -26,6 +26,9 @@ export default defineConfig({
         "src/ui/liveness-display.ts",
         "src/ui/approval-display.ts",
         "src/ui/wall-display.ts",
+        // QA-1: セーフティデモ起動フックの runtime (二度押し抑止 / NO-RAW parse 統合 / error 縮退 /
+        //   TDA-2 出現 watchdog) を無検証化させないため gate に含める (safety-demo-hook.test.tsx が駆動)。
+        "src/ui/use-safety-demo.ts",
         "src/server/**",
       ],
       exclude: ["src/**/*.{test,spec}.{ts,tsx}", "src/realtime/contract.ts"],

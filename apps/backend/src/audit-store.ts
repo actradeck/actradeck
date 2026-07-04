@@ -139,6 +139,7 @@ function foldApprovals(rows: readonly ApprovalGroupRow[]): {
 function metaToSummary(
   r: SessionMetaRow,
   approvals: { total: number; byDecision: AuditDecisionTally; highRisk: number },
+  autoAllowedCount: number,
   entries?: readonly AuditApprovalEntry[],
 ): AuditSessionSummary {
   const decidedTotal = AUDIT_DECISIONS.reduce((acc, d) => acc + approvals.byDecision[d], 0);
@@ -165,6 +166,7 @@ function metaToSummary(
       pending: Math.max(0, approvals.total - decidedTotal),
     },
     high_risk_op_count: approvals.highRisk,
+    auto_allowed_count: autoAllowedCount,
     ...(entries !== undefined ? { entries } : {}),
   };
 }
@@ -196,6 +198,28 @@ export class AuditStore {
     ),
   ) {}
 
+  /**
+   * 対象 session 群の無プロンプト自動許可 (auto_allowed=true) の **full-session** 件数を 1 往復で数える。
+   * events の auto_allowed マーカーは start イベント (command.started 等) に 1 操作 1 回付く (normalize.ts)
+   * ため、件数 = auto-allowed 操作数。sessionSummary(単一) と rangeReport(複数) が共有 (単一出所・TDA-1)。
+   * report route の 10000-event 打ち切りに依存しない (by_decision / high_risk と同じ full 集計)。
+   */
+  private async autoAllowedCounts(sessionIds: readonly string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (sessionIds.length === 0) return out;
+    const { rows } = await this.pool.query<{ session_id: string; n: number }>(
+      `SELECT session_id, count(*)::int AS n
+         FROM events
+        WHERE session_id = ANY($1::text[])
+          AND jsonb_typeof(payload->'auto_allowed') = 'boolean'
+          AND (payload->>'auto_allowed')::boolean = true
+        GROUP BY session_id`,
+      [sessionIds],
+    );
+    for (const r of rows) out.set(r.session_id, r.n);
+    return out;
+  }
+
   /** 1 セッションの監査要約。detail=true で承認エントリ列 (allow-list) を付ける。 */
   async sessionSummary(
     sessionId: string,
@@ -223,11 +247,12 @@ export class AuditStore {
       [sessionId, APPROVAL_EVENT_TYPES],
     );
     const approvals = foldApprovals(groupRows);
+    const autoCounts = await this.autoAllowedCounts([sessionId]);
 
     let entries: AuditApprovalEntry[] | undefined;
     if (opts?.detail) entries = await this.approvalEntries(sessionId);
 
-    return metaToSummary(meta, approvals, entries);
+    return metaToSummary(meta, approvals, autoCounts.get(sessionId) ?? 0, entries);
   }
 
   /**
@@ -532,6 +557,8 @@ export class AuditStore {
         else groupBySession.set(r.session_id, [r]);
       }
     }
+    // full-session auto-allowed 件数を 1 往復で (by_decision と対称・TDA-1)。
+    const autoCounts = await this.autoAllowedCounts(sessionIds);
 
     const sessions: AuditSessionSummary[] = [];
     // 集計は可変ローカルへ畳んで最後に readonly totals を構築する。
@@ -543,7 +570,7 @@ export class AuditStore {
     let sessionsWithSecret = 0;
     for (const meta of pageRows) {
       const approvals = foldApprovals(groupBySession.get(meta.session_id) ?? []);
-      const summary = metaToSummary(meta, approvals);
+      const summary = metaToSummary(meta, approvals, autoCounts.get(meta.session_id) ?? 0);
       sessions.push(summary);
       secretRedactionCount += summary.secret_redaction_count;
       for (const [k, v] of Object.entries(summary.secret_redaction_count_by_kind)) {

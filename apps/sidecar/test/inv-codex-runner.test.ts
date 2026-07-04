@@ -18,6 +18,8 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { NormalizedEvent } from "@actradeck/event-model";
+import { reduceEvents, type SessionProjection } from "@actradeck/projection";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ApprovalBridge } from "../src/approval-bridge.js";
@@ -157,7 +159,7 @@ describe("startManagedCodex: SESSION-ID + REDACTION-TRANSPARENCY", () => {
       session.dispose();
       store.close();
     });
-    return { store, sink, identity, child, session };
+    return { store, sink, identity, child, session, approvalBridge };
   }
 
   /** handshake が完了し canonical が確定するまで待つ。 */
@@ -367,5 +369,174 @@ describe("startManagedCodex: SESSION-ID + REDACTION-TRANSPARENCY", () => {
     await waitHandshake(rig.identity);
     rig.session.stop("SIGTERM");
     expect(rig.child.killed).toBe("SIGTERM");
+  });
+
+  // ---- P4.5 / TDA-1 (ADR 019f2476): tool.permission.resolved 対称 emit (実配線経由)。 ----
+  // 上の inv-codex-approval-resolved.test.ts が CodexApprovalBridge の seam 契約を単体で固定するのに対し、
+  // ここでは startManagedCodex → codexApproval.emitResolved → emitCodex → sink.emit → SQLite の**実経路**を
+  // 貫通させ、codex-runner.ts の resolved builder (provider/source/state/payload) を被覆する。
+  const approvalParams = (command: string) => ({
+    itemId: "i1",
+    threadId: THREAD_ID,
+    turnId: "turn_1",
+    startedAtMs: 1,
+    command,
+    cwd: "/repo",
+  });
+  const requestIdOf = (rig: ReturnType<typeof makeRig>): string => {
+    const row = rig.store.allRows().find((r) => r.event_type === "tool.permission.requested");
+    expect(row).toBeDefined();
+    const ev = JSON.parse(row!.event_json) as { payload: { request_id?: string } };
+    expect(typeof ev.payload.request_id).toBe("string");
+    return ev.payload.request_id!;
+  };
+  const projectStore = (rig: ReturnType<typeof makeRig>): SessionProjection =>
+    reduceEvents(
+      THREAD_ID,
+      rig.store.allRows().map((r) => JSON.parse(r.event_json) as NormalizedEvent),
+    );
+
+  it("TDA-1: managed approval allow emits tool.permission.resolved(allow) — card clear + audit row", async () => {
+    const rig = makeRig();
+    await waitHandshake(rig.identity);
+    rig.child.emitLine({
+      id: 77,
+      method: "item/commandExecution/requestApproval",
+      params: approvalParams("rm -rf /tmp/x"),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = requestIdOf(rig);
+    // 解決前: projection は当該カードを pending に持つ。
+    expect(projectStore(rig).pending_approvals.map((p) => p.request_id)).toContain(requestId);
+
+    // operator allow (Approval Inbox → approve)。
+    expect(rig.approvalBridge.resolve(requestId, "allow")).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const resolvedRow = rig.store
+      .allRows()
+      .find((r) => r.event_type === "tool.permission.resolved");
+    expect(resolvedRow).toBeDefined(); // 監査行 (mutation: finish() emitResolved 撤去 → 不在 = 赤)。
+    const ev = JSON.parse(resolvedRow!.event_json) as {
+      provider: string;
+      source: string;
+      state: string;
+      payload: Record<string, unknown>;
+    };
+    expect(ev.provider).toBe("codex");
+    expect(ev.source).toBe("app_server");
+    // TDA-1 (=QA-1): 実 builder (codex-runner.ts ~:286) の allow→state 写像を wired path で固定する。
+    //   mutation: allow-state を別の valid state (例 running.model_wait) に変える → ここが赤。
+    expect(ev.state).toBe("running.tool_preparing");
+    // NO-RAW: resolved payload は 3 フィールドのみ (raw command/cwd 非再掲)。
+    expect(ev.payload).toEqual({
+      kind: "tool.permission.resolved",
+      request_id: requestId,
+      decision: "allow",
+    });
+    // 実 projection (provider 非依存 foldPendingApprovals) が pending を clear。
+    expect(projectStore(rig).pending_approvals).toEqual([]);
+  });
+
+  it("TDA-1: managed approval deny emits tool.permission.resolved(deny)", async () => {
+    const rig = makeRig();
+    await waitHandshake(rig.identity);
+    rig.child.emitLine({
+      id: 78,
+      method: "item/commandExecution/requestApproval",
+      params: approvalParams("curl http://evil"),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = requestIdOf(rig);
+    expect(rig.approvalBridge.resolve(requestId, "deny")).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const resolvedRow = rig.store
+      .allRows()
+      .find((r) => r.event_type === "tool.permission.resolved");
+    expect(resolvedRow).toBeDefined();
+    const ev = JSON.parse(resolvedRow!.event_json) as {
+      state: string;
+      payload: { decision?: string };
+    };
+    expect(ev.payload.decision).toBe("deny");
+    // TDA-1 (=QA-1): 実 builder の deny→state 写像を wired path で固定する。
+    expect(ev.state).toBe("running.model_wait");
+  });
+
+  it("TDA-1: child exit while approval in-flight emits tool.permission.resolved(deny) (cancelInFlight)", async () => {
+    const rig = makeRig();
+    await waitHandshake(rig.identity);
+    rig.child.emitLine({
+      id: 79,
+      method: "item/commandExecution/requestApproval",
+      params: approvalParams("rm -rf /"),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = requestIdOf(rig);
+    // 解決せず in-flight のまま child が exit → cancelInFlight が resolved(deny) を emit。
+    rig.child.emitExit(1, null);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const resolvedRow = rig.store
+      .allRows()
+      .find((r) => r.event_type === "tool.permission.resolved");
+    // 監査行の存在が load-bearing (session.ended terminal でも pending は clear されるため
+    //   projection では falsify できない)。mutation: cancelInFlight の emitResolved 撤去 → 不在 = 赤。
+    expect(resolvedRow).toBeDefined();
+    const ev = JSON.parse(resolvedRow!.event_json) as {
+      provider: string;
+      state: string;
+      payload: { request_id?: string; decision?: string };
+    };
+    expect(ev.provider).toBe("codex");
+    expect(ev.payload.request_id).toBe(requestId);
+    expect(ev.payload.decision).toBe("deny");
+    // TDA-1 (=QA-1): 実 builder の deny→state 写像を child-exit (cancelInFlight) 経路でも固定する。
+    expect(ev.state).toBe("running.model_wait");
+  });
+
+  // ---- P4.5 / TDA-4 (ADR 019f24c2): shutdown/drain 経路の監査完全性 (実配線経由)。 ----
+  // TDA の full sweep が「未テスト」と指摘した不変条件を固定する: in-flight codex 承認がある状態で
+  // sidecar.shutdown() が走ると、global approvalBridge.drain() が bridge pending を deny 解決 →
+  // 遅延 .then(finish) → emitResolved(...,"deny") → resolved 監査行が store.close() の **前** に persist される。
+  // これが安全なのは emitMonitoring (session-identity.ts:167-170) が canonical 分岐で disposed ガード
+  //   (hold() :176) を **迂回**し、dispose() が canonical を消さないから。canonical 分岐を disposed で
+  //   gate する将来のリファクタは drain 経路 resolved 行を **silent に落とす** (019ef10b shutdown-race class)。
+  // mutation: emitMonitoring canonical 分岐に `if (this.disposed) return;` を足す → resolved 行不在 = 赤。
+  it("TDA-4: shutdown/drain with in-flight codex approval persists resolved(deny) before store.close", async () => {
+    const rig = makeRig();
+    await waitHandshake(rig.identity);
+    // codex 承認を in-flight にする (カード emit・bridge pending)。
+    rig.child.emitLine({
+      id: 80,
+      method: "item/commandExecution/requestApproval",
+      params: approvalParams("rm -rf /var"),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = requestIdOf(rig);
+    // 解決前: projection は当該カードを pending に持つ。
+    expect(projectStore(rig).pending_approvals.map((p) => p.request_id)).toContain(requestId);
+
+    // sidecar.shutdown() の :366-376 と同じ順序で drain 経路を駆動する:
+    //   identity.dispose() → approvalBridge.drain() → microtask flush → (store.close は afterEach)。
+    rig.identity.dispose();
+    rig.approvalBridge.drain();
+    await new Promise((r) => setTimeout(r, 20)); // 遅延 .then(finish) microtask を flush。
+
+    const resolvedRow = rig.store
+      .allRows()
+      .find((r) => r.event_type === "tool.permission.resolved");
+    // 監査完全性: dispose 後でも canonical 分岐で emit され、resolved 行が close 前に persist される。
+    expect(resolvedRow).toBeDefined();
+    const ev = JSON.parse(resolvedRow!.event_json) as {
+      provider: string;
+      payload: { request_id?: string; decision?: string };
+    };
+    expect(ev.provider).toBe("codex");
+    expect(ev.payload.request_id).toBe(requestId);
+    expect(ev.payload.decision).toBe("deny");
+    // 実 projection (provider 非依存 foldPendingApprovals) が pending を clear (drain も UI 終端する)。
+    expect(projectStore(rig).pending_approvals).toEqual([]);
   });
 });

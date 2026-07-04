@@ -24,6 +24,7 @@ import { SessionReplayView } from "./SessionReplay";
 import { ThemeToggle } from "./ThemeToggle";
 import { useDaemons } from "./use-daemons";
 import { useReadiness } from "./use-readiness";
+import { useSafetyDemo } from "./use-safety-demo";
 import type { PolicyRelayTarget } from "./use-policy-admin";
 import { useRealtime } from "./use-realtime";
 import { useSessionEvents } from "./use-session-events";
@@ -118,6 +119,14 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
     enabled: boardEmpty,
     refreshKey: connectedCount,
   });
+  // ADR 019f22a7 P1: first-run セーフティデモ。空状態 CTA から BFF 経由で使い捨てデモを起動し、返った
+  // session_id を掴む (token はブラウザに出さない・BFF が Bearer 付与)。出現したら inbox の pending 承認へ導く。
+  // TDA-2: live 一覧の session_id を渡し、出現 watchdog に「デモが live に現れたか」を判定させる (子が
+  // ENOENT / 誤ポートで接続失敗し session が出現しない負経路で running 固着せず error へ縮退させる)。
+  const liveSessionIds = useMemo(() => sessions.map((s) => s.session_id), [sessions]);
+  const safetyDemo = useSafetyDemo({ liveSessionIds });
+  // デモ session が一覧に出たら 1 度だけ focus し承認 inbox へ誘導する (block→redact→replay の導線)。
+  const demoNavRef = useRef<string | null>(null);
   const policyRelayTarget: PolicyRelayTarget | null = connectedSessionId
     ? { kind: "session", id: connectedSessionId }
     : firstDaemonId !== undefined
@@ -151,6 +160,20 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
     if (selectedId && pinnedSelectionRef.current === selectedId) return;
     select(firstSessionId);
   }, [sessions, selectedId, select]);
+  // ADR 019f22a7 P1: 起動したデモ session が一覧に出現したら 1 度だけ focus し、承認 inbox の pending 承認カード
+  // へ導く (ユーザーが Deny で止める → 既存 inbox の onOpenReplay で Session Replay へ)。pinnedSelectionRef で
+  // 「先頭へ上書きする auto-select」を無効化し、demoNavRef で誘導を 1 度に限る (毎レンダの再ナビを防ぐ)。
+  useEffect(() => {
+    const demoId = safetyDemo.sessionId;
+    if (!demoId) return;
+    if (demoNavRef.current === demoId) return;
+    if (!sessions.some((s) => s.session_id === demoId)) return; // まだ出現していない
+    demoNavRef.current = demoId;
+    pinnedSelectionRef.current = demoId;
+    setShowHistory(true);
+    select(demoId);
+    setTopView("inbox");
+  }, [safetyDemo.sessionId, sessions, select, setShowHistory]);
   // 監査詳細 →「このセッションを再生」: board + Replay へ直行する。selectedId 変化で view が
   // detail に戻る effect と、自動選択 effect の上書きを ref で無効化したうえで replay を開く。
   const openSessionReplay = useCallback(
@@ -402,6 +425,8 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
                           // per-agent 取得済みならそれを (count + Claude/Codex ✓/✗)、未取得なら daemonIds.length を
                           // count フォールバック (2a coarse 形・後方互換)。
                           readiness: agentReadiness ?? { daemonCount: daemonIds.length },
+                          // ADR 019f22a7 P1: 空状態の安全性訴求 + 30秒セーフティデモ CTA (BFF 経由起動)。
+                          safety: { phase: safetyDemo.phase, onLaunch: safetyDemo.launch },
                         }
                       : {})}
                     {...(canSearchHistory

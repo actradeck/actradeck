@@ -1,0 +1,218 @@
+name: Release
+
+# Signed, provenance-attested GitHub Release (ADR 0013 / decision 019f2bc1, Phase 1).
+#
+# This workflow SHIPS in the public mirror and fires when an annotated tag `vX.Y.Z`
+# is pushed to the mirror (scripts/version.sh stamps the tag locally; scripts/sync-oss.sh
+# carries it to the mirror with OSS_SYNC_TAGS=1). Because it runs INSIDE the mirror, the
+# tree it archives is already sanitized by scripts/prepare-oss.sh (git archive of the tag).
+#
+# Assets: (1) source tarball (git archive of the tag), (2) CycloneDX SBOM of the
+# production dependency closure (single-source scripts/lib/sbom.sh), (3) checksums.txt,
+# each attested with SLSA build provenance (actions/attest-build-provenance -> keyless
+# OIDC -> Sigstore). Consumers verify with `gh attestation verify`.
+#
+# The RELEASE signature (ephemeral OIDC cert, CI artifact) is deliberately a DIFFERENT
+# trust root from the product's AUDIT-EXPORT signature (long-lived operator Ed25519,
+# runtime data). The audit key is NEVER reused to sign releases.
+#
+# Name-agnostic: repo/owner come from ${{ github.repository }}, tag from
+# ${{ github.ref_name }} — no owner/org is hardcoded (the final public org name is
+# still unresolved and irrelevant to this workflow, which resolves it at run time).
+#
+# Action pin policy: matches .github/workflows/ci.yml (major-tag pins, e.g. @v4). The
+# repo does not SHA-pin actions today; kept consistent here rather than mixing schemes.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Least-privilege by default: the whole workflow only READS the repo. The release job
+# alone escalates (job-scoped) to the writes it needs. INV-RELEASE-WORKFLOW-PERMS-MINIMAL
+# asserts top-level == {contents: read} and that write lives only in a job.
+permissions:
+  contents: read
+
+jobs:
+  # --- verify: the tag is buildable and its version matches the tag ------------
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: pnpm
+
+      # INV-RELEASE-TAG-MATCHES-VERSION: the pushed tag MUST equal `v<root package.json
+      # version>`. A lockstep bump (scripts/version.sh) stamps every package + the tag
+      # together; this guards against tagging without stamping (or vice versa).
+      - name: Assert tag matches package.json version
+        run: |
+          root_ver="$(jq -r '.version' package.json)"
+          expected="v${root_ver}"
+          if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' != package.json version '${expected}' — run scripts/version.sh ${root_ver} to stamp+tag in lockstep" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches root version ${root_ver}"
+
+      # Lightweight buildability gate (full test/DB matrix runs in ci.yml on push to
+      # main; here we only confirm the tagged tree installs, lints, and builds).
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Build workspace
+        run: pnpm run build
+
+  # --- release: cut tarball + SBOM, attest provenance, publish the Release ------
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release + upload assets
+      id-token: write # keyless OIDC signing for attestations
+      attestations: write # record the SLSA build provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: pnpm
+
+      - name: Compute release identifiers
+        id: id
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "tag=${tag}"           >> "$GITHUB_OUTPUT"
+          echo "version=${version}"   >> "$GITHUB_OUTPUT"
+          echo "tarball=actradeck-${version}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # The tarball IS the shipped artifact (D7: NO-LEAK invariant is pinned to the
+      # git-archive tarball, not npm-pack). git archive of the tag = the sanitized
+      # mirror tree, so it is leak-free by construction; the scan below is defense in depth.
+      - name: Build source tarball (git archive of the tag)
+        # SEC-1: tag-derived step outputs are passed via env (never interpolated into the
+        # run: script body), so a crafted value cannot break out of the shell quoting.
+        env:
+          VERSION: ${{ steps.id.outputs.version }}
+          TARBALL: ${{ steps.id.outputs.tarball }}
+        run: |
+          git archive --format=tar.gz \
+            --prefix="actradeck-${VERSION}/" \
+            -o "${TARBALL}" "${GITHUB_REF_NAME}"
+
+      # Install ONLY the production dependency store so the SBOM covers prod deps.
+      # --ignore-scripts avoids native addon builds (better-sqlite3/node-pty) we don't
+      # need just to enumerate the dependency graph.
+      - name: Install production dependencies (for SBOM)
+        run: pnpm install --prod --frozen-lockfile --ignore-scripts
+
+      # Single-source SBOM generation (same scripts/lib/sbom.sh prepare-oss uses).
+      - name: Generate CycloneDX SBOM (production deps)
+        run: |
+          . scripts/lib/sbom.sh
+          sbom_generate . sbom.cdx.json
+
+      # Defense-in-depth leak gate (release ABORTS on any hit): (a) forbidden internal
+      # files must be absent from the tarball listing; (b) the SBOM passes the NO-RAW
+      # self-scan. The tarball is git archive of the sanitized mirror, whose maintainer
+      # coupling scan (maintainer home path, handle, project id) already ran at prepare-oss;
+      # a GENERIC '/home/<user>/' tree scan is intentionally NOT used here because the
+      # mirror legitimately ships synthetic example paths (/home/user, /home/me) in test
+      # fixtures and the demo cast — that would fail every real release.
+      - name: Re-scan tarball + SBOM for leaks (fail-closed)
+        env:
+          TARBALL: ${{ steps.id.outputs.tarball }} # SEC-1: via env, not run-body interpolation
+        run: |
+          set -euo pipefail
+          . scripts/lib/sbom.sh
+          tb="${TARBALL}"
+
+          echo "== (a) forbidden internal files absent from tarball =="
+          if tar tzf "$tb" | grep -aE '(^|/)(\.env|\.mcp\.json|CLAUDE\.md|AGENTS\.md|plan\.md)$|(^|/)\.claude/'; then
+            echo "::error::forbidden internal file present in release tarball" >&2
+            exit 1
+          fi
+          echo "ok: no forbidden files in tarball"
+
+          echo "== (b) SBOM NO-RAW self-scan (generated data must carry no path/secret) =="
+          sbom_scan_noraw sbom.cdx.json
+          echo "ok: SBOM clean"
+
+      - name: Generate checksums
+        env:
+          TARBALL: ${{ steps.id.outputs.tarball }} # SEC-1: via env, not run-body interpolation
+        run: sha256sum "${TARBALL}" sbom.cdx.json > checksums.txt
+
+      # SLSA build provenance (keyless OIDC -> Sigstore). Attests BOTH shipped assets.
+      - name: Attest build provenance (tarball + SBOM)
+        env:
+          TARBALL: ${{ steps.id.outputs.tarball }} # SEC-1: reference via env below
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ env.TARBALL }}
+            sbom.cdx.json
+
+      # Publish the Release via the preinstalled gh CLI (no extra action dependency).
+      # The body carries the consumer verification command, name-agnostic via the
+      # ${{ github.repository }} context (owner/name resolved at run time).
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # SEC-1: all interpolated values enter via env, never the run: body.
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          TARBALL: ${{ steps.id.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          tag="${TAG}"
+          repo="${REPO}"
+          tarball="${TARBALL}"
+          notes="$(cat <<EOF
+          ## ActraDeck ${tag}
+
+          Signed, provenance-attested release. Assets: source tarball, CycloneDX SBOM
+          (\`sbom.cdx.json\`), and \`checksums.txt\`.
+
+          ### Verify before you run it
+
+          Confirm this tarball was built by this repository's release workflow (SLSA
+          build provenance, keyless Sigstore signature):
+
+          \`\`\`sh
+          gh attestation verify ${tarball} --repo ${repo}
+          sha256sum -c checksums.txt
+          \`\`\`
+
+          Or let the installer verify for you:
+
+          \`\`\`sh
+          ACTRADECK_VERIFY=1 ACTRADECK_REF=${tag} \\
+            ACTRADECK_REPO=https://github.com/${repo} sh scripts/install.sh
+          \`\`\`
+
+          See CHANGELOG.md for what changed.
+          EOF
+          )"
+          gh release create "$tag" \
+            --repo "$repo" \
+            --title "ActraDeck $tag" \
+            --notes "$notes" \
+            "$tarball" sbom.cdx.json checksums.txt

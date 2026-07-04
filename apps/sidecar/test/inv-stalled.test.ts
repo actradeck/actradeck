@@ -30,6 +30,24 @@ import type { WsClient } from "../src/ws-client.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 条件が満たされるまで最大 deadlineMs だけ ~stepMs 間隔でポーリングする (固定 sleep の代替)。
+ *
+ * なぜ固定 sleep を避けるか: 各サンプルは pidusage が `ps` サブプロセスを spawn する。v8 coverage
+ * 計装 (`vitest run --coverage`) + マシン負荷が重なると、このサンプラが starve され、固定 sleep 窓
+ * (例: 80ms) の間に 0 件しか出ないことがある (plain `test` では緑、coverage で ~20% RED という
+ * regime 依存の timing flake)。窓を「経過時間」でなく「観測条件」で締めることで:
+ *   - 健全なサンプラ: 通常 ~40-100ms で条件到達 → 速く緑。負荷時も予算内 → 緑。
+ *   - 壊れた/死んだサンプラ: 予算 2000ms を使い切っても条件未達 → RED (falsifiability 維持)。
+ * これは testing.md の「timing flake → 予算付きポーリング (falsifiability 維持)」方針に沿う。
+ */
+const waitFor = async (cond: () => boolean, deadlineMs = 2000, stepMs = 20): Promise<void> => {
+  const start = Date.now();
+  while (!cond() && Date.now() - start < deadlineMs) {
+    await sleep(stepMs);
+  }
+};
+
 /** REAL: 実子プロセスを spawn し、生死を観測できる状態にする。 */
 function spawnSleeper(seconds: number): ChildProcess {
   // 純粋な sleep。stdout を握らず PID だけ観測対象にする。
@@ -76,11 +94,18 @@ describe("INV-STALLED: process heartbeat observes REAL process liveness", () => 
     const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
     child.kill("SIGKILL");
     await exited;
-    // OS が PID を回収するまで僅かに待つ (pidusage が ESRCH を返すまで)。
-    await sleep(50);
 
+    // OS が PID を回収する (pidusage が ESRCH を返す) まで観測する。旧: 固定 `await sleep(50)`。
+    // 計装下/高負荷で回収が 50ms 内に間に合わず alive=true を観測し flaky になり得たため、
+    // alive=false を観測するまで予算内でポーリングする。生存 PID は決して false にならないので
+    // falsifiability は維持 (壊れたサンプラなら予算を使い切っても false 未達 → RED)。
     const monitor = new ProcessMonitor({ pid, onSample: () => {} });
-    const sample = await monitor.sampleOnce();
+    let sample = await monitor.sampleOnce();
+    const started = Date.now();
+    while (sample.alive && Date.now() - started < 2000) {
+      await sleep(20);
+      sample = await monitor.sampleOnce();
+    }
     monitor.stop();
 
     expect(sample.pid).toBe(pid);
@@ -99,7 +124,9 @@ describe("INV-STALLED: process heartbeat observes REAL process liveness", () => 
       onSample: (s) => samples.push(s.alive),
     });
     monitor.start();
-    await sleep(80);
+    // 旧: 固定 `await sleep(80)`。coverage 計装下でサンプラ (ps spawn) が starve され 80ms 窓で
+    // 0 件になり ~20% RED だった。時間でなく「サンプル 2 件蓄積」を条件に予算内で待つ (assert は厳格維持)。
+    await waitFor(() => samples.length >= 2);
     monitor.stop();
     expect(samples.length).toBeGreaterThanOrEqual(2); // heartbeat が複数出る
     expect(samples.every((a) => a === true)).toBe(true);
@@ -142,7 +169,9 @@ describe("INV-STALLED: managed-runner emits process_alive heartbeat from a REAL 
     });
     expect(session.pid).toBeGreaterThan(0);
 
-    await sleep(120);
+    // 旧: 固定 `await sleep(120)`。同じ coverage regime の flake 面 (heartbeat 蓄積が予算内で
+    // 来ないと 0 件)。heartbeat が 1 件以上蓄積するまで予算内で待つ (assert は厳格維持)。
+    await waitFor(() => heartbeats.length >= 1);
     session.dispose();
     session.stop("SIGKILL");
     store.close();

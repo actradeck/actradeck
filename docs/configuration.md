@@ -78,6 +78,7 @@ Defaults are right for almost everyone; these exist for unusual setups.
 | `ACTRADECK_CLAUDE_BIN` / `ACTRADECK_CODEX_BIN` | `claude` / `codex` on `PATH` | Binary paths for Managed mode (`agentmon claude` / `agentmon codex`). |
 | `ACTRADECK_ATTACH_IDLE_TTL_MS` | _(built-in)_ | How long an attach session may stay silent before being reaped as ended. Raise it if long-idle sessions get marked ended too eagerly. |
 | `ACTRADECK_ATTACH_REAPER_INTERVAL_MS` | _(built-in)_ | How often the reaper scans for idle sessions. |
+| `ACTRADECK_CODEX_RPC_TIMEOUT_MS` | `25000` (25s) | JSON-RPC request timeout for the Managed Codex (App Server) handshake. Fails fast instead of waiting forever on a hung `codex app-server`. `0` or a negative/non-numeric value falls back to the default. |
 
 ## Not configuration
 

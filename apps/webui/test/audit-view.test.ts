@@ -8,9 +8,12 @@ import {
   aggregateSessions,
   buildAuditUrl,
   buildSessionAuditUrl,
+  buildSessionReportUrl,
   decidedTotal,
   distinctProjects,
   entryPrimaryText,
+  exportAccept,
+  exportMime,
   filterSessions,
   formatKindCounts,
   formatStamp,
@@ -60,6 +63,47 @@ describe("buildAuditUrl", () => {
     expect(buildAuditUrl({ limit: 0 })).toBe("/realtime/audit/sessions");
     expect(buildAuditUrl({ limit: -3 })).toBe("/realtime/audit/sessions");
     expect(buildAuditUrl({ limit: 2.5 })).toBe("/realtime/audit/sessions");
+  });
+
+  it("P2: html/md format も query へ載る (ADR 019f2326)", () => {
+    expect(buildAuditUrl({ format: "html" })).toBe("/realtime/audit/sessions?format=html");
+    expect(buildAuditUrl({ format: "md" })).toBe("/realtime/audit/sessions?format=md");
+  });
+});
+
+describe("buildSessionReportUrl (P2・ADR 019f2326)", () => {
+  it("format を query へ・session_id はエスケープ・token なし", () => {
+    expect(buildSessionReportUrl("abc-123", "html")).toBe(
+      "/realtime/audit/sessions/abc-123/report?format=html",
+    );
+    expect(buildSessionReportUrl("a/b?x", "md")).toBe(
+      "/realtime/audit/sessions/a%2Fb%3Fx/report?format=md",
+    );
+    expect(buildSessionReportUrl("abc", "json")).not.toContain("token");
+  });
+
+  it("includeDiff=true のときのみ diff=1 を付与 (既定 off)", () => {
+    expect(buildSessionReportUrl("abc", "html", false)).toBe(
+      "/realtime/audit/sessions/abc/report?format=html",
+    );
+    expect(buildSessionReportUrl("abc", "html", true)).toBe(
+      "/realtime/audit/sessions/abc/report?format=html&diff=1",
+    );
+  });
+});
+
+describe("exportMime / exportAccept (P2 export 形式ごとの MIME/Accept)", () => {
+  it("形式ごとに正しい MIME を返す", () => {
+    expect(exportMime("json")).toBe("application/json");
+    expect(exportMime("csv")).toBe("text/csv;charset=utf-8");
+    expect(exportMime("html")).toBe("text/html;charset=utf-8");
+    expect(exportMime("md")).toBe("text/markdown;charset=utf-8");
+  });
+  it("形式ごとに正しい Accept を返す", () => {
+    expect(exportAccept("json")).toBe("application/json");
+    expect(exportAccept("csv")).toBe("text/csv");
+    expect(exportAccept("html")).toBe("text/html");
+    expect(exportAccept("md")).toBe("text/markdown");
   });
 });
 

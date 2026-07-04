@@ -649,6 +649,71 @@ textarea {
   text-align: center;
 }
 
+// ADR 019f22a7 P1: 空状態の安全性訴求 + 30秒セーフティデモ CTA。readiness パネル下に控えめな枠で置く。
+.ad-safety {
+  display: grid;
+  gap: 0.75rem;
+  place-items: center;
+  width: 100%;
+  max-width: 34rem;
+  margin-top: 0.5rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: 0.5rem;
+  background: var(--ad-bg-subtle, transparent);
+  text-align: center;
+}
+
+.ad-safety__title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ad-fg);
+}
+
+.ad-safety__lead {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  color: var(--ad-fg-muted);
+}
+
+// 「止める・残さない・証明できる」capability 行 (静的✓を使わない・デモで実証する)。
+.ad-safety__caps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.375rem;
+  width: 100%;
+  font-size: 0.8125rem;
+  line-height: 1.2rem;
+  text-align: left;
+
+  li {
+    display: grid;
+    grid-template-columns: minmax(4.5rem, auto) 1fr;
+    gap: 0.5rem;
+    align-items: baseline;
+    color: var(--ad-fg);
+  }
+}
+
+.ad-safety__verb {
+  font-weight: 600;
+  color: var(--ad-status-success-fg);
+}
+
+.ad-safety__progress {
+  font-size: 0.75rem;
+  color: var(--ad-fg-muted);
+}
+
+.ad-safety__error {
+  font-size: 0.75rem;
+  color: var(--ad-status-danger-fg, var(--ad-status-warn-fg));
+}
+
 .ad-session-table {
   table-layout: fixed;
 }
@@ -989,6 +1054,48 @@ textarea {
 
 .ad-policy__cat-label {
   flex: 1;
+}
+
+/* ADR 019f23e1: 承認ポリシー preset (Strict/Balanced/Demo) セレクタ。category checkbox 群の上に加法。 */
+.ad-policy-preset {
+  display: grid;
+  gap: 0.375rem;
+  padding: 0.5rem 0 0.25rem;
+}
+
+.ad-policy-preset__legend {
+  margin: 0;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ad-policy-preset__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.ad-policy-preset__current {
+  display: flex;
+  gap: 0.375rem;
+  align-items: center;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.ad-policy-preset__current-label {
+  color: var(--ad-fg-muted);
+}
+
+.ad-policy-preset__summary,
+.ad-policy-preset__scope {
+  margin: 0;
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 
 /* ADR 019f0eca: per-repo 承認ポリシー設定画面 (master-detail・監査タブ隣のトップレベルビュー)。 */
@@ -2420,8 +2527,36 @@ textarea {
 .ad-modal__header-actions {
   display: flex;
   flex-shrink: 0;
+  flex-wrap: wrap;
   gap: var(--ad-space-2);
   align-items: center;
+  justify-content: flex-end;
+}
+
+// P2 監査レポート export (ADR 019f2326): レポート出力ラベル + diff トグル + HTML/MD/JSON ボタン群。
+.ad-audit-report {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ad-space-2);
+  padding: var(--ad-space-1) var(--ad-space-2);
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: var(--ad-radius-2, 6px);
+}
+
+.ad-audit-report__label {
+  font-size: 0.75rem;
+  color: var(--ad-fg-muted);
+  white-space: nowrap;
+}
+
+.ad-audit-report__diff {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ad-space-1);
+  font-size: 0.75rem;
+  color: var(--ad-fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 .ad-modal__title {

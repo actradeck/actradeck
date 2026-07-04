@@ -102,6 +102,16 @@ jobs:
           bash scripts/test-install.sh
           bash scripts/test-install-e2e.sh
 
+      # Release / supply-chain gate (ADR 0013): lockstep version single-source, tag↔version
+      #   match, tarball has no internal/secret content, SBOM covers prod deps + carries no
+      #   raw paths, release.yml permissions are least-privilege, and install.sh's verify
+      #   path rejects a tampered/absent-attestation tarball. Needs the installed prod store
+      #   (SBOM via pnpm licenses) — runs after Install; git + python3 present on the runner.
+      #   Self-adapts in the public mirror (builds the tarball via `git archive HEAD` when the
+      #   private prepare-oss tooling is absent). Wiring it here keeps the gate from going dead.
+      - name: Release prep gate (version/SBOM/tarball/perms/install-verify)
+        run: bash scripts/test-release-prep.sh
+
       # 3#QA-1: db テストが参照する events/sessions スキーマを用意 (実 Postgres)。
       - name: Migrate up (provision schema for real-DB INV)
         run: pnpm --filter @actradeck/db run migrate:up

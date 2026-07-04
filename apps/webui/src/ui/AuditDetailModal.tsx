@@ -19,8 +19,11 @@ import { decisionLabel, formatClock, riskTone } from "./action-units-display";
 import {
   buildRedactionOccurrencesUrl,
   buildSessionAuditUrl,
+  buildSessionReportUrl,
   decidedTotal,
   entryPrimaryText,
+  exportAccept,
+  exportMime,
   formatStamp,
   occurrencePrimaryText,
   parseAuditSession,
@@ -28,6 +31,7 @@ import {
   projectLabel,
   shortenPath,
   sortedKindCounts,
+  type AuditReportFormat,
   type AuditSessionSummary,
   type RedactionOccurrences,
 } from "./audit-view";
@@ -74,6 +78,12 @@ export function AuditDetailModal({
   // drill-down 専用の世代ガード (kind 切替で最新のみ反映)。
   const occGenRef = useRef(0);
 
+  // P2 監査レポート export (ADR 019f2326): 単一セッション詳細レポートを HTML/MD/JSON で書き出す。
+  //   diff トグルは on-demand redacted diff を含めるか (既定 off・live 接続時のみ内容が付く・切断時は
+  //   backend が本文へ「取得不可」を明記して graceful)。エラーは固定リテラルのみ (原文/URL 非エコー)。
+  const [includeDiff, setIncludeDiff] = useState(false);
+  const [reportError, setReportError] = useState<string | undefined>(undefined);
+
   // session 切替/クローズで drill-down 表示も破棄する (別 session の occurrence を残さない)。
   const resetDrilldown = (): void => {
     occGenRef.current++;
@@ -89,6 +99,7 @@ export function AuditDetailModal({
       genRef.current++;
       setSummary(undefined);
       setError(undefined);
+      setReportError(undefined);
       setLoading(false);
       resetDrilldown();
       return;
@@ -96,6 +107,7 @@ export function AuditDetailModal({
     const gen = ++genRef.current;
     setLoading(true);
     setError(undefined);
+    setReportError(undefined);
     setSummary(undefined);
     resetDrilldown();
     void (async () => {
@@ -160,6 +172,34 @@ export function AuditDetailModal({
     })();
   };
 
+  // P2 レポート出力: report route を BFF 経由 (same-origin・token 非搭載) で pull し client blob download。
+  //   HTML/MD/JSON は backend の redacted-at-rest formatter 由来 (INV-AUDIT-EXPORT-NO-RAW)。エラーは
+  //   固定リテラルのみで URL/原文をエコーしない。ファイル名は client の a.download で付与する。
+  const downloadReport = async (format: AuditReportFormat): Promise<void> => {
+    if (sessionId === null) return;
+    setReportError(undefined);
+    try {
+      const url = buildSessionReportUrl(sessionId, format, includeDiff);
+      const res = await fetch(url, { headers: { accept: exportAccept(format) } });
+      if (!res.ok) {
+        setReportError(t("audit.report.error"));
+        return;
+      }
+      const text = await res.text();
+      const blob = new Blob([text], { type: exportMime(format) });
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = `actradeck-session-${sessionId}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(href);
+    } catch {
+      setReportError(t("audit.report.error"));
+    }
+  };
+
   const meta: ReadonlyArray<readonly [string, string | undefined]> =
     summary === undefined
       ? []
@@ -200,6 +240,52 @@ export function AuditDetailModal({
           ) : null}
         </h2>
         <div className="ad-modal__header-actions">
+          {sessionId !== null ? (
+            <div
+              className="ad-audit-report"
+              role="group"
+              aria-label={t("audit.report.export")}
+              data-testid="audit-report-export"
+            >
+              <span className="ad-audit-report__label">{t("audit.report.export")}</span>
+              <label className="ad-audit-report__diff" title={t("audit.report.includeDiff.title")}>
+                <input
+                  type="checkbox"
+                  checked={includeDiff}
+                  onChange={(e) => setIncludeDiff(e.target.checked)}
+                  data-testid="audit-report-diff"
+                />
+                <span>{t("audit.report.includeDiff")}</span>
+              </label>
+              <Button
+                kind="ghost"
+                size="sm"
+                data-testid="audit-report-html"
+                title={t("audit.report.html.title")}
+                onClick={() => void downloadReport("html")}
+              >
+                {t("audit.report.html")}
+              </Button>
+              <Button
+                kind="ghost"
+                size="sm"
+                data-testid="audit-report-md"
+                title={t("audit.report.markdown.title")}
+                onClick={() => void downloadReport("md")}
+              >
+                {t("audit.report.markdown")}
+              </Button>
+              <Button
+                kind="ghost"
+                size="sm"
+                data-testid="audit-report-json"
+                title={t("audit.report.json.title")}
+                onClick={() => void downloadReport("json")}
+              >
+                {t("audit.report.json")}
+              </Button>
+            </div>
+          ) : null}
           {onReplay && sessionId !== null ? (
             <Button
               kind="primary"
@@ -223,6 +309,11 @@ export function AuditDetailModal({
       <div className="ad-modal__body">
         {loading ? <p className="ad-modal__muted">{t("audit.loading")}</p> : null}
         {error !== undefined ? <p className="ad-modal__error">{error}</p> : null}
+        {reportError !== undefined ? (
+          <p className="ad-modal__error" data-testid="audit-report-error">
+            {reportError}
+          </p>
+        ) : null}
 
         {summary !== undefined ? (
           <>

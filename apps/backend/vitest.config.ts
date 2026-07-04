@@ -15,6 +15,8 @@ import { defaultExclude, defineConfig } from "vitest/config";
  * ため real-PG ではなく unit 側。
  */
 const REAL_PG_TESTS = [
+  "test/inv-audit-packet-route.test.ts",
+  "test/inv-audit-report-route.test.ts",
   "test/inv-detail-pull.test.ts",
   "test/inv-inbox.test.ts",
   "test/inv-ingest-store.test.ts",
@@ -113,9 +115,30 @@ export default defineConfig({
         //   到達不可・他 route の :226/:294 と同型の防御コード) を 1 行追加し 98→96 台へ。500 catch は
         //   forced-error テストで実カバー済。残る未到達は全 route 共通の defensive guard ゆえ実測直下
         //   (97.04/96.79) に張り直す (緩めでなく現実トラッキング・契約 70/80 は大幅超)。
-        "src/realtime-server.ts": { statements: 96, branches: 88, functions: 90, lines: 96 },
+        //   ADR 6点強化 #2: レビュー・パケット route (packet GET + packet/verify) を追加。GET の
+        //   json/400/404/500-catch/format/dedup/25超 は fake-store guards + real-pg で実カバー、
+        //   packet/verify の catch は decode/verify が内部 catch ゆえ到達不能な defensive guard
+        //   (単一 verify と同型)。実測 (単一 run) 95.88/lines 96.84 → floor 94/95 = 実 margin ≈1.85pt
+        //   (TDA-L1: 「3-5pt」は誤記・訂正)。route handler の statement/line 被覆は awaited で run 間安定
+        //   (funcs のような小-N callback flake なし) ゆえ ≈1.85pt でも erosion tripwire として実運用可。
+        //   ただし real-PG skip regime では packet route 分岐が落ちて CI-worst が下振れしうる (未計測)。
+        "src/realtime-server.ts": { statements: 94, branches: 88, functions: 90, lines: 95 },
         "src/realtime-store.ts": { statements: 87, branches: 72, functions: 95, lines: 95 },
         "src/sidecar-registry.ts": { statements: 88, branches: 72, functions: 95, lines: 95 },
+        // QA-2 (ADR 019f280c 監査): INV-SAFETY-DEMO + INV-DEMO-SPAWN-PATH-INDEPENDENT を担う
+        //   INV-bearing ファイルに erosion tripwire を張る (global 90/78/92/92 だけでは silent erode)。
+        //   実測 98.36/87.09/100/100。floor は WORST-observed の下 (per-file-coverage-floor-below-worst-
+        //   not-best): funcs は 100/N 感度で callback 未発火の run に脆いため 92 まで下げて非 flaky に。
+        "src/safety-demo.ts": { statements: 94, branches: 80, functions: 92, lines: 96 },
+        // ADR 6点強化 #1: tamper-evident audit の crypto (canonicalize/chain/ed25519 sign/verify) は
+        //   security-critical ゆえ INV-AUDIT-INTEGRITY の erosion tripwire を張る。SEC-1 v2 rework 後の
+        //   実測 (INV + route suite) 94.73/94.36/100/95.45。floor は WORST の下 (fail-safe crypto catch と
+        //   funcs≠100 感度で flake 耐性・per-file-coverage-floor-below-worst-not-best)。
+        "src/audit-integrity.ts": { statements: 88, branches: 85, functions: 92, lines: 88 },
+        // ADR 6点強化 #2: レビュー・パケットのガバナンス導出 (hard/soft/auto) + 集約 + 描画。
+        //   security/監査-relevant ゆえ erosion tripwire を張る。実測 97.46/80.85/100/97.29。floor は
+        //   WORST の下 (branches は flagged/diff 分岐で 80 台・funcs は 100/N 感度で 92 まで下げ非 flaky)。
+        "src/audit-packet.ts": { statements: 92, branches: 74, functions: 92, lines: 92 },
       },
     },
   },

@@ -1,16 +1,18 @@
 # ActraDeck
 
-**The vendor-neutral control plane for coding-agent approvals, secrets, and audit.**
+**The vendor-neutral control plane for coding agents — secret redaction, cross-vendor audit, and approval governance in one cockpit.**
 
 ActraDeck sits beside your coding agents — Claude Code, Codex, and whatever comes
-next — and gives you **one place to approve what they do, stop secrets before they
-are stored, and keep an audit trail across vendors**. It is local-first: a sidecar
-on your machine collects structured events, redacts secrets _before_ anything is
-persisted, and serves a web cockpit you control.
+next — and gives you **one place to watch what they do, stop secrets before they
+are stored, and keep an audit trail across vendors**. Approvals relay to the cockpit
+for Claude Code out of the box, and for Codex in Managed Mode (see the
+[support matrix](#vendor--mode-support)). It is local-first: a sidecar on your machine
+collects structured events, redacts secrets _before_ anything is persisted, and serves
+a web cockpit you control.
 
 > Status: **early / active development (pre-1.0).** The pieces below work today; the
-> declarative policy engine, tamper-evident audit export, and team features are on
-> the roadmap. Expect rough edges and breaking changes.
+> declarative policy engine and team features are on the roadmap. Expect rough edges
+> and breaking changes.
 
 ## See it in action
 
@@ -36,11 +38,17 @@ vendor structurally will not build: **neutral governance across competing agents
 - **Approval governance, not just a prompt.** A structural risk classifier gates
   high-risk commands; an opt-in persistent allowlist lets you skip re-approving
   _safe_ operations without ever auto-allowing dangerous ones.
-- **Secrets never hit disk.** Redaction runs _before_ persist/transmit — secret
-  keys, tokens, `.env` contents are masked at the choke point, with per-kind counts
-  shown in the UI (the values themselves are never stored).
+- **Secrets are redacted before persist or transmit.** A single choke-point redactor
+  (INV-REDACTION) masks detected secret keys, tokens, and `.env` contents _before_ any
+  event reaches disk or the network, with per-kind counts shown in the UI. Detection is
+  best-effort pattern matching (gitleaks-style rules + custom regexes) — a strong safety
+  net, not an absolute guarantee (see [honest limits](./docs/approval-policy.md#honest-limits)).
 - **Audit & replay.** Every session can be replayed after the fact for review,
-  incident analysis, or compliance.
+  incident analysis, or compliance. Session reports export to HTML/Markdown with an
+  embedded integrity manifest (SHA-256 hash chain). Enable `ACTRADECK_AUDIT_SIGNING_KEY`
+  (Ed25519) for a signed, **tamper-evident** report that a recipient can verify was not
+  altered after export; without a key the manifest is chain-only (internal integrity).
+  Detecting tampering of the underlying store _before_ export is out of scope (roadmap).
 - **Cross-vendor.** One event model and one audit trail spanning Claude Code _and_
   Codex, surfaced in one approval inbox (see the support matrix for what each mode
   relays — more agents over time).
@@ -72,8 +80,10 @@ agent) adds approval relay for Codex.
 
 So **observation, redaction, and audit are cross-vendor today** in the default Attach
 Mode. **Approval relay** works for Claude Code over Attach; for Codex it requires
-Managed Mode (App Server) — over Attach, Codex is observed and its native approvals
-still happen in its own TUI. (Claude Code in Managed Mode is all ✅, omitted for brevity.)
+Managed Mode — launch it with `agentmon codex -- "<prompt>"` and its App Server
+approvals relay to the cockpit (allow / deny / allow-for-session). Over Attach, Codex is
+observed and its native approvals still happen in its own TUI. (Claude Code in Managed
+Mode is all ✅, omitted for brevity.)
 
 ## Quickstart
 
@@ -112,9 +122,9 @@ cd ~/any/project && claude     # or: codex  → shows up in the cockpit
 ```
 
 > Both agents appear immediately. Over Attach (the default), **Codex is observed** —
-> its approvals stay in its own TUI; cockpit **approval relay for Codex needs Managed
-> Mode** (see the [support matrix](#vendor--mode-support)). Claude Code approvals
-> relay over Attach.
+> its approvals stay in its own TUI. To relay Codex approvals to the cockpit, launch it
+> in **Managed Mode** instead: `agentmon codex -- "<prompt>"` (see the
+> [support matrix](#vendor--mode-support)). Claude Code approvals relay over Attach.
 
 `quickstart` is idempotent and generates a `.env` with random local secrets on first
 run. It daemonizes the four tiers via `systemd --user` (Linux) or **launchd
@@ -135,8 +145,10 @@ troubleshooting). The precision/limits of Attach Mode are in
 [`docs/attach-mode.md`](./docs/attach-mode.md).
 
 > Attach Mode is observability + approval/redaction/audit oriented and does not
-> require launching agents through ActraDeck. A higher-fidelity Managed Mode
-> (ActraDeck spawns the agent) is also planned/partially available.
+> require launching agents through ActraDeck. **Managed Mode** (ActraDeck spawns the
+> agent via the Codex App Server) ships today and is what relays Codex approvals to the
+> cockpit — launch a session with `agentmon codex -- "<prompt>"`. See
+> [`docs/attach-mode.md`](./docs/attach-mode.md) for its precise limits.
 
 ## Architecture
 

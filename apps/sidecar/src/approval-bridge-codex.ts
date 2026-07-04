@@ -144,6 +144,13 @@ export interface CodexApprovalBridgeOptions {
   readonly sessionId: () => string;
   /** UI 承認カードを emit する (sink.emit へ writelidthrough; redaction は sink が担保)。 */
   readonly emitCard: (card: CodexApprovalCard, requestId: string) => void;
+  /**
+   * TDA-1 (ADR 019f2476): 承認解決を `tool.permission.resolved` 監査イベントとして emit する
+   * (emitCard と対称の seam; codex-runner が emitCodex 経由で sink.emit へ writethrough)。
+   * claude (hook-receiver.ts) と同一契約で ①Approval Inbox カードの clear ②決定の監査証跡 を成立させる。
+   * NO-RAW: payload は kind/request_id/decision(enum) のみ (raw command 非再掲)。redaction は sink が担保。
+   */
+  readonly emitResolved: (requestId: string, decision: ApprovalDecision | "deny") => void;
   /** 解決した decision を codex へ JSON-RPC Response として送る。 */
   readonly sendResponse: (id: CodexRequestId, result: Record<string, unknown>) => void;
 }
@@ -161,6 +168,11 @@ export class CodexApprovalBridge {
   private readonly opts: CodexApprovalBridgeOptions;
   /** codex id(string) → 進行中フラグ (二重受信ガード)。 */
   private readonly inFlight = new Set<string>();
+  /**
+   * R4 (ADR 019f2421): child 消失後は codex へ Response を書かない (死 pipe write=R2 crash 誘発 を防ぐ)。
+   * cancelInFlight で一度立てたら永続 (child は再生しない)。finish の sendResponse を構造的に抑止する。
+   */
+  private suppressed = false;
 
   constructor(opts: CodexApprovalBridgeOptions) {
     this.bridge = opts.bridge;
@@ -251,12 +263,55 @@ export class CodexApprovalBridge {
     kind: CodexApprovalKind,
     decision: ApprovalDecision | undefined,
   ): void {
-    if (!this.inFlight.has(key)) return; // 既に応答済み (idempotent)
+    if (!this.inFlight.has(key)) return; // 既に応答済み / cancelInFlight 済み (idempotent)
     this.inFlight.delete(key);
     const requestId = this.forward.get(key);
     this.forward.delete(key);
     if (requestId !== undefined) this.reverse.delete(requestId);
+    // TDA-1 (ADR 019f2476): 解決を tool.permission.resolved として対称 emit (カード clear + 監査証跡)。
+    //   正常な operator 決定 + timeout/drain (decision undefined → deny) を覆う。これは sink 監査
+    //   イベント (codex への write でない) ゆえ suppressed と独立 = suppressed ガードより **前** に emit し、
+    //   finish が inFlight ガードを通過したときは常に監査行が出る (正常経路では suppressed=false)。
+    //   requestId 未確定 (稀: card emit 前の異常経路) は突合対象が無いため emit しない。
+    if (requestId !== undefined) this.opts.emitResolved(requestId, decision ?? "deny");
+    // R4: child 消失後は死 pipe へ書かない (sendResponse 抑止)。primary な bridge 解決は既に済んでいる。
+    if (this.suppressed) return;
     this.opts.sendResponse(id, buildApprovalResultBody(kind, decision));
+  }
+
+  /**
+   * R4 (ADR 019f2421): codex child が exit したとき、in-flight の承認を **死 pipe へ write せず** 安全側
+   * deny へ即解決する。child 消失⟹deny 等価 (fail-safe)。
+   *
+   * - `suppressed=true` で以降の finish の sendResponse を構造抑止 (死 pipe write=R2 crash 誘発 を防ぐ)。
+   * - 各 in-flight の **in-memory ApprovalBridge pending** を **deny 解決** し、待機中の承認 Promise を
+   *   安全側 deny へ解決して 30s ApprovalBridge timeout の宙吊りを除去する。`.then(finish)` は microtask で
+   *   走るが、下で inFlight を先に掃除するため no-op になる (sendResponse に到達しない)。
+   *   **監査行 (TDA-1 / ADR 019f2476 で解決)**: 各 in-flight entry に対し `emitResolved(requestId, "deny")` を
+   *   emit し、child-exit deny を **監査証跡へ記録** + Approval Inbox カードを **clear** する (claude と対称)。
+   *   これは sink 監査イベント (codex への write でない) ゆえ suppressed と独立に emit する。safe-deny の
+   *   enforcement 自体は child が既に消失している事実 (死 pipe へ Response を書かない ⟹ codex は承認を得られない)
+   *   で担保され、resolved emit はそれに **監査 + UI 終端** を足す。
+   * - **冪等**: 既 suppress なら再入 no-op。bridge.resolve は pending 削除済みなら false (二重解決しない)。
+   *   global shutdown drain (sidecar.ts) / 30s timer が後で発火しても、pending は解決済で no-op。
+   */
+  cancelInFlight(): void {
+    if (this.suppressed) return; // 冪等: child exit は 1 回。
+    this.suppressed = true;
+    for (const key of [...this.inFlight]) {
+      const requestId = this.forward.get(key);
+      // inFlight/maps を先に掃除し、遅延する .then(finish) を idempotent no-op 化する。
+      this.inFlight.delete(key);
+      this.forward.delete(key);
+      if (requestId !== undefined) {
+        this.reverse.delete(requestId);
+        // TDA-1 (ADR 019f2476): child-exit deny を tool.permission.resolved(deny) として emit し、
+        //   監査証跡へ記録 + Approval Inbox カードを clear する (finish 経路と対称)。
+        this.opts.emitResolved(requestId, "deny");
+        // bridge pending を安全側 deny へ解決 (UI terminal + 監査 deny)。pending 無ければ false (無害)。
+        this.bridge.resolve(requestId, "deny", "codex child exited (safe default: deny)");
+      }
+    }
   }
 
   /** 進行中の承認件数 (検証用)。 */

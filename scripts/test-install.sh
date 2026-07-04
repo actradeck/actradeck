@@ -48,14 +48,23 @@ assert_absent() {
 assert_exit 0 "sh -n install.sh (POSIX パース)" -- sh -n "$IN"
 assert_exit 0 "bash -n install.sh" -- bash -n "$IN"
 
-# 2. 部分ダウンロード耐性の構造不変条件: 全ロジックが main() に包まれ、末尾で 1 回だけ呼ばれる。
+# 2. 部分ダウンロード耐性の構造不変条件: 全ロジックが main() に包まれ、1 回だけ呼ばれる。
 #    (途中切断で main 定義前に切れたら no-op になる rustup 流の安全形。)
+#    main の呼出しは verified-install (ADR 0013) 導入で SOURCE_ONLY guard 内へ入り
+#    インデントされたため、行頭 anchored でなく indent 非依存で数える (新契約)。
 if grep -qE '^main\(\)[[:space:]]*\{' "$IN"; then ok "main() が定義されている"; else ng "main() 定義が無い"; fi
-main_calls="$(grep -cE '^main "\$@"' "$IN")"
-[ "$main_calls" = 1 ] && ok "main \"\$@\" が末尾で 1 回だけ呼ばれる" || ng "main \"\$@\" の呼出し回数が 1 でない (got=$main_calls)"
-# main "$@" が実効的な最終行 (以降は空行/コメントのみ)。
-tail_noise="$(awk 'f{if($0!~/^[[:space:]]*(#.*)?$/) c++} /^main "\$@"/{f=1} END{print c+0}' "$IN")"
-[ "$tail_noise" = 0 ] && ok "main \"\$@\" 以降に実行コードが無い" || ng "main \"\$@\" の後に実行コードがある (lines=$tail_noise)"
+main_calls="$(grep -cE '^[[:space:]]*main "\$@"[[:space:]]*$' "$IN")"
+[ "$main_calls" = 1 ] && ok "main \"\$@\" が 1 回だけ呼ばれる (indent 非依存)" || ng "main \"\$@\" の呼出し回数が 1 でない (got=$main_calls)"
+
+# 2b. 新不変条件 (SOURCE_ONLY guard): テストが純関数を取り出すために source しても
+#     main が実行されない = 副作用ゼロ。guard が壊れる (main が無条件実行される) と
+#     source 時に installer banner が出るか、未知引数でエラーする → 下の 2 assert が赤化。
+src_probe="$(ACTRADECK_INSTALL_SOURCE_ONLY=1 sh -c '. "$1"; printf SOURCED_END' _ "$IN" 2>&1)"
+if printf '%s' "$src_probe" | grep -qF 'SOURCED_END'; then ok "SOURCE_ONLY=1 で source が最後まで到達 (guard が main を抑止)"; else ng "SOURCE_ONLY=1 の source が完走しない (guard 不全 / main が実行された): $src_probe"; fi
+if printf '%s' "$src_probe" | grep -qF 'ActraDeck installer'; then ng "SOURCE_ONLY=1 でも main が実行された (installer banner 出力・副作用あり)"; else ok "SOURCE_ONLY=1 で main の副作用ゼロ (banner 非出力)"; fi
+# 関数が source 後に利用可能 (SOURCE_ONLY の目的 = 純関数のテスト)。
+fn_probe="$(ACTRADECK_INSTALL_SOURCE_ONLY=1 sh -c '. "$1"; command -v verify_sha256 >/dev/null 2>&1 && printf HASFN' _ "$IN" 2>&1)"
+if printf '%s' "$fn_probe" | grep -qF 'HASFN'; then ok "source 後に verify 純関数 (verify_sha256) が利用可能"; else ng "source 後に verify_sha256 が未定義 (SOURCE_ONLY の目的を満たさない)"; fi
 
 # 3. --help: exit 0 + Usage と env override 名を出す (契約)。
 assert_exit 0 "--help は exit 0" -- sh "$IN" --help

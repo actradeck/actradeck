@@ -25,6 +25,7 @@ Status values: **Accepted** (in force) · **Superseded** · **Proposed**.
 | [0010](0010-auto-guard-secret-in-input.md)     | Auto-guard: a secret in tool input escalates to an approval                        | Accepted |
 | [0011](0011-attach-mode.md)                    | Attach Mode: non-destructive wiring, observability-first; Codex via rollout tail   | Accepted |
 | [0012](0012-threat-model-and-local-fs.md)      | Threat model: single-operator / local-fs / loopback; advisory locks; 0600 writes   | Accepted |
+| [0013](0013-release-signing-and-distribution.md) | Release signing & distribution: signed GitHub Releases, CycloneDX SBOM, SLSA provenance | Accepted |
 
 > This export is a curated backbone, not the complete decision history. More ADRs
 > will be added as areas stabilize.

@@ -73,15 +73,44 @@ export interface AuditRangeReport {
 const AUDIT_BASE = "/realtime/audit/sessions";
 const DECISIONS: readonly AuditDecision[] = ["allow", "allow_for_session", "deny", "cancel"];
 
+/** 期間集計 export の出力形式 (json/csv は既存・html/md は P2・ADR 019f2326)。 */
+export type AuditExportFormat = "json" | "csv" | "html" | "md";
+/** 単一セッション詳細レポートの出力形式 (csv は無し・時系列レンダリングは html/md/json のみ)。 */
+export type AuditReportFormat = "html" | "md" | "json";
+
+/** export 形式ごとの Blob MIME (client 側 a.download 用・charset を明示)。 */
+const EXPORT_MIME: Record<AuditExportFormat, string> = {
+  json: "application/json",
+  csv: "text/csv;charset=utf-8",
+  html: "text/html;charset=utf-8",
+  md: "text/markdown;charset=utf-8",
+};
+/** export 形式ごとの Accept ヘッダ (backend の content-type 分岐に対応)。 */
+const EXPORT_ACCEPT: Record<AuditExportFormat, string> = {
+  json: "application/json",
+  csv: "text/csv",
+  html: "text/html",
+  md: "text/markdown",
+};
+
+/** Blob 生成用の MIME (未知値は json 既定・型で網羅済み)。 */
+export function exportMime(format: AuditExportFormat): string {
+  return EXPORT_MIME[format] ?? EXPORT_MIME.json;
+}
+/** fetch の Accept ヘッダ (未知値は json 既定・型で網羅済み)。 */
+export function exportAccept(format: AuditExportFormat): string {
+  return EXPORT_ACCEPT[format] ?? EXPORT_ACCEPT.json;
+}
+
 /**
  * 監査集約 endpoint の same-origin URL を組む。from/to は ISO8601 (空は付けない)。
- * format=csv|json は export 用。token は付けない (BFF が server-side で付与)。
+ * format=json|csv|html|md は export 用。token は付けない (BFF が server-side で付与)。
  */
 export function buildAuditUrl(opts: {
   readonly from?: string;
   readonly to?: string;
   readonly limit?: number;
-  readonly format?: "json" | "csv";
+  readonly format?: AuditExportFormat;
 }): string {
   const q = new URLSearchParams();
   if (opts.from) q.set("from", opts.from);
@@ -223,6 +252,24 @@ export function parseAuditReport(raw: unknown): AuditRangeReport {
 export function buildSessionAuditUrl(sessionId: string, format?: "json" | "csv"): string {
   const base = `${AUDIT_BASE}/${encodeURIComponent(sessionId)}`;
   return format ? `${base}?format=${format}` : base;
+}
+
+/**
+ * P2 監査レポート (ADR 019f2326): 単一セッション詳細レポート endpoint の same-origin URL。
+ * `buildSessionAuditUrl` (detail JSON) とは別・report 専用の `/report` サフィックス。時系列
+ * (command/exit_code/decision/risk/redaction by-kind/時刻) を html|md|json でレンダリングする。
+ * includeDiff=true で `?diff=1` を付与し on-demand redacted diff を含める (live 接続時のみ・切断時は
+ * backend が本文へ「取得不可」を明記して graceful)。session_id は encodeURIComponent でエスケープ
+ * (path injection 防止)。token は付けない (BFF が server-side で付与)。
+ */
+export function buildSessionReportUrl(
+  sessionId: string,
+  format: AuditReportFormat,
+  includeDiff = false,
+): string {
+  const q = new URLSearchParams({ format });
+  if (includeDiff) q.set("diff", "1");
+  return `${AUDIT_BASE}/${encodeURIComponent(sessionId)}/report?${q.toString()}`;
 }
 
 /**

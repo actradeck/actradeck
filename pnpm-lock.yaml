@@ -112,6 +112,9 @@ importers:
       '@actradeck/backend':
         specifier: workspace:*
         version: link:../backend
+      '@actradeck/projection':
+        specifier: workspace:*
+        version: link:../../packages/projection
       '@types/better-sqlite3':
         specifier: 7.6.13
         version: 7.6.13

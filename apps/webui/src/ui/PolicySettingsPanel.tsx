@@ -18,6 +18,7 @@ import { DEFAULT_GATED_CATEGORIES, type PolicyCategory } from "@actradeck/event-
 
 import { Button, InlineAlert, Tag } from "./kit";
 import { useLocale } from "./LocaleProvider";
+import { PolicyPresetSelector } from "./PolicyPresetSelector";
 import { ALL_POLICY_CATEGORIES, usePolicy } from "./use-policy";
 
 export interface PolicySettingsPanelProps {
@@ -107,6 +108,16 @@ export function PolicySettingsPanel({ sessionId }: PolicySettingsPanelProps) {
             <span>{t("policy.enabledLabel")}</span>
           </label>
           <p className="ad-policy__hint">{t("policy.enabledHint")}</p>
+
+          {/* ADR 019f23e1: preset セレクタ (加法)。クリックでドラフト categories を presetCategories に
+              セットし既存 Save/looser フローへ流す (checkbox 個別編集はそのまま残る)。 */}
+          <PolicyPresetSelector
+            prefix="policy"
+            draftCats={draftCats}
+            draftEnabled={draftEnabled}
+            onApply={(cats) => setDraftCats(new Set(cats))}
+            disabled={saving}
+          />
 
           <fieldset className="ad-policy__cats" data-testid="policy-categories" disabled={saving}>
             <legend className="ad-policy__legend">{t("policy.categoriesLegend")}</legend>

@@ -82,6 +82,12 @@ export interface AuditSessionSummary {
   readonly approvals: AuditApprovalSummary;
   /** risk_level が high/critical の承認要求件数。 */
   readonly high_risk_op_count: number;
+  /**
+   * 無プロンプト自動許可 (allowlist / session-grant) の **full-session** 件数。events の auto_allowed
+   * マーカー由来だが by_decision / high_risk_op_count と同じく **SQL full 集計**で打ち切り非依存
+   * (TDA-1: レビュー・パケットの governance がこれを走査する・truncated events を数える過少計上を排除)。
+   */
+  readonly auto_allowed_count: number;
   /** per-session 詳細 (/:id) でのみ付く承認エントリ列。一覧では undefined。 */
   readonly entries?: readonly AuditApprovalEntry[];
 }
@@ -205,6 +211,18 @@ export function csvCell(value: string | number | boolean | undefined): string {
 }
 
 /**
+ * kind 別件数を `kind:count;...` の 1 文字列へ畳む (原文非載せ・closed-enum kind + 非負整数のみ)。
+ * CSV / HTML / Markdown の全 range formatter がこの単一ソースを共有し、区切りドリフトを防ぐ
+ * (TDA-1・decision 019f235a: 以前 CSV が `;`・HTML/MD が `; ` と分岐していた)。区切りは機械 CSV の
+ * セル内 split 安全側で `;` (空白なし) に統一する。
+ */
+export function foldByKind(byKind: Record<string, number>): string {
+  return Object.entries(byKind)
+    .map(([k, v]) => `${k}:${v}`)
+    .join(";");
+}
+
+/**
  * range レポートを per-session 1 行の CSV へ整形する (監査台帳)。kind 別件数は
  * `kind:count;...` の 1 セルへ畳む (列数を固定し原文を載せない)。
  */
@@ -231,9 +249,7 @@ export function auditReportToCsv(report: AuditRangeReport): string {
   ];
   const lines = [header.join(",")];
   for (const s of report.sessions) {
-    const byKind = Object.entries(s.secret_redaction_count_by_kind)
-      .map(([k, v]) => `${k}:${v}`)
-      .join(";");
+    const byKind = foldByKind(s.secret_redaction_count_by_kind);
     lines.push(
       [
         csvCell(s.session_id),

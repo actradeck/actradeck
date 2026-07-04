@@ -6,6 +6,9 @@
  */
 import {
   isAllowlistRevokePath,
+  isAuditPacketVerifyPath,
+  isAuditVerifyPath,
+  isDemoLaunchPath,
   isPolicyResolvePath,
   isPolicySetPath,
   isPolicyUnsetPath,
@@ -24,17 +27,28 @@ export type FetchLike = (
   },
 ) => Promise<Response>;
 
-/** POST body の上限 (revoke は小さな JSON {signature, repo_scope?} のみ・肥大ボディを弾く)。 */
+/** POST body の上限 (revoke/policy は小さな JSON のみ・肥大ボディを弾く)。 */
 const MAX_POST_BODY_BYTES = 4096;
+/**
+ * audit verify の body 上限 (AUDIT-VERIFY-SIZE)。旧 512KiB は多忙/長時間セッションの report(最も監査
+ * 価値が高い・最大 10000 events で ~5MB(JSON)/base64 ~1.33x)を弾いていた。値は **経験的 calibration**
+ * (provable worst-case でない・TDA-2)で measured max + headroom = 16 MiB。病的に巨大なフィールドを持つ
+ * report が超過した場合は readBody が reject し verify へ届かない(deny-safe・leak でない)。backend
+ * verify route の AUDIT_VERIFY_BODY_LIMIT と手動整合(同値・TDA-1)。
+ */
+const MAX_VERIFY_BODY_BYTES = 16 * 1024 * 1024;
 
 /** IncomingMessage から body を上限付きで読む (上限超過は reject)。 */
-async function readBody(req: IncomingMessage): Promise<string> {
+async function readBody(
+  req: IncomingMessage,
+  maxBytes: number = MAX_POST_BODY_BYTES,
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
     req.on("data", (c: Buffer) => {
       total += c.length;
-      if (total > MAX_POST_BODY_BYTES) {
+      if (total > maxBytes) {
         reject(new Error("body too large"));
         req.destroy();
         return;
@@ -123,7 +137,19 @@ export async function proxyReplayHistory(
   const isRevoke = isAllowlistRevokePath(req.url ?? "");
   const isPolicyMutating = isPolicySetPath(req.url ?? "") || isPolicyUnsetPath(req.url ?? "");
   const isPolicyResolve = isPolicyResolvePath(req.url ?? "");
-  const isMutating = isRevoke || isPolicyMutating || isPolicyResolve;
+  // ADR 019f22a7 P1: セーフティデモ起動も mutating-class (POST-only + CSRF) 扱い。
+  const isDemoLaunch = isDemoLaunchPath(req.url ?? "");
+  // ADR 6点強化 #1: tamper-evidence の検証も POST-only + CSRF。純粋検証だが body で manifest を運ぶ。
+  const isAuditVerify = isAuditVerifyPath(req.url ?? "");
+  // ADR 6点強化 #2: レビュー・パケット検証も同扱い (POST-only + CSRF + 大 body)。
+  const isAuditPacketVerify = isAuditPacketVerifyPath(req.url ?? "");
+  const isMutating =
+    isRevoke ||
+    isPolicyMutating ||
+    isPolicyResolve ||
+    isDemoLaunch ||
+    isAuditVerify ||
+    isAuditPacketVerify;
   if (method === "POST" && !isMutating) {
     res.writeHead(405, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "method not allowed" }));
@@ -148,7 +174,10 @@ export async function proxyReplayHistory(
       headers: { ...cfg.headers },
     };
     if (method === "POST") {
-      const body = await readBody(req);
+      const body = await readBody(
+        req,
+        isAuditVerify || isAuditPacketVerify ? MAX_VERIFY_BODY_BYTES : MAX_POST_BODY_BYTES,
+      );
       init.method = "POST";
       init.body = body;
       init.headers["content-type"] = "application/json";

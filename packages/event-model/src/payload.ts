@@ -124,6 +124,57 @@ export function projectPolicyCategories(raw: unknown): PolicyCategory[] {
 }
 
 /**
+ * 承認ポリシー **preset** (ADR 019f23e1・P3): 既存 PolicyCategory 集合への「名前付き展開テンプレート」。
+ *
+ * pure-expand: preset 名は wire/policy.json/live gate のどこにも保存しない。operator が preset を選ぶと
+ * UI は **既存の set 経路**で `categories = presetCategories(name)` をセットするだけ (enforcement 機構は不変)。
+ * UI は保存済/ドラフトの categories から `matchPreset` で現在 preset を逆引き表示する (categories が唯一の真実)。
+ *
+ * 各 preset 値は `orderPolicyCategories` で `PolicyCategory.options` の安定順に固定する
+ * (手書き順序に依存しない・diff 安定)。`balanced` は `DEFAULT_GATED_CATEGORIES` から導出し二重定義しない
+ * (ドリフト防止)。`demo` は破滅的不可逆 floor のみ (非空ゆえ empty→DEFAULT fail-safe に触れない)。
+ */
+export type PolicyPresetName = "strict" | "balanced" | "demo";
+
+/** UI 表示順 (strict → balanced → demo)。 */
+export const PRESET_ORDER: readonly PolicyPresetName[] = ["strict", "balanced", "demo"];
+
+/**
+ * preset → 展開後 PolicyCategory 集合 (options 安定順)。
+ * - strict:   全 PolicyCategory (検出できる全カテゴリを止める・プロンプト増)。
+ * - balanced: DEFAULT_GATED_CATEGORIES と同一 (out-of-box 既定=推奨)。二重定義しない。
+ * - demo:     破滅的不可逆 floor {recursive-rm, disk-destroy, fork-bomb} のみ。それ以外は素通し。
+ */
+export const POLICY_PRESETS: Readonly<Record<PolicyPresetName, readonly PolicyCategory[]>> = {
+  strict: orderPolicyCategories(new Set<PolicyCategory>(PolicyCategory.options)),
+  balanced: orderPolicyCategories(new Set<PolicyCategory>(DEFAULT_GATED_CATEGORIES)),
+  demo: orderPolicyCategories(
+    new Set<PolicyCategory>(["recursive-rm", "disk-destroy", "fork-bomb"]),
+  ),
+};
+
+/** preset 名 → 展開後 categories (呼び元が変更しても共有 const を汚さないよう新配列で返す・順序安定)。 */
+export function presetCategories(name: PolicyPresetName): PolicyCategory[] {
+  return [...POLICY_PRESETS[name]];
+}
+
+/**
+ * 与えられた categories 集合が **厳密一致**する preset 名を返す (逆引き)。どの preset とも不一致なら
+ * undefined (= custom)。入力は `orderPolicyCategories` で closed-enum の安定順へ正規化してから
+ * size + 要素で比較するため、未知文字列/非 enum 値は構造的に落として評価する (NO-RAW)。
+ */
+export function matchPreset(cats: ReadonlySet<string>): PolicyPresetName | undefined {
+  const normalized = orderPolicyCategories(cats);
+  for (const name of PRESET_ORDER) {
+    const preset = POLICY_PRESETS[name];
+    if (preset.length === normalized.length && preset.every((c, i) => c === normalized[i])) {
+      return name;
+    }
+  }
+  return undefined;
+}
+
+/**
  * variant ビルダー: `kind` リテラル + 固有フィールド。
  * looseObject で「正規化済みの追加キー」を許容する (MVP の前方互換)。
  */

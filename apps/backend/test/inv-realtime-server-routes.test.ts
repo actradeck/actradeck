@@ -352,6 +352,7 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
         pending: 0,
       },
       high_risk_op_count: 0,
+      auto_allowed_count: 0,
     };
     const fake = {
       rangeReport: async () => {

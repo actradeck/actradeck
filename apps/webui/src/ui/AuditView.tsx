@@ -16,12 +16,15 @@ import {
   buildAuditUrl,
   decidedTotal,
   distinctProjects,
+  exportAccept,
+  exportMime,
   filterSessions,
   formatKindCounts,
   formatStamp,
   parseAuditReport,
   projectLabel,
   shortenPath,
+  type AuditExportFormat,
   type AuditRangeReport,
 } from "./audit-view";
 import { Button, InlineAlert, Select, Tag } from "./kit";
@@ -87,21 +90,17 @@ export function AuditView({
   }, [range, t]);
 
   const download = useCallback(
-    async (format: "json" | "csv") => {
+    async (format: AuditExportFormat) => {
       setError(undefined);
       try {
         const url = buildAuditUrl({ ...range(), format });
-        const res = await fetch(url, {
-          headers: { accept: format === "csv" ? "text/csv" : "application/json" },
-        });
+        const res = await fetch(url, { headers: { accept: exportAccept(format) } });
         if (!res.ok) {
           setError(t("audit.error"));
           return;
         }
         const text = await res.text();
-        const blob = new Blob([text], {
-          type: format === "csv" ? "text/csv;charset=utf-8" : "application/json",
-        });
+        const blob = new Blob([text], { type: exportMime(format) });
         const href = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = href;
@@ -196,6 +195,26 @@ export function AuditView({
           title={t("audit.exportCsv.title")}
         >
           {t("audit.exportCsv")}
+        </Button>
+        <Button
+          kind="ghost"
+          size="sm"
+          disabled={report === undefined}
+          onClick={() => void download("html")}
+          data-testid="audit-export-html"
+          title={t("audit.exportHtml.title")}
+        >
+          {t("audit.exportHtml")}
+        </Button>
+        <Button
+          kind="ghost"
+          size="sm"
+          disabled={report === undefined}
+          onClick={() => void download("md")}
+          data-testid="audit-export-md"
+          title={t("audit.exportMarkdown.title")}
+        >
+          {t("audit.exportMarkdown")}
         </Button>
       </div>
 

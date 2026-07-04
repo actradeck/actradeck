@@ -47,6 +47,25 @@ export default defineConfig({
         //   (D サブシェル/メタ文字 / E prefix ビルトイン / F source procsub) + 赤テストで branch
         //   実測が 76.88% → 79.26% へ上昇したため新実測直下の 79 へ。閾値は決して下げない。
         "src/normalize.ts": { statements: 85, branches: 79, functions: 95, lines: 90 },
+        // P4#QA-2 (ADR 019f2421): codex-runner.ts は R1/R2/R4/R5 の transport/lifecycle hardening を
+        //   担う一次表面 (handshake timeout / stream-error 封じ込め / exit-drain / stop-state)。ここに
+        //   per-file 閾値が無いと lifecycle ロジックの被覆が silent に erode しうる。
+        // FLAKE 修正 (fix/codex-coverage-floor・2026-07-03): 旧 floor { stmts82 / br70 / fn80 / lines83 } は
+        //   BEST 実測直下に置かれており CI で flaky に割れた (CI fn=74.5% < 80 で verify RED)。原因は
+        //   function coverage が環境間で大きく振れること: uncovered な 9〜13 関数はすべて runCodexSession
+        //   closure 内の **timing/flow 依存コールバック** (ProcessMonitor 間隔タイマ発火の heartbeat 群
+        //   onSample→emitHeartbeat→emitMonitoring 匿名 = 3 fn ≈ 6pt / fault handler onParseError・onWriteError /
+        //   approval Response 送出時のみ通る sendResponse / stderr on-data / 置換前 resolveExit 初期値)。
+        //   real-bin e2e 専用ではなく (SKIP=1 でも到達可)、aggregate 実行のタイミングでどれが踏まれるかが
+        //   揺れる (monitor 間隔 vs test 終了・approval flow 順序)。
+        //   観測レンジ (CI regime = ACTRADECK_SKIP_REAL_BIN_E2E=1・全 metric): stmts 82.07〜85.84 /
+        //   branch 71.77〜73.68 / func 74.5〜88.23 (~13.7pt swing) / lines 83.51〜87.23。real-bin e2e を
+        //   走らせると (SKIP 無し) さらに上振れる (audit 実測 func 88.23)。
+        //   よって WORST-observed (CI 値・stmts 82.07 / br 71.77 / fn 74.5 / lines 83.51) の 3〜5pt 下に
+        //   conservative に固定し測定分散を吸収する。floor は依然 meaningful (lifecycle 被覆の実 erosion は
+        //   ここを大きく下回る) だが flaky ではない。never-lower discipline は「BEST でなく WORST の下」に
+        //   置いてこそ成立する (今回の教訓)。
+        "src/codex-runner.ts": { statements: 78, branches: 68, functions: 70, lines: 79 },
       },
     },
   },

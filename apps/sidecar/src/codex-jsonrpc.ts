@@ -46,6 +46,12 @@ export interface CodexJsonRpcOptions {
   readonly onMessage: (msg: CodexInboundMessage) => void;
   /** 不正 JSON 行を観測 (テスト・診断)。プロセスは落とさない。 */
   readonly onParseError?: (line: string, err: unknown) => void;
+  /**
+   * R2 (ADR 019f2421): send の同期 write が死 stream で throw (ERR_STREAM_DESTROYED / EPIPE) した
+   * ときに **局所** で観測する (テスト・診断)。プロセスを落とさない (未指定なら握り潰す)。
+   * NO-RAW: 呼び元 (codex-runner) は errno code 等の非 raw メタのみを diag へ流す。
+   */
+  readonly onWriteError?: (err: unknown) => void;
 }
 
 /**
@@ -55,6 +61,13 @@ export interface CodexJsonRpcOptions {
  * 「行を組み立てて parse し onMessage へ渡す」「メッセージを 1 行で書き出す」のみに徹する。
  */
 export class CodexJsonRpc {
+  /**
+   * R3 (ADR 019f2421): 行未満の残バッファの上限。newline 無しの巨大 line (flood/OOM) で
+   * `buffer` が無界に伸びるのを防ぐ。rollout tailer の MAX_TAIL_CHUNK (16 MiB・codex-rollout-tailer.ts)
+   * と同 order・同クラス (無界 Buffer→capped) の可用性/OOM 対策。上限は文字長で見る (byte 近似・十分厳しい)。
+   */
+  private static readonly MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
   private readonly stdin: WritableLike;
   private readonly opts: CodexJsonRpcOptions;
   /** 行未満の残バッファ (分割 read を跨いで 1 行を組み立てる)。 */
@@ -73,7 +86,15 @@ export class CodexJsonRpc {
    * (本 stdin は codex への制御チャネルで観測イベントではない)。
    */
   send(msg: Record<string, unknown>): void {
-    this.stdin.write(JSON.stringify(msg) + "\n");
+    try {
+      this.stdin.write(JSON.stringify(msg) + "\n");
+    } catch (err) {
+      // R2 (ADR 019f2421): 死んだ/破棄済み stream への write は **同期 throw** しうる
+      // (ERR_STREAM_DESTROYED)。これを素通しさせると CLI の uncaughtException →
+      // process.exit(1) = daemon 全体 fatal 終了になる (cli.ts:472)。ここで局所吸収し、
+      // 呼び元へ非 raw で通知する (async EPIPE は runner の stdin "error" listener が受ける)。
+      this.opts.onWriteError?.(err);
+    }
   }
 
   /**
@@ -91,6 +112,17 @@ export class CodexJsonRpc {
       const line = this.buffer.slice(0, nlIdx);
       this.buffer = this.buffer.slice(nlIdx + 1);
       this.handleLine(line);
+    }
+    // R3 (ADR 019f2421): 完全な行を全て消費した後の残 partial-frame が上限を超えたら
+    // (= newline 無しで無界に伸びる flood/OOM) buffer を捨てて fail-safe に縮退する。
+    // NO-RAW: onParseError には **固定リテラル + 破棄バイト数のみ** を渡す (raw 本文は echo しない)。
+    if (this.buffer.length > CodexJsonRpc.MAX_BUFFER_BYTES) {
+      const droppedBytes = this.buffer.length;
+      this.buffer = "";
+      this.opts.onParseError?.(
+        `<oversized frame dropped: ${droppedBytes} bytes, no newline>`,
+        new Error("frame buffer cap exceeded"),
+      );
     }
   }
 

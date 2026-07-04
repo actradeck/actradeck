@@ -20,6 +20,8 @@
  */
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 
+import type { ApprovalDecision } from "@actradeck/event-model";
+
 import type { ApprovalBridge } from "./approval-bridge.js";
 import {
   CodexApprovalBridge,
@@ -59,6 +61,13 @@ export interface CodexRunnerOptions {
   readonly clientName?: string;
   readonly clientVersion?: string;
   /**
+   * R1 (ADR 019f2421): JSON-RPC request の有界 timeout (ms)。app-server ハングで handshake が
+   * 永久待ちにならないよう seam 化する。未指定なら env `ACTRADECK_CODEX_RPC_TIMEOUT_MS`、それも
+   * 無ければ既定 25s。handshake の Response は prompt ACK (turn/start は inProgress を即返す) ゆえ、
+   * 生成的 timeout は「真に無応答な server」のみを捕捉する。
+   */
+  readonly rpcTimeoutMs?: number;
+  /**
    * テスト注入用 spawn seam (QA carryover / TDA-5)。既定は `defaultSpawnChild` (実 codex を
    * `spawn(codexBin, ["app-server"], …)` 起動)。env は **ランナー側で buildChildEnv 構築**して
    * `opts.env` で渡すため、fake seam が受け取った `opts.env` を観測して spawn 配線を falsifiable に
@@ -72,6 +81,21 @@ export interface CodexRunnerOptions {
   ) => ChildLike;
   /** 診断フック (handshake 進捗・parse error・stderr 行)。 */
   readonly onDiagnostic?: (msg: string) => void;
+}
+
+/**
+ * R1 (ADR 019f2421): JSON-RPC request が有界 timeout に達したときの typed error。
+ * handshake().catch がこの型で「無応答 server」を識別し session.ended(failed, handshake_timeout)
+ * を emit する (通常の method error と区別する)。
+ */
+export class CodexRpcTimeoutError extends Error {
+  constructor(
+    readonly method: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`codex rpc timeout: ${method} did not respond within ${timeoutMs}ms`);
+    this.name = "CodexRpcTimeoutError";
+  }
 }
 
 /** spawnChild seam が受け取る spawn オプション (child_process spawn の本モジュール使用分)。 */
@@ -129,6 +153,33 @@ function defaultSpawnChild(
 }
 
 /**
+ * R2 (ADR 019f2421): エラー由来の **非 raw** な短い識別子を返す (NO-RAW: errno code / message 冒頭のみ)。
+ * 生の write payload / command / secret は含めない (errno は "EPIPE" 等の OS レベル定数)。
+ */
+function errCode(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  if (typeof code === "string" && code.length > 0) return code;
+  if (err instanceof Error) return err.message.slice(0, 60);
+  return "unknown";
+}
+
+/**
+ * R2 (ADR 019f2421): stream に "error"/"end"/"close" listener を **防御的に** 付ける。
+ * fake seam (テスト) の stream が `on` を持たない場合は no-op (ChildLike 契約を広げず後方互換)。
+ * これらの listener が無いと EPIPE が uncaughtException → daemon 全体 fatal になる (cli.ts:472)。
+ */
+function attachStreamEvent(
+  stream: unknown,
+  event: "error" | "end" | "close",
+  listener: (err?: Error) => void,
+): void {
+  const s = stream as { on?: (ev: string, l: (err?: Error) => void) => unknown } | undefined;
+  if (s !== undefined && typeof s.on === "function") {
+    s.on(event, listener);
+  }
+}
+
+/**
  * codex app-server を managed 子プロセスとして起動し、handshake → notification 正規化 →
  * 承認ブリッジ → heartbeat を配線する。
  */
@@ -137,6 +188,15 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
   const cwd = opts.cwd ?? process.cwd();
   const killGraceMs = opts.killGraceMs ?? 5_000;
   const diag = (m: string): void => opts.onDiagnostic?.(m);
+
+  // R1: request timeout の解決 (seam → env → 既定 25s)。0/負値は既定へ (無効化を許さない: 無界待ち防止)。
+  const envTimeout = Number(process.env.ACTRADECK_CODEX_RPC_TIMEOUT_MS);
+  const rpcTimeoutMs =
+    opts.rpcTimeoutMs !== undefined && opts.rpcTimeoutMs > 0
+      ? opts.rpcTimeoutMs
+      : Number.isFinite(envTimeout) && envTimeout > 0
+        ? envTimeout
+        : 25_000;
 
   // SEC-1: 全 env 継承をやめ allowlist 化する (INGEST_TOKEN / ACTRADECK_* を child へ漏らさない)。
   // codex は provider 認証を env でなく CODEX_HOME 設定ファイルで受けるため extra なし
@@ -152,7 +212,14 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
 
   // --- request/response 相関 (handshake + 任意 request)。 ---
   let nextId = 1;
-  const pending = new Map<CodexRequestId, (msg: CodexInboundMessage) => void>();
+  // R1: pending は response 解決 (onMessage) と timeout/teardown 時の reject を分けて保持し、
+  //   タイマーを併せて掃除できるようにする (closure leak / 無界待ちを解消)。
+  interface PendingRpc {
+    readonly onMessage: (msg: CodexInboundMessage) => void;
+    readonly onReject: (err: Error) => void;
+    timer: NodeJS.Timeout | undefined;
+  }
+  const pending = new Map<CodexRequestId, PendingRpc>();
 
   // --- session 状態。 ---
   let threadId: string | undefined;
@@ -168,6 +235,11 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
       diag(
         `parse-error: ${err instanceof Error ? err.message : String(err)} line=${line.slice(0, 80)}`,
       ),
+    // R2: 死 stream への同期 write throw を局所観測する (daemon 全体 fatal を防ぐ)。errno のみ (NO-RAW)。
+    onWriteError: (err) => {
+      diag(`write-error: ${errCode(err)}`);
+      handleConnectionLoss("stdin_write_error");
+    },
   });
 
   // 承認ブリッジ (UI カード emit + codex Response 送出)。
@@ -193,6 +265,31 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
         }),
       );
     },
+    emitResolved: (requestId: string, decision: ApprovalDecision | "deny") => {
+      // TDA-1 (ADR 019f2476): 承認解決を tool.permission.resolved として対称 emit
+      //   (claude=hook-receiver.ts と同一契約)。①Approval Inbox カードの clear
+      //   (projection foldPendingApprovals は provider 非依存で request_id 一致除去)
+      //   ②決定の監査証跡。emitCard と同じ codex event metadata を通し
+      //   provider=codex / source=app_server / thread_id / turn_id を担保する。
+      //   NO-RAW: payload は kind/request_id/decision(enum) のみ・raw command/cwd を再掲しない。
+      //   全イベントは sink.emit の redactDeep choke を通る。
+      const allowed = decision === "allow" || decision === "allow_for_session";
+      emitCodex((sessionId, ts) =>
+        buildEvent({
+          session_id: sessionId,
+          provider: "codex",
+          source: "app_server",
+          ...(providerSessionId !== undefined ? { provider_session_id: providerSessionId } : {}),
+          ...(threadId !== undefined ? { thread_id: threadId } : {}),
+          ...(currentTurnId !== undefined ? { turn_id: currentTurnId } : {}),
+          event_type: "tool.permission.resolved",
+          state: allowed ? "running.tool_preparing" : "running.model_wait",
+          timestamp: ts,
+          summary: `承認 ${allowed ? "許可" : "拒否"}`,
+          payload: { kind: "tool.permission.resolved", request_id: requestId, decision },
+        }),
+      );
+    },
     sendResponse: (id: CodexRequestId, result: Record<string, unknown>) => {
       sendResponse(id, result);
     },
@@ -215,6 +312,26 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
     diag(`stderr: ${s.trimEnd().slice(0, 200)}`);
   });
 
+  // R2 (ADR 019f2421): stdin/stdout に "error" listener が無いと、死 pipe への write-after-death
+  //   (EPIPE) が CLI の uncaughtException → process.exit(1) = **他 session を監督する daemon 全体を
+  //   落とす**。shutdown-race close-backstop (decision 019ef10b) と同型の crash-safety backstop として、
+  //   1 codex session の死 pipe を局所封じ込めする (source で contain)。
+  //   stdout "end"/"close" は接続喪失として扱い、lingering process の half-closed channel が zombie を
+  //   残さないよう終端させる (emitSessionEndedFailure は先着ガードで idempotent)。
+  attachStreamEvent(child.stdin, "error", (err) => {
+    diag(`stdin-error: ${errCode(err)}`);
+    handleConnectionLoss("stdin_error");
+  });
+  attachStreamEvent(child.stdout, "error", (err) => {
+    diag(`stdout-error: ${errCode(err)}`);
+    handleConnectionLoss("stdout_error");
+  });
+  // stdout "end"/"close" は正常終了でも発火する。ここで直接 failed を emit すると clean exit を
+  //   false-failed 化しうる (close が exit に先行する稀ケース)。よって lingering process を stopChild で
+  //   確実に終端し、authoritative な state (completed/failed) は child "exit" 経路に委ねる (zombie 回避)。
+  attachStreamEvent(child.stdout, "end", () => handleStreamClosed("stdout_end"));
+  attachStreamEvent(child.stdout, "close", () => handleStreamClosed("stdout_close"));
+
   // --- exit。 ---
   let resolveExit: (code: number) => void = () => {};
   const exited = new Promise<number>((resolve) => {
@@ -222,15 +339,20 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
   });
   let teardownDone = false;
   let killTimer: NodeJS.Timeout | undefined;
+  // R5 (ADR 019f2421): operator が stop() を呼んだ (graceful)。crash と区別して session.ended を
+  //   正直に報告するためのフラグ (SIGTERM/SIGKILL でも operator 起点なら completed/stopped)。
+  let operatorStopRequested = false;
 
   child.on("exit", (code, signal) => {
     // AGG-2: child OS exit は **真の終端源**。実 codex は SIGTERM 時 thread/closed も
     // process/exited も emit しないため、ここで session.ended を結線しないと crash/SIGKILL で
     // UI が終端を観測できない。sessionEnded ガードで idempotent (thread/closed 先着時は二重に
-    // 出さない)。state は exit code/signal で completed/failed を判定する。
-    // 注 (SEC 確認済): ここで approvalBridge.drain() は呼ばない。pending 承認は安全側
-    //   timeout / shutdown-deny で解決させる (drain を足すと早期消去になる)。
+    // 出さない)。state は exit code/signal (+ R5 operator-stop) で completed/failed を判定する。
     emitSessionEndedOnce(code, signal);
+    // R4 (ADR 019f2421): child 消失時、in-flight codex 承認を **死 pipe へ write せず** 安全側 deny へ
+    //   即解決する (30s ApprovalBridge timeout 宙吊り + 死 pipe sendResponse=R2 crash 誘発 を除去)。
+    //   emitSessionEndedOnce の後・teardown の前に呼ぶ (bridge.resolve は同期・finish は suppress される)。
+    codexApproval.cancelInFlight();
     teardown();
     resolveExit(code ?? 0);
   });
@@ -287,7 +409,12 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
   function emitSessionEndedOnce(code: number | null, signal: NodeJS.Signals | null): void {
     if (sessionEnded) return;
     sessionEnded = true;
-    const clean = code === 0 && signal === null;
+    const cleanExit = code === 0 && signal === null;
+    // R5 (ADR 019f2421): operator が stop() で終了させた (SIGTERM/SIGKILL) 場合は crash でなく
+    //   graceful stop。既存の state enum (completed/failed) と reason 文字列のみで表現し、schema/
+    //   state 契約は変えない (completed + reason="stopped")。operatorStop でない signal は従来どおり failed。
+    const operatorStop = operatorStopRequested && !cleanExit;
+    const completed = cleanExit || operatorStop;
     const ts = new Date().toISOString();
     opts.identity.emitMonitoring("output", (sessionId) => {
       opts.sink.emit(
@@ -298,34 +425,105 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
           ...(providerSessionId !== undefined ? { provider_session_id: providerSessionId } : {}),
           ...(threadId !== undefined ? { thread_id: threadId } : {}),
           event_type: "session.ended",
-          state: clean ? "completed" : "failed",
+          state: completed ? "completed" : "failed",
           timestamp: ts,
-          summary: clean
+          summary: cleanExit
             ? "Codex プロセス終了"
-            : `Codex プロセス終了 (${signal !== null ? `signal=${signal}` : `code=${code ?? "?"}`})`,
+            : operatorStop
+              ? "Codex プロセス停止 (operator)"
+              : `Codex プロセス終了 (${signal !== null ? `signal=${signal}` : `code=${code ?? "?"}`})`,
           payload: {
             kind: "session.ended",
-            reason: clean
+            reason: cleanExit
               ? "exit_0"
-              : signal !== null
-                ? `signal_${signal}`
-                : `exit_${code ?? "unknown"}`,
+              : operatorStop
+                ? "stopped"
+                : signal !== null
+                  ? `signal_${signal}`
+                  : `exit_${code ?? "unknown"}`,
           },
         }),
       );
     });
   }
 
-  /** JSON-RPC request を送り response を待つ。 */
+  /**
+   * R1/R2 (ADR 019f2421): handshake timeout / 接続喪失 (stream error/end/close) を **観測可能な**
+   * session.ended(failed, reason=<enum>) として 1 回だけ emit する (sessionEnded 先着ガードで idempotent)。
+   * reason は固定リテラル (handshake_timeout / handshake_failed / stdin_error / stdout_end 等) の非 raw enum。
+   * canonical 未確定でも operator が失敗を観測できるよう、呼び元が identity.flushWithFallback() を続けて呼ぶ。
+   */
+  function emitSessionEndedFailure(reason: string): void {
+    if (sessionEnded) return;
+    sessionEnded = true;
+    const ts = new Date().toISOString();
+    opts.identity.emitMonitoring("output", (sessionId) => {
+      opts.sink.emit(
+        buildEvent({
+          session_id: sessionId,
+          provider: "codex",
+          source: "app_server",
+          ...(providerSessionId !== undefined ? { provider_session_id: providerSessionId } : {}),
+          ...(threadId !== undefined ? { thread_id: threadId } : {}),
+          event_type: "session.ended",
+          state: "failed",
+          timestamp: ts,
+          summary: `Codex 接続失敗 (${reason})`,
+          payload: { kind: "session.ended", reason },
+        }),
+      );
+    });
+  }
+
+  /**
+   * R2 (ADR 019f2421): 接続喪失 (stream error / stdout end/close / write-after-death) を局所処理する。
+   * lingering process を停止し (zombie 回避)、失敗を観測可能化してから teardown する。teardownDone なら no-op
+   * (二重処理防止)。emitSessionEndedFailure は先着ガードゆえ、exit が先行していれば正確な state を保つ。
+   */
+  function handleConnectionLoss(reason: string): void {
+    if (teardownDone) return;
+    stopChild("SIGTERM"); // lingering process を確実に終端 (kill 済/死亡済なら no-op)。
+    emitSessionEndedFailure(reason);
+    opts.identity.flushWithFallback(); // canonical 未確定でも held を fallback で flush (観測喪失を防ぐ)。
+    teardown();
+  }
+
+  /**
+   * R2 (ADR 019f2421): stdout の "end"/"close" (readable 側の終端)。正常終了でも発火するため、
+   * ここでは state を直接確定せず、lingering process を stopChild で終端して authoritative な
+   * session.ended を child "exit" 経路に委ねる (clean exit の false-failed 化を避けつつ zombie を回避)。
+   * exit が既に処理済 (teardownDone) / 終端済 (sessionEnded) なら no-op。
+   */
+  function handleStreamClosed(reason: string): void {
+    if (teardownDone || sessionEnded) return;
+    diag(`stream-closed: ${reason}`);
+    stopChild("SIGTERM");
+  }
+
+  /**
+   * JSON-RPC request を送り response を待つ。
+   * R1 (ADR 019f2421): 有界 timeout を張り、app-server 無応答で永久待ちにならないようにする。
+   * timeout / teardown で pending を typed error / abort error で reject し closure leak を残さない。
+   */
   function request(method: string, params: Record<string, unknown>): Promise<CodexInboundMessage> {
     const id = nextId++;
     return new Promise<CodexInboundMessage>((resolve, reject) => {
-      pending.set(id, (msg) => {
-        if (msg.error !== undefined) {
-          reject(new Error(`${method} failed: ${msg.error.message ?? "unknown"}`));
-        } else {
-          resolve(msg);
-        }
+      const timer = setTimeout(() => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        reject(new CodexRpcTimeoutError(method, rpcTimeoutMs));
+      }, rpcTimeoutMs);
+      timer.unref?.(); // request timer が daemon の event loop 終了を妨げないように。
+      pending.set(id, {
+        onMessage: (msg) => {
+          if (msg.error !== undefined) {
+            reject(new Error(`${method} failed: ${msg.error.message ?? "unknown"}`));
+          } else {
+            resolve(msg);
+          }
+        },
+        onReject: reject,
+        timer,
       });
       rpc.send({ id, method, params });
     });
@@ -345,14 +543,15 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
   function dispatch(msg: CodexInboundMessage): void {
     // (1) response: id があり method が無い → pending を解決。
     if (msg.id !== undefined && msg.method === undefined) {
-      const resolver = pending.get(msg.id);
-      if (resolver === undefined) {
+      const entry = pending.get(msg.id);
+      if (entry === undefined) {
         // foreign / 未知 id の Response は無視 (INV-CODEX-REQID)。
         diag(`unknown response id=${String(msg.id)}`);
         return;
       }
       pending.delete(msg.id);
-      resolver(msg);
+      if (entry.timer) clearTimeout(entry.timer); // R1: response 到着で timeout を解除。
+      entry.onMessage(msg);
       return;
     }
     // (2) server request: id があり method がある → 承認なら CodexApprovalBridge、他は無視 (MVP)。
@@ -453,6 +652,31 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
     if (killTimer) clearTimeout(killTimer);
     monitor?.stop();
     rpc.dispose();
+    // R1: outstanding pending を全 reject し closure/timer leak を残さない (握られない Promise は
+    //   handshake().catch が受ける。無関係な request は本 file 内で handshake のみ)。
+    rejectAllPending("teardown");
+  }
+
+  /** R1: 未解決の pending を全て reject し timer を掃除する (無界待ち / closure leak の解消)。 */
+  function rejectAllPending(reasonTag: string): void {
+    if (pending.size === 0) return;
+    const entries = [...pending.values()];
+    pending.clear();
+    for (const entry of entries) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.onReject(new Error(`codex rpc aborted: ${reasonTag}`));
+    }
+  }
+
+  /**
+   * R1/R2/R5 (ADR 019f2421): 対象 PID 限定の段階的停止 (SIGTERM→killGraceMs→SIGKILL・escalateKill)。
+   * operator stop / handshake timeout / connection loss が共有する単一 choke。teardownDone 後は再武装
+   * しない (exit 後に kill timer を残さない)。再 stop 時は前 timer を解除してから再武装する。
+   */
+  function stopChild(signal: NodeJS.Signals = "SIGTERM"): void {
+    if (teardownDone) return;
+    if (killTimer) clearTimeout(killTimer);
+    killTimer = escalateKill(child, { signal, graceMs: killGraceMs });
   }
 
   // ============ handshake ============
@@ -498,9 +722,15 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
     }
   }
 
-  // handshake を起動 (失敗時は診断のみ; 子の exit が exited を解決する)。
+  // handshake を起動。R1 (ADR 019f2421): 失敗 (timeout / method error) 時は observed-failure に倒す:
+  //   ① session.ended(failed, reason) を emit ② canonical 未確定でも fallback で flush (operator が観測)
+  //   ③ un-enforceable zombie を残さないよう child を stop。silent hang を作らない。
   void handshake().catch((err: unknown) => {
     diag(`handshake error: ${err instanceof Error ? err.message : String(err)}`);
+    const reason = err instanceof CodexRpcTimeoutError ? "handshake_timeout" : "handshake_failed";
+    emitSessionEndedFailure(reason);
+    opts.identity.flushWithFallback();
+    stopChild("SIGTERM");
   });
 
   return {
@@ -514,11 +744,11 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
       }
     },
     stop: (signal: NodeJS.Signals = "SIGTERM") => {
-      // 強み(a): signal → killGraceMs → SIGKILL の段階的停止 (PID 限定)。managed-runner と
-      // 共有 helper (escalateKill) に集約 (TDA: 重複ロジックを単一 choke へ)。再 stop 時は前回
-      // timer を解除してから再武装する。child exit 時は teardown が clear する (冪等)。
-      if (killTimer) clearTimeout(killTimer);
-      killTimer = escalateKill(child, { signal, graceMs: killGraceMs });
+      // 強み(a): signal → killGraceMs → SIGKILL の段階的停止 (PID 限定)・escalateKill に集約。
+      // R5 (ADR 019f2421): operator 起点の graceful stop を記録し、後続 exit を crash-failed と混同せず
+      //   completed/stopped で報告する (schema/state 契約は不変・reason 文字列のみ)。
+      operatorStopRequested = true;
+      stopChild(signal);
     },
     dispose: () => teardown(),
   };

@@ -95,13 +95,17 @@ function makeHarness(timeoutMs = 50) {
   const bridge = new ApprovalBridge({ timeoutMs });
   const cards: Array<{ card: CodexApprovalCard; requestId: string }> = [];
   const responses: Array<{ id: CodexRequestId; result: Record<string, unknown> }> = [];
+  const resolved: Array<{ requestId: string; decision: string }> = [];
   const codex = new CodexApprovalBridge({
     bridge,
     sessionId: () => "sess_test",
     emitCard: (card, requestId) => cards.push({ card, requestId }),
+    // TDA-1 (ADR 019f2476): resolved 監査 emit seam。本 harness では捕捉のみ
+    //   (resolved emit の契約は inv-codex-approval-resolved.test.ts が固定)。
+    emitResolved: (requestId, decision) => resolved.push({ requestId, decision }),
     sendResponse: (id, result) => responses.push({ id, result }),
   });
-  return { bridge, codex, cards, responses };
+  return { bridge, codex, cards, responses, resolved };
 }
 
 describe("INV-CODEX-APPROVAL-MAP: inbound → card → resolve → codex Response", () => {

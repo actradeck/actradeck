@@ -147,6 +147,19 @@ cd ~/any/project && claude           # or: codex
 The session appears in the cockpit live list within a second or two, showing its
 state, current action, repo/branch, and any pending approval.
 
+Over Attach, **Codex is observed** — its approvals stay in its own TUI. To relay Codex
+approvals to the cockpit (allow / deny, like Claude Code), launch it in **Managed Mode**
+instead — ActraDeck spawns Codex via its App Server and bridges its approval requests to
+the cockpit inbox:
+
+```bash
+# Run from the ActraDeck repo after `pnpm -r build`. (`agentmon` is the sidecar bin.)
+node apps/sidecar/dist/cli.js codex -- "<your prompt>"
+```
+
+Claude Code relays approvals over Attach already, so no Managed Mode is needed for it.
+See [`attach-mode.md`](./attach-mode.md) for the precise limits of each mode.
+
 Here is what the cockpit looks like in use — live wall, liveness-by-evidence,
 secret redaction, cross-vendor audit, approval inbox, and replay:
 

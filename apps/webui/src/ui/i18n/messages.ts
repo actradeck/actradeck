@@ -113,6 +113,29 @@ const ja = {
   "audit.occurrences.more": "上限まで表示しています",
   "audit.occurrences.jump": "Replay で確認",
 
+  // ── P2 監査レポート export (ADR 019f2326) ───────────────────────────────
+  // 期間集計を HTML/Markdown でも書き出す(既存 JSON/CSV に追加)。いずれも秘匿原文を含まない。
+  "audit.exportHtml": "HTML 出力",
+  "audit.exportHtml.title":
+    "監査集計を HTML で書き出す(そのままブラウザで開ける・チーム/クライアント共有用。秘匿原文は含まない)",
+  "audit.exportMarkdown": "Markdown 出力",
+  "audit.exportMarkdown.title":
+    "監査集計を Markdown で書き出す(PR・Issue・ドキュメント貼り付け用。秘匿原文は含まない)",
+  // 単一セッション詳細レポート(時系列・承認・redaction 件数・exit code)。HTML/MD/JSON を選べる。
+  "audit.report.export": "レポート出力",
+  "audit.report.html": "HTML",
+  "audit.report.html.title":
+    "このセッションの詳細レポートを HTML で書き出す(時系列・承認・redaction 件数・exit code。秘匿原文は含まない)",
+  "audit.report.markdown": "Markdown",
+  "audit.report.markdown.title":
+    "このセッションの詳細レポートを Markdown で書き出す(秘匿原文は含まない)",
+  "audit.report.json": "JSON",
+  "audit.report.json.title": "このセッションの詳細レポートを JSON で書き出す(秘匿原文は含まない)",
+  "audit.report.includeDiff": "diff を含める",
+  "audit.report.includeDiff.title":
+    "接続中セッションのみ redaction 済み diff を含める(切断中は取得不可と本文に明記)",
+  "audit.report.error": "レポートの出力に失敗しました",
+
   // ── ワークスペース / セッション一覧パネル ────────────────────────────────
   "workspace.sessions": "Sessions",
   "workspace.title": "Session workspace",
@@ -158,6 +181,22 @@ const ja = {
   "readiness.agent.codex.observable": "Codex: 観測可能",
   "readiness.agent.codex.detected": "Codex: 検出済みだが rollout 未解決",
   "readiness.agent.codex.missing": "Codex: 未検出",
+
+  // ── first-run セーフティデモ (ADR 019f22a7 P1・空状態 CTA) ─────────────────────
+  // 「止める・残さない・証明できる」を静的✓で断定せず、使い捨て30秒デモで実証する capability として提示する。
+  "safetyDemo.title": "この端末で守られています",
+  "safetyDemo.lead":
+    "ActraDeck はこの端末でエージェントを監督します。次の 3 つを、使い捨ての 30 秒デモで実証します。",
+  "safetyDemo.cap.blockVerb": "止める",
+  "safetyDemo.cap.block": "高リスク操作（rm -rf …/build）を承認前に hold し、Deny で止めます。",
+  "safetyDemo.cap.redactVerb": "残さない",
+  "safetyDemo.cap.redact": "secret を保存前に redact します（種別ごとの件数だけを表示）。",
+  "safetyDemo.cap.auditVerb": "証明できる",
+  "safetyDemo.cap.audit": "command・判断・redaction・diff を Session Replay で証跡化します。",
+  "safetyDemo.cta": "30 秒セーフティデモを実行",
+  "safetyDemo.launching": "デモを起動しています…",
+  "safetyDemo.running": "デモ実行中：承認カードが表示されたら Deny で止めてください。",
+  "safetyDemo.error": "デモを起動できませんでした。少し待って再度お試しください。",
 
   // ── liveness バッジ (liveness-display) ──────────────────────────────────
   "liveness.live": "LIVE",
@@ -259,6 +298,22 @@ const ja = {
   "policy.cat.external-tool": "外部ツール（MCP / WebFetch）",
   "policy.cat.migrate-prod": "本番マイグレーション",
   "policy.cat.high-risk-other": "その他 high-risk（backstop）",
+  // ── preset セレクタ (ADR 019f23e1・PolicyPresetSelector) ──
+  "policy.preset.legend": "プリセット",
+  "policy.preset.current": "現在のプリセット:",
+  "policy.preset.custom": "カスタム",
+  "policy.preset.strict": "Strict（厳格）",
+  "policy.preset.strict.summary":
+    "検出できる全カテゴリを止める（最も安全・承認プロンプトは増える）。",
+  "policy.preset.balanced": "Balanced（推奨）",
+  "policy.preset.balanced.summary": "推奨の既定。破滅的操作＋秘匿情報の外部送出などを止める。",
+  "policy.preset.demo": "Demo（デモ用・緩め）",
+  "policy.preset.demo.summary":
+    "破滅的で不可逆な操作（rm -rf / ディスク破壊 / fork 爆弾）だけを止め、それ以外は素通しします⚠。",
+  "policy.preset.looserWarn":
+    "このプリセットは推奨既定（Balanced）より緩く、止まるはずの操作が素通しになります。この端末全体（YOLO 時）に適用されます。",
+  "policy.enforcementScope":
+    "予防が効くのは Managed モード（CC / Codex を ActraDeck 経由で起動）のときだけです。Attach は観測のみ・Codex rollout は検知のみです。",
 
   // ── per-repo 承認ポリシー設定画面 (ApprovalPolicyView・ADR 019f0eca) ─────────────
   "approvalPolicy.title": "承認ポリシー（この端末・YOLO 時）",
@@ -308,6 +363,23 @@ const ja = {
   "approvalPolicy.saving": "保存中…",
   "approvalPolicy.resetToDefault": "Default に戻す",
   "approvalPolicy.resetHint": "この repo の上書きを削除し、Default を継承します。",
+  // ── preset セレクタ (ADR 019f23e1・PolicyPresetSelector) ──
+  "approvalPolicy.preset.legend": "プリセット",
+  "approvalPolicy.preset.current": "現在のプリセット:",
+  "approvalPolicy.preset.custom": "カスタム",
+  "approvalPolicy.preset.strict": "Strict（厳格）",
+  "approvalPolicy.preset.strict.summary":
+    "検出できる全カテゴリを止める（最も安全・承認プロンプトは増える）。",
+  "approvalPolicy.preset.balanced": "Balanced（推奨）",
+  "approvalPolicy.preset.balanced.summary":
+    "推奨の既定。破滅的操作＋秘匿情報の外部送出などを止める。",
+  "approvalPolicy.preset.demo": "Demo（デモ用・緩め）",
+  "approvalPolicy.preset.demo.summary":
+    "破滅的で不可逆な操作（rm -rf / ディスク破壊 / fork 爆弾）だけを止め、それ以外は素通しします⚠。",
+  "approvalPolicy.preset.looserWarn":
+    "このプリセットは推奨既定（Balanced）より緩く、止まるはずの操作が素通しになります。Default に適用すると、上書きの無い全 repo に波及します。",
+  "approvalPolicy.enforcementScope":
+    "予防が効くのは Managed モード（CC / Codex を ActraDeck 経由で起動）のときだけです。Attach は観測のみ・Codex rollout は検知のみです。",
 
   // ── 承認 Inbox (ApprovalInbox) ──────────────────────────────────────────
   "inbox.title": "承認 Inbox",
@@ -722,6 +794,27 @@ const en: Record<MessageKey, string> = {
   "audit.occurrences.more": "Showing up to the limit",
   "audit.occurrences.jump": "View in Replay",
 
+  // ── P2 audit report export (ADR 019f2326) ──
+  "audit.exportHtml": "Export HTML",
+  "audit.exportHtml.title":
+    "Export the audit aggregate as HTML (open directly in a browser; share with team/clients; no raw secrets)",
+  "audit.exportMarkdown": "Export Markdown",
+  "audit.exportMarkdown.title":
+    "Export the audit aggregate as Markdown (paste into PRs, issues, docs; no raw secrets)",
+  "audit.report.export": "Export report",
+  "audit.report.html": "HTML",
+  "audit.report.html.title":
+    "Export this session's detailed report as HTML (timeline, approvals, redaction counts, exit codes; no raw secrets)",
+  "audit.report.markdown": "Markdown",
+  "audit.report.markdown.title":
+    "Export this session's detailed report as Markdown (no raw secrets)",
+  "audit.report.json": "JSON",
+  "audit.report.json.title": "Export this session's detailed report as JSON (no raw secrets)",
+  "audit.report.includeDiff": "Include diff",
+  "audit.report.includeDiff.title":
+    "Include the redacted diff for connected sessions only (marked unavailable in-body when disconnected)",
+  "audit.report.error": "Failed to export report",
+
   // ── workspace ──
   "workspace.sessions": "Sessions",
   "workspace.title": "Session workspace",
@@ -767,6 +860,24 @@ const en: Record<MessageKey, string> = {
   "readiness.agent.codex.observable": "Codex: observable",
   "readiness.agent.codex.detected": "Codex: detected but rollout dir unresolved",
   "readiness.agent.codex.missing": "Codex: not detected",
+
+  // ── first-run safety demo (ADR 019f22a7 P1; empty-state CTA) ──
+  "safetyDemo.title": "Protected on this machine",
+  "safetyDemo.lead":
+    "ActraDeck supervises agents on this machine. The throwaway 30-second demo proves all three below.",
+  "safetyDemo.cap.blockVerb": "Stops",
+  "safetyDemo.cap.block":
+    "Holds high-risk operations (rm -rf …/build) before approval so you can deny and stop them.",
+  "safetyDemo.cap.redactVerb": "Leaves nothing",
+  "safetyDemo.cap.redact":
+    "Redacts secrets before they are stored (only per-kind counts are shown).",
+  "safetyDemo.cap.auditVerb": "Proves it",
+  "safetyDemo.cap.audit":
+    "Turns command, decision, redaction and diff into an auditable Session Replay.",
+  "safetyDemo.cta": "Run the 30-second safety demo",
+  "safetyDemo.launching": "Starting the demo…",
+  "safetyDemo.running": "Demo running: when the approval card appears, press Deny to stop it.",
+  "safetyDemo.error": "Could not start the demo. Please wait a moment and try again.",
 
   // ── liveness ──
   "liveness.live": "LIVE",
@@ -870,6 +981,23 @@ const en: Record<MessageKey, string> = {
   "policy.cat.external-tool": "External tool (MCP / WebFetch)",
   "policy.cat.migrate-prod": "Production migration",
   "policy.cat.high-risk-other": "Other high-risk (backstop)",
+  // ── preset selector (ADR 019f23e1・PolicyPresetSelector) ──
+  "policy.preset.legend": "Preset",
+  "policy.preset.current": "Current preset:",
+  "policy.preset.custom": "Custom",
+  "policy.preset.strict": "Strict",
+  "policy.preset.strict.summary":
+    "Gates every category we can detect (safest; more approval prompts).",
+  "policy.preset.balanced": "Balanced (recommended)",
+  "policy.preset.balanced.summary":
+    "The recommended default. Gates catastrophic operations plus secret egress and more.",
+  "policy.preset.demo": "Demo (looser)",
+  "policy.preset.demo.summary":
+    "Gates only catastrophic, irreversible operations (rm -rf / disk destruction / fork bombs); everything else passes through ⚠.",
+  "policy.preset.looserWarn":
+    "This preset is looser than the recommended default (Balanced); operations that should be gated will pass through. It applies to this whole machine (under YOLO).",
+  "policy.enforcementScope":
+    "Prevention only takes effect in Managed mode (CC / Codex launched via ActraDeck). Attach observes only; Codex rollout detects only.",
 
   // ── per-repo approval policy view (ApprovalPolicyView) ──
   "approvalPolicy.title": "Approval policy (this machine, under YOLO)",
@@ -919,6 +1047,23 @@ const en: Record<MessageKey, string> = {
   "approvalPolicy.saving": "Saving…",
   "approvalPolicy.resetToDefault": "Reset to Default",
   "approvalPolicy.resetHint": "Remove this repo's override and inherit Default.",
+  // ── preset selector (ADR 019f23e1・PolicyPresetSelector) ──
+  "approvalPolicy.preset.legend": "Preset",
+  "approvalPolicy.preset.current": "Current preset:",
+  "approvalPolicy.preset.custom": "Custom",
+  "approvalPolicy.preset.strict": "Strict",
+  "approvalPolicy.preset.strict.summary":
+    "Gates every category we can detect (safest; more approval prompts).",
+  "approvalPolicy.preset.balanced": "Balanced (recommended)",
+  "approvalPolicy.preset.balanced.summary":
+    "The recommended default. Gates catastrophic operations plus secret egress and more.",
+  "approvalPolicy.preset.demo": "Demo (looser)",
+  "approvalPolicy.preset.demo.summary":
+    "Gates only catastrophic, irreversible operations (rm -rf / disk destruction / fork bombs); everything else passes through ⚠.",
+  "approvalPolicy.preset.looserWarn":
+    "This preset is looser than the recommended default (Balanced); operations that should be gated will pass through. Applying it to Default propagates to every repo without an override.",
+  "approvalPolicy.enforcementScope":
+    "Prevention only takes effect in Managed mode (CC / Codex launched via ActraDeck). Attach observes only; Codex rollout detects only.",
 
   // ── inbox ──
   "inbox.title": "Approvals",

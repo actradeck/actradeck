@@ -16,6 +16,7 @@ import {
   waitingKind,
 } from "./liveness-display";
 import { formatCurrentAction } from "./action-units-display";
+import type { SafetyDemoPhase } from "./use-safety-demo";
 
 import type { SessionListItem } from "../realtime/contract";
 // 2b-TDA-2 (sweep 019f1991): per-agent の wire shape は正準型を参照する (inline 再宣言しない)。
@@ -134,6 +135,65 @@ export interface SessionListProps {
     readonly claude?: AgentVisibilityWire["claude"];
     readonly codex?: AgentVisibilityWire["codex"];
   };
+  /**
+   * ADR 019f22a7 P1: 空状態の「この端末で守られている」セクション + 30秒セーフティデモ CTA。
+   * 指定時のみ readiness パネル下に描画する (readiness が出る真の空状態でのみ有効)。CTA 押下は親が握る
+   * BFF 経由の起動 (`onLaunch`)・phase で二度押し抑止 / 進行 / 失敗を表示する。
+   */
+  readonly safety?: {
+    readonly phase: SafetyDemoPhase;
+    readonly onLaunch: () => void;
+  };
+}
+
+/**
+ * ADR 019f22a7 P1: 空状態の安全性訴求 + セーフティデモ CTA。
+ * 「止める・残さない・証明できる」を **静的な✓で断定せず**、使い捨て 30 秒デモで **実証する** capability として
+ * 提示する (claim-matches-default-mode: 偽りの常時✓を作らない)。デモが本物の証跡ゆえ「見せる」でなく「証明する」。
+ */
+function SafetyDemoPanel({ phase, onLaunch }: { phase: SafetyDemoPhase; onLaunch: () => void }) {
+  const { t } = useLocale();
+  const busy = phase === "launching" || phase === "running";
+  return (
+    <section className="ad-safety" data-testid="safety-demo" data-phase={phase}>
+      <h3 className="ad-safety__title">{t("safetyDemo.title")}</h3>
+      <p className="ad-safety__lead">{t("safetyDemo.lead")}</p>
+      <ul className="ad-safety__caps">
+        <li>
+          <span className="ad-safety__verb">{t("safetyDemo.cap.blockVerb")}</span>
+          <span>{t("safetyDemo.cap.block")}</span>
+        </li>
+        <li>
+          <span className="ad-safety__verb">{t("safetyDemo.cap.redactVerb")}</span>
+          <span>{t("safetyDemo.cap.redact")}</span>
+        </li>
+        <li>
+          <span className="ad-safety__verb">{t("safetyDemo.cap.auditVerb")}</span>
+          <span>{t("safetyDemo.cap.audit")}</span>
+        </li>
+      </ul>
+      <Button
+        kind="primary"
+        size="md"
+        iconStart="play"
+        data-testid="safety-demo-cta"
+        disabled={busy}
+        onClick={onLaunch}
+      >
+        {t("safetyDemo.cta")}
+      </Button>
+      {phase === "launching" || phase === "running" ? (
+        <span className="ad-safety__progress" data-testid="safety-demo-progress" role="status">
+          {phase === "launching" ? t("safetyDemo.launching") : t("safetyDemo.running")}
+        </span>
+      ) : null}
+      {phase === "error" ? (
+        <span className="ad-safety__error" data-testid="safety-demo-error" role="alert">
+          {t("safetyDemo.error")}
+        </span>
+      ) : null}
+    </section>
+  );
 }
 
 /** Claude の観測配線状態 3 値 (anyHook=配線済み / binary のみ=未配線 / 未検出)。 */
@@ -167,6 +227,7 @@ export function SessionList({
   emptyLabel,
   emptyAction,
   readiness,
+  safety,
 }: SessionListProps) {
   const { t } = useLocale();
   if (sessions.length === 0) {
@@ -209,6 +270,7 @@ export function SessionList({
           ) : (
             <span data-testid="readiness-disconnected">{t("readiness.disconnected")}</span>
           )}
+          {safety ? <SafetyDemoPanel phase={safety.phase} onLaunch={safety.onLaunch} /> : null}
         </div>
       );
     }

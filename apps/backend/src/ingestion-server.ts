@@ -34,6 +34,7 @@ import { RealtimeStore } from "./realtime-store.js";
 import { registerRealtimeRoute } from "./realtime-server.js";
 import { ReplayStore } from "./replay-store.js";
 import { AuditStore } from "./audit-store.js";
+import { SafetyDemoLauncher } from "./safety-demo.js";
 import {
   isAllowlistResponseFrame,
   isDiffResponseFrame,
@@ -74,6 +75,12 @@ export interface IngestionServerOptions {
   readonly livenessOptions?: SynthesizeOptions;
   /** presence grace 期間 (ms)。既定 5000(ADR 019ea2bf)。テスト/統合で短縮注入用。 */
   readonly presenceGraceMs?: number;
+  /**
+   * ADR 019f22a7 P1: first-run セーフティデモの起動コントローラ (テスト注入用)。
+   * 省略時は ingestToken から既定 launcher を構成する (driver 実在時のみ auto-enable)。
+   * realtimeToken 未設定なら route 自体を mount しないため未使用。
+   */
+  readonly demoLauncher?: SafetyDemoLauncher;
   /** Fastify logger を有効化。 */
   readonly logger?: boolean;
 }
@@ -170,6 +177,10 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
   const realtimeStore = new RealtimeStore(opts.pool);
   const replayStore = new ReplayStore(opts.pool);
   const auditStore = new AuditStore(opts.pool);
+  // ADR 019f22a7 P1: セーフティデモ起動コントローラ。ingestToken を子 env へ注入する authoritative 値と
+  //   して束ねる (子はこの backend の /ingest/ws へ実接続する)。driver 実在時のみ auto-enable。
+  const demoLauncher =
+    opts.demoLauncher ?? new SafetyDemoLauncher({ ingestToken: opts.ingestToken });
 
   const app = Fastify({
     // SEC-1: logger 有効時、Fastify 既定の req serializer は req.url を **query 込み**で
@@ -189,6 +200,8 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
     preClose: function preClose() {
       // TDA-3: pending grace タイマを clear し event loop の居座りを防ぐ(app.close() が即返る)。
       sidecarRegistry.dispose();
+      // ADR 019f22a7 P1: 走行中のセーフティデモ子プロセスを kill する (孤児化を防ぐ)。
+      demoLauncher.dispose();
       for (const client of app.websocketServer.clients) {
         client.close(1001, "server shutting down");
       }
@@ -299,6 +312,7 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
       replayStore,
       auditStore,
       sidecarRegistry,
+      demoLauncher,
     });
   }
 

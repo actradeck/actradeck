@@ -129,6 +129,11 @@ export function normalizeReplayRequestPath(requestPath: string): string {
     // ガバナンス証跡 drill-down (decision 019f03cc): kind 別件数→個別イベント (query kind/limit は
     //   search で保持)。session セグメントは [^/]+ (traversal は `/` 不在で構造的に塞ぐ)。anchored。
     /^\/realtime\/audit\/sessions\/[^/]+\/redactions$/.test(parsed.pathname) ||
+    // P2 監査レポート export (ADR 019f2326): 単一セッション詳細レポート (時系列・command/exit_code/
+    //   decision/risk/redaction by-kind/時刻)。query format=html|md|json / diff=1 は search で保持。
+    //   read-only (GET) ゆえ mutating gate には載せない (isPolicySetPath 等に非該当)。session セグメントは
+    //   [^/]+ (traversal は `/` 不在で構造遮断)。anchored で緩めない (SSRF/path-confusion 防止)。
+    /^\/realtime\/audit\/sessions\/[^/]+\/report$/.test(parsed.pathname) ||
     // PAL-v2 (ADR 019ee147): 永続承認 allowlist の in-UI 一覧 (GET) / 失効 (POST)。
     //   session セグメントは `[^/]+`。revoke は mutating ゆえ proxy 側で method=POST を厳格に絞る
     //   (isAllowlistRevokePath)。allowlist (一覧) は GET-only。allowlist を緩めない (anchored)。
@@ -158,7 +163,20 @@ export function normalizeReplayRequestPath(requestPath: string): string {
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/list$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/set$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/unset$/.test(parsed.pathname) ||
-    /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/resolve$/.test(parsed.pathname);
+    /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/resolve$/.test(parsed.pathname) ||
+    // ADR 019f22a7 P1: first-run セーフティデモの起動 (POST 固定 path・segment/query なし)。実行を
+    //   起動する mutating-class ゆえ isDemoLaunchPath で POST-only + same-origin CSRF を強制する
+    //   (set/unset/resolve と同扱い)。anchored・traversal 不可。
+    /^\/realtime\/demo\/safety$/.test(parsed.pathname) ||
+    // ADR 6点強化 #1: tamper-evident audit export の検証 (POST 固定 path・segment/query なし)。
+    //   manifest を body で運び純粋検証 (副作用なし) するが POST ゆえ method-pure + same-origin CSRF を
+    //   isAuditVerifyPath で強制する (policy set / demo と同扱い)。anchored・traversal 不可。
+    /^\/realtime\/audit\/verify$/.test(parsed.pathname) ||
+    // ADR 6点強化 #2: レビュー・パケット。GET は複数セッション束ね (query sessions/format/diff は search で
+    //   保持・read-only GET)。verify は packet manifest を body で運ぶ POST (isAuditPacketVerifyPath で
+    //   method-pure + same-origin CSRF)。いずれも固定 path (segment なし)・anchored・traversal 不可。
+    /^\/realtime\/audit\/packet$/.test(parsed.pathname) ||
+    /^\/realtime\/audit\/packet\/verify$/.test(parsed.pathname);
   if (!allowed) {
     throw new InvalidReplayRequestPathError(requestPath);
   }
@@ -230,6 +248,51 @@ export function isPolicyResolvePath(requestPath: string): boolean {
   return /^\/realtime\/(?:sessions|daemons)\/[^/]+\/approvals\/policy\/resolve$/.test(
     parsed.pathname,
   );
+}
+
+/**
+ * ADR 019f22a7 P1: POST (実行を起動する mutating-class) セーフティデモ起動 path。set/unset/resolve と
+ * 同じく method-pure に分離し、proxy が「POST-only + same-origin CSRF」を強制する (cross-site の
+ * デモ乱起動を構造遮断)。固定 path (session/daemon セグメントなし)。
+ */
+export function isDemoLaunchPath(requestPath: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestPath, "http://local");
+  } catch {
+    return false;
+  }
+  return /^\/realtime\/demo\/safety$/.test(parsed.pathname);
+}
+
+/**
+ * ADR 6点強化 #1: POST (mutating-class) を許す tamper-evidence 検証 path = `/realtime/audit/verify`。
+ * 副作用は無い純粋検証だが、manifest を body で運ぶため demo/policy と同じ POST-only + same-origin
+ * CSRF ゲートに服させる (GET-only の read path と分離)。
+ */
+export function isAuditVerifyPath(requestPath: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestPath, "http://local");
+  } catch {
+    return false;
+  }
+  return /^\/realtime\/audit\/verify$/.test(parsed.pathname);
+}
+
+/**
+ * ADR 6点強化 #2: POST (mutating-class) を許すレビュー・パケット検証 path = `/realtime/audit/packet/verify`。
+ * 単一 verify と同じく副作用の無い純粋検証だが packet manifest を body で運ぶため POST-only + same-origin
+ * CSRF ゲートに服させる (packet GET = read-only とは分離)。anchored・固定 path。
+ */
+export function isAuditPacketVerifyPath(requestPath: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestPath, "http://local");
+  } catch {
+    return false;
+  }
+  return /^\/realtime\/audit\/packet\/verify$/.test(parsed.pathname);
 }
 
 /**

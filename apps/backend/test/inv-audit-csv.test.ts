@@ -81,6 +81,7 @@ function sampleSession(overrides: Partial<AuditSessionSummary> = {}): AuditSessi
       pending: 0,
     },
     high_risk_op_count: 1,
+    auto_allowed_count: 0,
     ...overrides,
   };
 }

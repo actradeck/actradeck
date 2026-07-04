@@ -372,7 +372,15 @@ describe("INV egress: Bearer auth + hello handshake (real ws server)", () => {
       });
     });
 
-    for (let i = 0; i < 800 && cap.upgradeAuth.length < 2; i++) await sleep(10);
+    // reconnect の upgrade(Bearer) と hello frame は別タイミング (upgrade 完了 → 接続確立後に
+    // hello 送信) ゆえ、upgradeAuth.length>=2 だけを poll すると hello frame 到着前に assert して
+    // 間欠失敗する (expected 1 to be >= 2)。実際に assert する hello frame の再送 (>=2) 自体を
+    // poll 条件へ含める。reconnect が hello を再送しなければ budget を使い切って失敗する
+    // (falsifiability 維持)。
+    const helloCount = (): number =>
+      cap.frames.filter((f) => (f as { type?: string }).type === "hello").length;
+    for (let i = 0; i < 800 && (cap.upgradeAuth.length < 2 || helloCount() < 2); i++)
+      await sleep(10);
     expect(cap.upgradeAuth.length).toBeGreaterThanOrEqual(2);
     // 再接続でも Bearer + hello。
     expect(cap.upgradeAuth[cap.upgradeAuth.length - 1]).toBe(`Bearer ${TOKEN}`);

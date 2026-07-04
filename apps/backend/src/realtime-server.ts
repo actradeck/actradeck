@@ -24,6 +24,7 @@ import { ApprovalDecision, sanitizeRepoLabel } from "@actradeck/event-model";
 import type { ClientFrame, RealtimeHub, RealtimeSink } from "./realtime-hub.js";
 import {
   decodeReplayCursor,
+  MAX_REPLAY_LIMIT,
   MAX_WALL_SESSIONS,
   normalizeOutputTail,
   normalizeReplayLimit,
@@ -38,9 +39,33 @@ import {
   normalizeRedactionOccurrenceLimit,
 } from "./audit-contract.js";
 import type { AuditRangeReport } from "./audit-contract.js";
+import {
+  auditReportToHtml,
+  auditReportToMarkdown,
+  sessionReportToHtml,
+  sessionReportToMarkdown,
+} from "./audit-report.js";
+import type { AuditSessionReport, AuditSessionReportDiff } from "./audit-report.js";
+import {
+  buildAuditManifest,
+  resolveAuditSignerFromEnv,
+  verifyAuditManifest,
+  verifyPacketManifest,
+  decodeManifestBase64,
+  decodePacketManifestBase64,
+  type AuditManifest,
+  type PacketManifest,
+} from "./audit-integrity.js";
+import {
+  buildReviewPacket,
+  renderReviewPacketHtml,
+  renderReviewPacketMarkdown,
+} from "./audit-packet.js";
+import type { ReplayEventDTO } from "./replay-contract.js";
 import type { AuditStore } from "./audit-store.js";
 import { isPathWithinProjectScope, parseProjectScope } from "./project-scope.js";
 import type { RealtimeStore } from "./realtime-store.js";
+import type { SafetyDemoLauncher } from "./safety-demo.js";
 import type {
   PolicyRelayOp,
   PolicyRelayParams,
@@ -61,6 +86,11 @@ export interface RealtimeRouteOptions {
    * env ACTRADECK_PROJECT_SCOPE をパースする (audit/list 系と同一出所)。空=無制限 (default-off)。
    */
   readonly projectScope?: readonly string[];
+  /**
+   * ADR 019f22a7 P1: first-run セーフティデモの起動コントローラ。省略時は
+   * `POST /realtime/demo/safety` は 404 (この配備でデモ導線を生やさない)。
+   */
+  readonly demoLauncher?: SafetyDemoLauncher;
 }
 
 const VALID_DECISIONS: ReadonlySet<string> = new Set(ApprovalDecision.options);
@@ -360,6 +390,31 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
     return reply.send(opts.sidecarRegistry.agentReadiness());
   });
 
+  // ─── ADR 019f22a7 P1: first-run セーフティデモの起動 route ────────────────────────────────
+  //   cockpit の CTA から呼ばれ、hold モードで使い捨て `demo-safety-<short>` セッションを **実パイプライン**
+  //   (子デモ sidecar → ingestion → event store) で起動し、UI が live 一覧 / Approval Inbox / replay で
+  //   focus できるよう session_id を返す。REALTIME_TOKEN gate (上の onRequest) 背後・**method-pure POST**
+  //   (app.post ゆえ GET 等は route 不一致で拒否)。same-origin CSRF は BFF (replay-proxy の isSameOriginPost)
+  //   が mutating-class として強制する (isDemoLaunchPath)。
+  //   **実行サーフェス封じ込め**: 起動は SafetyDemoLauncher の **固定コマンド / 固定コードパスのみ**で、
+  //   ユーザー入力を argv / コマンドへ一切渡さない (injection 皆無)。多重起動は 1 本に抑止 (走行中は既存
+  //   session_id を返す)。認可 / 検証拒否は throw でなく **値ベース** (SEC-R3-3・launcher.launch が値を返す)。
+  app.post("/realtime/demo/safety", async (_req, reply) => {
+    const launcher = opts.demoLauncher;
+    if (launcher === undefined) {
+      // この配備ではデモ導線を生やさない (silent 起動不能でなく明示 404)。
+      return reply.code(404).send({ error: "safety demo not enabled" });
+    }
+    const res = launcher.launch();
+    if (!res.ok) {
+      return reply.code(res.status).send({ error: res.error ?? "safety demo launch failed" });
+    }
+    return reply.code(res.status).send({
+      session_id: res.sessionId,
+      ...(res.alreadyRunning === true ? { already_running: true } : {}),
+    });
+  });
+
   app.get<{ Params: { daemonId: string }; Querystring: { repo_scope?: string } }>(
     "/realtime/daemons/:daemonId/approvals/policy",
     async (req, reply) => {
@@ -553,19 +608,279 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
       return reply.code(500).send({ error: "internal error" });
     }
   });
+
+  // P2 監査レポート export (ADR 019f2326): 単一セッション詳細レポート (時系列) を html/md/json で返す。
+  //   REALTIME_TOKEN gate (上の onRequest) 背後・method-pure GET。AuditStore.sessionSummary(detail) +
+  //   ReplayStore.eventsPage (時系列全件・上限内) を合成し、command/exit_code/decision/risk/redaction
+  //   by-kind/時刻を時系列で描画する。入力は既存 redacted-at-rest DTO のみ (新 redaction 面ゼロ・
+  //   backend 再 redaction なし)。html/md formatter は全値を htmlEscape/mdCell に通す
+  //   (INV-AUDIT-EXPORT-NO-RAW を html/md へ拡張・XSS 防御)。?diff=1 は on-demand requestDiff (live のみ・
+  //   切断時は本文へ「diff 取得不可 (session 切断)」を明記し graceful・500 にしない)。
+  app.get<{
+    Params: { sessionId: string };
+    Querystring: { format?: string; diff?: string };
+  }>("/realtime/audit/sessions/:sessionId/report", async (req, reply) => {
+    try {
+      const sessionId = req.params.sessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        return reply.code(400).send({ error: "missing session_id" });
+      }
+      // 単一セッションレポート合成 (summary + 時系列 events + ?diff=1)。packet route と共有 (単一出所)。
+      const report = await buildSessionReport(opts, sessionId, (req.query.diff ?? "") === "1");
+      if (report === undefined) return reply.code(404).send({ error: "session not found" });
+
+      // tamper-evident manifest (ADR 6点強化 #1): ハッシュ連鎖 + 任意 Ed25519 署名。署名鍵は
+      // env ACTRADECK_AUDIT_SIGNING_KEY (未設定なら連鎖のみ)。生成物 (html/md/json) 全てに載せる。
+      const manifest = buildAuditManifest(report, resolveAuditSignerFromEnv());
+
+      const format = (req.query.format ?? "json").toLowerCase();
+      if (format === "html") {
+        return sendHtml(reply, sessionReportToHtml(report, manifest), `audit-report-${sessionId}`);
+      }
+      if (format === "md" || format === "markdown") {
+        return sendMarkdown(
+          reply,
+          sessionReportToMarkdown(report, manifest),
+          `audit-report-${sessionId}`,
+        );
+      }
+      return reply.send({ ...report, integrity: manifest });
+    } catch (err) {
+      req.log.error({ err }, "audit session report failed");
+      return reply.code(500).send({ error: "internal error" });
+    }
+  });
+
+  // 改竄検知の検証 route (ADR 6点強化 #1)。受け取った manifest (JSON or base64) を export と同一の
+  // canonicalize/chain で再計算し、署名があれば Ed25519 検証する。純粋な検証 (副作用なし・DB 非参照)
+  // ゆえ REALTIME_TOKEN gate 配下で method-pure POST。expected_fingerprint で既知鍵照合も可。
+  // AUDIT-VERIFY-SIZE: verify は report route が出す最大 manifest を受理せねばならない (export が出す
+  //   ものを verify が受けられないと打ち切り report が再検証不能になる)。app 既定 bodyLimit(1MiB)では
+  //   最大 report(10000 events ≈ 5MB JSON / base64 は ~1.33x)を弾くため、per-route で AUDIT_VERIFY_BODY_LIMIT
+  //   へ引き上げる。上限は 10000-event hard cap 由来の有界値・verify は O(events) ゆえ DoS 面は限定的
+  //   (trust 境界 = REALTIME_TOKEN + loopback + single-operator)。
+  app.post<{
+    Body: { manifest?: unknown; manifest_b64?: unknown; expected_fingerprint?: unknown };
+  }>("/realtime/audit/verify", { bodyLimit: AUDIT_VERIFY_BODY_LIMIT }, async (req, reply) => {
+    try {
+      const body = req.body ?? {};
+      let manifest: AuditManifest | undefined;
+      if (typeof body.manifest_b64 === "string") {
+        manifest = decodeManifestBase64(body.manifest_b64);
+      } else if (body.manifest !== null && typeof body.manifest === "object") {
+        manifest = body.manifest as AuditManifest;
+      }
+      if (manifest === undefined) {
+        return reply
+          .code(400)
+          .send({ error: "missing or invalid manifest (send manifest or manifest_b64)" });
+      }
+      // SEC-2: fingerprint pin。client 指定を優先し、無ければ **server 自身の署名鍵 fingerprint** を
+      // 既定 pin にする (同一 server で署名・検証すれば自動 pin で ok=true)。未 pin (client 未指定 かつ
+      // server 鍵なし) の署名済み manifest は verify が ok=false(unpinned) を返す。
+      const clientExpected =
+        typeof body.expected_fingerprint === "string" ? body.expected_fingerprint : undefined;
+      const expected = clientExpected ?? resolveAuditSignerFromEnv()?.fingerprint;
+      // verifyAuditManifest は untrusted manifest を構造ガードで受け ok=false(malformed) を返す
+      // (throw しない)。防御的一貫性のため route も try/catch で 500 化を防ぐ (QA-2/SEC-4)。
+      return reply.send(
+        verifyAuditManifest(
+          manifest,
+          expected !== undefined ? { expectedFingerprint: expected } : {},
+        ),
+      );
+    } catch (err) {
+      req.log.error({ err }, "audit verify failed");
+      return reply.code(500).send({ error: "internal error" });
+    }
+  });
+
+  // 強み #2 レビュー・パケット (ADR 6点強化 #2): 複数セッションを 1 つの改竄検知パケットに束ねて
+  //   html/md/json で返す。?sessions=id1,id2,... (カンマ区切り・MAX_PACKET_SESSIONS 上限)。各セッションの
+  //   per-session manifest を要素に packet manifest が root + governance 集計を束ねる。REALTIME_TOKEN gate
+  //   背後・method-pure GET。入力は既存 redacted-at-rest DTO のみ (buildSessionReport 共有・新 redaction 面ゼロ)。
+  //   ?diff=1 は各セッションの on-demand diff (live のみ・切断は graceful)。
+  app.get<{ Querystring: { sessions?: string; format?: string; diff?: string } }>(
+    "/realtime/audit/packet",
+    async (req, reply) => {
+      try {
+        const sessionIds = parsePacketSessionIds(req.query.sessions);
+        if (sessionIds === undefined) {
+          return reply.code(400).send({
+            error: `missing or too many sessions (1..${MAX_PACKET_SESSIONS} comma-separated ids)`,
+          });
+        }
+        const includeDiff = (req.query.diff ?? "") === "1";
+        const signer = resolveAuditSignerFromEnv();
+        const built: { report: AuditSessionReport; manifest: AuditManifest }[] = [];
+        for (const sessionId of sessionIds) {
+          const report = await buildSessionReport(opts, sessionId, includeDiff);
+          if (report === undefined) {
+            return reply.code(404).send({ error: `session not found: ${sessionId}` });
+          }
+          built.push({ report, manifest: buildAuditManifest(report, signer) });
+        }
+        const packet = buildReviewPacket({
+          generated_at: new Date().toISOString(),
+          sessions: built,
+          ...(signer !== undefined ? { signer } : {}),
+        });
+        const format = (req.query.format ?? "json").toLowerCase();
+        if (format === "html") {
+          return sendHtml(reply, renderReviewPacketHtml(packet), "review-packet");
+        }
+        if (format === "md" || format === "markdown") {
+          return sendMarkdown(reply, renderReviewPacketMarkdown(packet), "review-packet");
+        }
+        return reply.send(packet);
+      } catch (err) {
+        req.log.error({ err }, "audit packet failed");
+        return reply.code(500).send({ error: "internal error" });
+      }
+    },
+  );
+
+  // packet 改竄検知の検証 route (ADR 6点強化 #2)。受け取った packet manifest を build と同一の
+  //   canonicalize/chain で再計算し、署名があれば Ed25519 検証する。純検証 (副作用なし・DB 非参照)。
+  //   packet manifest は O(sessions) (events を含まない) ゆえ小さいが、単一 verify と同じ per-route
+  //   bodyLimit を再利用する (境界一貫性・過大でない)。
+  app.post<{
+    Body: { manifest?: unknown; manifest_b64?: unknown; expected_fingerprint?: unknown };
+  }>(
+    "/realtime/audit/packet/verify",
+    { bodyLimit: AUDIT_VERIFY_BODY_LIMIT },
+    async (req, reply) => {
+      try {
+        const body = req.body ?? {};
+        let manifest: PacketManifest | undefined;
+        if (typeof body.manifest_b64 === "string") {
+          manifest = decodePacketManifestBase64(body.manifest_b64);
+        } else if (body.manifest !== null && typeof body.manifest === "object") {
+          manifest = body.manifest as PacketManifest;
+        }
+        if (manifest === undefined) {
+          return reply
+            .code(400)
+            .send({ error: "missing or invalid packet manifest (send manifest or manifest_b64)" });
+        }
+        const clientExpected =
+          typeof body.expected_fingerprint === "string" ? body.expected_fingerprint : undefined;
+        const expected = clientExpected ?? resolveAuditSignerFromEnv()?.fingerprint;
+        return reply.send(
+          verifyPacketManifest(
+            manifest,
+            expected !== undefined ? { expectedFingerprint: expected } : {},
+          ),
+        );
+      } catch (err) {
+        req.log.error({ err }, "audit packet verify failed");
+        return reply.code(500).send({ error: "internal error" });
+      }
+    },
+  );
 }
 
-/** 監査レポートを JSON か CSV (?format=csv) で返す。 */
+/** レポート時系列の最大取得ページ数 (MAX_REPLAY_LIMIT × これ = 上限件数・over-fetch 防止)。 */
+const MAX_REPORT_PAGES = 20;
+
+/** packet に束ねられる最大セッション数 (over-fetch / DoS 面の有界化・single-operator 境界内)。 */
+const MAX_PACKET_SESSIONS = 25;
+
+/**
+ * `?sessions=` のカンマ区切り id を parse する。空/全空白/重複除去後 0/上限超は undefined (route が 400)。
+ * 重複は除去して同一セッションの二重束ねを防ぐ (packet root の決定論も保つ)。
+ */
+function parsePacketSessionIds(raw: string | undefined): string[] | undefined {
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  const ids = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const unique = [...new Set(ids)];
+  if (unique.length === 0 || unique.length > MAX_PACKET_SESSIONS) return undefined;
+  return unique;
+}
+
+/**
+ * 単一セッションレポート合成 (summary + 時系列 events[上限内] + ?diff)。report route と packet route が
+ * 共有する単一出所。session 不在は undefined。入力は redacted-at-rest DTO のみ (新 redaction 面ゼロ)。
+ */
+async function buildSessionReport(
+  opts: RealtimeRouteOptions,
+  sessionId: string,
+  includeDiff: boolean,
+): Promise<AuditSessionReport | undefined> {
+  const summary = await opts.auditStore.sessionSummary(sessionId, { detail: true });
+  if (summary === undefined) return undefined;
+  // 時系列イベント (allow-list 投影)。cursor で全件辿るが上限ページ数で打ち切り (over-fetch 防止)。
+  const events: ReplayEventDTO[] = [];
+  let cursor: ReturnType<typeof decodeReplayCursor>;
+  let eventsTruncated = false;
+  for (let page = 0; page < MAX_REPORT_PAGES; page++) {
+    const p = await opts.replayStore.eventsPage({
+      sessionId,
+      limit: MAX_REPLAY_LIMIT,
+      ...(cursor !== undefined ? { cursor } : {}),
+    });
+    events.push(...p.events);
+    if (!p.has_more || p.next_cursor === undefined) break;
+    cursor = decodeReplayCursor(p.next_cursor);
+    if (page === MAX_REPORT_PAGES - 1) eventsTruncated = true;
+  }
+  // ?diff=1 のときのみ on-demand で redacted diff を要求する (live 接続のみ・切断は graceful)。
+  let diff: AuditSessionReportDiff | undefined;
+  if (includeDiff) {
+    const res = await opts.sidecarRegistry.requestDiff(sessionId);
+    diff = res.ok
+      ? {
+          available: true,
+          body: res.diff.body,
+          truncated: res.diff.truncated,
+          secret_detected: res.diff.secret_detected,
+          redaction_count: res.diff.redaction_count,
+        }
+      : { available: false, unavailable_reason: "diff 取得不可 (session 切断)" };
+  }
+  return {
+    generated_at: new Date().toISOString(),
+    summary,
+    events,
+    events_truncated: eventsTruncated,
+    ...(diff !== undefined ? { diff } : {}),
+  };
+}
+
+/**
+ * verify route の per-route body 上限 (AUDIT-VERIFY-SIZE)。app 既定 bodyLimit(1MiB)を override して
+ * report route が出す大型 manifest を受理する。値は **経験的 calibration**(provable worst-case でない・
+ * TDA-2): 最大 10000 events(MAX_REPORT_PAGES × MAX_REPLAY_LIMIT)で実測 ~5MB(JSON)、base64 埋込
+ * (manifest_b64)は ~1.33x、これに headroom を足して 16 MiB。command は cap 済(MAX_COMMAND_LEN)だが
+ * path/subject/reason/error に明示長 cap が無く、病的に巨大なフィールドを持つ 10000-event report は
+ * 16MiB を超えうる。その場合 verify は **413/deny-safe reject**(ok を返さない・leak/gate 弱体化でない)。
+ * report route(GET)は無上限で >16MiB を serve しうる pre-existing 非対称ゆえ、provable round-trip 保証が
+ * 要るなら report 出力を同 bound に cap する follow-up(裁定 019f28f2 option②)。BFF 側
+ * MAX_VERIFY_BODY_BYTES(replay-proxy.ts)と手動整合(どちらか小さい方が実効上限・TDA-1)。
+ */
+const AUDIT_VERIFY_BODY_LIMIT = 16 * 1024 * 1024;
+
+/** 監査レポートを JSON / CSV / HTML / Markdown (?format=) で返す。 */
 function sendAudit(
   reply: FastifyReply,
   report: AuditRangeReport,
   format: string | undefined,
   basename: string,
 ): unknown {
-  if ((format ?? "").toLowerCase() === "csv") {
-    return sendCsv(reply, auditReportToCsv(report), basename);
+  switch ((format ?? "").toLowerCase()) {
+    case "csv":
+      return sendCsv(reply, auditReportToCsv(report), basename);
+    case "html":
+      return sendHtml(reply, auditReportToHtml(report), basename);
+    case "md":
+    case "markdown":
+      return sendMarkdown(reply, auditReportToMarkdown(report), basename);
+    default:
+      return reply.send(report);
   }
-  return reply.send(report);
 }
 
 /**
@@ -712,16 +1027,37 @@ function isDaemonId(v: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v);
 }
 
+/**
+ * SEC-1r2: Content-Disposition filename へ補間する前に allow-list 文字へ畳む。basename には
+ * 無検証の session_id (URL param 由来) が混ざりうるため、裸の `"`/`;`/制御文字で filename
+ * パラメータ injection されないよう英数._- 以外を `_` 化する (空なら "audit" にフォールバック)。
+ */
+function safeFilename(basename: string): string {
+  return basename.replace(/[^A-Za-z0-9._-]/g, "_") || "audit";
+}
+
 /** CSV を text/csv + ダウンロード Content-Disposition で返す。 */
 function sendCsv(reply: FastifyReply, csv: string, basename: string): unknown {
-  // SEC-1r2: Content-Disposition filename へ補間する前に allow-list 文字へ畳む。basename には
-  //   無検証の session_id (URL param 由来) が混ざりうるため、裸の `"`/`;`/制御文字で filename
-  //   パラメータ injection されないよう英数._- 以外を `_` 化する (空なら "audit" にフォールバック)。
-  const safeName = basename.replace(/[^A-Za-z0-9._-]/g, "_") || "audit";
   return reply
     .header("content-type", "text/csv; charset=utf-8")
-    .header("content-disposition", `attachment; filename="${safeName}.csv"`)
+    .header("content-disposition", `attachment; filename="${safeFilename(basename)}.csv"`)
     .send(csv);
+}
+
+/** HTML を text/html + ダウンロード Content-Disposition で返す (生成物は self-contained・全値 escape 済)。 */
+function sendHtml(reply: FastifyReply, html: string, basename: string): unknown {
+  return reply
+    .header("content-type", "text/html; charset=utf-8")
+    .header("content-disposition", `attachment; filename="${safeFilename(basename)}.html"`)
+    .send(html);
+}
+
+/** Markdown を text/markdown + ダウンロード Content-Disposition で返す。 */
+function sendMarkdown(reply: FastifyReply, md: string, basename: string): unknown {
+  return reply
+    .header("content-type", "text/markdown; charset=utf-8")
+    .header("content-disposition", `attachment; filename="${safeFilename(basename)}.md"`)
+    .send(md);
 }
 
 /** UI からの 1 フレームを処理する (subscribe/unsubscribe/approve/interrupt)。 */

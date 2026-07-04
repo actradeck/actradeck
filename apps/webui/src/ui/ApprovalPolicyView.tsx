@@ -31,6 +31,7 @@ import {
 import { Button, InlineAlert, Tag } from "./kit";
 import { useLocale } from "./LocaleProvider";
 import { PersistedApprovalsPanel } from "./PersistedApprovalsPanel";
+import { PolicyPresetSelector } from "./PolicyPresetSelector";
 import { loadCandidateStubs, saveCandidateStubs } from "./policy-cache";
 import {
   usePolicyAdmin,
@@ -567,6 +568,16 @@ export function ApprovalPolicyView({
                 <span>{t("approvalPolicy.enabledLabel")}</span>
               </label>
               <p className="ad-policy__hint">{t("approvalPolicy.enabledHint")}</p>
+
+              {/* ADR 019f23e1: preset セレクタ (加法)。クリックでドラフト categories を presetCategories に
+                  セットし既存 Save/looser フローへ流す (checkbox 個別編集はそのまま残る・relay 不変)。 */}
+              <PolicyPresetSelector
+                prefix="approvalPolicy"
+                draftCats={draftCats}
+                draftEnabled={draftEnabled}
+                onApply={(cats) => setDraftCats(new Set(cats))}
+                disabled={saving || offline}
+              />
 
               <fieldset
                 className="ad-policy__cats"
