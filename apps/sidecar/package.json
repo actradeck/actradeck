@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@actradeck/event-model": "workspace:*",
+    "@actradeck/redaction": "workspace:*",
     "better-sqlite3": "12.10.0",
     "chokidar": "5.0.0",
     "node-pty": "1.1.0",

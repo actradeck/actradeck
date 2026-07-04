@@ -8,7 +8,7 @@
  *  - INV-DETAIL-REDACTION-TRANSPARENCY (round-trip 全経路): sidecar が返す redaction 済み diff 本文が
  *    backend を素通りして HTTP 応答に届き、秘匿 (ghp_) は raw で出ず redaction 済み。
  *  - stdout output read: redacted-at-rest な command.output.delta.delta を tail 連結して返す
- *    (backend 再 redaction なし・allow-list delta)。
+ *    (ingress redaction 床は既 redacted に冪等・allow-list delta)。
  *
  * REAL DATA ONLY: 実 PG に永続して検証。DB 未到達なら skip。
  */
@@ -182,7 +182,8 @@ describe.skipIf(!reachable)("INV-DETAIL-PULL (real PG + real WS)", () => {
   it("diff: registered session round-trips the sidecar's (redacted) body verbatim, raw secret absent", async () => {
     const sid = newSession("pull_diff_ok");
     // sidecar は **redaction 済み** body を返す (実 sidecar の diff-provider 透過後を模す)。
-    const redactedBody = "diff --git a/a.txt b/a.txt\n+GITHUB_TOKEN=[REDACTED:github-token]\n";
+    const redactedBody =
+      "diff --git a/a.txt b/a.txt\n+GITHUB_TOKEN=[REDACTED:credential-assignment]\n";
     const sc = await openSidecar("ctrl-token-bbbbbbbbbbbbbbbb", [sid], redactedBody, {
       secretDetected: true,
       redactionCount: 1,
@@ -203,7 +204,7 @@ describe.skipIf(!reachable)("INV-DETAIL-PULL (real PG + real WS)", () => {
       expect(body.body).toBe(redactedBody);
       // raw secret prefix は応答に存在しない (sidecar choke の証跡)。
       expect(body.body).not.toContain("ghp_");
-      expect(body.body).toContain("[REDACTED:github-token]");
+      expect(body.body).toContain("[REDACTED:credential-assignment]");
       expect(body.secret_detected).toBe(true);
       expect(body.redaction_count).toBe(1);
       // 中継要求には controlToken が付いている (relayApproval と同じ認可境界)。
@@ -513,9 +514,10 @@ describe.skipIf(!reachable)("INV-DETAIL-PULL (real PG + real WS)", () => {
         payload: { kind: "command.started", command: "printenv" },
       }),
     );
-    // 注: ingestion-server は backend で再 redaction しない (sidecar が choke)。よって delta は
-    //   **既に redaction 済み** で届く前提。ここでは redaction 済みトークンが read で素通りし、
-    //   read 層が新たな raw 露出を作らない (allow-list delta) ことを固定する。
+    // 注: delta は sidecar で redaction 済みで届く。backend は ingress redaction 床
+    //   (ADR 019f2d2c) を持つが既 redacted に冪等 — sidecar が KEY=<secret> に対し実際に産む
+    //   credential-assignment marker は ingress 床を通しても不変。read 層が新たな raw 露出を
+    //   作らない (allow-list delta) ことを固定する。
     await ingest(
       makeEvent({
         session_id: sid,
@@ -524,7 +526,7 @@ describe.skipIf(!reachable)("INV-DETAIL-PULL (real PG + real WS)", () => {
         payload: {
           kind: "command.output.delta",
           stream: "stdout",
-          delta: "GITHUB_TOKEN=[REDACTED:github-token]\n",
+          delta: "GITHUB_TOKEN=[REDACTED:credential-assignment]\n",
         },
       }),
     );
@@ -535,7 +537,7 @@ describe.skipIf(!reachable)("INV-DETAIL-PULL (real PG + real WS)", () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { output_excerpt: string };
-    expect(body.output_excerpt).toContain("[REDACTED:github-token]");
+    expect(body.output_excerpt).toContain("[REDACTED:credential-assignment]");
     expect(body.output_excerpt).not.toContain("ghp_");
   });
 

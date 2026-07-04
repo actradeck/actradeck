@@ -20,7 +20,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { MAX_COMMAND_LEN, normalizeHook } from "../src/normalize.js";
-import { MAX_REDACT_INPUT, redactString } from "../src/redactor.js";
+import { MAX_REDACT_INPUT, redactString } from "@actradeck/redaction";
 import { EventSink } from "../src/sink.js";
 import { EventStore } from "../src/store.js";
 import type { WsClient } from "../src/ws-client.js";

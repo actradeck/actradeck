@@ -10,7 +10,8 @@
  *    onRequest gate を外す mutation で赤。
  *  - INV-INBOX-REDACTION: 集約応答は **redaction 済みの allow-list 7 キーのみ**で、raw secret prefix
  *    (ghp_) は出ない。session_state.pending_approvals(sidecar redaction 済 jsonb)を再利用するだけ
- *    で backend は再 redaction も raw 露出もしない。allow-list 以外の生フィールドが応答に出ない。
+ *    で raw 露出しない。backend は ingress redaction 床 (ADR 019f2d2c・既 redacted に冪等) を持ち、
+ *    allow-list 以外の生フィールドは応答に出ない (read allow-list) 上に at-rest でも ingress 床で redact 済み。
  *
  * REAL DATA ONLY: 実 PG に永続して検証。DB 未到達なら skip。
  */
@@ -249,10 +250,12 @@ describe.skipIf(!reachable)("INV-INBOX (real PG + real WS)", () => {
     const sid = newSession("inbox_redact");
     const owner = await openOwner("ctrl-token-inbox-bbbbbbbbbb", [sid]);
     try {
-      // sidecar は redaction 済みで ingest する (backend は再 redaction しない=sidecar choke)。
+      // sidecar は redaction 済みで ingest する。backend は ingress redaction 床 (ADR 019f2d2c) を
+      //   併せ持つが、既 redacted 値には冪等 (KEY=<marker> は sidecar が実際に産む credential-assignment
+      //   へ正規化される)。加えて allow-list 外の raw secret_env は ingress 床が実マスクする (defense-in-depth)。
       // 加えて allow-list 外の生フィールド(secret_env)を payload に混ぜ、read が allow-list へ
       // 限定して raw を素通りさせないことを固定する。
-      await requestApproval(sid, "req-redact-1", "export TOKEN=[REDACTED:github-token]", {
+      await requestApproval(sid, "req-redact-1", "export TOKEN=[REDACTED:credential-assignment]", {
         secret_env: "ghp_SHOULD_NOT_LEAK_0123456789",
       });
 
@@ -263,7 +266,7 @@ describe.skipIf(!reachable)("INV-INBOX (real PG + real WS)", () => {
       const pending = group!.pending_approvals[0]!;
 
       // redaction 済み値は素通り、raw secret prefix は応答全体に存在しない。
-      expect(String(pending.command)).toContain("[REDACTED:github-token]");
+      expect(String(pending.command)).toContain("[REDACTED:credential-assignment]");
       expect(rawText).not.toContain("ghp_");
       expect(rawText).not.toContain("SHOULD_NOT_LEAK");
       // 各キーは allow-list 7 キーの **部分集合** であること (JSON は undefined を省くため

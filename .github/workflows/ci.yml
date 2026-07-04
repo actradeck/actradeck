@@ -73,7 +73,7 @@ jobs:
         run: pnpm run format
 
       # CI-BUILD (公開 CI 初回失敗の是正): workspace ライブラリ (event-model / projection /
-      #   design-tokens / backend / sidecar) は package exports が `./dist/*` のみ (src フォールバック
+      #   redaction / design-tokens / backend / sidecar) は package exports が `./dist/*` のみ (src フォールバック
       #   なし) のため、それらを import する type-check / test / e2e は **dist が無いと失敗する**
       #   (projection の `tsc --noEmit` が @actradeck/event-model を解決できず exit2 / sidecar e2e が
       #   dist/index.js を ERR_MODULE_NOT_FOUND)。消費ステップの前に topological order で全パッケージを
@@ -136,6 +136,14 @@ jobs:
       #   DATABASE_URL 到達下で実走し、実測直下の閾値割れを exit≠0 で赤判定する。
       - name: Test (backend coverage gate)
         run: pnpm --filter @actradeck/backend run test:coverage
+
+      # R1 QA-1 (redaction coverage 退行是正): redactor.ts は sidecar 在籍時 sidecar coverage gate で
+      #   per-file 閾値が ENFORCED だった。packages/redaction へ移設後、`pnpm run test` (= vitest run)
+      #   は coverage を計算しないため floor が **dormant** (閾値割れでも exit 0) になっていた。専用
+      #   coverage gate step を追加し、redactor.ts / redact-for-persist.ts の per-file floor + global
+      #   floor を CI で実効化する (閾値割れで exit≠0)。
+      - name: Test (redaction coverage gate)
+        run: pnpm --filter @actradeck/redaction run test:coverage
 
       # egress#QA-1: sidecar の貫通 e2e (inv-egress-e2e.test.ts) は実 backend
       #   buildIngestionServer を **package entry (dist) 経由**で import する (test 専用 devDep)。

@@ -1,0 +1,28 @@
+{
+  "name": "@actradeck/redaction",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "T1 canonical secret redactor (INV-REDACTION). Single source shared by the sidecar sink choke and the backend ingress floor (ADR 019f2d2c).",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@actradeck/event-model": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

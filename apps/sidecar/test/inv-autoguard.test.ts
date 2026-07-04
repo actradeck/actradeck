@@ -15,7 +15,7 @@ import { REDACTION_KINDS_SET } from "@actradeck/event-model";
 import { ApprovalBridge } from "../src/approval-bridge.js";
 import { normalizeHook } from "../src/normalize.js";
 import type { HookCommonInput } from "../src/normalize.js";
-import { redactDeep } from "../src/redactor.js";
+import { redactDeep } from "@actradeck/redaction";
 
 // --- 合成ダミー secret (テスト専用・実 key ではない) ---------------------------
 // GitHub token 形 (ghp_ + 36 字 base62)。redactor の github-token ルールが拾う。

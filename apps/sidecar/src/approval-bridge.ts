@@ -32,7 +32,7 @@ import {
   isPersistDeniedCommand,
 } from "./normalize.js";
 import type { HookCommonInput } from "./normalize.js";
-import { countRedactionMarkersByKind, redactString } from "./redactor.js";
+import { countRedactionMarkersByKind, redactString } from "@actradeck/redaction";
 
 /**
  * 秘匿ファイル (path ベースの広め一致・over-approval が安全側)。`requiresDestructiveApproval` と

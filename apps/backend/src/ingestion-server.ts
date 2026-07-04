@@ -15,13 +15,23 @@
  *  - **自前 try-catch**: WS message handler 内は plugin の errorHandler に頼らず try-catch する
  *    (errorHandler は message 処理に効かない)。
  *  - **parseEvent 検証必須**: 受信を信頼し切らず T1 schema で検証し、不正は ack エラー
- *    (接続維持) で拒否する。backend は再 redaction しない (sidecar が choke point)。
+ *    (接続維持) で拒否する。
+ *  - **ingress redaction 床 (ADR 019f2d2c D3)**: redaction choke は sidecar sink + backend ingress の
+ *    二層。sidecar 経由 (sink.emit) は既に redaction 済だが、INGEST_TOKEN 保持アダプタの直 POST は
+ *    sink を経由しない。よって ingestOne は store.ingest の**前**に全イベントへ無条件 redaction を
+ *    適用し (@actradeck/redaction の共有 `redactEventWithAuthoritativeCounts`)、redaction_count/by_kind を
+ *    実マーカー数で権威再導出する (client 申告値は信用しない・count spoof 封じ)。二重適用は
+ *    **≤2 step で fixpoint に収束** (発散ゼロ・SEC 実測): standalone marker は secret ルールに
+ *    再マッチしないが、例外 2 つ (いずれも収束・非 leak) — `KEY=<marker>` 文脈の credential-assignment
+ *    への再ラップ (kind 帰属のみ変化・現実の sidecar single-pass 出力は fixpoint) と >MAX_REDACT_INPUT
+ *    の再 truncation。詳細は @actradeck/redaction redact-for-persist.ts。直 POST 経路の権威は backend。
  *  - **preClose**: graceful shutdown で接続を閉じる。
  */
 import { timingSafeEqual } from "node:crypto";
 
 import fastifyWebsocket from "@fastify/websocket";
 import { parseEvent } from "@actradeck/event-model";
+import { redactEventWithAuthoritativeCounts } from "@actradeck/redaction";
 import Fastify, {
   type FastifyInstance,
   type FastifyRequest,
@@ -393,13 +403,17 @@ async function handleWsMessage(
  * parseEvent で不正 payload を拒否する (受信を信頼し切らない)。
  */
 async function ingestOne(store: IngestStore, input: unknown): Promise<IngestAck> {
+  // ingress redaction 床 (ADR 019f2d2c D3): store.ingest の**前**に無条件 redaction を適用し、
+  //   redaction_count/by_kind を実マーカー数で権威再導出する (sidecar sink choke と対称・単一出所)。
+  //   parseEvent は redacted に対して行うため、検証エラーメッセージにも raw secret は載らない。
+  const redacted = redactEventWithAuthoritativeCounts(input);
   let ev;
   try {
-    ev = parseEvent(input); // T1 検証 (不正 payload / 型違反を拒否)。
+    ev = parseEvent(redacted); // T1 検証 (不正 payload / 型違反を拒否)。
   } catch (err) {
     const eid =
-      input && typeof input === "object" && "event_id" in input
-        ? String((input as { event_id?: unknown }).event_id)
+      redacted && typeof redacted === "object" && "event_id" in redacted
+        ? String((redacted as { event_id?: unknown }).event_id)
         : undefined;
     return {
       type: "ack",

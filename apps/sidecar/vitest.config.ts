@@ -10,6 +10,9 @@ export default defineConfig({
       "@actradeck/event-model": fileURLToPath(
         new URL("../../packages/event-model/src/index.ts", import.meta.url),
       ),
+      "@actradeck/redaction": fileURLToPath(
+        new URL("../../packages/redaction/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {
@@ -27,8 +30,11 @@ export default defineConfig({
         branches: 70,
         functions: 85,
         lines: 80,
-        // コア領域 (redaction / sink / store / approval-bridge) は高め。
-        "src/redactor.ts": { statements: 90, branches: 80, functions: 95, lines: 90 },
+        // コア領域 (sink / store / approval-bridge) は高め。redactor.ts は
+        //   @actradeck/redaction (packages/redaction) へ移設済で、当該 package の vitest が
+        //   per-file floor (redactor.ts 89/85/95/94・redact-for-persist.ts 95/90/90/95 + global
+        //   89/85/95/94) を強制する (ADR 019f2d2c D3・R1 recalibrated)。CI では専用
+        //   `pnpm --filter @actradeck/redaction run test:coverage` step が実効化する (R1 QA-1)。
         // 4#QA-1: redaction choke point の branch ゲートは testing.md 契約 (branch>70) を
         //   下回らせない。実測 72.72% で 70 をクリア (3#QA-3 の 50 緩和を撤回)。
         "src/sink.ts": { statements: 95, branches: 70, functions: 100, lines: 95 },

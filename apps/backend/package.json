@@ -19,6 +19,7 @@
     "@actradeck/db": "workspace:*",
     "@actradeck/event-model": "workspace:*",
     "@actradeck/projection": "workspace:*",
+    "@actradeck/redaction": "workspace:*",
     "@electric-sql/pglite": "0.5.3",
     "@electric-sql/pglite-socket": "0.2.6",
     "@fastify/websocket": "^11.2.0",

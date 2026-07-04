@@ -17,8 +17,9 @@ import {
   parseEvent,
 } from "@actradeck/event-model";
 
+import { redactEventWithAuthoritativeCounts } from "@actradeck/redaction";
+
 import { assertPayloadConsistency } from "./event-factory.js";
-import { redactDeepWithCount } from "./redactor.js";
 import type { EventStore } from "./store.js";
 import type { WsClient } from "./ws-client.js";
 
@@ -100,44 +101,30 @@ export class EventSink {
    * @returns 永続化された redaction 済み NormalizedEvent。検証失敗時は undefined。
    */
   emit(rawCandidate: NormalizedEvent | Record<string, unknown>): NormalizedEvent | undefined {
-    // (1) redaction を「最初」に適用する。以降 raw は使わない。
-    //   TDA-1 (hot-path): redactDeepWithCount は redactDeep と**同一の redacted 値**を返しつつ、
-    //   その走査内で `[REDACTED:*]` マーカー件数を同梱する。これにより従来の二重 JSON.stringify
-    //   (count 用 + store.append の永続用) のうち count 用を排し、走査 1 回で件数を得る。
-    const {
-      value: redacted,
-      redactionCount,
-      redactionCountByKind,
-    } = redactDeepWithCount(rawCandidate);
-
-    // (1') secret_detected の出所: redacted event の top-level `redaction_count` を付与する。
+    // (1) redaction を「最初」に適用し、`redaction_count` / `redaction_count_by_kind` を
+    //   redacted ツリーから再算出した権威値で相乗せする。以降 raw は使わない。
+    //   ADR 019f2d2c D3: この権威付与ロジックは @actradeck/redaction の
+    //   `redactEventWithAuthoritativeCounts` を **backend ingress 床と共有**する単一出所
+    //   (二重実装しない・security-gate-reuse-canonical-parser)。
     //   - 観測対象は **redactDeep 適用後** の redacted のみ (raw event は一切見ない)。
     //   - count は redacted の数値ゆえ原文非依存・再 redaction 不要 (新 redaction 面を増やさない)。
-    //   - 既に呼び出し側が redaction_count を載せていても、ここで走査から再計算した正準値で
-    //     **上書き**する (sink が唯一の権威。観測点を choke point に固定する)。
-    //   - 強み(a)③: redaction_count_by_kind も同一走査から付与する (raw は見ない・sink が権威で
-    //     上書き・原文非依存)。kind 名 + 件数のみ。正直な不変条件 (round-1 方針A / QA-1 / TDA-2):
-    //     **sum(by_kind) <= redaction_count**。scalar は全 `[REDACTED:*]` マーカー数
-    //     (countRedactionMarkersDeep)、by_kind は既知 kind (KNOWN_REDACTION_KINDS allowlist) に
-    //     帰属したマーカーの部分集合。等号は全マーカーが既知 kind のときのみ (phantom kind は除外)。
-    const withCount: Record<string, unknown> = {
-      ...(redacted as Record<string, unknown>),
-      redaction_count: redactionCount,
-      redaction_count_by_kind: redactionCountByKind,
-    };
+    //   - 既に呼び出し側が redaction_count を載せていても、走査から再計算した正準値で **上書き** する
+    //     (sink が唯一の権威。観測点を choke point に固定する)。
+    //   - 正直な不変条件 (round-1 方針A / QA-1 / TDA-2): **sum(by_kind) <= redaction_count**。
+    //     scalar は全 `[REDACTED:*]` マーカー数 (countRedactionMarkersDeep)、by_kind は既知 kind
+    //     (KNOWN_REDACTION_KINDS allowlist) に帰属したマーカーの部分集合 (phantom kind は除外)。
+    const withCount = redactEventWithAuthoritativeCounts(rawCandidate) as Record<string, unknown>;
 
     // (2) 正規化境界の検証 (T1) + payload 判別 union 強制 (3#TDA-1)。
-    //   失敗時は raw を一切残さず破棄 (kind!=event_type / union 不適合も含む)。
+    //   失敗時は raw を一切残さず破棄 (kind!=event_type / union 不適合も含む)。redacted 済の
+    //   withCount から event_type を読むため error path でも raw は漏れない。
     let event: NormalizedEvent;
     try {
       event = parseEvent(withCount);
       assertPayloadConsistency(event);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const et =
-        typeof (redacted as Record<string, unknown>).event_type === "string"
-          ? ((redacted as Record<string, unknown>).event_type as string)
-          : "unknown";
+      const et = typeof withCount.event_type === "string" ? withCount.event_type : "unknown";
       this.onValidationError?.(et, message);
       return undefined;
     }

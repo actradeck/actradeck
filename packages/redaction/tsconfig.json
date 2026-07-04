@@ -6,11 +6,7 @@
     "composite": true,
     "tsBuildInfoFile": "./dist/.tsbuildinfo"
   },
-  "references": [
-    { "path": "../../packages/event-model" },
-    { "path": "../../packages/projection" },
-    { "path": "../../packages/redaction" }
-  ],
+  "references": [{ "path": "../event-model" }],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "src/**/*.test.ts"]
 }

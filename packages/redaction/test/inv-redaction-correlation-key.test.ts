@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest";
 
 import { newEventId } from "@actradeck/event-model";
 
-import { redactDeep, redactValue } from "../src/redactor.js";
+import { redactDeep, redactValue } from "@actradeck/redaction";
 
 const REDACTED_HIGH_ENTROPY = "[REDACTED:high-entropy-secret]";
 

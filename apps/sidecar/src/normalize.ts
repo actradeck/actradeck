@@ -14,7 +14,7 @@
 import type { EventType, PolicyCategory, RiskLevel, State } from "@actradeck/event-model";
 
 import { type BuildEventInput, buildEvent } from "./event-factory.js";
-import { redactString } from "./redactor.js";
+import { redactString } from "@actradeck/redaction";
 
 /** Claude Code hook の共通入力 (HTTP body = command stdin と同形)。 */
 export interface HookCommonInput {

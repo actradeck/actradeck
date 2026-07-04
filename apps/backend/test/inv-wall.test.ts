@@ -10,7 +10,8 @@
  *    onRequest gate を外す mutation で赤。
  *  - INV-WALL-REDACTION: 集約応答は **ReplayEventDTO の allow-list フィールドのみ**で、raw secret
  *    prefix(ghp_)・allow-list 外の生 payload フィールドは出ない。events(sidecar redaction 済 at-rest)
- *    を allow-list 投影(rowToReplayEvent)で再利用するだけで backend は再 redaction も raw 露出もしない。
+ *    を allow-list 投影(rowToReplayEvent)で再利用する。backend は ingress redaction 床
+ *    (ADR 019f2d2c・既 redacted に冪等) を持ち、raw 露出せず allow-list 外の生フィールドも応答に出ない。
  *
  * REAL DATA ONLY: 実 PG に永続して検証。DB 未到達なら skip。
  */
@@ -250,7 +251,7 @@ describe.skipIf(!reachable)("INV-WALL (real PG + real WS)", () => {
       // 生フィールド(secret_blob)を payload に混ぜ、read が allow-list 投影で raw を素通りさせない
       // ことを固定する。
       await ingestEvent(sid, "command.started", "2026-06-05T00:00:01.000Z", {
-        command: "export TOKEN=[REDACTED:github-token]",
+        command: "export TOKEN=[REDACTED:credential-assignment]",
         risk_level: "high",
         secret_blob: "ghp_SHOULD_NOT_LEAK_0123456789",
       });
@@ -262,7 +263,7 @@ describe.skipIf(!reachable)("INV-WALL (real PG + real WS)", () => {
       const ev = lane!.events[0]!;
 
       // redaction 済み値は素通り、raw secret prefix は応答全体に存在しない。
-      expect(String(ev.command)).toContain("[REDACTED:github-token]");
+      expect(String(ev.command)).toContain("[REDACTED:credential-assignment]");
       expect(rawText).not.toContain("ghp_");
       expect(rawText).not.toContain("SHOULD_NOT_LEAK");
       // 各キーは ReplayEventDTO allow-list の部分集合であること (allow-list 外の生フィールドは出ない)。

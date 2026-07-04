@@ -21,7 +21,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { buildChildEnv } from "./child-env.js";
-import { countRedactionMarkers, redactString } from "./redactor.js";
+import { countRedactionMarkers, redactString } from "@actradeck/redaction";
 
 const execFileAsync = promisify(execFile);
 

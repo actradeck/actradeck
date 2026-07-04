@@ -21,6 +21,7 @@ const REAL_PG_TESTS = [
   "test/inv-inbox.test.ts",
   "test/inv-ingest-store.test.ts",
   "test/inv-ingestion-server.test.ts",
+  "test/inv-ingress-redaction.test.ts",
   "test/inv-liveness-parity.test.ts",
   "test/inv-redaction-backfill.test.ts",
   "test/inv-redaction-occurrences.test.ts",
@@ -41,6 +42,11 @@ export default defineConfig({
       //   (event-model と同方針)。SEC-1r read/carry 対称化 (merge prev gate) を src で固定する。
       "@actradeck/projection": fileURLToPath(
         new URL("../../packages/projection/src/index.ts", import.meta.url),
+      ),
+      // redaction も src へ alias。ingress redaction 床 (ingestOne) を built dist でなく
+      //   実ソースで検証する (event-model / projection と同方針・ADR 019f2d2c D3)。
+      "@actradeck/redaction": fileURLToPath(
+        new URL("../../packages/redaction/src/index.ts", import.meta.url),
       ),
     },
   },
