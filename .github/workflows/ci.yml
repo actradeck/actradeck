@@ -145,6 +145,14 @@ jobs:
       - name: Test (redaction coverage gate)
         run: pnpm --filter @actradeck/redaction run test:coverage
 
+      # R2 QA-1 (event-model coverage gate): D1 で足した provider slug 判定
+      #   (provider.ts: isKnownProvider / PROVIDER_SLUG_RE / Provider schema) は `pnpm run test`
+      #   (= vitest run) では coverage 非計算のため floor が dormant だった。専用 coverage gate step で
+      #   provider.ts の 100-or-trip per-file floor + global erosion floor を CI で実効化する
+      #   (閾値割れで exit≠0・redaction gate と同型)。
+      - name: Test (event-model coverage gate)
+        run: pnpm --filter @actradeck/event-model run test:coverage
+
       # egress#QA-1: sidecar の貫通 e2e (inv-egress-e2e.test.ts) は実 backend
       #   buildIngestionServer を **package entry (dist) 経由**で import する (test 専用 devDep)。
       #   dist が新鮮であることを保証するため sidecar gate の直前に backend を build する

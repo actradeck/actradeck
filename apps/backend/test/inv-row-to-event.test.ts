@@ -176,9 +176,10 @@ describe.skipIf(!reachable)(
       expect(r.liveness.state).toBe("stalled");
     });
 
-    it("M4: a contract-invalid HEARTBEAT row (bad provider) is excluded from process observation", async () => {
+    it("M4: a contract-invalid HEARTBEAT row (non-slug provider) is excluded from process observation", async () => {
       // 集約クエリは event_type/state を enum で絞るが provider は絞らない。最新 heartbeat 行は
-      // validateRowForLiveness で full T1 検証され、provider が enum 外なら process 未観測扱い。
+      // validateRowForLiveness で full T1 検証され、provider が **slug 規則違反** なら process 未観測扱い。
+      // (ADR 019f2d2c D1: provider は slug 開放ゆえ、契約違反は enum 外でなく非 slug 値で表す。)
       const sid = newSession("sess_hbcontract");
       const base = Date.now();
       const store = new IngestStore({ pool, livenessOptions: { nowMs: base } });
@@ -202,12 +203,12 @@ describe.skipIf(!reachable)(
         }),
       );
 
-      // 契約違反の heartbeat 行 (provider が enum 外) を直接 INSERT。最新 heartbeat だが
-      // safeParseEvent 失敗 → process シグナル未観測になるべき。
+      // 契約違反の heartbeat 行 (provider が非 slug: 大文字+空白+記号) を直接 INSERT。最新 heartbeat だが
+      // safeParseEvent 失敗 (PROVIDER_SLUG_RE 不一致) → process シグナル未観測になるべき。
       await rawInsertEvent(sid, {
         event_type: "heartbeat",
         timestamp: iso(base, -200),
-        provider: "bogus_provider_not_in_enum",
+        provider: "Bogus Provider!",
         payload: { kind: "heartbeat", process_alive: false },
       });
 

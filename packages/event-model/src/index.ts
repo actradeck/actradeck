@@ -5,15 +5,23 @@
  * Sidecar (採番・送信) / backend (ingestion・reducer・state engine) / UI が共通参照する。
  *
  * 公開面:
- * - 型/enum: Provider, Source, State, EventType, RiskLevel, ApprovalDecision
+ * - provider: Provider (WHO・slug 開放・ADR 019f2d2c D1) / KNOWN_PROVIDERS / isKnownProvider
+ * - enum: Source, State, EventType, RiskLevel, ApprovalDecision (Provider は enum ではない)
  * - schema:  NormalizedEvent, EventPayload, Metrics, Timestamp, EventId
  * - 採番:     newEventId / isUuidV7
  * - 遷移:     STATE_TRANSITIONS / isValidTransition / assertValidTransition
  * - 単調性:   MonotonicTimestampChecker / isMonotonicNonDecreasing
  */
 
-// provider / source
-export { Provider, Source } from "./provider.js";
+// provider (WHO・slug 開放) / source (HOW・closed enum) — ADR 019f2d2c #6a 公開取込コントラクト
+export {
+  Provider,
+  Source,
+  KNOWN_PROVIDERS,
+  PROVIDER_SLUG_RE,
+  isKnownProvider,
+} from "./provider.js";
+export type { KnownProvider } from "./provider.js";
 
 // state model + transitions (T1 遷移表)
 export {

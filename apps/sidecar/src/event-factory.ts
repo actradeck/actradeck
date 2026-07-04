@@ -38,9 +38,9 @@ export interface BuildEventInput {
    */
   readonly permission_mode?: string;
   readonly event_type: EventType;
-  /** 既定 claude_code。codex 連携時に上書き (Provider enum / T1 整合)。 */
+  /** 既定 claude_code。codex 連携時に上書き (Provider = slug 開放・ADR 019f2d2c D1 / T1 整合)。 */
   readonly provider?: Provider;
-  /** 既定 hooks。app_server / sdk 連携時に上書き (Source enum / T1 整合)。 */
+  /** 既定 hooks。app_server / sdk / external 連携時に上書き (Source = closed enum / T1 整合)。 */
   readonly source?: Source;
   readonly state?: State;
   readonly thread_id?: string;

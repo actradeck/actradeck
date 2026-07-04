@@ -25,7 +25,9 @@
  *      `export TOKEN=[REDACTED:credential-assignment]` を産む (github-token でなく) ため再適用で不変。
  *      (この不変性は sidecar 経路の 9 形の代表出力で実測確認済。)
  *   2. **`>MAX_REDACT_INPUT` の再 truncation**: 超長文字列は redaction 後に MAX_REDACT_INPUT で
- *      切り詰められる。既に切り詰め済なら再適用は no-op (長さ不変)。
+ *      切り詰められる。no-op (長さ不変・不動点) になるのは **fixpoint 到達後 (2 回目以降)** であり、
+ *      **pass1→pass2 で一度だけ長さが変わりうる** (marker 置換で膨らんだ後に切り詰めが効くため。
+ *      実測 262169→262166→fixpoint)。以降は不変で発散しない。
  * いずれも 2 回目の適用で不動点に達し、raw secret を新たに露出しない。
  */
 import { redactDeepWithCount } from "./redactor.js";

@@ -67,12 +67,22 @@ describe("INV-EVENT-SCHEMA", () => {
     expect(safeParseEvent(validEvent({ provider_session_id: 123 as never })).success).toBe(false);
   });
 
-  it("rejects an unknown provider", () => {
-    expect(safeParseEvent(validEvent({ provider: "gemini" as never })).success).toBe(false);
+  // provider は slug 開放 (ADR 019f2d2c D1)。未知 slug は受理される
+  // (詳細な reject クラス・KNOWN 不変は inv-provider-forward-compat.test.ts)。
+  it("accepts an unknown-but-valid provider slug (D1 開放)", () => {
+    expect(safeParseEvent(validEvent({ provider: "gemini" })).success).toBe(true);
   });
 
-  it("rejects an unknown source", () => {
+  it("rejects a non-slug provider (uppercase)", () => {
+    expect(safeParseEvent(validEvent({ provider: "Gemini" as never })).success).toBe(false);
+  });
+
+  it("rejects an unknown source (closed enum・D2)", () => {
     expect(safeParseEvent(validEvent({ source: "telnet" as never })).success).toBe(false);
+  });
+
+  it("accepts source external (D2 additive)", () => {
+    expect(safeParseEvent(validEvent({ source: "external" })).success).toBe(true);
   });
 
   it("rejects an unknown event_type", () => {

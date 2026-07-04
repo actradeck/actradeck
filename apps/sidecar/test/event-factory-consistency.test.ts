@@ -114,8 +114,8 @@ describe("TDA-3: event-factory defaults are consistent across all sink.emit path
   });
 });
 
-// --- 再#TDA-4: provider/source は enum 経由で引数化 (codex 前方互換) -----------
-describe("再#TDA-4: buildEvent provider/source are enum-parameterized (default claude_code/hooks)", () => {
+// --- 再#TDA-4: provider=slug (開放) / source=closed enum で引数化 (codex 前方互換) --------
+describe("再#TDA-4: buildEvent provider (slug) / source (closed enum) parameterized (default claude_code/hooks)", () => {
   it("defaults to claude_code / hooks when not specified (Phase 2 既定)", () => {
     const ev = buildEvent({
       session_id: "s1",
