@@ -10,6 +10,10 @@
  * mutation: withFileLock を「素通し (lock 取らず fn 実行)」に変えると、
  * 「保持中は二重取得が fail-loud」「保持中 lockfile 存在」テストが赤化する。
  *
+ * NOTE: 「空ファイル窓 (create→pid 可視の TOCTOU) で二重取得しない」INV は実 multi-process harness が
+ *   必要なため、承認永続の並走テスト inv-approval-allowlist-store.test.ts の
+ *   `INV-FILELOCK-NO-EMPTY-WINDOW` に同居する (実 spawn worker + acquireDelayMs 注入で falsifiable)。
+ *
  * 🔴 すべて os.tmpdir() 配下。実設定不可侵。
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -74,7 +78,7 @@ describe("INV-ATTACH-WIRE-LOCK: mutual exclusion", () => {
 });
 
 describe("INV-ATTACH-WIRE-LOCK: creates the lock dir if missing", () => {
-  // QA-2: lock file の親 dir が未作成でも openSync('wx') が ENOENT で落ちないことを pin。
+  // QA-2: lock file の親 dir が未作成でも linkSync 取得が ENOENT で落ちないことを pin。
   // mutation: file-lock.ts の mkdirSync(dirname(lockPath),{recursive:true}) を削除すると、
   //           未作成の入れ子 dir 配下で ENOENT throw して赤化する。
   it("runs fn under a target inside an uncreated nested directory", () => {
@@ -150,5 +154,72 @@ describe("INV-ATTACH-WIRE-LOCK: self-unlink on throw", () => {
     // finally は holder !== self を検出して unlink しない → 他者の lock を尊重。
     expect(existsSync(lockPath)).toBe(true);
     expect(readFileSync(lockPath, "utf8").trim()).toBe(String(otherLivePid));
+  });
+});
+
+describe("INV-ATTACH-WIRE-LOCK: SEC-1 acquire-delay env は test モード時のみ honor", () => {
+  // 取得遅延の env (ACTRADECK_TEST_LOCK_ACQUIRE_DELAY_MS) は本番デーモンで無視されねばならない
+  // (万一漏れても取得遅延を注入できない)。free lock ゆえ backoff sleep は起きないため、注入した
+  // sleep spy が呼ばれたら「acquire-delay が honor された」直接証拠になる。
+  const ENV_KEY = "ACTRADECK_TEST_LOCK_ACQUIRE_DELAY_MS";
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = {
+      [ENV_KEY]: process.env[ENV_KEY],
+      NODE_ENV: process.env.NODE_ENV,
+      VITEST: process.env.VITEST,
+    };
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it("NODE_ENV=production では env の取得遅延を無視する (sleep 未呼出)", () => {
+    process.env[ENV_KEY] = "5000";
+    process.env.NODE_ENV = "production";
+    delete process.env.VITEST; // test-mode シグナルを外す
+    const sleeps: number[] = [];
+    withFileLock(target, () => "ok", { sleep: (ms) => sleeps.push(ms) });
+    expect(sleeps).toEqual([]); // 本番では取得遅延を注入しない
+  });
+
+  it("NODE_ENV=test では env の取得遅延を honor する (sleep 呼出)", () => {
+    process.env[ENV_KEY] = "7";
+    process.env.NODE_ENV = "test";
+    delete process.env.VITEST;
+    const sleeps: number[] = [];
+    withFileLock(target, () => "ok", { sleep: (ms) => sleeps.push(ms) });
+    expect(sleeps).toContain(7); // test モードでは注入される
+  });
+
+  it("VITEST シグナルだけでも honor する (NODE_ENV 非 test でも)", () => {
+    process.env[ENV_KEY] = "9";
+    process.env.NODE_ENV = "production";
+    process.env.VITEST = "true";
+    const sleeps: number[] = [];
+    withFileLock(target, () => "ok", { sleep: (ms) => sleeps.push(ms) });
+    expect(sleeps).toContain(9);
+  });
+
+  it("env 値は 60s に clamp される (暴走遅延防止)", () => {
+    process.env[ENV_KEY] = "999999999";
+    process.env.NODE_ENV = "test";
+    delete process.env.VITEST;
+    const sleeps: number[] = [];
+    withFileLock(target, () => "ok", { sleep: (ms) => sleeps.push(ms) });
+    expect(sleeps).toContain(60_000); // 上限で頭打ち
+    expect(Math.max(...sleeps, 0)).toBeLessThanOrEqual(60_000);
+  });
+
+  it("非有限な env 値は 0 扱い (遅延なし)", () => {
+    process.env[ENV_KEY] = "not-a-number";
+    process.env.NODE_ENV = "test";
+    delete process.env.VITEST;
+    const sleeps: number[] = [];
+    withFileLock(target, () => "ok", { sleep: (ms) => sleeps.push(ms) });
+    expect(sleeps).toEqual([]);
   });
 });

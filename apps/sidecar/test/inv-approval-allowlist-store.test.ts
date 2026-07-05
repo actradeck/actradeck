@@ -230,8 +230,16 @@ describe("INV-APPROVAL-PERSIST-CONCURRENT (QA-3): multi-process withFileLock 直
     ) ?? join(repoRoot, "node_modules/.bin/tsx");
   const workerPath = join(testDir, "helpers/persist-add-worker.mts");
 
-  /** worker を 1 プロセス spawn し exit code を待つ。 */
-  function spawnAdd(storePath: string, signature: string): Promise<number> {
+  /**
+   * worker を 1 プロセス spawn し exit code を待つ。
+   * `acquireDelayMs` を渡すと withFileLock の「排他生成直後・fn 前」に deschedule 窓を注入する
+   * (INV-FILELOCK-NO-EMPTY-WINDOW の実プロセス反証用・本番デーモンはこの env を設定しない)。
+   */
+  function spawnAdd(
+    storePath: string,
+    signature: string,
+    acquireDelayMs?: number,
+  ): Promise<number> {
     return new Promise((resolvePromise, reject) => {
       const child = spawn(tsxBin, [workerPath], {
         env: {
@@ -241,6 +249,9 @@ describe("INV-APPROVAL-PERSIST-CONCURRENT (QA-3): multi-process withFileLock 直
           SCOPE: "scope0000001",
           TTL_MS: String(60 * 60_000),
           NOW: "1000000",
+          ...(acquireDelayMs
+            ? { ACTRADECK_TEST_LOCK_ACQUIRE_DELAY_MS: String(acquireDelayMs) }
+            : {}),
         },
         stdio: ["ignore", "ignore", "inherit"],
       });
@@ -270,4 +281,56 @@ describe("INV-APPROVAL-PERSIST-CONCURRENT (QA-3): multi-process withFileLock 直
       rmSync(cdir, { recursive: true, force: true });
     }
   }, 60_000);
+
+  /**
+   * INV-FILELOCK-NO-EMPTY-WINDOW: 排他生成直後 (fn 前) の deschedule 窓を注入しても二重取得しない。
+   *
+   * 上の K プロセステストは無負荷では緑だが、CPU 逼迫 (全 suite 並列 + cold-start 競合) 下で稀に
+   * 初回 fail→再実行 pass する flake を観測していた (PR-2 QA)。原因は timing budget でなく
+   * withFileLock の **空ファイル窓**: 旧 openSync 方式は「排他生成」と「pid 書込」が 2 syscall に
+   * 分かれ、その間に契約者が deschedule されると lockPath が pid 無しで一瞬存在し、別プロセスが
+   * `holder===undefined`=stale と誤判定して奪取 → 二重保持 → lost-update した。linkSync 方式は
+   * lockPath が出現の瞬間から pid を持つため窓自体が無い。
+   *
+   * このテストは `acquireDelayMs` (env `ACTRADECK_TEST_LOCK_ACQUIRE_DELAY_MS`) で取得直後 deschedule を
+   * **決定的に**注入し、flake を待たずに窓の有無を検出する。複数ラウンドで感度を上げる。
+   *
+   * falsifiability (mutation 反証・本 PR turn で実証): file-lock.ts の取得を旧 openSync+後追い pid 書込へ
+   * 戻し、遅延を openSync と pid 書込の間へ置くと、本テストが lost-update で RED になる (linkSync 方式は緑)。
+   *
+   * 🔴 store は os.tmpdir 配下。実 ~/.actradeck 不可侵。実プロセス (distinct pid) で検証。
+   */
+  it("INV-FILELOCK-NO-EMPTY-WINDOW: 取得直後 deschedule 窓を注入しても lost-update しない", async () => {
+    const ROUNDS = 4;
+    const K = 8;
+    const ACQUIRE_DELAY_MS = 40; // openSync 方式なら空ファイル窓が確実に広がる幅
+    for (let r = 0; r < ROUNDS; r++) {
+      const cdir = mkdtempSync(join(tmpdir(), "actradeck-pal-window-"));
+      const cpath = join(cdir, "allowlist.json");
+      try {
+        // ラウンド跨ぎで衝突しない distinct な 64hex 署名 (r*K+i を 2hex へ)。
+        const signatures = Array.from({ length: K }, (_, i) =>
+          (r * K + i).toString(16).padStart(2, "0").repeat(32),
+        );
+        const codes = await Promise.all(
+          signatures.map((sig) => spawnAdd(cpath, sig, ACQUIRE_DELAY_MS)),
+        );
+        expect(
+          codes.every((c) => c === 0),
+          `round ${r}: a worker aborted`,
+        ).toBe(true);
+        const store = new ApprovalAllowlistStore({ path: cpath });
+        const persisted = store.list(1_000_000);
+        // 窓が閉じていれば全 K 生存 (二重保持による lost-update ゼロ)。
+        expect(
+          persisted,
+          `round ${r}: lost-update under injected acquire-delay window`,
+        ).toHaveLength(K);
+        expect(new Set(persisted.map((e) => e.signature))).toEqual(new Set(signatures));
+        expect(statSync(cpath).mode & 0o777).toBe(0o600);
+      } finally {
+        rmSync(cdir, { recursive: true, force: true });
+      }
+    }
+  }, 120_000);
 });

@@ -72,6 +72,13 @@ export default defineConfig({
         //   ここを大きく下回る) だが flaky ではない。never-lower discipline は「BEST でなく WORST の下」に
         //   置いてこそ成立する (今回の教訓)。
         "src/codex-runner.ts": { statements: 78, branches: 68, functions: 70, lines: 79 },
+        // QA-1 (file-lock 空ファイル窓修正・R1): withFileLock は approval allowlist / policy 永続 /
+        //   attach settings の直列化を担う security-adjacent primitive。per-file floor が無いと取得
+        //   ロジックの被覆が silent に erode しうる。file-lock.ts は完全同期・非決定 async 無しゆえ
+        //   coverage は環境間で安定 (実測 3/3 run 同値 92.45/93.47/100/97.95)。floor は監査時 worst
+        //   90.19/87.5/100/97.87 の下 3-5pt (per-file-coverage-floor-below-worst-not-best・funcs は
+        //   100 観測の小ファイルゆえ 95・erosion tripwire であって target ではない)。
+        "src/file-lock.ts": { statements: 86, branches: 83, functions: 95, lines: 93 },
       },
     },
   },

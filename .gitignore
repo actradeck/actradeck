@@ -23,7 +23,8 @@
 *.actradeck-bak-*
 *.actradeck-tmp-*
 # SEC-1 (Attach Mode): file-lock の advisory lock file (holder pid を含む)。tracked にしない。
-*.actradeck-lock
+# SEC-2: glob は取得 temp (`<lock>.<pid>.acquire`) まで覆う (SIGKILL 残骸の誤コミット防止)。
+*.actradeck-lock*
 
 # 環境変数 / 秘匿情報（.env.example のみコミット）
 .env

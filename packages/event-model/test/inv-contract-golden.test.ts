@@ -9,16 +9,23 @@
  * 対になる実 /ingest 経路の検証は apps/backend/test/inv-contract-golden.test.ts (real PG POST)。
  */
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
 import {
   ALL_EVENT_TYPES,
+  extractDocEventTypes,
+  extractGoldenEvent,
+  GOLDEN_DOC_RELPATH,
   isKnownProvider,
   PROVIDER_SLUG_RE,
   safeParseEvent,
 } from "../src/index.js";
-import { extractDocEventTypes, extractGoldenEvent, GOLDEN_DOC_PATH } from "./golden-contract.js";
+
+// doc パスは共有 relpath を自 dir に resolve する (node 依存は test 側・src は node-free を維持)。
+const GOLDEN_DOC_PATH = resolve(dirname(fileURLToPath(import.meta.url)), GOLDEN_DOC_RELPATH);
 
 describe("INV-CONTRACT-GOLDEN: docs/ingestion-contract.md の golden example", () => {
   const raw = readFileSync(GOLDEN_DOC_PATH, "utf8");
@@ -70,6 +77,22 @@ describe("INV-CONTRACT-GOLDEN: docs/ingestion-contract.md の golden example", (
       // サイズも一致 (重複記載も検出)。
       expect(docSet.size).toBe(canonSet.size);
       expect(extractDocEventTypes(raw).length).toBe(canonSet.size);
+    });
+  });
+
+  // contract-doc の fail-loud 契約 (marker 欠落 → throw)。「docs を黙って壊す」を CI で赤化させる。
+  // 単一出所化 (PR-2 QA-3/TDA-1) で public API 化した抽出器の throw 分岐を pin する。
+  describe("fail-loud: marker が欠けたら throw (docs 破壊を黙って通さない)", () => {
+    it("GOLDEN-EVENT marker が無い markdown で extractGoldenEvent が throw する", () => {
+      expect(() => extractGoldenEvent("# ドキュメント\n本文に golden なし")).toThrow(
+        /GOLDEN-EVENT marker/,
+      );
+    });
+
+    it("EVENT-TYPES marker が無い markdown で extractDocEventTypes が throw する", () => {
+      expect(() => extractDocEventTypes("# ドキュメント\nevent_type 列挙なし")).toThrow(
+        /EVENT-TYPES marker/,
+      );
     });
   });
 });

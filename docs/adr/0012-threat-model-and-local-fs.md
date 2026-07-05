@@ -15,7 +15,8 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
 
 - **Concurrency.** Cross-process read-modify-write (multiple daemons touching the
   same file during `systemctl` restarts, etc.) is serialized with an **advisory file
-  lock** (`O_EXCL` create, pid-based stale detection, fail-loud on timeout).
+  lock** (hardlink `linkSync` exclusive create — content-complete with the holder pid,
+  so there is no empty-file window; pid-based stale detection; fail-loud on timeout).
 - **At-rest secrecy.** Secret/token-bearing state files are written **`0600`** via a
   single shared atomic helper — `writeJson0600` (temp-write → `rename`) — so all
   such writers share one audited implementation instead of drifting copies.

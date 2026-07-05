@@ -13,7 +13,8 @@
  *
  * 非対象 (意図的):
  * - codex-rollout-tailer.ts の offset state は **secret を含まない**ため 0600 を課さない (素の atomic write)。
- * - file-lock.ts は `openSync(lockPath, 'wx', 0o600)` の **排他生成 (O_CREAT|O_EXCL)** で目的が異なる。
+ * - file-lock.ts は pid を含む temp を書いて `linkSync(tmp, lockPath)` で **atomic 排他生成
+ *   (content-complete・空ファイル窓なし)** する advisory lock で目的が異なる (旧: openSync('wx'))。
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";

@@ -1,6 +1,6 @@
 {
   "name": "@actradeck/db",
-  "version": "0.0.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Database migrations (node-pg-migrate, TS up/down) for ActraDeck event store + projections",

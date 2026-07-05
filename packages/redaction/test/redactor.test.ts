@@ -330,6 +330,13 @@ describe("INV-REDACTION-MARKER-ROUNDTRIP: marker regex charset == canonical [a-z
 });
 
 // --- ReDoS scaling 共通基盤 (全ブロックをここに帰着させ basis ドリフトを防ぐ) ---
+// NOTE (PR-1 TDA-2・意図的複製 = documented 受容): この redos 計測基盤 (redosMinOf/redosBestOfMs/
+//   REDOS_TEST_TIMEOUT_MS/REDOS_BUDGET_REPEAT) は apps/sidecar/test/inv-redaction.test.ts の
+//   同名ブロックと **verbatim 同期**している (REDOS_RATIO_MAX は scaling テストを持つ本ファイル固有)。
+//   共通化しない理由: (a) 純粋 ~11 行の timing helper で、パッケージ境界を跨ぐ共有 test-utils 新設は
+//   過剰 (過剰工作禁止)、(b) 両パッケージとも test/** は tsc 対象外 (tsconfig exclude) ゆえ型レベルの
+//   単一出所化利得が無い、(c) cross-package の相対 test import はより脆く smell。redactor 移設時の
+//   意図的複製 (decision 019f2d4f)。**編集時は両コピーを同期**。
 // median は contention でスパイクするため使わず、best-of-N の **最小値 (min)** を取る:
 // 計測ノイズは加法的ゆえ min が無競合の真の計算時間に最も近い (QA-10 / 再#5d flake の教訓)。
 const redosMinOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);

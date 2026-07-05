@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { newEventId } from "@actradeck/event-model";
+import { extractGoldenEvent, GOLDEN_DOC_RELPATH, newEventId } from "@actradeck/event-model";
 import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 
@@ -28,17 +28,18 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const reachable = DATABASE_URL ? await dbReachable(DATABASE_URL) : false;
 const TOKEN = "test-ingest-token-golden-1234567890";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const DOC_PATH = resolve(HERE, "../../../docs/ingestion-contract.md");
-const GOLDEN_RE =
-  /<!--\s*GOLDEN-EVENT:START\s*-->\s*```json\s*([\s\S]*?)\s*```\s*<!--\s*GOLDEN-EVENT:END\s*-->/;
+// doc パスは共有 relpath を自 dir に resolve する (event-model 契約テストと同一 doc・同一 marker)。
+const DOC_PATH = resolve(dirname(fileURLToPath(import.meta.url)), GOLDEN_DOC_RELPATH);
 
-/** docs/ingestion-contract.md から golden example を抽出する (event-model 側の抽出と同じ marker)。 */
+/**
+ * docs/ingestion-contract.md から golden example を抽出する。
+ * 抽出規則は event-model の正準ヘルパ (extractGoldenEvent) を共有し、event-model 側 schema 契約
+ * テストと同一の doc・同一の marker を single source として読む (PR-2 QA-3/TDA-1: 以前の GOLDEN_RE
+ * verbatim 二重定義を解消)。
+ */
 function extractGolden(): Record<string, unknown> {
   const md = readFileSync(DOC_PATH, "utf8");
-  const m = GOLDEN_RE.exec(md);
-  if (!m || !m[1]) throw new Error("GOLDEN-EVENT marker/json not found in ingestion-contract.md");
-  return JSON.parse(m[1]) as Record<string, unknown>;
+  return extractGoldenEvent(md) as Record<string, unknown>;
 }
 
 interface Ack {

@@ -11,7 +11,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
-The first tagged release. Everything below already works today against a live stack
+## [0.3.0] - 2026-07-05
+
+The first release produced by the signed pipeline (versioned tarball + CycloneDX
+SBOM + SLSA build provenance). Prior public releases v0.1.0 (2026-06-27) and v0.2.0
+(2026-06-30) were early manually-cut previews without signing; their notes live on the
+GitHub Releases page. Everything below already works today against a live stack
 with real sessions (no mocks); see the README support matrix for what each vendor mode
 relays.
 
@@ -47,5 +52,31 @@ relays.
   closure, a release workflow that attests the release tarball with SLSA build
   provenance, and an opt-in `ACTRADECK_VERIFY=1` install path that fails closed if
   provenance is absent or the download digest does not match.
+- **Public ingestion contract.** Any tool can normalize its own events and `POST /ingest`
+  them into the cockpit ([docs/ingestion-contract.md](docs/ingestion-contract.md)):
+  `provider` is an open slug dimension (`^[a-z][a-z0-9_-]{0,31}$` — a charset/length
+  bound, not secret detection), `source` gains `"external"`, and `event_type` stays a
+  closed enum (the state machine gives each type meaning; normalization is the
+  adapter's job). The doc's golden example and event-type list are pinned by contract
+  tests, so the published contract cannot silently drift from the schema. Ships with a
+  zero-dependency example adapter (`docs/examples/ingest-adapter`).
+- **Ingress redaction floor.** Direct `/ingest` POSTs that bypass the sidecar are now
+  unconditionally redacted _before_ persist (shared `@actradeck/redaction` single
+  source), and redaction counts are re-derived server-side from actual markers —
+  client-declared counts are never trusted. This is an accident-prevention floor for
+  honest adapters, not a defense against adversarial `INGEST_TOKEN` holders (they are
+  inside the trust boundary).
 
-[Unreleased]: https://github.com/actradeck/actradeck/commits/main
+### Fixed
+
+- **File-lock lost-update race (found while de-flaking its own test).** The advisory
+  file lock that serializes approval-allowlist, approval-policy, and attach-settings
+  persistence had an empty-file window between exclusive create and pid write
+  (create-then-fill TOCTOU): under CPU pressure a second process could misread the
+  brand-new lock as stale, take it over, and enter the critical section concurrently —
+  losing updates. Acquisition now publishes the lock file atomically _with_ its holder
+  pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
+  real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
+
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/actradeck/actradeck/releases/tag/v0.3.0

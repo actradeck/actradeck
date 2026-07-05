@@ -786,7 +786,8 @@ export class ApprovalBridge {
    * 戻り値 = 成功なら true / 同期 throw を吸収したら false。
    *
    * 承認永続 (store.add)・allowlist 失効 (store.revoke)・policy 永続 (persistDelta→applyPolicyDelta) はいずれも
-   * `withFileLock`→`writeJson0600` 経由で ENOSPC/EACCES/EROFS や mkdirSync/openSync の **同期 throw** を
+   * `withFileLock`→`writeJson0600` 経由で ENOSPC/EACCES/EROFS や mkdirSync / lock 取得の
+   * writeFileSync(tmp)・linkSync / writeJson0600 の writeFileSync・rename・chmod の **同期 throw** を
    * しうる。これらの control handler は同期 emit (ws-client) で呼ばれるため、throw を素通しさせると
    * uncaughtException → daemon crash になる。primary な in-memory 効果 (承認解決 / live gate 更新) は
    * 呼び元で throw の前に確定させ、本ヘルパで disk 失敗のみ吸収する (per-site try/catch の散在を防ぐ

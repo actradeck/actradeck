@@ -93,6 +93,11 @@ export { normalizeScopePath, isPathWithinScope, sanitizeRepoLabel } from "./path
 export { parseAgentVisibilityWire, aggregateAgentReadiness } from "./agent-visibility-wire.js";
 export type { AgentVisibilityWire } from "./agent-visibility-wire.js";
 
+// 契約 docs 抽出ヘルパ (INV テスト共有基盤・runtime プロダクトロジックではない・PR-2 QA-3/TDA-1)
+// docs/ingestion-contract.md の golden example / event_type 列挙を event-model 契約テストと
+// backend real-POST 契約テストが同一規則で抽出するための単一出所 (verbatim 二重定義の解消)。
+export { GOLDEN_DOC_RELPATH, extractGoldenEvent, extractDocEventTypes } from "./contract-doc.js";
+
 // event id (UUIDv7)
 export { EventId, newEventId, isUuidV7 } from "./id.js";
 

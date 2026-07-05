@@ -1,6 +1,6 @@
 {
   "name": "@actradeck/design-tokens",
-  "version": "0.0.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Adaptive Clarity 2030 design tokens (DTCG 2025.10) — semantic/component/theme CSS custom properties + TS contrast utils",
