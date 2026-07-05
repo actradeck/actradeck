@@ -1,0 +1,37 @@
+# Dependabot keeps the supply-chain pins fresh so that pinning does not mean going stale.
+#
+# The workflows pin every GitHub Action to a full commit SHA (C1) and the Dockerfile
+# pins the node base image to a manifest digest (C3). A raw pin never updates on its
+# own, so Dependabot watches upstream: when an action cuts a new release or the base
+# image publishes a new digest, it opens a PR that bumps the pinned SHA/digest AND the
+# trailing `# vX` comment together. Review + merge that PR to move the pin forward.
+#
+# Scope note: this covers the two things the pins protect (actions + base image). npm /
+# pnpm dependency freshness stays on the existing `pnpm audit` path (pnpm workspaces need
+# per-directory entries here, which is a separate follow-up).
+#
+# Coverage gap (intentional): the `docker` ecosystem below scans the Dockerfile and
+# docker-compose.yml, but NOT a workflow's service-container `image:` (e.g. the Postgres
+# `image:` in .github/workflows/ci.yml) — Dependabot does not treat workflow service
+# images as a docker manifest. Those digest pins are held by INV-IMAGE-DIGEST-PINNED
+# (scripts/test-release-prep.sh) plus manual digest bumps.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"
+    # One grouped PR per week instead of one per action, to keep review load sane.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(docker)"

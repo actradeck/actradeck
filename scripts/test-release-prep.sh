@@ -1142,6 +1142,370 @@ else
 fi
 
 # ============================================================================
+# INV-ACTIONS-SHA-PINNED  (C1: every remote `uses:` is pinned to a full commit SHA)
+# ============================================================================
+# Supply-chain tripwire: a raw `@vN` action tag is a mutable, hijackable reference. C1
+# pins every third-party action to a 40-hex commit SHA (dependabot moves the pin, not
+# the CI). This gate reads EVERY .github/workflows/*.yml and fails if a remote `uses:`
+# carries anything other than `@<40-hex>`. Local (`./…`) uses are exempt (they resolve
+# inside the repo, not by a mutable Git tag). `docker://…` uses are UNCONDITIONALLY exempt
+# and the gate does NOT inspect them for a digest: `docker://image@sha256:…` would resolve
+# by digest, but `docker://image:tag` (a MUTABLE registry tag) is not caught — a known
+# coverage gap tracked in task 019f3460 to close before GHCR publish. (There are 0
+# `docker://` uses in the current tree, so nothing un-pinned slips through today.)
+actions_sha_pinned() {  # $@ = workflow / composite-action YAML files; nonzero + prints violations
+  # SEC-PIN-R2-1: parse each file with a real YAML parser and recursively walk EVERY key
+  #   literally named `uses` (jobs.*.steps[].uses AND composite runs.steps[].uses). Because
+  #   block-style, flow-style (`- {uses: …}`), flow-sequence (`steps: [{uses: …}]`) and
+  #   line-continuation all normalize to the same parsed structure, one walk catches every
+  #   syntax — no per-shape regex whack-a-mole. PyYAML absent => fail-closed (never silent-pass).
+  python3 - "$@" <<'PY'
+import sys, os, re
+sha_re = re.compile(r'@[0-9a-fA-F]{40}$')
+try:
+    import yaml
+except Exception:
+    sys.stderr.write("PyYAML unavailable — fail-closed\n")
+    sys.exit(2)
+
+def walk_uses(node, out):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == 'uses' and isinstance(v, str):
+                out.append(v)
+            walk_uses(v, out)
+    elif isinstance(node, list):
+        for it in node:
+            walk_uses(it, out)
+
+viol = []
+for p in sys.argv[1:]:
+    if not os.path.isfile(p):
+        continue
+    base = os.path.basename(p)
+    try:
+        doc = yaml.safe_load(open(p))
+    except Exception as e:
+        viol.append(f"{base}: YAML parse error ({e}) — fail-closed")
+        continue
+    refs = []
+    walk_uses(doc, refs)
+    for ref in refs:
+        r = ref.strip().strip('"\'')
+        if r.startswith('./') or r.startswith('docker://'):
+            continue
+        if not sha_re.search(r):
+            viol.append(f"{base}: uses {r}")
+if viol:
+    sys.stderr.write("\n".join(viol) + "\n")
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+WF_DIR="$ROOT/.github/workflows"
+# SEC-PIN-R2-2: discover action targets by glob, not by hardcoding ci/release/codeql:
+#   `.github/workflows/*.yml|*.yaml` plus any composite action
+#   (`.github/actions/**/action.yml|yaml`) if present. HONEST SCOPE: this covers `uses:`
+#   refs in workflows and composites only. It does NOT reach non-workflow ref sites such
+#   as `docker://image:tag` uses (see docker:// note above) — all 0-instance in the current
+#   tree, tracked in task 019f3460.
+ACT_FILES=()
+for f in "$WF_DIR"/*.yml "$WF_DIR"/*.yaml; do [ -f "$f" ] && ACT_FILES+=("$f"); done
+ACT_COMPOSITE=0
+if [ -d "$ROOT/.github/actions" ]; then
+  while IFS= read -r f; do ACT_FILES+=("$f"); ACT_COMPOSITE=$((ACT_COMPOSITE+1)); done \
+    < <(find "$ROOT/.github/actions" -type f \( -name action.yml -o -name action.yaml \) 2>/dev/null)
+fi
+if [ ! -d "$WF_DIR" ]; then
+  ng "INV-ACTIONS-SHA-PINNED: .github/workflows not found at $WF_DIR"
+elif ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import yaml" >/dev/null 2>&1; then
+  ng "INV-ACTIONS-SHA-PINNED: python3 + PyYAML required to parse the workflows (fail-closed)"
+elif [ "${#ACT_FILES[@]}" -eq 0 ]; then
+  ng "INV-ACTIONS-SHA-PINNED: no workflow YAML files discovered under $WF_DIR"
+else
+  if actions_sha_pinned "${ACT_FILES[@]}" >/dev/null 2>&1; then
+    ok "INV-ACTIONS-SHA-PINNED: every remote uses: (block/flow/list/continuation) is 40-hex SHA-pinned [${#ACT_FILES[@]} files, ${ACT_COMPOSITE} composite]"
+  else
+    ng "INV-ACTIONS-SHA-PINNED: a workflow uses: is not SHA-pinned — $(actions_sha_pinned "${ACT_FILES[@]}" 2>&1 | tr '\n' ' ')"
+  fi
+  # RED 1 (block-style, existing): rewrite ONE SHA-pinned uses back to a bare `@vN` tag.
+  WFM="$WORK/wf-bare"; rm -rf "$WFM"; mkdir -p "$WFM"; cp "$WF_DIR/ci.yml" "$WFM/ci.yml"
+  python3 - "$WFM/ci.yml" <<'PY'
+import sys, re
+p = sys.argv[1]
+src = open(p).read()
+# actions/checkout@<40-hex> # v4  ->  actions/checkout@v4  (bare mutable tag)
+src2 = re.sub(r'(uses:\s*actions/checkout)@[0-9a-fA-F]{40}(\s*#[^\n]*)?', r'\1@v4', src, count=1)
+assert src2 != src, "mutation did not apply (DEAD MUTATION)"
+open(p, 'w').write(src2)
+PY
+  if actions_sha_pinned "$WFM/ci.yml" >/dev/null 2>&1; then
+    ng "INV-ACTIONS-SHA-PINNED: DEAD GATE — a bare @vN block-style uses still passed"
+  else
+    ok "INV-ACTIONS-SHA-PINNED: gate FAILS on a bare @vN block-style uses (falsifiable)"
+  fi
+  # RED 2 (flow-style step — the SEC-PIN-R2-1 hole the line-regex missed): `- {uses: foo@v4}`.
+  FS="$WORK/wf-flowstep.yml"
+  cat > "$FS" <<'YML'
+name: probe
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: actions/checkout@v4}
+YML
+  if actions_sha_pinned "$FS" >/dev/null 2>&1; then
+    ng "INV-ACTIONS-SHA-PINNED: DEAD GATE — a flow-style {uses: @v4} passed (SEC-PIN-R2-1)"
+  else
+    ok "INV-ACTIONS-SHA-PINNED: gate FAILS on a flow-style {uses: @v4} (SEC-PIN-R2-1 closed)"
+  fi
+  # RED 3 (flow-sequence list): `steps: [{uses: foo@v4}]`.
+  FL="$WORK/wf-flowlist.yml"
+  cat > "$FL" <<'YML'
+name: probe
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{uses: pnpm/action-setup@v4}]
+YML
+  if actions_sha_pinned "$FL" >/dev/null 2>&1; then
+    ng "INV-ACTIONS-SHA-PINNED: DEAD GATE — a flow-sequence [{uses: @v4}] passed"
+  else
+    ok "INV-ACTIONS-SHA-PINNED: gate FAILS on a flow-sequence [{uses: @v4}]"
+  fi
+  # RED 4 (continuation / folded scalar — the uses: value on the next line).
+  FC="$WORK/wf-cont.yml"
+  cat > "$FC" <<'YML'
+name: probe
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: >-
+          actions/setup-node@v4
+YML
+  if actions_sha_pinned "$FC" >/dev/null 2>&1; then
+    ng "INV-ACTIONS-SHA-PINNED: DEAD GATE — a continuation (folded) uses @v4 passed"
+  else
+    ok "INV-ACTIONS-SHA-PINNED: gate FAILS on a continuation (folded) uses @v4"
+  fi
+  # GREEN (over-detection guard): a flow-style step that IS 40-hex pinned must PASS.
+  FG="$WORK/wf-flow-ok.yml"
+  cat > "$FG" <<'YML'
+name: probe
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5}
+YML
+  if actions_sha_pinned "$FG" >/dev/null 2>&1; then
+    ok "INV-ACTIONS-SHA-PINNED: a 40-hex-pinned flow-style step PASSES (no over-detection)"
+  else
+    ng "INV-ACTIONS-SHA-PINNED: OVER-FAIL — a 40-hex-pinned flow-style step was rejected"
+  fi
+fi
+
+# ============================================================================
+# INV-IMAGE-DIGEST-PINNED  (C3: every container image is pinned to a @sha256: digest)
+# ============================================================================
+# Supply-chain tripwire: a bare `postgres:17.5-alpine` / `node:22-slim` tag is mutable —
+# the same tag can point at a different image tomorrow. C3 pins every image we consume by
+# manifest digest. This gate covers all three surfaces where an image ref lives: the
+# Dockerfile `FROM` lines, the workflow service-container `image:` lines (ci.yml postgres),
+# and docker-compose.yml `image:`. `FROM scratch` and internal multi-stage `FROM <stage>`
+# references (which resolve to a prior build stage, not a registry image) are exempt.
+image_digest_pinned() {  # $@ = files (Dockerfile* parsed as FROM lines, else YAML-walked for image:)
+  # SEC-PIN-R2-1 / QA-PIN-R2-2 / QA-PIN-R2-3: YAML files (workflows + compose) are parsed with a
+  #   real YAML parser and EVERY key named `image` is walked (block/flow syntax alike). Dockerfiles
+  #   are not YAML: a robust FROM line-parser joins `\`-continuations, skips build flags
+  #   (`--platform=…`), and honors `scratch` + multi-stage self-references. All refs must carry a
+  #   FULL `@sha256:<64-hex>` digest (a truncated 8-hex digest is rejected). PyYAML absent =>
+  #   fail-closed.
+  python3 - "$@" <<'PY'
+import sys, os, re
+# full 64-hex digest; the negative lookahead rejects a 65+ hex run and (via the {64} minimum)
+# a truncated one like @sha256:deadbeef.
+digest_re = re.compile(r'@sha256:[0-9a-fA-F]{64}(?![0-9a-fA-F])')
+try:
+    import yaml
+except Exception:
+    sys.stderr.write("PyYAML unavailable — fail-closed\n")
+    sys.exit(2)
+
+def logical_lines(path):
+    # join Dockerfile `\`-continuations into one logical line (keeps the first line number).
+    out, buf, start = [], '', None
+    for idx, raw in enumerate(open(path).read().split('\n'), 1):
+        s = raw.rstrip()
+        if start is None:
+            start = idx
+        if s.endswith('\\'):
+            buf += s[:-1] + ' '
+        else:
+            buf += s
+            out.append((start, buf)); buf, start = '', None
+    if buf.strip():
+        out.append((start or 1, buf))
+    return out
+
+def walk_images(node, out):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == 'image' and isinstance(v, str):
+                out.append(v)
+            walk_images(v, out)
+    elif isinstance(node, list):
+        for it in node:
+            walk_images(it, out)
+
+viol = []
+for p in sys.argv[1:]:
+    if not os.path.isfile(p):
+        continue
+    base = os.path.basename(p)
+    is_df = base == 'Dockerfile' or base.startswith('Dockerfile.')
+    if is_df:
+        stages = set()
+        for lineno, line in logical_lines(p):
+            m = re.match(r'^\s*FROM\s+(.*)', line, re.I)
+            if not m:
+                continue
+            toks = m.group(1).split()
+            img, rest = None, []
+            for j, t in enumerate(toks):          # skip build flags (--platform=…); first bare token = image
+                if t.startswith('--'):
+                    continue
+                img = t.strip('"\''); rest = toks[j + 1:]; break
+            if img is None:
+                continue
+            stage = None
+            for j, t in enumerate(rest):          # `AS <stage>` alias -> exempt later self-references
+                if t.upper() == 'AS' and j + 1 < len(rest):
+                    stage = rest[j + 1]; break
+            if img.lower() != 'scratch' and img not in stages and not digest_re.search(img):
+                viol.append(f"{base}:{lineno}: FROM {img}")
+            if stage:
+                stages.add(stage)
+    else:
+        try:
+            doc = yaml.safe_load(open(p))
+        except Exception as e:
+            viol.append(f"{base}: YAML parse error ({e}) — fail-closed")
+            continue
+        imgs = []
+        walk_images(doc, imgs)
+        for img in imgs:
+            r = img.strip().strip('"\'')
+            if not digest_re.search(r):
+                viol.append(f"{base}: image {r}")
+if viol:
+    sys.stderr.write("\n".join(viol) + "\n")
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+# SEC-PIN-R2-2: glob discovery (Dockerfile* at repo ROOT ONLY, all workflow YAML, compose
+#   files) — never hardcode ci/release/codeql. HONEST SCOPE — this discovery is NON-RECURSIVE
+#   and NAME-BOUND: it scans only `$ROOT/Dockerfile` + `$ROOT/Dockerfile.*`, root compose,
+#   and workflow YAML. A Dockerfile in a subdirectory or under a non-standard name (e.g.
+#   `backend/Dockerfile`, `deploy/app.dockerfile`) is NOT walked. It also does not resolve
+#   image refs living elsewhere: external `COPY --from=<image>` / `RUN --mount=…,from=<image>`
+#   in a Dockerfile, `docker://image:tag`, dynamic `FROM ${VAR}` build-args, or a compose
+#   `build:` context's Dockerfile. All of these are 0-instance in the current tree; the
+#   hardening to cover them is tracked in task 019f3460 (before GHCR publish).
+IMG_FILES=()
+for f in "$ROOT"/Dockerfile "$ROOT"/Dockerfile.*; do [ -f "$f" ] && IMG_FILES+=("$f"); done
+for f in "$ROOT"/docker-compose.yml "$ROOT"/docker-compose.yaml "$ROOT"/compose.yml "$ROOT"/compose.yaml; do [ -f "$f" ] && IMG_FILES+=("$f"); done
+for f in "$WF_DIR"/*.yml "$WF_DIR"/*.yaml; do [ -f "$f" ] && IMG_FILES+=("$f"); done
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import yaml" >/dev/null 2>&1; then
+  ng "INV-IMAGE-DIGEST-PINNED: python3 + PyYAML required to parse the image refs (fail-closed)"
+elif [ "${#IMG_FILES[@]}" -eq 0 ]; then
+  ng "INV-IMAGE-DIGEST-PINNED: no Dockerfile / compose / workflow files discovered"
+else
+  if image_digest_pinned "${IMG_FILES[@]}" >/dev/null 2>&1; then
+    ok "INV-IMAGE-DIGEST-PINNED: every FROM / service image: / compose image: carries a full @sha256:<64hex> digest [${#IMG_FILES[@]} files]"
+  else
+    ng "INV-IMAGE-DIGEST-PINNED: a container image is not digest-pinned — $(image_digest_pinned "${IMG_FILES[@]}" 2>&1 | tr '\n' ' ')"
+  fi
+  # RED (a): strip the digest from the Dockerfile base image -> gate must fail.
+  #   TDA-PIN-R2-2: assert the mutation actually applied (DEAD MUTATION guard, symmetric to actions).
+  DFD="$WORK/Dockerfile.bare"; cp "$ROOT/Dockerfile" "$DFD"
+  perl -0pi -e 's/(FROM\s+\S+?)\@sha256:[0-9a-fA-F]{64}/$1/g' "$DFD"
+  if diff -q "$ROOT/Dockerfile" "$DFD" >/dev/null; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD MUTATION — Dockerfile digest strip was a no-op"
+  elif image_digest_pinned "$DFD" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a bare Dockerfile FROM tag still passed"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS when a Dockerfile FROM drops its digest (falsifiable)"
+  fi
+  # RED (b): strip the digest from the workflow service-container image -> gate must fail.
+  CID="$WORK/ci-bare.yml"; cp "$WF_DIR/ci.yml" "$CID"
+  perl -0pi -e 's/(image:\s*\S+?)\@sha256:[0-9a-fA-F]{64}/$1/g' "$CID"
+  if diff -q "$WF_DIR/ci.yml" "$CID" >/dev/null; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD MUTATION — workflow image digest strip was a no-op"
+  elif image_digest_pinned "$CID" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a bare workflow service image: still passed"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS when a workflow service image: drops its digest (falsifiable)"
+  fi
+  # RED (c): strip the digest from docker-compose.yml image -> gate must fail.
+  CMP="$WORK/compose-bare.yml"; cp "$ROOT/docker-compose.yml" "$CMP"
+  perl -0pi -e 's/(image:\s*\S+?)\@sha256:[0-9a-fA-F]{64}/$1/g' "$CMP"
+  if diff -q "$ROOT/docker-compose.yml" "$CMP" >/dev/null; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD MUTATION — compose image digest strip was a no-op"
+  elif image_digest_pinned "$CMP" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a bare docker-compose image: still passed"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS when docker-compose image: drops its digest (falsifiable)"
+  fi
+  # RED (d): flow-style service image (the syntax the line-based gate missed): `{image: <tag>}`.
+  FSI="$WORK/compose-flow.yml"
+  cat > "$FSI" <<'YML'
+services:
+  db: {image: postgres:17.5-alpine}
+YML
+  if image_digest_pinned "$FSI" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a flow-style {image: <tag>} passed (SEC-PIN-R2-1)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on a flow-style {image: <tag>} (SEC-PIN-R2-1 closed)"
+  fi
+  # RED (e): a truncated 8-hex digest must be rejected — full 64-hex required (QA-PIN-R2-2).
+  SHX="$WORK/compose-shorthex.yml"
+  cat > "$SHX" <<'YML'
+services:
+  db:
+    image: postgres@sha256:deadbeef
+YML
+  if image_digest_pinned "$SHX" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — an 8-hex @sha256:deadbeef passed (QA-PIN-R2-2)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on a truncated 8-hex digest — full 64-hex required (QA-PIN-R2-2)"
+  fi
+  # RED (f): a `\`-continuation FROM whose base drops its digest must fail (continuation support).
+  DFC="$WORK/Dockerfile.cont"
+  printf 'FROM \\\n  node:22-bookworm-slim\n' > "$DFC"
+  if image_digest_pinned "$DFC" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a continuation FROM without a digest passed"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on a line-continuation FROM missing its digest"
+  fi
+  # GREEN (over-fail guard): a `FROM --platform=… <img>@sha256:<64hex>` must PASS (QA-PIN-R2-3).
+  PLT="$WORK/Dockerfile.platform"
+  PLT_HEX="$(printf '0%.0s' $(seq 1 64))"
+  printf 'FROM --platform=$BUILDPLATFORM node:22@sha256:%s AS builder\n' "$PLT_HEX" > "$PLT"
+  if image_digest_pinned "$PLT" >/dev/null 2>&1; then
+    ok "INV-IMAGE-DIGEST-PINNED: FROM --platform=… <img>@sha256:<64hex> PASSES (no over-fail, QA-PIN-R2-3)"
+  else
+    ng "INV-IMAGE-DIGEST-PINNED: OVER-FAIL — a --platform-flagged, digest-pinned FROM was rejected"
+  fi
+fi
+
+# ============================================================================
 echo
 if [ "$fail" = 0 ]; then
   echo "ALL release-prep invariants PASS."

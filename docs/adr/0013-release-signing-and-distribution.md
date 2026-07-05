@@ -78,6 +78,64 @@ only `{name, version, license}` — never absolute paths — from the package ma
 output. `sbom.sh` is the one lib in `scripts/lib/` that ships to the mirror (it is
 public-safe); the private coupling-scan lib does not ship.
 
+### D5b — Supply-chain pinning (C1/C3)
+
+Everything the CI/release pipeline pulls from outside is pinned to an immutable
+reference, so an upstream tag hijack cannot silently change what runs:
+
+- **GitHub Actions → full commit SHA (C1).** Every remote `uses:` across
+  `.github/workflows/*.yml` is pinned to a 40-hex commit SHA (with a trailing `# vN`
+  comment for readability), not a mutable `@vN` tag.
+- **Container base + service images → manifest digest (C3).** The Dockerfile `FROM`
+  lines, the workflow service-container `image:` (ci.yml Postgres), and
+  `docker-compose.yml`'s `image:` all carry a `@sha256:` digest (tag kept alongside for
+  legibility).
+- **Freshness without staleness.** A raw pin never updates itself, so
+  `.github/dependabot.yml` watches the `github-actions` and `docker` ecosystems and
+  opens a weekly grouped PR that bumps the pinned SHA/digest **and** its `# vN` comment
+  together — review + merge moves the pin forward. Note: Dependabot's `docker` ecosystem
+  covers the Dockerfile and `docker-compose.yml`, **not** a workflow's service-container
+  `image:`; those are held by `INV-IMAGE-DIGEST-PINNED` plus manual update.
+- **Regression-locked.** `scripts/test-release-prep.sh` (wired into CI) pins two
+  falsifiable meta-tests. Both **parse the workflow/compose YAML with a real parser
+  (PyYAML)** and recursively walk **every** `uses:` / `image:` key, so block-style,
+  flow-style (`- {uses: …}` / `db: {image: …}`), flow-sequence (`steps: [{uses: …}]`) and
+  line-continuation forms are all checked uniformly — the earlier line-anchored regex only
+  saw block-style inline and silently passed the other syntaxes (SEC-PIN-R2-1). Targets are
+  discovered by glob (`.github/workflows/*.yml|*.yaml`, root `Dockerfile*`,
+  `docker-compose.yml` / `compose.yaml`, plus `.github/actions/**/action.yml` composites),
+  not by a hardcoded file list. `INV-ACTIONS-SHA-PINNED` fails unless every remote `uses:`
+  is a full 40-hex commit SHA (`./…` local and `docker://…` refs exempt).
+  `INV-IMAGE-DIGEST-PINNED` fails unless every `FROM` / service `image:` / compose `image:`
+  carries a **full `@sha256:<64-hex>` digest** (a truncated digest such as
+  `@sha256:deadbeef` is rejected); the Dockerfile `FROM` parser joins `\`-continuations and
+  skips build flags (`--platform=…`) so a legitimately digest-pinned, `--platform`-flagged
+  base is not over-rejected. PyYAML absent ⇒ the gate is **fail-closed** (never a silent
+  pass), and CI ensures PyYAML is present before running the gate (`ci.yml`: `python3 -c
+  "import yaml" || python3 -m pip install --user pyyaml`). **Parser-pin caveat (not fully
+  pinned):** that fallback `pip install --user pyyaml` is itself **unpinned** (no version/
+  hash), so the parser used by the gate is not supply-chain-pinned the way the gate's own
+  targets are; pinning or removing this fallback is tracked in task 019f3460. Each
+  invariant asserts GREEN on the real tree and RED on an injected un-pinning across all of
+  those syntaxes, so **a silently loosened pin cannot pass CI regardless of YAML syntax.**
+
+  **Honest coverage boundary.** What the gate *enforces*: every remote `uses:` across all
+  workflow YAML (any YAML style — block / flow / flow-sequence / line-continuation) is a
+  full 40-hex commit SHA, and every root `Dockerfile` `FROM` + workflow service `image:` +
+  compose `image:` carries a full `@sha256:<64-hex>` digest. What the gate does **NOT**
+  cover today (each **0-instance** in the current tree; hardening tracked in task 019f3460
+  to land before GHCR publish): external `COPY --from=<image>` / `RUN --mount=…,from=<image>`
+  inside a Dockerfile; a Dockerfile in a subdirectory or under a non-standard name
+  (discovery is non-recursive, root + `Dockerfile.*` only); `docker://image:tag` mutable-tag
+  action refs (unconditionally exempted, digest not inspected); dynamic `FROM ${VAR}`
+  build-args; and a compose `build:` context's Dockerfile. These are coverage gaps, not
+  present leaks.
+
+  **Adversary boundary.** Beyond coverage, this is a CI-side tripwire under the
+  single-operator / CI trust boundary — it rejects a non-pinned `uses:` / `image:` / `FROM`
+  in any YAML syntax, but it is not an adversary-proof control against someone with
+  repo-write who can edit the gate itself.
+
 ### D6 — Opt-in verified install
 
 `scripts/install.sh` gains `ACTRADECK_VERIFY=1`: it requires `ACTRADECK_REF` to be a
