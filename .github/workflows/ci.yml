@@ -278,3 +278,66 @@ jobs:
 
       - name: Migrate up again (idempotent re-apply)
         run: pnpm --filter @actradeck/db run migrate:up
+
+  # R2-L4 + R3 root: which files affect the container IMAGE? Gate the (slower) image build+scan
+  # job on this. R3-M-root widened the filter from packaging files ONLY to ALL image CONTENT
+  # (apps/**, packages/**, db/**, root package.json) so that a coupling literal added to any
+  # baked-in source RE-FIRES the authoritative real scan — the config-checkers alone cannot
+  # catch a content leak (QA-R3-4). This is the structural end of the whack-a-mole: image
+  # content changes ⟹ real FS scan runs.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docker:
+              # packaging (how the image is assembled + scanned)
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'scripts/docker-entrypoint.sh'
+              - 'scripts/lib/scan-image-fs.sh'
+              - 'scripts/lib/oss-patterns.sh'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/ci.yml'
+              - 'pnpm-lock.yaml'
+              # image CONTENT (everything baked into /app — a leak can enter through any of these)
+              - 'package.json'
+              - 'pnpm-workspace.yaml'
+              - 'tsconfig.base.json'
+              - 'tsconfig.json'
+              - 'apps/**'
+              - 'packages/**'
+              - 'db/**'
+
+  # R2-L4: build the REAL cockpit image and scan its filesystem for leaks. This is the
+  # AUTHORITATIVE leak gate (R3): the release.yml docker-job structure checks (INV-DOCKER-*)
+  # can only assert the workflow is wired correctly — here we test actual image BEHAVIOR on
+  # every image-content change. Single-sourced with release.yml via scripts/lib/scan-image-fs.sh.
+  docker-image-scan:
+    needs: changes
+    if: ${{ needs.changes.outputs.docker == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build cockpit image (load, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          provenance: false
+          tags: actradeck-ci-scan:pr
+
+      - name: Scan image filesystem for leaks (fail-closed)
+        run: |
+          set -euo pipefail
+          . scripts/lib/scan-image-fs.sh
+          scan_image_fs actradeck-ci-scan:pr

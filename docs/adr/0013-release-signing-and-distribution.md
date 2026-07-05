@@ -32,8 +32,12 @@ Constraints that shape the design:
 - **Phase 1 (this ADR):** the canonical distributable is a **signed GitHub Release on
   an annotated tag `vX.Y.Z`**. Assets: (1) a source tarball (`git archive` of the tag),
   (2) a CycloneDX SBOM, (3) `checksums.txt`, each attested with SLSA build provenance.
-- **Phase 2 (deferred):** Docker image on GHCR signed with cosign keyless. Trigger:
-  demand for one-command bring-up.
+- **Phase 2 (implemented — decisions `019f305f` / `019f3271`):** one-command Docker image
+  on GHCR (cockpit stack: backend + webui + embedded PGlite), signed with cosign keyless +
+  a SLSA build-provenance attestation of the image digest. Trigger met (demand for
+  one-command bring-up). The image job is **USER-GATED** (off by default) and builds →
+  leak-scans the image filesystem → pushes; the live GHCR push + signature fire on the
+  first opted-in tag/dispatch. See [`docs/docker.md`](../docker.md).
 - **Phase 3 (deferred):** npm publish of the attach CLI via Trusted Publishing (OIDC),
   contingent on resolving the dependency-closure / native-addon story. Homebrew:
   deferred indefinitely.
@@ -125,4 +129,6 @@ The owner/name are resolved at run time (`${{ github.repository }}` in the workf
   single-source, tag ↔ version match, tarball has no internal/secret content, SBOM
   covers prod deps and carries no raw paths, workflow permissions are least-privilege,
   and the installer rejects a tampered tarball.
-- Phase 2/3 remain deferred with tracked follow-ups; nothing here promises them.
+- Phase 2 (GHCR Docker image + cosign) is implemented and USER-GATED; its live signing
+  path fires on first opted-in publish (same posture as Phase 1). Phase 3 (npm) remains
+  deferred with tracked follow-ups; nothing here promises it.

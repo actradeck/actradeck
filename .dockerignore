@@ -1,0 +1,111 @@
+# .dockerignore — keep the build context lean and drop obvious secret/host-local paths.
+#
+# HONEST SCOPE (do NOT read this as parity with the OSS mirror gate): this is a
+# best-effort PATH denylist over the build context. A denylist is inherently holey (the OSS
+# gate learned this the hard way — see scripts/lib/oss-patterns.sh). Image leak-safety is a
+# THREE-LAYER story, not one mechanism: (1) the Dockerfile runtime stage uses a DIRECTORY-
+# level allowlist COPY that structurally drops whole trees (sidecar source, docs, CI, dev
+# scripts); (2) BUT it copies apps/packages as whole dirs, so THIS denylist is what actually
+# keeps the redaction test fixtures (the only private-coupling literals in the tree) out —
+# a best-effort layer, not a construction guarantee; (3) the ENFORCING backstop is the
+# release workflow's image-filesystem leak scan (SEC-2), which fails a publish on any
+# denylist miss. This file's jobs: keep the builder context small/fast, and keep the test
+# fixtures + any stray credential material out of the context (defense in depth).
+#
+# `docker build` sends the context to the daemon BEFORE the Dockerfile runs, so anything
+# not excluded here COULD be COPYed in — but the runtime stage only copies the allowlist.
+
+# --- secrets & credentials (NEVER into an image) ---
+.env
+.env.*
+!.env.example
+.mcp.json
+.mcp.local.json
+**/*.actradeck-bak-*
+**/*.actradeck-tmp-*
+**/*.actradeck-lock*
+# SEC-3: extra credential material — none exist in-tree today, excluded as defense in
+# depth so a future stray key/registry-auth file can't ride into the build context.
+.npmrc
+**/.npmrc
+*.pem
+**/*.pem
+*.key
+**/*.key
+id_rsa
+id_rsa.*
+**/id_rsa
+**/id_rsa.*
+credentials.json
+**/credentials.json
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+
+# --- test suites (redaction FAKE-secret fixtures + private-coupling literals live ONLY
+# here; never needed to RUN the cockpit). The runtime stage copies apps/packages as WHOLE
+# dirs, so this denylist is what actually keeps the test files out of the image — a
+# best-effort single layer, NOT a construction guarantee. The enforcing backstop is the
+# release workflow's image-filesystem leak scan (SEC-2), which fails a publish if any test
+# fixture (or other coupling/secret literal) reaches the image. ---
+**/test
+**/__tests__
+**/e2e
+**/*.test.ts
+**/*.test.tsx
+**/*.test.mts
+**/*.test.js
+**/*.spec.ts
+
+# --- private dev/agent tooling & knowledge (not part of the product) ---
+.claude
+CLAUDE.md
+AGENTS.md
+plan.md
+
+# --- OSS / landing publication mirrors + sync work trees (generated) ---
+oss
+.oss-sync
+oss-landing
+landing
+.ossfilter
+
+# --- VCS + CI-local state ---
+.git
+.gitignore
+.github
+
+# --- build artifacts / dependencies (rebuilt inside the image) ---
+node_modules
+**/node_modules
+dist
+**/dist
+.next
+**/.next
+.next-smoke
+**/.next-smoke
+coverage
+**/coverage
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# --- local runtime data / logs / db files ---
+*.log
+**/*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+**/*.sqlite*
+apps/sidecar/.data
+data
+pgdata
+
+# --- editor / OS noise ---
+.DS_Store
+.vscode
+.idea
+
+# --- media / assets not needed to run the cockpit ---
+docs/media
+assets

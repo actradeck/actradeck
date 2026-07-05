@@ -3,7 +3,7 @@
   "specVersion": "1.5",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-07-05T04:49:26Z",
+    "timestamp": "2026-07-05T17:57:22Z",
     "tools": [
       {
         "vendor": "ActraDeck",
@@ -40,6 +40,19 @@
         {
           "license": {
             "name": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "@esbuild/linux-x64",
+      "version": "0.28.1",
+      "purl": "pkg:npm/%40esbuild/linux-x64@0.28.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
           }
         }
       ]
@@ -686,6 +699,19 @@
       "name": "end-of-stream",
       "version": "1.4.5",
       "purl": "pkg:npm/end-of-stream@1.4.5",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "esbuild",
+      "version": "0.28.1",
+      "purl": "pkg:npm/esbuild@0.28.1",
       "licenses": [
         {
           "license": {
@@ -2159,6 +2185,19 @@
         {
           "license": {
             "name": "0BSD"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "tsx",
+      "version": "4.22.4",
+      "purl": "pkg:npm/tsx@4.22.4",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
           }
         }
       ]

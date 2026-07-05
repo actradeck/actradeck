@@ -38,6 +38,334 @@ trap 'rm -rf "$WORK"' EXIT
 command -v jq >/dev/null 2>&1 || { ng "jq is required for the release-prep tests"; exit 1; }
 
 # ============================================================================
+# Shared GitHub-Actions `if:` parser/evaluator (single source — R4-M1b/L6)
+# ============================================================================
+# Written to ONE file and used in two modes so the lexer/parser is not duplicated:
+#   if_gate_check_str <expr>  -> mode=validate : closed-enum + &&-tag-guard + 4-context matrix.
+#                                Used to VALIDATE the CANONICAL_IF constant and as the parser
+#                                unit test (INV-IF-GATE-PARSER).
+#   if_ast_repr <expr>        -> mode=repr     : deterministic AST serialization, for the
+#                                CANONICAL_IF exact-match pin (INV-GHCR-PUBLISH-GATED).
+IF_GATE_PY="$WORK/if_gate.py"
+cat > "$IF_GATE_PY" <<'PYEOF'
+import sys
+
+class Tok:
+    def __init__(s, k, v): s.k, s.v = k, v
+def lex(x):
+    i, n, out = 0, len(x), []
+    while i < n:
+        c = x[i]
+        if c.isspace(): i += 1; continue
+        if c == "'":
+            j = i + 1; buf = []
+            while j < n and x[j] != "'": buf.append(x[j]); j += 1
+            out.append(Tok("str", "".join(buf))); i = j + 1; continue
+        for op in ("&&", "||", "==", "!="):
+            if x.startswith(op, i): out.append(Tok("op", op)); i += 2; break
+        else:
+            if c in "()!,": out.append(Tok(c, c)); i += 1; continue
+            j = i
+            while j < n and (x[j].isalnum() or x[j] in "._-"): j += 1
+            if j == i: print("lex error at", x[i:]); sys.exit(1)
+            out.append(Tok("id", x[i:j])); i = j
+    out.append(Tok("eof", None)); return out
+class P:
+    def __init__(s, t): s.t, s.i = t, 0
+    def pk(s): return s.t[s.i]
+    def eat(s, k=None):
+        tk = s.t[s.i]
+        if k and tk.k != k and not (k == "op" and tk.k == "op"): print("parse err want", k, "got", tk.k); sys.exit(1)
+        s.i += 1; return tk
+    def orr(s):
+        a = s.andd()
+        while s.pk().k == "op" and s.pk().v == "||": s.eat(); a = ("||", a, s.andd())
+        return a
+    def andd(s):
+        a = s.eq()
+        while s.pk().k == "op" and s.pk().v == "&&": s.eat(); a = ("&&", a, s.eq())
+        return a
+    def eq(s):
+        a = s.un()
+        if s.pk().k == "op" and s.pk().v in ("==", "!="): o = s.eat().v; a = (o, a, s.un())
+        return a
+    def un(s):
+        if s.pk().k == "!": s.eat(); return ("!", s.un())
+        return s.prim()
+    def prim(s):
+        tk = s.pk()
+        if tk.k == "(":
+            s.eat(); e = s.orr(); s.eat(")"); return e
+        if tk.k == "str": s.eat(); return ("lit", tk.v)
+        if tk.k == "id":
+            s.eat()
+            if s.pk().k == "(":
+                s.eat("("); args = []
+                if s.pk().k != ")":
+                    args.append(s.orr())
+                    while s.pk().k == ",": s.eat(); args.append(s.orr())
+                s.eat(")"); return ("call", tk.v, args)
+            return ("ctx", tk.v)
+        print("parse err at", tk.k, tk.v); sys.exit(1)
+def parse(cond):
+    try:
+        p = P(lex(cond))
+        ast = p.orr()
+        # R5-L1: require ALL tokens consumed. Without this, a trailing token after a complete
+        # expression is silently DROPPED (`<canonical> foo` would parse to <canonical> and match
+        # the pin / validate). Non-exploitable (juxtaposition is a GHA syntax error, operator
+        # continuations already parse/RED), but parser soundness: reject leftover tokens.
+        if p.pk().k != "eof":
+            print("trailing token(s) after expression:", p.pk().v); sys.exit(1)
+        return ast
+    except SystemExit: raise
+    except Exception as e:
+        print("could not parse if:", e); sys.exit(1)
+
+# closed-enum allowlist: every context ref must be a gate input; string literals only as
+# comparison/function operands (no bare-literal boolean like `|| 'false'`).
+ALLOWED_CTX = {"github.ref", "github.event_name", "vars.ENABLE_GHCR_PUBLISH", "true", "false"}
+def check_closed_enum(node, parent):
+    t = node[0]
+    if t == "ctx":
+        if node[1] not in ALLOWED_CTX:
+            print(f"context '{node[1]}' is outside the closed enum {sorted(ALLOWED_CTX)}"); sys.exit(1)
+    elif t == "lit":
+        if parent not in ("==", "!=", "call"):
+            print(f"bare string literal '{node[1]}' used as a boolean operand (not a comparison/arg)"); sys.exit(1)
+    elif t == "call":
+        for a in node[2]: check_closed_enum(a, "call")
+    elif t in ("==", "!="):
+        check_closed_enum(node[1], t); check_closed_enum(node[2], t)
+    elif t in ("&&", "||"):
+        check_closed_enum(node[1], t); check_closed_enum(node[2], t)
+    elif t == "!":
+        check_closed_enum(node[1], t)
+    else:
+        print("unexpected node in closed-enum walk:", t); sys.exit(1)
+
+def truth(v):
+    # GitHub coercion: a NON-EMPTY string is truthy (incl. the string 'false').
+    if isinstance(v, bool): return v
+    if v is None: return False
+    return str(v) != ""
+def ev(node, ctx):
+    t = node[0]
+    if t == "lit": return node[1]
+    if t == "ctx":
+        name = node[1]
+        if name == "true": return True
+        if name == "false": return False
+        return ctx.get(name, "")
+    if t == "!": return not truth(ev(node[1], ctx))
+    if t == "==": return str(ev(node[1], ctx)) == str(ev(node[2], ctx))
+    if t == "!=": return str(ev(node[1], ctx)) != str(ev(node[2], ctx))
+    if t == "&&":
+        l = ev(node[1], ctx); return ev(node[2], ctx) if truth(l) else l
+    if t == "||":
+        l = ev(node[1], ctx); return l if truth(l) else ev(node[2], ctx)
+    if t == "call":
+        fn, args = node[1], [ev(a, ctx) for a in node[2]]
+        if fn == "startsWith": return str(args[0]).startswith(str(args[1]))
+        if fn == "endsWith":   return str(args[0]).endswith(str(args[1]))
+        if fn == "contains":   return str(args[1]) in str(args[0])
+        print("unknown fn", fn); sys.exit(1)
+    print("bad node", t); sys.exit(1)
+def refs_github_ref(node):
+    if node[0] == "ctx": return node[1] == "github.ref"
+    if node[0] == "lit": return False
+    return any(refs_github_ref(c) for c in node[1:] if isinstance(c, tuple)) or \
+        (node[0] == "call" and any(refs_github_ref(a) for a in node[2]))
+def flatten_and(node):
+    if node[0] == "&&": return flatten_and(node[1]) + flatten_and(node[2])
+    return [node]
+
+def validate(cond):
+    if not cond.strip(): print("empty `if:` expression"); sys.exit(1)
+    ast = parse(cond)
+    check_closed_enum(ast, None)
+    if ast[0] != "&&":
+        print("top-level `if:` operator is not && (tag guard not ANDed):", ast[0]); sys.exit(1)
+    if not any(refs_github_ref(c) for c in flatten_and(ast)):
+        print("no github.ref (tag) guard among top-level conjuncts"); sys.exit(1)
+    TAG = "refs/tags/v1.2.3"; BR = "refs/heads/main"
+    matrix = [
+        ({"github.ref": TAG, "github.event_name": "workflow_dispatch", "vars.ENABLE_GHCR_PUBLISH": ""},     True,  "tag+dispatch"),
+        ({"github.ref": TAG, "github.event_name": "push",              "vars.ENABLE_GHCR_PUBLISH": "true"}, True,  "tag+push+var"),
+        ({"github.ref": TAG, "github.event_name": "push",              "vars.ENABLE_GHCR_PUBLISH": ""},     False, "tag+push+novar"),
+        ({"github.ref": BR,  "github.event_name": "workflow_dispatch", "vars.ENABLE_GHCR_PUBLISH": ""},     False, "nontag+dispatch"),
+    ]
+    for ctx, want, label in matrix:
+        if truth(ev(ast, ctx)) != want:
+            print(f"context {label}: expected {want}"); sys.exit(1)
+
+mode = sys.argv[1]; cond = sys.argv[2]
+if mode == "validate":
+    validate(cond); sys.exit(0)
+elif mode == "repr":
+    if not cond.strip(): print("empty `if:` expression"); sys.exit(1)
+    print(repr(parse(cond))); sys.exit(0)
+else:
+    print("unknown mode", mode); sys.exit(2)
+PYEOF
+if_gate_check_str() { python3 "$IF_GATE_PY" validate "$1"; }
+if_ast_repr()       { python3 "$IF_GATE_PY" repr "$1"; }
+
+# ============================================================================
+# Shared docker-job STEP predicates (single source — R5-M1 / TDA-R5-1)
+# ============================================================================
+# is_scan / is_guard / is_push / enabled / cont_on_err were drifting across THREE python
+# programs (docker_publish_guard_run, docker_scan_before_push, the step mutator). The guard
+# checker had simply FORGOTTEN the neuter checks (enabled / cont_on_err) its sibling scan
+# checker already had (SEC-R5-1 ≡ QA-R5-1). Defining them ONCE here and importing everywhere
+# closes both the guard hole and the 3-program drift. Consumers add SP_DIR to sys.path and
+# `import step_predicates as sp` (SP_DIR is exported below; inherited by every python3 call).
+SP_DIR="$WORK"; export SP_DIR
+cat > "$WORK/step_predicates.py" <<'PYEOF'
+# Canonical docker-job step predicates. Imported by the guard checker, the scan checker, and
+# the step mutator so their classification + neutralization rules can never drift apart.
+def name(s): return str(s.get("name", ""))
+def is_scan(s):
+    n = name(s).lower(); return "scan" in n and "leak" in n
+def is_guard(s):
+    n = name(s).lower(); return "publish" in n and "guard" in n
+def is_push(s):
+    w = s.get("with") or {}
+    return (str(s.get("uses", "")).startswith("docker/build-push-action")
+            and str(w.get("push", "")).lower() in ("true", "1", "yes")) \
+        or "docker push" in str(s.get("run", ""))
+def enabled(s):
+    # A step is DISABLED (not guaranteed to run) unless its `if:` is ABSENT or a plain truthy
+    # CONSTANT. `if: false` / `if: ${{ false }}` -> disabled. A dynamic/unusual `if:` — incl.
+    # `always()` (which changes failure semantics, not "run unconditionally as written") — is
+    # treated as NOT-guaranteed-enabled and rejected, so a security-critical step (scan/guard)
+    # can't be silently neutered by an `if:` the checker can't fully reason about.
+    c = s.get("if", None)
+    if c is None: return True
+    if isinstance(c, bool): return c
+    return str(c).strip().lower() in ("true", "success()", "${{ true }}")
+def cont_on_err(s):
+    # `continue-on-error: true` swallows a step's non-zero exit -> its `exit 1` no longer fails
+    # the job. GHA also accepts an EXPRESSION here (`continue-on-error: ${{ true }}` /
+    # `${{ github.event_name == 'workflow_dispatch' }}`), so matching only the literal `true`
+    # was fail-OPEN (R6-M1). Mirror enabled()'s fail-CLOSED rule: treat the step as carrying
+    # continue-on-error UNLESS it is provably safe — absent, or a constant that is explicitly
+    # `false`. Anything else (literal true, an expression `${{ ... }}`, any non-constant) is
+    # treated as possibly-continuing and REJECTED, so a security-critical step can't be silently
+    # neutered by a continue-on-error value the checker can't fully reason about.
+    c = s.get("continue-on-error", None)
+    if c is None: return False
+    if isinstance(c, bool): return c
+    return str(c).strip().lower() != "false"
+PYEOF
+
+# extract the docker job's `if:` string from a workflow file (or a sentinel on absence).
+docker_if_string() {
+  python3 - "$1" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+j = (d.get("jobs") or {}).get("docker")
+if not j: print("__NOJOB__"); sys.exit(0)
+c = j.get("if")
+print(c if isinstance(c, str) else "__NONSTRING__")
+PY
+}
+
+# --- runtime publish-guard helpers (R4-M1a / R5-M1) ------------------------------------
+# Print the docker job's runtime publish-guard step run body, but ONLY if that step is a VALID
+# gate: it exists, sits before the push step, is NOT disabled by a falsy/dynamic `if:`, and does
+# NOT carry a `continue-on-error` that isn't a provable `false`. The last two use the SHARED step
+# predicates (R5-M1 — the guard checker used to omit them while the scan checker enforced them;
+# R6-M1 made cont_on_err fail-closed for expression forms). Non-zero exit (empty stdout) = "no
+# valid guard".
+docker_publish_guard_run() {
+  python3 - "$1" <<'PY'
+import sys, os, yaml
+sys.path.insert(0, os.environ["SP_DIR"]); import step_predicates as sp
+d = yaml.safe_load(open(sys.argv[1]))
+steps = ((d.get("jobs") or {}).get("docker") or {}).get("steps") or []
+gi = next((i for i, s in enumerate(steps) if sp.is_guard(s)), None)
+pi = next((i for i, s in enumerate(steps) if sp.is_push(s)), None)
+if gi is None: sys.stderr.write("no publish-guard step\n"); sys.exit(1)
+if pi is None: sys.stderr.write("no push step\n"); sys.exit(1)
+if gi >= pi:   sys.stderr.write("guard is not before push\n"); sys.exit(1)
+g = steps[gi]
+if not sp.enabled(g):     sys.stderr.write(f"guard disabled by `if: {g.get('if')}`\n"); sys.exit(1)
+if sp.cont_on_err(g):     sys.stderr.write("guard has a non-false `continue-on-error` (exit 1 may be swallowed)\n"); sys.exit(1)
+sys.stdout.write(str(g.get("run", "")))
+PY
+}
+# Execute a guard run body under one (ref, event, enable) context; exit code = the guard's.
+guard_ctx() { env GITHUB_REF="$2" GITHUB_EVENT_NAME="$3" ENABLE_GHCR_PUBLISH="$4" bash -c "$1" >/dev/null 2>&1; }
+# True iff a guard run body enforces tag∧opt-in across the context matrix (fail-closed). R5-L3
+# widens the sample points beyond the original 4 to shrink (not eliminate) the sampling hole:
+# a SECOND tag version catches a guard hardcoded to one tag, a non-dispatch/non-push event and
+# a `false` opt-in value (broken-disable) catch a guard that treats "anything set" as authorized.
+# HONEST LIMIT (sweep — QA-R5-2): this executes only the extracted RUN body, so a step/job-level
+# `env: ENABLE_GHCR_PUBLISH: 'true'` defang (which the checker does not see) is not caught here;
+# that residual is if:-gated + disclosed and carried to the v0.4.0 sweep, not chased into a denylist.
+guard_matrix_ok() {
+  local run="$1"
+  guard_ctx "$run" refs/tags/v1.2.3 workflow_dispatch ''    ; [ $? -eq 0 ] || return 1  # tag+dispatch -> allow
+  guard_ctx "$run" refs/tags/v1.2.3 push             true  ; [ $? -eq 0 ] || return 1  # tag+push+var -> allow
+  guard_ctx "$run" refs/tags/v9.9.9 workflow_dispatch ''    ; [ $? -eq 0 ] || return 1  # OTHER tag+dispatch -> allow
+  guard_ctx "$run" refs/tags/v1.2.3 push             ''    ; [ $? -ne 0 ] || return 1  # tag+push+novar -> BLOCK
+  guard_ctx "$run" refs/tags/v9.9.9 push             ''    ; [ $? -ne 0 ] || return 1  # OTHER tag+push+novar -> BLOCK
+  guard_ctx "$run" refs/tags/v1.2.3 push             false ; [ $? -ne 0 ] || return 1  # broken-disable ENABLE=false -> BLOCK
+  guard_ctx "$run" refs/tags/v1.2.3 schedule         ''    ; [ $? -ne 0 ] || return 1  # tag+non-dispatch event -> BLOCK
+  guard_ctx "$run" refs/heads/main  workflow_dispatch ''    ; [ $? -ne 0 ] || return 1  # nontag -> BLOCK
+  return 0
+}
+
+# --- single-source docker STEP mutator (R4-L6 + R5-M1: is_scan/is_guard from step_predicates) -
+# Apply a named mutation to the docker job's scan OR guard step and write the mutated workflow.
+# scan ops:  remove | reorder_last | gut | disable | coe | comment | echo
+# guard ops: guard_remove | guard_disable | guard_coe | guard_always
+MUTATE_STEP_PY="$WORK/mutate_step.py"
+cat > "$MUTATE_STEP_PY" <<'PYEOF'
+import sys, os, yaml
+sys.path.insert(0, os.environ["SP_DIR"]); import step_predicates as sp
+op, inp, out = sys.argv[1], sys.argv[2], sys.argv[3]
+d = yaml.safe_load(open(inp))
+job = (d.get("jobs") or {}).get("docker") or {}
+steps = job.get("steps") or []
+COE_EXPR_T = "${{ true }}"
+COE_EXPR_C = "${{ github.event_name == 'workflow_dispatch' }}"
+SCAN_OPS = ("gut", "disable", "coe", "coe_exprT", "coe_exprC", "coe_false", "comment", "echo")
+GUARD_STEP_OPS = ("guard_disable", "guard_coe", "guard_coe_exprT", "guard_coe_exprC",
+                  "guard_coe_false", "guard_always")
+if op == "remove":
+    job["steps"] = [s for s in steps if not sp.is_scan(s)]
+elif op == "reorder_last":
+    job["steps"] = [s for s in steps if not sp.is_scan(s)] + [s for s in steps if sp.is_scan(s)]
+elif op == "guard_remove":
+    job["steps"] = [s for s in steps if not sp.is_guard(s)]
+elif op in SCAN_OPS or op in GUARD_STEP_OPS:
+    for s in steps:
+        if op in SCAN_OPS and sp.is_scan(s):
+            if op == "gut":         s["run"] = "echo scanning done"
+            elif op == "disable":   s["if"] = False
+            elif op == "coe":       s["continue-on-error"] = True
+            elif op == "coe_exprT": s["continue-on-error"] = COE_EXPR_T
+            elif op == "coe_exprC": s["continue-on-error"] = COE_EXPR_C
+            elif op == "coe_false": s["continue-on-error"] = False
+            elif op == "comment":   s["run"] = "set -euo pipefail\n# scan_image_fs docker export exit 1 (all in a comment)\necho no real scan"
+            elif op == "echo":      s["run"] = 'echo "scan_image_fs docker export exit 1"'
+        elif op in GUARD_STEP_OPS and sp.is_guard(s):
+            if op == "guard_disable":     s["if"] = False
+            elif op == "guard_coe":       s["continue-on-error"] = True
+            elif op == "guard_coe_exprT": s["continue-on-error"] = COE_EXPR_T
+            elif op == "guard_coe_exprC": s["continue-on-error"] = COE_EXPR_C
+            elif op == "guard_coe_false": s["continue-on-error"] = False
+            elif op == "guard_always":    s["if"] = "always()"
+else:
+    sys.stderr.write(f"unknown op {op}\n"); sys.exit(2)
+yaml.safe_dump(d, open(out, "w"))
+PYEOF
+mutate_scan()  { python3 "$MUTATE_STEP_PY" "$1" "$2" "$3"; }
+mutate_guard() { python3 "$MUTATE_STEP_PY" "$1" "$2" "$3"; }
+
+# ============================================================================
 # Checkers under test (pure; operate on a given tree/file)
 # ============================================================================
 
@@ -111,6 +439,12 @@ if top != {"contents": "read"}:
 # QA-2: a job may hold WRITE only if it is the signing/release job, identified
 # structurally by declaring id-token:write AND attestations:write (name-agnostic). Any
 # OTHER job carrying a write scope (e.g. an injected `packages: write` on verify) FAILS.
+#
+# SEC-4: there are now TWO signing jobs (release: contents+id-token+attestations; docker:
+# packages+id-token+attestations). The is_signing gate alone would pass a signing job that
+# ALSO grabbed an unrelated write (e.g. `actions: write` / `deployments: write`). So each
+# signing job's write set must additionally be a SUBSET of the expected signing scopes.
+SIGNING_WRITE_ALLOWED = {"contents", "packages", "id-token", "attestations"}
 for name, job in (d.get("jobs") or {}).items():
     jp = job.get("permissions") or {}
     writes = [k for k, v in jp.items() if v == "write"]
@@ -118,6 +452,141 @@ for name, job in (d.get("jobs") or {}).items():
         is_signing = jp.get("id-token") == "write" and jp.get("attestations") == "write"
         if not is_signing:
             print(f"job '{name}' holds write {writes} but is not the signing job"); sys.exit(1)
+        surplus = [k for k in writes if k not in SIGNING_WRITE_ALLOWED]
+        if surplus:
+            print(f"signing job '{name}' holds unexpected write scope(s) {surplus}"); sys.exit(1)
+sys.exit(0)
+PY
+}
+
+# SEC-2 (R2-M2 → R3-M2): inside the `docker` job the image leak-scan step MUST come BEFORE the
+# push AND actually run for real. A name+order check was a DEAD GATE; even the R2 hardening was
+# defeated by `continue-on-error: true` (exit 1 no longer fails the job) and by burying the
+# load-bearing token in a COMMENT or an echo STRING (substring match). R3-M2 hardens against
+# those three no-op forms — but this is a SECONDARY wiring check, NOT an exhaustive proof the
+# scan runs (the AUTHORITATIVE leak gate is the real image scan; see the NOTE below):
+#   (i)   NOT disabled by a falsy `if:`,
+#   (ii)  NO `continue-on-error: true` (an `exit 1` must actually fail the job),
+#   (iii) the run body, AFTER stripping comments + quoted-string contents, still contains an
+#         EXECUTABLE call to the canonical scan — `scan_image_fs` (scripts/lib/scan-image-fs.sh,
+#         R3-L1) OR the inline pair `docker export` + `exit 1`.
+# The push step is a `docker push` (R2-L3 retag-and-push) or a build-push-action with push:true;
+# a re-building push (build-push-action push:true) is rejected (scanned image != pushed image).
+# NOTE: this is only the SECONDARY (wiring) check. The AUTHORITATIVE leak gate is the real image
+# FS scan (scripts/lib/scan-image-fs.sh, run in release.yml before push AND in ci.yml's
+# docker-image-scan job on every image-content change).
+docker_scan_before_push() {
+  python3 - "$1" <<'PY'
+import sys, os, re, yaml
+sys.path.insert(0, os.environ["SP_DIR"]); import step_predicates as sp
+d = yaml.safe_load(open(sys.argv[1]))
+job = (d.get("jobs") or {}).get("docker")
+if not job:
+    print("no `docker` job in workflow"); sys.exit(1)
+steps = job.get("steps") or []
+def strip_run(run):
+    # remove QUOTED string contents first (so a token inside echo "..." / '...' is gone), then
+    # strip shell comments — leaving only EXECUTABLE tokens. A token that survives is a real
+    # command, not a comment or an echo argument. (scan-specific; not a shared step predicate.)
+    out = []
+    for line in run.splitlines():
+        line = re.sub(r"'[^']*'", "''", line)
+        line = re.sub(r'"[^"]*"', '""', line)
+        line = re.sub(r'#.*$', '', line)
+        out.append(line)
+    return "\n".join(out)
+scan_i = next((i for i, s in enumerate(steps) if sp.is_scan(s)), None)
+push_i = next((i for i, s in enumerate(steps) if sp.is_push(s)), None)
+if push_i is None:
+    print("no push step (docker push / build-push-action push:true) in docker job"); sys.exit(1)
+if scan_i is None:
+    print("no image leak-scan step found in docker job"); sys.exit(1)
+if scan_i >= push_i:
+    print(f"scan step (index {scan_i}) is not BEFORE push step (index {push_i})"); sys.exit(1)
+scan = steps[scan_i]
+if not sp.enabled(scan):
+    print(f"scan step is disabled by `if: {scan.get('if')}`"); sys.exit(1)
+if sp.cont_on_err(scan):
+    print("scan step has `continue-on-error: true` — a leak `exit 1` would not fail the job"); sys.exit(1)
+run = strip_run(str(scan.get("run", "")))
+via_lib = "scan_image_fs" in run
+via_inline = ("docker export" in run) and ("exit 1" in run)
+if not (via_lib or via_inline):
+    print("scan step `run:` has no EXECUTABLE scan call (scan_image_fs, or docker export + exit 1) after comment/string strip"); sys.exit(1)
+rebuild = [sp.name(s) for s in steps
+           if str(s.get("uses", "")).startswith("docker/build-push-action")
+           and str((s.get("with") or {}).get("push", "")).lower() in ("true", "1", "yes")]
+if rebuild:
+    print("push re-builds the image (build-push-action push:true) — scanned image != pushed image:", rebuild); sys.exit(1)
+sys.exit(0)
+PY
+}
+
+# TDA-1 (R2-M3 → R3-M3): the Dockerfile's RUNTIME stage must NOT carry a broad copy of the
+# whole `/app` tree from a build stage — that re-bakes the entire source tree (test fixtures
+# with private coupling literals) into the shipped image. Prior checkers keyed on the LITERAL
+# `COPY --from=builder` with the flag FIRST — a DEAD GATE bypassed by flag reordering
+# (`COPY --chown=1:1 --from=builder …`), extra flags (`--link`), a renamed build stage
+# (`--from=b`), and path idioms (`/app/`, `/app/./`). R3-M3 is flag- and stage-INDEPENDENT:
+# tokenize every COPY line, resolve `--from=<stage>` in ANY position (any stage name), and
+# normalize each path (collapse `/./`, dup slashes, trailing slash) before deciding — broad iff
+# any SOURCE that comes FROM A BUILD STAGE normalizes to exactly `/app`. HONEST LIMITS (this is a
+# SECONDARY check; the authoritative leak gate is the real image scan): normalization does NOT
+# resolve `..` segments or Dockerfile build-args (`$STAGE` / `${FOO}`), so a `COPY --from=builder
+# /app/../app …` or a build-arg-obscured source is not recognized here — those would still be
+# caught downstream by the real image FS scan (a `..`-escape is exotic and re-fires that scan).
+dockerfile_runtime_allowlist() {
+  python3 - "$1" <<'PY'
+import sys, re
+raw = open(sys.argv[1]).read()
+raw = re.sub(r'\\\n', ' ', raw)                 # join line-continuations into one logical line
+lines = raw.splitlines()
+start = next((i for i, l in enumerate(lines)
+              if re.match(r'\s*FROM\s+.*\bAS\s+runtime\b', l, re.I)), None)
+if start is None:
+    print("no `AS runtime` stage in Dockerfile"); sys.exit(1)
+seg = lines[start + 1:]
+nxt = next((i for i, l in enumerate(seg) if re.match(r'\s*FROM\s', l, re.I)), None)
+if nxt is not None:
+    seg = seg[:nxt]
+
+def norm(p):
+    # normalize a COPY path the way Docker/OCI treats it: strip quotes, collapse `/./`
+    # segments, collapse duplicate slashes, drop the trailing slash. So `/app`, `/app/`,
+    # `/app/.`, `/app/./`, `/app//` all normalize to `/app`.
+    p = p.strip().strip('"').strip("'")
+    p = re.sub(r'/\.(?=/|$)', '/', p)   # `/.` -> `/`  (repeat below collapses the result)
+    p = re.sub(r'/\.(?=/|$)', '/', p)
+    p = re.sub(r'/+', '/', p)           # collapse duplicate slashes
+    p = re.sub(r'/$', '', p) or "/"     # drop trailing slash
+    return p
+
+copies = []
+for l in seg:
+    toks = l.split()
+    if not toks or toks[0].upper() != "COPY":
+        continue
+    # A COPY has a build-stage source iff it carries a `--from=<stage>` flag in ANY position
+    # AND that stage is NOT an external image ref (contains no ':' / '/' registry markers).
+    from_stage = None
+    for t in toks[1:]:
+        m = re.match(r'--from=(.+)$', t)
+        if m:
+            from_stage = m.group(1)
+    has_build_from = from_stage is not None and (":" not in from_stage and "/" not in from_stage)
+    paths = [t for t in toks[1:] if not t.startswith("--")]
+    if len(paths) < 2:
+        continue  # heredoc / malformed — no path pair to classify
+    srcs, dest = paths[:-1], paths[-1]
+    copies.append((srcs, dest, has_build_from, l))
+
+# sanity: the runtime stage should copy SOMETHING from a build stage (the allowlist).
+if not any(has_build_from for (_, _, has_build_from, _) in copies):
+    print("runtime stage has no `COPY --from=<build-stage>` (unexpected)"); sys.exit(1)
+bad = [l for (srcs, dest, has_build_from, l) in copies
+       if has_build_from and any(norm(s) == "/app" for s in srcs)]
+if bad:
+    print("runtime stage has a BROAD whole-tree copy:", bad[0].strip()); sys.exit(1)
 sys.exit(0)
 PY
 }
@@ -320,6 +789,319 @@ PY
   else
     ok "INV-PERMS-MINIMAL: gate FAILS when a non-signing job holds write (falsifiable)"
   fi
+  # RED (SEC-4): grant a SIGNING job an unexpected surplus write (id-token+attestations are
+  # kept, so is_signing still holds) -> the subset check must fail.
+  python3 - "$REL_YML" "$WORK/rel.surplus.mut.yml" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+jobs = d.get("jobs") or {}
+# find a signing job (id-token+attestations write) and add a surplus write to it
+target = next((n for n, j in jobs.items()
+               if (j.get("permissions") or {}).get("id-token") == "write"
+               and (j.get("permissions") or {}).get("attestations") == "write"), None)
+if target is None:
+    d["jobs"] = {"release": {"permissions": {"id-token": "write", "attestations": "write",
+                                             "actions": "write"}}}
+else:
+    jobs[target]["permissions"]["actions"] = "write"
+yaml.safe_dump(d, open(sys.argv[2], "w"))
+PY
+  if perms_minimal "$WORK/rel.surplus.mut.yml" >/dev/null 2>&1; then
+    ng "INV-PERMS-MINIMAL: DEAD GATE — surplus write on a signing job still passed"
+  else
+    ok "INV-PERMS-MINIMAL: gate FAILS when a signing job holds a surplus write (falsifiable)"
+  fi
+fi
+
+# ============================================================================
+# INV-GHCR-PUBLISH-GATED  (R4-M1b: the docker if: must AST-MATCH the CANONICAL_IF constant)
+# ============================================================================
+# Publish-gate defense is now THREE layers (honest framing — the closed-enum alone does NOT
+# close it): (1) the closed-enum whitelist makes an ENUM-OUTSIDE bypass unexpressible; (2) but
+# an ENUM-INSIDE weakening (`|| github.event_name != 'push'`, `|| vars.ENABLE_GHCR_PUBLISH != ''`)
+# is closed-enum-valid and slips a 4-context SAMPLING matrix — so the SEMANTIC check here is an
+# exact CANONICAL_IF AST-match: ANY deviation (weaken OR strengthen) breaks it; (3) the runtime
+# publish guard (INV-PUBLISH-RUNTIME-GUARD) is the AUTHORITATIVE backstop that blocks the push
+# even if the if: is changed. The closed-enum/evaluator/4-context matrix is retained to VALIDATE
+# the CANONICAL_IF constant itself + as the parser unit test (INV-IF-GATE-PARSER).
+CANONICAL_IF="startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true')"
+if [ ! -f "$REL_YML" ] || ! command -v python3 >/dev/null 2>&1; then
+  ng "INV-GHCR-PUBLISH-GATED: release.yml or python3 missing"
+else
+  # 1. the canonical constant is itself a valid closed-enum tag∧opt-in gate (validates the pin target).
+  if if_gate_check_str "$CANONICAL_IF" >/dev/null 2>&1; then
+    ok "INV-GHCR-PUBLISH-GATED: CANONICAL_IF is a valid closed-enum tag-gated form (pin target sound)"
+  else
+    ng "INV-GHCR-PUBLISH-GATED: CANONICAL_IF constant is itself malformed"
+  fi
+  # 2. release.yml docker if: must AST-match CANONICAL_IF exactly.
+  canon_repr="$(if_ast_repr "$CANONICAL_IF")"
+  real_if="$(docker_if_string "$REL_YML")"
+  real_repr="$(if_ast_repr "$real_if" 2>/dev/null || echo PARSE_FAIL)"
+  if [ "$real_repr" = "$canon_repr" ]; then
+    ok "INV-GHCR-PUBLISH-GATED: release.yml docker if: AST-matches CANONICAL_IF"
+  else
+    ng "INV-GHCR-PUBLISH-GATED: release.yml docker if: DEVIATES from CANONICAL_IF — if you intentionally changed the gate, update the CANONICAL_IF constant in scripts/test-release-prep.sh in the SAME PR (2-point, review-visible change)"
+  fi
+  # RED (R4-M1c): SEC's A/C/D vectors inject a weakening disjunct INSIDE the opt-in group, so they
+  # stay closed-enum-valid AND keep top-level && with a tag guard — i.e. they PASS if_gate_check_str
+  # (the 4-context matrix samples only ref=v1.2.3, event∈{dispatch,push}, ENABLE∈{'',true}, so the
+  # extra disjunct is true only OUTSIDE those samples: A=ENABLE set to anything non-empty like
+  # 'false'/broken-disable, C=any non-push event on a tag, D=any tag != v1.2.3 = near-total bypass).
+  # The canonical AST pin catches every one. Assert for each: (i) the evaluator ACCEPTS it (proves
+  # the matrix alone is insufficient — the pin's whole reason), AND (ii) the AST pin BREAKS on it.
+  pin_red=1; pin_n=0
+  while IFS= read -r form; do
+    [ -n "$form" ] || continue
+    pin_n=$((pin_n + 1))
+    if ! if_gate_check_str "$form" >/dev/null 2>&1; then
+      ng "INV-GHCR-PUBLISH-GATED: SEC vector no longer slips the matrix (demonstration stale): $form"; pin_red=0
+    fi
+    wrepr="$(if_ast_repr "$form" 2>/dev/null || echo PARSE_FAIL)"
+    if [ "$wrepr" = "$canon_repr" ]; then
+      ng "INV-GHCR-PUBLISH-GATED: DEAD PIN — enum-inside weakening AST-matched canonical: $form"; pin_red=0
+    fi
+  done <<'FORMS'
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true' || vars.ENABLE_GHCR_PUBLISH != '')
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true' || github.event_name != 'push')
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true' || github.ref != 'refs/tags/v1.2.3')
+FORMS
+  [ "$pin_red" = 1 ] && ok "INV-GHCR-PUBLISH-GATED: canonical pin BREAKS on all $pin_n opt-in-group enum-inside weakenings that PASS the 4-ctx matrix (SEC A/C/D) (falsifiable)"
+fi
+
+# ============================================================================
+# INV-PUBLISH-RUNTIME-GUARD  (R4-M1a: authoritative runtime backstop before the push)
+# ============================================================================
+# Symmetric with the leak face's real image scan: a step BEFORE push that fails closed unless
+# tag∧opt-in truly holds. Even if if: is weakened, this blocks the push. The INV EXECUTES the
+# guard's run body under the 8-context matrix (real behavior, not a structural guess).
+if [ ! -f "$REL_YML" ] || ! command -v python3 >/dev/null 2>&1; then
+  ng "INV-PUBLISH-RUNTIME-GUARD: release.yml or python3 missing"
+else
+  guard_run="$(docker_publish_guard_run "$REL_YML" 2>/dev/null)"; guard_present=$?
+  if [ "$guard_present" -ne 0 ] || [ -z "$guard_run" ]; then
+    ng "INV-PUBLISH-RUNTIME-GUARD: no runtime publish-guard step before the push step"
+  else
+    ok "INV-PUBLISH-RUNTIME-GUARD: guard step present before the push step"
+    if guard_matrix_ok "$guard_run"; then
+      ok "INV-PUBLISH-RUNTIME-GUARD: guard fails-closed correctly across the 8-context matrix"
+    else
+      ng "INV-PUBLISH-RUNTIME-GUARD: guard does not enforce tag∧opt-in (8-context mismatch)"
+    fi
+    # RED (R5-M1): guard-step NEUTRALIZATION forms the guard checker previously ignored — its
+    # sibling scan checker already rejected `if: false` / `continue-on-error: true` (the
+    # consolidation gap SEC-R5-1 ≡ QA-R5-1). Now that both share step_predicates, each of these
+    # makes docker_publish_guard_run report "no valid guard" (exit non-zero). `always()` is
+    # rejected because enabled() admits only a plain truthy constant (see step_predicates).
+    guard_red_ok=1
+    for m in \
+      "guard_remove:removing the guard step" \
+      "guard_disable:disabling the guard with if:false" \
+      "guard_coe:continue-on-error:true on the guard" \
+      "guard_coe_exprT:continue-on-error:\${{ true }} on the guard" \
+      "guard_coe_exprC:continue-on-error:\${{ expr }} on the guard" \
+      "guard_always:if:always() on the guard"; do
+      op="${m%%:*}"; desc="${m#*:}"
+      mutate_guard "$op" "$REL_YML" "$WORK/rel.$op.yml"
+      if docker_publish_guard_run "$WORK/rel.$op.yml" >/dev/null 2>&1; then
+        ng "INV-PUBLISH-RUNTIME-GUARD: DEAD GATE — $desc still passed"; guard_red_ok=0
+      fi
+    done
+    [ "$guard_red_ok" = 1 ] && ok "INV-PUBLISH-RUNTIME-GUARD: gate FAILS on all 6 guard-neuter forms (remove / if:false / continue-on-error true/\${{ true }}/\${{ expr }} / always()) (falsifiable)"
+    # NO OVER-REJECT (R6-M1): a provably-safe `continue-on-error: false` on the guard must NOT
+    # be rejected (fail-closed must stay precise).
+    mutate_guard guard_coe_false "$REL_YML" "$WORK/rel.guard_coe_false.yml"
+    if docker_publish_guard_run "$WORK/rel.guard_coe_false.yml" >/dev/null 2>&1; then
+      ok "INV-PUBLISH-RUNTIME-GUARD: continue-on-error:false is NOT over-rejected (fail-closed is precise)"
+    else
+      ng "INV-PUBLISH-RUNTIME-GUARD: OVER-REJECT — a safe continue-on-error:false guard was rejected"
+    fi
+    # RED: defang the guard's fail path (exit 1 -> exit 0) -> the 8-context matrix must mismatch.
+    defanged="${guard_run//exit 1/exit 0}"
+    if guard_matrix_ok "$defanged"; then
+      ng "INV-PUBLISH-RUNTIME-GUARD: DEAD GATE — defanged guard (exit 1->exit 0) still matched"
+    else
+      ok "INV-PUBLISH-RUNTIME-GUARD: matrix FAILS when the guard fail path is defanged (falsifiable)"
+    fi
+    # RED: invert the opt-in condition (|| -> &&) -> the 8-context matrix must mismatch.
+    inverted="${guard_run// || / && }"
+    if guard_matrix_ok "$inverted"; then
+      ng "INV-PUBLISH-RUNTIME-GUARD: DEAD GATE — inverted guard (|| -> &&) still matched"
+    else
+      ok "INV-PUBLISH-RUNTIME-GUARD: matrix FAILS when the guard condition is inverted (falsifiable)"
+    fi
+  fi
+fi
+
+# ============================================================================
+# INV-IF-GATE-PARSER  (R3-L3 → R4: parser/evaluator unit tests — validate the pin target)
+# ============================================================================
+# These string-level tests keep the closed-enum + evaluator + 4-context matrix honest: they
+# prove if_gate_check_str (which VALIDATES CANONICAL_IF above) accepts valid tag∧opt-in forms
+# and rejects every malformed / weakened / enum-outside one. NOTE: rejecting an enum-OUTSIDE
+# vector at parse time is real, but it is NOT the whole publish-gate defense — an enum-INSIDE
+# weakening is caught by the canonical AST pin, and the runtime guard is the final backstop.
+if ! command -v python3 >/dev/null 2>&1; then
+  ng "INV-IF-GATE-PARSER: python3 required"
+else
+  ifp_ok=1
+  while IFS= read -r good; do
+    [ -n "$good" ] || continue
+    if_gate_check_str "$good" >/dev/null 2>&1 || { ng "INV-IF-GATE-PARSER: wrongly REJECTED valid: $good"; ifp_ok=0; }
+  done <<'GOOD'
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true')
+startsWith(github.ref, 'refs/tags/') && (vars.ENABLE_GHCR_PUBLISH == 'true' || github.event_name == 'workflow_dispatch')
+GOOD
+  [ "$ifp_ok" = 1 ] && ok "INV-IF-GATE-PARSER: accepts valid closed-enum tag-gated forms"
+  # INVALID forms (structural + behavioral-bypass) the evaluator must REJECT.
+  ifp_bad=1; ifp_bn=0
+  while IFS= read -r bad; do
+    [ -n "$bad" ] || continue
+    ifp_bn=$((ifp_bn + 1))
+    if if_gate_check_str "$bad" >/dev/null 2>&1; then ng "INV-IF-GATE-PARSER: wrongly ACCEPTED invalid: $bad"; ifp_bad=0; fi
+  done <<'BAD'
+github.event_name == 'workflow_dispatch'
+startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || github.actor != '')
+startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch')
+true
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true') || true
+startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true')
+true || (startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true'))
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true') trailingtoken
+BAD
+  [ "$ifp_bad" = 1 ] && ok "INV-IF-GATE-PARSER: rejects all $ifp_bn invalid/bypass forms (no-guard / top-OR / enum-outside / negated / bare-true / ||true / AND→OR / true|| / trailing-token)"
+  # ENUM-OUTSIDE weakeners appended to the canonical form — all rejected at PARSE time. Includes
+  # freshly INVENTED siblings to show the class is closed (no denylist to keep updating).
+  ifp_eo=1; ifp_en=0
+  while IFS= read -r vec; do
+    [ -n "$vec" ] || continue
+    ifp_en=$((ifp_en + 1))
+    if if_gate_check_str "$CANONICAL_IF $vec" >/dev/null 2>&1; then ng "INV-IF-GATE-PARSER: enum-outside vector ACCEPTED: $vec"; ifp_eo=0; fi
+  done <<'VECS'
+|| github.repository_owner == 'someorg'
+|| github.actor != ''
+|| 'false'
+|| github.sha != ''
+|| github.run_id != ''
+|| secrets.FOO != ''
+|| contains(github.event.head_commit.message, 'ship')
+|| runner.os == 'Linux'
+|| env.PUBLISH == '1'
+|| always()
+VECS
+  [ "$ifp_eo" = 1 ] && ok "INV-IF-GATE-PARSER: rejects all $ifp_en enum-outside/bare-literal vectors at parse time (closed-enum class closed)"
+fi
+
+# ============================================================================
+# INV-DOCKER-SCAN-BEFORE-PUSH  (SEC-2: leak scan runs before the GHCR push)
+# ============================================================================
+if [ ! -f "$REL_YML" ]; then
+  ng "INV-DOCKER-SCAN-BEFORE-PUSH: release.yml not found at $REL_YML"
+elif ! command -v python3 >/dev/null 2>&1; then
+  ng "INV-DOCKER-SCAN-BEFORE-PUSH: python3 required to parse the workflow"
+else
+  if docker_scan_before_push "$REL_YML" >/dev/null 2>&1; then
+    ok "INV-DOCKER-SCAN-BEFORE-PUSH: image leak-scan step precedes the push step"
+  else
+    ng "INV-DOCKER-SCAN-BEFORE-PUSH: no leak-scan step before push in the docker job"
+  fi
+  # RED probes via the single-source mutate_scan (L6 — is_scan lives in ONE place). Each named
+  # mutation is a distinct no-op / bypass form the checker must FAIL on.
+  #   remove       : delete the scan step (nothing gates the push)
+  #   reorder_last : move the scan step after push
+  #   gut          : replace run with a no-op echo
+  #   disable      : `if: false` on the scan step
+  #   coe          : `continue-on-error: true` (leak exit 1 ignored)
+  #   comment      : load-bearing token only in a comment
+  #   echo         : load-bearing token only inside an echo string
+  scan_red_ok=1
+  for m in \
+    "remove:removing the scan step" \
+    "reorder_last:moving the scan step after push" \
+    "gut:gutting the scan run to echo" \
+    "disable:disabling the scan step with if:false" \
+    "coe:continue-on-error:true on the scan step" \
+    "coe_exprT:continue-on-error:\${{ true }} on the scan step" \
+    "coe_exprC:continue-on-error:\${{ expr }} on the scan step" \
+    "comment:the scan token only in a comment" \
+    "echo:the scan token only inside an echo string"; do
+    op="${m%%:*}"; desc="${m#*:}"
+    mutate_scan "$op" "$REL_YML" "$WORK/rel.scan.$op.yml"
+    if docker_scan_before_push "$WORK/rel.scan.$op.yml" >/dev/null 2>&1; then
+      ng "INV-DOCKER-SCAN-BEFORE-PUSH: DEAD GATE — $desc still passed"; scan_red_ok=0
+    fi
+  done
+  [ "$scan_red_ok" = 1 ] && ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS on all 9 no-op/bypass forms incl continue-on-error \${{ true }} / \${{ expr }} (R6-M1 fail-closed) (falsifiable)"
+  # NO OVER-REJECT (R6-M1): a provably-safe `continue-on-error: false` must NOT be rejected.
+  mutate_scan coe_false "$REL_YML" "$WORK/rel.scan.coe_false.yml"
+  if docker_scan_before_push "$WORK/rel.scan.coe_false.yml" >/dev/null 2>&1; then
+    ok "INV-DOCKER-SCAN-BEFORE-PUSH: continue-on-error:false is NOT over-rejected (fail-closed is precise)"
+  else
+    ng "INV-DOCKER-SCAN-BEFORE-PUSH: OVER-REJECT — a safe continue-on-error:false was rejected"
+  fi
+  # RED (R2-L3): a re-building push (build-push-action push:true) is a DISTINCT build from the
+  # scanned image -> must fail. (Appends a step; not an is_scan mutation.)
+  python3 - "$REL_YML" "$WORK/rel.rebuild.mut.yml" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+job = (d.get("jobs") or {}).get("docker") or {}
+job["steps"] = (job.get("steps") or []) + [
+    {"name": "Rebuild and push", "uses": "docker/build-push-action@v6",
+     "with": {"context": ".", "push": True}}
+]
+yaml.safe_dump(d, open(sys.argv[2], "w"))
+PY
+  if docker_scan_before_push "$WORK/rel.rebuild.mut.yml" >/dev/null 2>&1; then
+    ng "INV-DOCKER-SCAN-BEFORE-PUSH: DEAD GATE — re-building push (build-push-action push:true) still passed"
+  else
+    ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS when the push re-builds the image (falsifiable)"
+  fi
+fi
+
+# ============================================================================
+# INV-DOCKERFILE-RUNTIME-ALLOWLIST  (TDA-1: no broad whole-tree copy into runtime)
+# ============================================================================
+DOCKERFILE="$ROOT/Dockerfile"
+if [ ! -f "$DOCKERFILE" ]; then
+  ng "INV-DOCKERFILE-RUNTIME-ALLOWLIST: Dockerfile not found at $DOCKERFILE"
+elif ! command -v python3 >/dev/null 2>&1; then
+  ng "INV-DOCKERFILE-RUNTIME-ALLOWLIST: python3 required to parse the Dockerfile"
+else
+  if dockerfile_runtime_allowlist "$DOCKERFILE" >/dev/null 2>&1; then
+    ok "INV-DOCKERFILE-RUNTIME-ALLOWLIST: runtime stage uses an allowlist COPY (no broad /app copy)"
+  else
+    ng "INV-DOCKERFILE-RUNTIME-ALLOWLIST: runtime stage has a broad whole-tree copy"
+  fi
+  # RED: reintroduce a broad `COPY --from=builder /app /app` in the runtime stage.
+  DFM="$WORK/Dockerfile.broad"; cp "$DOCKERFILE" "$DFM"
+  printf 'COPY --from=builder /app /app\n' >> "$DFM"
+  if dockerfile_runtime_allowlist "$DFM" >/dev/null 2>&1; then
+    ng "INV-DOCKERFILE-RUNTIME-ALLOWLIST: DEAD GATE — broad /app copy still passed"
+  else
+    ok "INV-DOCKERFILE-RUNTIME-ALLOWLIST: gate FAILS on a broad whole-tree copy (falsifiable)"
+  fi
+  # RED (R2-M3 + R3-M3): flag/stage/path variants Docker treats as the SAME broad copy but the
+  # old flag-first / stage-literal / trailing-slash regex let through. ALL must be caught after
+  # tokenization + normalization.
+  m3_all_red=1; m3_n=0
+  while IFS= read -r variant; do
+    [ -n "$variant" ] || continue
+    m3_n=$((m3_n + 1))
+    DFV="$WORK/Dockerfile.m3.$m3_n"; cp "$DOCKERFILE" "$DFV"; printf '%s\n' "$variant" >> "$DFV"
+    if dockerfile_runtime_allowlist "$DFV" >/dev/null 2>&1; then
+      ng "INV-DOCKERFILE-RUNTIME-ALLOWLIST: DEAD GATE — broad-copy variant ACCEPTED: $variant"; m3_all_red=0
+    fi
+  done <<'VARIANTS'
+COPY --from=builder /app /app
+COPY --from=builder /app/ /app/
+COPY --chown=1:1 --from=builder /app /app
+COPY --from=builder --link /app /app
+COPY --from=b /app /app
+COPY --from=builder /app/./ /app/
+COPY --from=builder /app//. /app/
+VARIANTS
+  [ "$m3_all_red" = 1 ] && ok "INV-DOCKERFILE-RUNTIME-ALLOWLIST: gate FAILS on all $m3_n broad-copy variants (flag order / --link / renamed stage / /./ / trailing slash) (falsifiable)"
 fi
 
 # ============================================================================

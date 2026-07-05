@@ -11,6 +11,22 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Added
+
+- **One-command Docker image (cockpit stack).** A signed container image publishes the
+  cockpit — backend + webui/BFF + an embedded PostgreSQL (PGlite) — so you can try
+  ActraDeck with a single `docker run` and no external database, a lighter on-ramp than
+  the clone/quickstart install. The image is the cockpit stack only; agent observation
+  (the sidecar) stays on the host and connects over loopback (see
+  [`docs/docker.md`](docs/docker.md) for the honest support matrix).
+- **GHCR publishing is USER-GATED and supply-chain hardened.** Publishing is off by
+  default (opt in via `ENABLE_GHCR_PUBLISH=true` or a manual workflow dispatch against a
+  `vX.Y.Z` tag). When it runs, the image is **leak-scanned before push**, signed with
+  **cosign keyless** (OIDC → Sigstore/Fulcio → Rekor), and carries a **SLSA build-provenance
+  attestation** of the image digest — a different trust root from the product's own
+  audit-export signature, never reused. Verify with `cosign verify` +
+  `gh attestation verify` (commands in `docs/docker.md`).
+
 ## [0.3.0] - 2026-07-05
 
 The first release produced by the signed pipeline (versioned tarball + CycloneDX

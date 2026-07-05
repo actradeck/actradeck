@@ -42,6 +42,10 @@ export function generateEn(html) {
     const en = el.getAttribute("data-en");
     if (en != null) el.innerHTML = en;
   });
+  doc.querySelectorAll("[data-href-en]").forEach((el) => {
+    const en = el.getAttribute("data-href-en");
+    if (en) el.setAttribute("href", en);
+  });
 
   // 3. Retarget head metadata at /en/.
   const set = (sel, attr, val) => {

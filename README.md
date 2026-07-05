@@ -164,6 +164,27 @@ troubleshooting). The precision/limits of Attach Mode are in
 > cockpit — launch a session with `agentmon codex -- "<prompt>"`. See
 > [`docs/attach-mode.md`](./docs/attach-mode.md) for its precise limits.
 
+### Or one command with Docker
+
+If you'd rather not install Node/pnpm, the **cockpit** (backend + webui + embedded
+database) runs from a single image — no external database, no build step:
+
+```bash
+docker run --rm -p 127.0.0.1:55400:55400 ghcr.io/actradeck/actradeck:latest
+# then open http://localhost:55400
+```
+
+The container is the **cockpit stack only**. The sidecar that observes your agents
+watches the *host's* Claude Code / Codex processes, so it can't run inside a container —
+you run it on the host and point it at the container's ingestion port over loopback. The
+honest support matrix, the exact `docker run` flags, verifying the image's cosign
+signature, and how to wire a host agent are all in
+[`docs/docker.md`](./docs/docker.md).
+
+> The image is **published on demand** (ADR 0013 Phase 2). Until a maintainer opts in to
+> the GHCR publish, build it locally with `docker build -t actradeck .` — the Dockerfile
+> and compose are the same ones the release workflow signs.
+
 ## Architecture
 
 ```

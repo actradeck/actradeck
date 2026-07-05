@@ -27,10 +27,16 @@ on:
   push:
     tags:
       - "v*"
+  # Manual opt-in path for the GHCR Docker image job ONLY (see the `docker` job's `if:`).
+  # Dispatch this against an existing `vX.Y.Z` tag to build+sign+push the image. The
+  # verify/release jobs are guarded to `push` events, so a dispatch never re-cuts a
+  # Release — it only exercises the (USER-GATED) docker job.
+  workflow_dispatch:
 
 # Least-privilege by default: the whole workflow only READS the repo. The release job
-# alone escalates (job-scoped) to the writes it needs. INV-RELEASE-WORKFLOW-PERMS-MINIMAL
-# asserts top-level == {contents: read} and that write lives only in a job.
+# alone escalates (job-scoped) to the writes it needs. INV-PERMS-MINIMAL (the gate name
+# emitted by scripts/test-release-prep.sh) asserts top-level == {contents: read} and that
+# write lives only in the signing jobs.
 permissions:
   contents: read
 
@@ -38,6 +44,9 @@ jobs:
   # --- verify: the tag is buildable and its version matches the tag ------------
   verify:
     runs-on: ubuntu-latest
+    # Only cut a Release on an actual tag push. A workflow_dispatch (used to trigger the
+    # USER-GATED docker job below) must NOT re-run verify/release on an existing tag.
+    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
 
@@ -216,3 +225,167 @@ jobs:
             --title "ActraDeck $tag" \
             --notes "$notes" \
             "$tarball" sbom.cdx.json checksums.txt
+
+  # --- docker: build + push + cosign-sign the GHCR cockpit image (USER-GATED) ---
+  # ADR 0013 Phase 2 (decision 019f2bc1 D1 / 019f305f). This job is OFF BY DEFAULT: a
+  # plain tag push does NOT publish an image. It runs only when the operator opts in,
+  # either by setting the repo variable `ENABLE_GHCR_PUBLISH=true` (then it rides along
+  # with the tag push) or by manually dispatching this workflow against a `vX.Y.Z` tag.
+  # It is independent of verify/release (no `needs:`), so it never affects the Release.
+  #
+  # The image is the cockpit stack only (backend + webui + embedded PGlite); the sidecar
+  # runs on the HOST (docs/docker.md). Signing uses keyless OIDC -> Sigstore (cosign) +
+  # a GitHub-native SLSA build-provenance attestation of the image digest — a DIFFERENT
+  # trust root from the product's operator Ed25519 audit key (ADR 0013 D3), never reused.
+  docker:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GHCR_PUBLISH == 'true')
+    permissions:
+      contents: read
+      packages: write # push the image to GHCR
+      id-token: write # keyless OIDC for cosign + attestation
+      attestations: write # record the SLSA build provenance of the image
+    steps:
+      - uses: actions/checkout@v4
+
+      # TDA-7: a workflow_dispatch reaches THIS job without the verify job's tag↔version
+      # check (verify is guarded to `push` events). Without re-asserting it here, a dispatch
+      # against a tag whose package.json version was never stamped could publish a
+      # mislabeled image. Re-run the same assertion the verify job uses.
+      - name: Assert tag matches package.json version
+        run: |
+          set -euo pipefail
+          root_ver="$(jq -r '.version' package.json)"
+          expected="v${root_ver}"
+          if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' != package.json version '${expected}' — run scripts/version.sh ${root_ver} to stamp+tag in lockstep before publishing an image" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches root version ${root_ver}"
+
+      # Name-agnostic: registry path derives from ${{ github.repository }} (GHCR requires
+      # a lowercase path). SEC-1: tag/repo values are computed via env, never interpolated
+      # into a later run: body (mirrors the release job's hardening).
+      - name: Compute image reference
+        id: img
+        env:
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          repo_lc="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+          version="${REF_NAME#v}"
+          echo "image=ghcr.io/${repo_lc}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}"       >> "$GITHUB_OUTPUT"
+          echo "resolved image=ghcr.io/${repo_lc} version=${version}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # SEC-2: build → SCAN → push (never `push: true` before the leak scan). The release
+      # job re-scans its tarball before publishing; the image had no equivalent gate, so a
+      # single `push: true` build shipped to GHCR before anything inspected the filesystem.
+      # We first build with `load: true` (into the local daemon, no push), scan that exact
+      # image, and only then push. `provenance: false` disables BuildKit's inline provenance
+      # attestor; we attest separately below with the GitHub-native action.
+      - name: Build image locally (load, not yet pushed)
+        id: build_local
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          provenance: false
+          tags: |
+            ${{ steps.img.outputs.image }}:${{ steps.img.outputs.version }}
+            ${{ steps.img.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.img.outputs.version }}
+
+      # AUTHORITATIVE image leak gate (R3): export the built image's filesystem and fail-closed
+      # on any leak BEFORE pushing. This is the real enforcement — the config-checkers in
+      # scripts/test-release-prep.sh only verify this step is wired in. Single-sourced via
+      # scripts/lib/scan-image-fs.sh (R3-L1) so release.yml and ci.yml can't drift.
+      - name: Scan built image filesystem for leaks (fail-closed, before push)
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+          VERSION: ${{ steps.img.outputs.version }}
+        run: |
+          set -euo pipefail
+          . scripts/lib/scan-image-fs.sh
+          scan_image_fs "${IMAGE}:${VERSION}"
+
+      # AUTHORITATIVE publish gate (R4-M1a): a runtime re-check RIGHT BEFORE the push that fails
+      # closed unless the tag∧opt-in conditions truly hold. This is the publish-face analogue of
+      # the leak-face image scan: even if the job `if:` is weakened, publishing is blocked here.
+      # The job `if:` (pinned to CANONICAL_IF by INV-GHCR-PUBLISH-GATED) is now the SECONDARY
+      # check; this step is the enforcement. GITHUB_REF / GITHUB_EVENT_NAME are Actions built-ins;
+      # ENABLE_GHCR_PUBLISH is passed via env (injection-safe idiom), never interpolated into the
+      # script body.
+      - name: Verify publish is authorized (runtime fail-closed guard)
+        env:
+          ENABLE_GHCR_PUBLISH: ${{ vars.ENABLE_GHCR_PUBLISH }}
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF:-}" in
+            refs/tags/*) : ;;
+            *) echo "::error::publish guard: ref '${GITHUB_REF:-}' is not a tag — refusing to push" >&2; exit 1 ;;
+          esac
+          if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] || [ "${ENABLE_GHCR_PUBLISH:-}" = "true" ]; then
+            echo "publish authorized (event=${GITHUB_EVENT_NAME:-}, ENABLE_GHCR_PUBLISH set: $([ "${ENABLE_GHCR_PUBLISH:-}" = "true" ] && echo yes || echo no))"
+          else
+            echo "::error::publish guard: not workflow_dispatch and ENABLE_GHCR_PUBLISH != 'true' — refusing to push" >&2
+            exit 1
+          fi
+
+      # R2-L3: push the EXACT image that was just scanned — do NOT re-build. The load build
+      # above put the image (with both tags) in the local daemon; we `docker push` those tags
+      # so the pushed manifest is byte-identical to the scanned one (a second build-push-action
+      # would be a distinct build with no digest-equality guarantee to the scanned image). The
+      # pushed registry digest is captured for cosign + attestation. INV-DOCKER-SCAN-BEFORE-PUSH
+      # pins that the push step does not re-build.
+      - name: Push scanned image
+        id: push
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+          VERSION: ${{ steps.img.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}:${VERSION}"
+          docker push "${IMAGE}:latest"
+          # Resolve the registry manifest digest of the just-pushed image (both tags share it).
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${VERSION}" | cut -d'@' -f2)"
+          case "$digest" in
+            sha256:*) : ;;
+            *) echo "::error::could not resolve pushed image digest (got '${digest}')" >&2; exit 1 ;;
+          esac
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "pushed ${IMAGE}@${digest}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless signature (OIDC -> Fulcio cert -> Rekor transparency log). Sign the exact
+      # digest, not a mutable tag, so the signature binds the immutable image content.
+      - name: Sign the image (cosign keyless)
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # SLSA build provenance for the image digest, pushed to the registry so consumers
+      # can `gh attestation verify oci://<image>@<digest> --repo <owner>/<name>`.
+      - name: Attest build provenance (image)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.img.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
