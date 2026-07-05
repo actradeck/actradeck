@@ -52,6 +52,11 @@ vendor structurally will not build: **neutral governance across competing agents
 - **Cross-vendor.** One event model and one audit trail spanning Claude Code _and_
   Codex, surfaced in one approval inbox (see the support matrix for what each mode
   relays — more agents over time).
+- **Public ingestion contract.** Any tool can normalize its own events and `POST /ingest`
+  into the same cockpit and audit trail. The provider dimension is an open slug, while
+  `event_type` stays a closed enum so the state machine remains meaningful. Start with
+  [`docs/ingestion-contract.md`](./docs/ingestion-contract.md) and the zero-dependency
+  example adapter in [`docs/examples/ingest-adapter/`](./docs/examples/ingest-adapter/).
 
 ## What works today
 
@@ -64,6 +69,8 @@ vendor structurally will not build: **neutral governance across competing agents
   with an opt-in restart-persistent allowlist for safe operations.
 - **Secret redaction before persist**, with per-kind redaction counts in the UI.
 - **Session replay** and an append-only local event log.
+- **External adapters** via the public ingestion contract (`provider=<your slug>`,
+  `source=external`), with backend ingress redaction before persistence.
 
 ## Vendor / mode support
 
@@ -98,8 +105,15 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradec
 > piped into a shell)? Fetch it, `less` it, then run it — or skip it and use the manual
 > clone below. The installer handles no secrets (quickstart generates a local `.env` at
 > mode `0600`), needs no root, and clones to `~/actradeck` (override with
-> `ACTRADECK_INSTALL_DIR`; pin a ref with `ACTRADECK_REF`). It becomes live once the
-> repository is public — until the OSS release, use the manual steps.
+> `ACTRADECK_INSTALL_DIR`; pin a ref with `ACTRADECK_REF`).
+
+For a release tarball with provenance and digest verification, use the fail-closed
+verified path (requires the GitHub CLI):
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh -o install.sh
+ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.3.0 sh install.sh
+```
 
 Already cloned, or prefer to do it by hand (needs Node 22.16+ and pnpm — **no Docker**):
 
@@ -165,6 +179,7 @@ troubleshooting). The precision/limits of Attach Mode are in
 Design principle: the Web UI never connects directly to local CLIs. The sidecar is
 the single choke point where redaction is applied before anything is stored or sent.
 
+- Public ingestion contract: [`docs/ingestion-contract.md`](./docs/ingestion-contract.md)
 - Architecture decision records: [`docs/adr/`](./docs/adr/)
 - 90-second demo runbook: [`docs/demo-90s.md`](./docs/demo-90s.md)
 

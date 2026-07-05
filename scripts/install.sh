@@ -29,9 +29,8 @@
 #                           verifies SLSA build provenance (`gh attestation verify`)
 #                           AND the sha256 digest before extracting anything. Absent
 #                           attestation / digest mismatch = non-zero abort (no install).
-#                           NOTE: usable only AFTER signed Releases are published — before
-#                           the first published tag no attestation exists, so this fails
-#                           closed by design; use the default clone path until then.
+#                           NOTE: usable only for signed Releases. Branches/commits are
+#                           unsigned and intentionally fail closed in verified mode.
 #                           Unset (default) = the plain clone path below, unchanged.
 # Flags:
 #   --dry-run / -n          check prerequisites and print the plan, but change nothing

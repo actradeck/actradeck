@@ -52,10 +52,17 @@ the setup, and it handles no credentials (quickstart still generates the `0600` 
   `ACTRADECK_INSTALL_DIR` (source location). It never runs as root and refuses to clobber
   a non-empty directory that is not an existing ActraDeck checkout.
 
-> The one-liner works once the repository is public (OSS release pending). Until then,
-> clone the repo and run `./scripts/quickstart` inside it. (Running `install.sh` on an
-> existing clone just makes a second checkout under `ACTRADECK_INSTALL_DIR` — it is the
-> remote-bootstrap entry point, not an in-place setup for a clone you already have.)
+For a signed release tarball with SLSA provenance and sha256 verification, fetch the
+installer first and opt into the verified path:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh -o install.sh
+ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.3.0 sh install.sh
+```
+
+Running `install.sh` on an existing clone makes a second checkout under
+`ACTRADECK_INSTALL_DIR`; it is the remote-bootstrap entry point, not an in-place setup for
+a clone you already have.
 
 ## Fast path — one command
 
