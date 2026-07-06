@@ -365,8 +365,9 @@ export async function runSafetyDemoDriver(opts: DemoDriverOptions = {}): Promise
     // emit してから閉じ、pending card の残存を縮小する (INV-APPROVAL: 安全側 deny)。resolvedEmitted ゲートで
     // 正常路との二重 resolved を防ぐ。ws 死亡時は send が同期 throw / reject するため try/catch で握り (daemon を
     // 落とさない backstop)、それでも emit 不能なら card は残りうる (限界・docs 開示)。
+    // NOTE: finally は一度しか走らないため、ここで resolvedEmitted を再セットしない (dead store・CodeQL
+    //   js/useless-assignment-to-local #24)。二重 resolved 防止はガード条件 (読み取り) のみで成立する。
     if (requestedEmitted && !resolvedEmitted) {
-      resolvedEmitted = true;
       try {
         await emitStep(
           DEMO_STEPS.permissionResolvedDeny,
