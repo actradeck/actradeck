@@ -81,26 +81,36 @@ describe("INV-CONTRACT-GOLDEN: docs/ingestion-contract.md の golden example", (
   });
 
   /**
-   * INV-CONTRACT-REDOS: contract-doc の抽出正規表現 (GOLDEN_RE / EVENT_TYPES_RE) は
-   * js/polynomial-redos を持たない。以前は `\s*([\s\S]*?)\s*` で `\s` が外側 `\s*` と内側
-   * `[\s\S]` の両方に一致し、空白多数入力で polynomial backtracking した。捕捉群に隣接する
-   * `\s*` を除去し固定リテラルで挟むことで overlap を構造的に消した。
+   * INV-CONTRACT-REDOS: contract-doc の抽出器は js/polynomial-redos を持たない (CodeQL #22/#23)。
    *
-   * ここでは (a) 抽出結果が現行と byte 等価であること (whitespace 変動に不変)、(b) 病的な
-   * 大量空白入力で catastrophic backtracking しない (時間上限) こと、を pin する。
-   * falsifiable: regex を旧 `\s*([\s\S]*?)\s*` へ戻すと (b) の時間上限を超え RED になる。
+   * 旧実装は `A([\s\S]*?)B`（START marker A・END marker B が共に `<!--` prefix を共有）の単一 regex で
+   * 領域を lazy 捕捉していた。prefix を共有する 2 marker で lazy 捕捉を挟む構造は、marker prefix の
+   * 反復入力（`<!--EVENT-TYPES:START-->` 等の連打）に対し捕捉境界の再試行が起きる quadratic
+   * backtracking を残した。前回の「隣接 `\s*` 除去」では A(...)B 構造が残り CodeQL は依然 flag した。
+   *
+   * 新実装は START/END/フェンスを**独立の線形 regex + indexOf で順に検出して slice** し、marker 間に
+   * lazy 捕捉を一切挟まない。よって本質的に線形。ここでは (a) 抽出結果が旧実装と byte 等価
+   * (whitespace 変動に不変)、(b) marker prefix の大量反復という**病的入力で線形時間** (catastrophic
+   * backtracking なし) を pin する。
+   * falsifiable: 抽出器を旧 `A([\s\S]*?)B` へ戻すと (b) の時間上限を超え RED になる。
    */
-  describe("INV-CONTRACT-REDOS: 抽出 regex が polynomial-redos を持たない (js/polynomial-redos)", () => {
-    it("golden 抽出はフェンス内前後空白に不変 (capture byte 等価)", () => {
+  describe("INV-CONTRACT-REDOS: 抽出器が polynomial-redos を持たない (js/polynomial-redos)", () => {
+    it("golden 抽出はフェンス内前後空白に不変 (slice byte 等価)", () => {
       // フェンス内に余分な先頭/末尾空白を挿入しても、trim 後の JSON.parse 結果は不変。
       const synthetic =
         "冒頭\n<!-- GOLDEN-EVENT:START -->\n\n```json\n\n   " +
         '{"event_id":"x","n":1}' +
         "\n\n```\n<!-- GOLDEN-EVENT:END -->\n末尾";
       expect(extractGoldenEvent(synthetic)).toEqual({ event_id: "x", n: 1 });
-      // 実 doc の抽出結果も従来どおり (schema drift テストと重複するが capture 不変を明示 pin)。
+      // 実 doc の抽出結果も従来どおり (schema drift テストと重複するが slice 不変を明示 pin)。
       const golden = extractGoldenEvent(raw) as Record<string, unknown>;
       expect(golden.event_id).toBeTypeOf("string");
+    });
+
+    it("golden 抽出は marker の \\s* 柔軟性を維持 (<!--X--> と <!-- X --> 両対応)", () => {
+      const tight =
+        '<!--GOLDEN-EVENT:START-->```json{"event_id":"y","n":2}```<!--GOLDEN-EVENT:END-->';
+      expect(extractGoldenEvent(tight)).toEqual({ event_id: "y", n: 2 });
     });
 
     it("event_type 抽出は marker 内前後空白に不変 (backtick token 集合等価)", () => {
@@ -109,27 +119,57 @@ describe("INV-CONTRACT-GOLDEN: docs/ingestion-contract.md の golden example", (
       expect(extractDocEventTypes(synthetic)).toEqual(["a.b", "c.d"]);
     });
 
-    it("病的な大量空白入力で GOLDEN_RE が catastrophic backtracking しない (時間上限)", () => {
-      // START + ```json の後に大量空白 + 閉じフェンス無し → 旧 regex は O(N^2) で backtrack。
+    it("event_type 抽出は marker 内に backtick token 皆無なら空配列 (?? [] fallback)", () => {
+      const noTokens =
+        "<!-- EVENT-TYPES:START -->\n本文にコード token なし\n<!-- EVENT-TYPES:END -->";
+      expect(extractDocEventTypes(noTokens)).toEqual([]);
+    });
+
+    it("病的入力 (START marker prefix の大量反復) で golden 抽出が線形時間", () => {
+      // 旧 `A([\s\S]*?)B` は START/END が共有する `<!--` prefix の反復で quadratic backtracking した。
+      //   新方式は単純 regex 2 つ + slice ゆえ本質的に線形 (END/フェンス欠落で即 fail-loud)。
+      const pathological = "<!--GOLDEN-EVENT:START-->".repeat(100_000) + "no-fence-no-end";
+      const start = performance.now();
+      expect(() => extractGoldenEvent(pathological)).toThrow(/GOLDEN-EVENT marker/);
+      const elapsed = performance.now() - start;
+      // 線形なら数 ms。旧 polynomial regex では秒オーダー。300ms を分離閾値に置く。
+      expect(
+        elapsed,
+        `golden extractor backtracking suspected (${elapsed.toFixed(1)}ms)`,
+      ).toBeLessThan(300);
+    });
+
+    it("病的入力 (大量空白 + 閉じフェンス無し) で golden 抽出が線形時間", () => {
       const pathological =
         "<!-- GOLDEN-EVENT:START -->\n```json\n" + " ".repeat(100_000) + "no-close";
       const start = performance.now();
       expect(() => extractGoldenEvent(pathological)).toThrow(/GOLDEN-EVENT marker/);
       const elapsed = performance.now() - start;
-      // 線形なら数 ms。旧 polynomial regex では 1s 超。300ms を分離閾値に置く。
-      expect(elapsed, `GOLDEN_RE backtracking suspected (${elapsed.toFixed(1)}ms)`).toBeLessThan(
-        300,
-      );
+      expect(
+        elapsed,
+        `golden extractor backtracking suspected (${elapsed.toFixed(1)}ms)`,
+      ).toBeLessThan(300);
     });
 
-    it("病的な大量空白入力で EVENT_TYPES_RE が catastrophic backtracking しない (時間上限)", () => {
+    it("病的入力 (EVENT-TYPES marker prefix の大量反復) で event_type 抽出が線形時間", () => {
+      const pathological = "<!--EVENT-TYPES:START-->".repeat(100_000) + "no-end-marker";
+      const start = performance.now();
+      expect(() => extractDocEventTypes(pathological)).toThrow(/EVENT-TYPES marker/);
+      const elapsed = performance.now() - start;
+      expect(
+        elapsed,
+        `event_type extractor backtracking suspected (${elapsed.toFixed(1)}ms)`,
+      ).toBeLessThan(300);
+    });
+
+    it("病的入力 (大量空白 + END marker 無し) で event_type 抽出が線形時間", () => {
       const pathological = "<!-- EVENT-TYPES:START -->\n" + " ".repeat(100_000) + "no-end-marker";
       const start = performance.now();
       expect(() => extractDocEventTypes(pathological)).toThrow(/EVENT-TYPES marker/);
       const elapsed = performance.now() - start;
       expect(
         elapsed,
-        `EVENT_TYPES_RE backtracking suspected (${elapsed.toFixed(1)}ms)`,
+        `event_type extractor backtracking suspected (${elapsed.toFixed(1)}ms)`,
       ).toBeLessThan(300);
     });
   });
@@ -141,6 +181,16 @@ describe("INV-CONTRACT-GOLDEN: docs/ingestion-contract.md の golden example", (
       expect(() => extractGoldenEvent("# ドキュメント\n本文に golden なし")).toThrow(
         /GOLDEN-EVENT marker/,
       );
+    });
+
+    it("START/END はあるが ```json フェンスが無いと throw する (fence 欠落)", () => {
+      const noFence = "<!-- GOLDEN-EVENT:START -->\n本文\n<!-- GOLDEN-EVENT:END -->";
+      expect(() => extractGoldenEvent(noFence)).toThrow(/GOLDEN-EVENT marker/);
+    });
+
+    it("閉じフェンスの後に END marker が無いと throw する (END 欠落)", () => {
+      const noEnd = "<!-- GOLDEN-EVENT:START -->\n```json\n{}\n```\n本文に END marker なし";
+      expect(() => extractGoldenEvent(noEnd)).toThrow(/GOLDEN-EVENT marker/);
     });
 
     it("EVENT-TYPES marker が無い markdown で extractDocEventTypes が throw する", () => {
