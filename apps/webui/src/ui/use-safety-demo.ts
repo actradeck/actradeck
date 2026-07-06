@@ -23,8 +23,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const DEMO_PATH = "/realtime/demo/safety";
-/** 使い捨てデモ session_id の prefix (backend safety-demo.ts / run-safety-demo.mts と一致)。 */
-const SAFETY_DEMO_SESSION_PREFIX = "demo-safety-";
+/**
+ * 使い捨てデモ session_id の prefix (backend safety-demo-script.ts の正典と一致)。
+ * browser bundle を汚さないため値はローカル定数だが、backend 正典との**等価性は契約テスト**
+ * (safety-demo-prefix-contract.test.ts) が両方 import して pin する (TDA-4・drift ガード)。
+ */
+export const SAFETY_DEMO_SESSION_PREFIX = "demo-safety-";
 
 /**
  * 出現 watchdog のタイムアウト (ms)。POST 応答 (session_id 返却) から live 一覧出現までは、ingestion への

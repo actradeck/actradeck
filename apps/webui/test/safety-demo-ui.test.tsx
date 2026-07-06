@@ -80,6 +80,31 @@ describe("SafetyDemoPanel (空状態 CTA)", () => {
     expect(html).not.toMatch(/data-testid="safety-demo-cta"[^>]*disabled/);
   });
 
+  it("接続 daemon 0 (Docker 初期状態・daemonCount=0) でも CTA が出る (decision 019f387f)", () => {
+    // Docker cockpit を開いた直後は host sidecar 未接続 (readiness.daemonCount=0) だが、CTA が
+    // self-run セーフティデモの唯一の onramp。disconnected 文言と **同時に** CTA を必ず描画する
+    // (connected gate で CTA を隠さない)。これを欠くと空 cockpit のまま導線ゼロに戻る回帰。
+    const html = renderToStaticMarkup(
+      <FixedLocaleProvider locale="ja">
+        <SessionList
+          sessions={[]}
+          selectedId={null}
+          nowMs={0}
+          onSelect={() => {}}
+          readiness={{ daemonCount: 0 }}
+          safety={{ phase: "idle", onLaunch: () => {} }}
+        />
+      </FixedLocaleProvider>,
+    );
+    expect(html).toContain('data-testid="readiness"');
+    expect(html).toContain('data-connected="false"'); // 未接続を正直に表示。
+    expect(html).toContain('data-testid="readiness-disconnected"');
+    // それでも CTA は描画される (zero-daemon でも self-run できる)。
+    expect(html).toContain('data-testid="safety-demo"');
+    expect(html).toContain('data-testid="safety-demo-cta"');
+    expect(html).not.toMatch(/data-testid="safety-demo-cta"[^>]*disabled/); // idle は押せる。
+  });
+
   it("safety 未指定なら CTA を描画しない (readiness のみ・後方互換)", () => {
     const html = renderToStaticMarkup(
       <FixedLocaleProvider locale="ja">

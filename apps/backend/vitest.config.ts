@@ -15,6 +15,7 @@ import { defaultExclude, defineConfig } from "vitest/config";
  * ため real-PG ではなく unit 側。
  */
 const REAL_PG_TESTS = [
+  "test/inv-safety-demo-backend-e2e.test.ts",
   "test/inv-audit-packet-route.test.ts",
   "test/inv-audit-report-route.test.ts",
   "test/inv-detail-pull.test.ts",
@@ -136,6 +137,13 @@ export default defineConfig({
         //   実測 98.36/87.09/100/100。floor は WORST-observed の下 (per-file-coverage-floor-below-worst-
         //   not-best): funcs は 100/N 感度で callback 未発火の run に脆いため 92 まで下げて非 flaky に。
         "src/safety-demo.ts": { statements: 94, branches: 80, functions: 92, lines: 96 },
+        // decision 019f387f: native-free driver + 定数/シーケンス script。driver は real-PG e2e
+        //   (inv-safety-demo-backend-e2e) + 純ヘルパ unit で被覆。CLI main()/allow 分岐/signal 経路は
+        //   未被覆ゆえ 100 ではない。floor は WORST-observed の下 (per-file-coverage-floor-below-worst-
+        //   not-best): driver 実測 79.06/74.19/76/81.51 (awaited で run 間安定) → 3-6pt 下。funcs は
+        //   小-N (main/onSignal 未発火) 感度で 6pt 余裕。script は 100/100/100/100 安定 (小さく pure)。
+        "src/safety-demo-driver.ts": { statements: 74, branches: 69, functions: 70, lines: 76 },
+        "src/safety-demo-script.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
         // ADR 6点強化 #1: tamper-evident audit の crypto (canonicalize/chain/ed25519 sign/verify) は
         //   security-critical ゆえ INV-AUDIT-INTEGRITY の erosion tripwire を張る。SEC-1 v2 rework 後の
         //   実測 (INV + route suite) 94.73/94.36/100/95.45。floor は WORST の下 (fail-safe crypto catch と

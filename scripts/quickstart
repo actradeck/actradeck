@@ -210,6 +210,8 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
 
 [quickstart] Done — the cockpit is running as user daemons.
   Cockpit:  http://localhost:${webui_port}
+  Try:      open the cockpit and click "Run the 30-second safety demo" to experience
+            block / redact / audit on a throwaway session (no host wiring needed).
   Next:     cd ~/your/project && claude     # or: codex
             -> your session shows up in the cockpit.
   Manage:   ./scripts/actradeck status | restart | down
@@ -227,6 +229,8 @@ else
   Start it (foreground; keeps running, Ctrl-C stops all tiers):
       ./scripts/actradeck up
   Then open:  http://localhost:${webui_port}
+  Try:        click "Run the 30-second safety demo" on the empty board to experience
+              block / redact / audit on a throwaway session (no host wiring needed).
   Next:       cd ~/your/project && claude     # or: codex
               -> your session shows up in the cockpit.
   Demo:       see docs/demo-90s.md to record the 90-second walkthrough.

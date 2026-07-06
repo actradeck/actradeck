@@ -128,8 +128,10 @@ one up via `docker compose`.
 
 ![ActraDeck first-run: fresh clone → running cockpit, recorded on a clean machine](docs/media/first-run.gif)
 
-Then open the cockpit at **http://localhost:55400** and run your agents normally —
-no change to how you start them:
+Then open the cockpit at **http://localhost:55400**. On the empty board you can click
+**Run the 30-second safety demo** to experience block / redact / audit on a throwaway
+session before wiring anything — then run your agents normally, no change to how you
+start them:
 
 ```bash
 cd ~/any/project && claude     # or: codex  → shows up in the cockpit

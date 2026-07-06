@@ -216,13 +216,16 @@ describe("INV-SAFETY-DEMO launcher (state machine)", () => {
     expect(launcher.running).toBe(false);
   });
 
-  it("resolveDefaultDriverPath: seed ドライバの絶対パスを返す (固定コードパス)", () => {
+  it("resolveDefaultDriverPath: native-free 単一 driver の backend src 同居パスを返す (固定コードパス)", () => {
     const p = resolveDefaultDriverPath();
-    expect(p.endsWith("apps/sidecar/e2e/run-safety-demo.mts")).toBe(true);
+    // decision 019f387f: 旧 apps/sidecar/e2e/run-safety-demo.mts から backend src 同居の driver へ昇格
+    // (Docker cockpit image が apps/sidecar を COPY しないため)。sibling 解決を回帰固定する。
+    expect(p.endsWith(join("apps", "backend", "src", "safety-demo-driver.ts"))).toBe(true);
+    expect(p.includes(join("apps", "sidecar"))).toBe(false); // 旧 sidecar 依存へ戻さない。
   });
 
   it("既定 launcher (spawner 非注入) を構成できる・enabled=false 明示で spawn せず 503", () => {
-    // spawner 非注入 → 既定 pnpm spawner を構成する経路 (実 spawn はしない)。enabled を明示 false に
+    // spawner 非注入 → 既定 spawner を構成する経路 (実 spawn はしない)。enabled を明示 false に
     // することで driver 実在の repo でも実プロセス起動を避けつつ constructor の既定経路を通す。
     const launcher = new SafetyDemoLauncher({ ingestToken: "tok", enabled: false });
     const res = launcher.launch();
@@ -336,14 +339,17 @@ describe("INV-DEMO-SPAWN-PATH-INDEPENDENT: default spawner は pnpm でなく no
   // 無いと ENOENT で黙って失敗し初回デモ CTA が route 200 のまま何も起きない欠陥を検出した。
   // default spawner が backend 自身の node (process.execPath・常在=PATH 非依存) + tsx で driver を
   // 直実行することを固定する (pnpm へ戻すと本テストが赤化する)。
-  it("command は process.execPath (pnpm でない)・args は --import tsx <driver>・cwd は apps/sidecar", () => {
+  it("command は process.execPath (pnpm でない)・args は --import tsx <driver>・cwd は apps/backend", () => {
     const driver = resolveDefaultDriverPath();
     const spec = defaultDemoSpawnSpec(driver);
     expect(spec.command).toBe(process.execPath); // backend の node 実体
     expect(spec.command).not.toBe("pnpm"); // PATH 依存の pnpm を使わない
-    expect(spec.args).toEqual(["--import", "tsx", driver]); // demo:safety = tsx e2e/run-safety-demo.mts と同経路
-    expect(spec.cwd).toBe(join(dirname(driver), "..")); // apps/sidecar (tsx / @actradeck/sidecar 解決)
-    expect(driver.endsWith(join("apps", "sidecar", "e2e", "run-safety-demo.mts"))).toBe(true);
+    expect(spec.args).toEqual(["--import", "tsx", driver]); // tsx ローダで driver 直実行
+    // decision 019f387f: driver は backend src 同居 (apps/backend/src/…) ゆえ cwd は apps/backend
+    // (tsx prod dep が解決する dir)。不変ロジック join(dirname(driver),"..") が driver 位置に追従する。
+    expect(spec.cwd).toBe(join(dirname(driver), ".."));
+    expect(spec.cwd.endsWith(join("apps", "backend"))).toBe(true);
+    expect(driver.endsWith(join("apps", "backend", "src", "safety-demo-driver.ts"))).toBe(true);
   });
 
   // QA-1 (ADR 019f280c 監査): 純関数 spec だけでなく、launcher が実際に配線する makeDefaultSpawner

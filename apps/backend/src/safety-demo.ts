@@ -2,15 +2,19 @@
  * Safety Demo Launcher — first-run セーフティデモの起動コントローラ (ADR 019f22a7 P1).
  *
  * cockpit の CTA から `POST /realtime/demo/safety` (realtime-server.ts) が呼ばれると、hold モードで
- * 使い捨て `demo-safety-<short>` セッションを **実パイプライン** (sidecar → ingestion → event store) で
+ * 使い捨て `demo-safety-<short>` セッションを **実パイプライン** (driver → ingestion → event store) で
  * 起動し、UI が live 一覧 / Approval Inbox / replay で focus できるよう session_id を返す。
  *
+ * driver 昇格 (decision 019f387f): 起動対象は backend 自身の src に同居する **native-free 単一 driver**
+ * (`safety-demo-driver.ts`) で、apps/sidecar/* / better-sqlite3 / node-pty を一切引かない。Docker cockpit
+ * image は apps/backend + tsx (prod dep) + node_modules を COPY 済ゆえ、container 内で driver が解決し
+ * **host 配線ゼロ**で self-run できる (旧 `apps/sidecar/e2e/run-safety-demo.mts` は image 非 COPY で 503 だった)。
+ *
  * 実行サーフェスの封じ込め (security.md 最優先):
- *  - **固定コマンド / 固定コードパスのみ**を起動する。既に検証済みの seed ドライバ
- *    (`apps/sidecar/e2e/run-safety-demo.mts`) を、backend 自身の node (`process.execPath`) +
- *    tsx ローダで **verbatim** に子プロセス spawn する (`demo:safety` = `tsx e2e/run-safety-demo.mts`
- *    と同経路・pnpm を介さず PATH 非依存)。**ユーザー入力を argv / コマンドへ一切渡さない**
- *    (session_id は内部生成の `demo-safety-<hex>`・env 経由でのみ子へ渡す = injection 皆無)。
+ *  - **固定コマンド / 固定コードパスのみ**を起動する。driver を backend 自身の node (`process.execPath`) +
+ *    tsx ローダで **verbatim** に子プロセス spawn する (pnpm を介さず PATH 非依存)。**ユーザー入力を
+ *    argv / コマンドへ一切渡さない** (session_id は内部生成の `demo-safety-<hex>`・env 経由でのみ子へ渡す
+ *    = injection 皆無)。
  *  - INGEST_TOKEN は起動時に検証済みの値 (buildIngestionServer が非空を保証) を子 env へ注入する
  *    (ハードコードしない)。子 sidecar は temp SQLite を使い PG にも REALTIME_TOKEN にも実依存しない
  *    (WS 送信は `/ingest/ws` へ INGEST_TOKEN のみ)。ゆえに最小権限として backend の
@@ -21,21 +25,19 @@
  *  - shutdown で走行中デモを kill する (dispose)。
  *
  * 起動方式の選択 = **子プロセス spawn (方式 a)** を採用 (in-process import ではなく):
- *  - ドライバは `e2e/` 配下の test/e2e サーフェスで **published package export ではない**。production
- *    backend から import すると (1) 層の逆転 (backend → sidecar 内部) を招き、(2) Sidecar 一式
- *    (better-sqlite3 native / hook receiver HTTP / node-pty) を backend プロセスへ引き込む。
- *  - spawn は実行を **独立プロセス** (自前 SQLite / hook receiver / lifecycle) に閉じ、既存の検証済み
- *    `demo:safety` を verbatim 再利用する。固定 argv ゆえ shell 不要 (shell:false) で injection なし。
+ *  - driver を **独立プロセス** に閉じることで backend プロセスの lifecycle / メモリと分離する
+ *    (デモ子が異常終了しても backend は無傷)。固定 argv ゆえ shell 不要 (shell:false) で injection なし。
+ *  - driver は native-free ゆえ in-process import でも native addon 混入の懸念は無いが、独立プロセスの
+ *    ライフサイクル分離 (単発起動・SIGTERM kill・多重起動抑止) を素直に表現できる spawn を継続採用する。
  *
- * production の脆さ (正直な開示):
- *  - `process.execPath` (backend の node) は常在ゆえ **PATH 非依存**で起動する。旧実装の
- *    `spawn('pnpm', …)` は systemd --user の最小 PATH に pnpm が無いと ENOENT で黙って失敗した
- *    (ADR 019f280c で実機検出・本 fix で解消)。残る前提は `tsx` + repo workspace が **実行時に
- *    存在すること** — cwd=apps/sidecar で tsx/@actradeck/sidecar が解決する。packaged な production
- *    配備 (node dist・repo/tsx なし) では依然起動できないが、それは driver 不在で `enabled=false` に
- *    畳まれ launch() が **503** を返す (fail-loud・silent no-op にしない)。route の 404 は launcher を
- *    一切配線しない配備 (`demoLauncher===undefined`) 専用で、driver 不在ケースには到達しない。
- *    published bin / dist entrypoint への昇格は別 follow-up。
+ * production の到達性 (正直な開示):
+ *  - `process.execPath` (backend の node) は常在ゆえ **PATH 非依存**で起動する (旧 `spawn('pnpm', …)` は
+ *    systemd --user の最小 PATH に pnpm が無いと ENOENT で黙って失敗した — ADR 019f280c 実機検出・解消済)。
+ *  - **Docker cockpit / repo 実行では動く**: driver は backend src の sibling で、cwd=apps/backend から
+ *    tsx (prod dep) が解決する。残る前提は `tsx` + node_modules が **実行時に存在すること**。
+ *  - **素の dist-only node 配備 (tsx/node_modules なし) では依然起動できない**が、それは driver 不在で
+ *    `enabled=false` に畳まれ launch() が **503** を返す (fail-loud・silent no-op にしない)。route の 404 は
+ *    launcher を一切配線しない配備 (`demoLauncher===undefined`) 専用で、driver 不在ケースには到達しない。
  *  - spawn 失敗 (tsx 不在等) は spawn の性質上 **非同期 'error'** でしか判らず、その場合 launch() は
  *    既に session_id を返した後になる (子は現れない)。'error' で状態をクリアしログする。
  */
@@ -45,8 +47,10 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** 使い捨てデモ session_id の prefix (run-safety-demo.mts と一致)。 */
-export const SAFETY_DEMO_SESSION_PREFIX = "demo-safety-";
+import { SAFETY_DEMO_SESSION_PREFIX } from "./safety-demo-script.js";
+
+/** 使い捨てデモ session_id の prefix — 単一出所は safety-demo-script.ts (driver と共有・再 export)。 */
+export { SAFETY_DEMO_SESSION_PREFIX };
 
 /**
  * 子デモへ伝播させない機微 env の名前 (最小権限・SEC-1/TDA-1)。子 sidecar は temp SQLite を使い
@@ -66,6 +70,14 @@ export function isLibpqEnvKey(key: string): boolean {
 /**
  * process.env を基に、node/tsx 実行に要る基盤 env は保持しつつ機微 env (REALTIME_TOKEN /
  * DATABASE_URL / libpq PG*) を scrub し、デモ子プロセス用の env を組み立てる。demo vars は上書き注入。
+ *
+ * SEC-1 (denylist↔allowlist トレードオフ・正直な開示): これは **allowlist ではなく denylist** (機微 key を
+ * 落とし残りは継承)。denylist は **ActraDeck 自身の secret を全カバー**する — INGEST_TOKEN は起動時検証済み
+ * 値で authoritative に上書き注入し、REALTIME_TOKEN / DATABASE_URL / PG* (libpq) は構造 (prefix) で scrub。
+ * よって ActraDeck の credential は子へ流入しない。無関係な operator secret (例: 他ツールの API key env) は
+ * 継承しうるが、子 driver は固定コードパス (safety-demo-driver) で **任意 egress 経路を持たない** (ws は
+ * INGEST_TOKEN 認証の /ingest/ws のみ・redaction floor 通過) ため exfil 面はゼロ。single-operator / loopback /
+ * local-fs 信頼境界の内側ゆえ accepted (allowlist 化は基盤 env の網羅が脆く node/tsx 起動を壊すリスクが上回る)。
  */
 export function buildDemoChildEnv(inject: {
   ingestToken: string;
@@ -133,13 +145,17 @@ export interface SafetyDemoLauncherOptions {
   readonly wsUrl?: string;
 }
 
-/** デモ seed ドライバの既定パスを解決する (repo root 相対・env で上書き可)。 */
+/**
+ * デモ driver の既定パスを解決する (**backend src 内の sibling**・decision 019f387f)。
+ *
+ * 旧実装は `apps/sidecar/e2e/run-safety-demo.mts` を repo-root 相対で指したが、Docker cockpit image は
+ * apps/sidecar を COPY しないため container 内で不在 → enabled=false → CTA 503 だった。native-free 単一
+ * driver (`safety-demo-driver.ts`) を backend 自身の src に同居させ、`import.meta.url` の dir 相対で解決する
+ * ことで、Docker (COPY apps/backend で載る) でも repo でも同じパスで解決する。ACTRADECK_REPO_ROOT による
+ * repo-root 上書きは不要になったため撤去した (sibling は import.meta.url から決定論的)。
+ */
 export function resolveDefaultDriverPath(): string {
-  const repoRoot =
-    process.env.ACTRADECK_REPO_ROOT ??
-    // apps/backend/src/safety-demo.ts → repo root は 3 階層上。
-    join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-  return join(repoRoot, "apps", "sidecar", "e2e", "run-safety-demo.mts");
+  return join(dirname(fileURLToPath(import.meta.url)), "safety-demo-driver.ts");
 }
 
 /**
@@ -149,15 +165,16 @@ export function resolveDefaultDriverPath(): string {
  * --user の最小 PATH に pnpm が無いと ENOENT で黙って失敗し初回デモ CTA が route 200 のまま
  * 何も起きなかった (実機検出)。それを次の spec で排除する:
  *  - command = process.execPath: backend 自身の node。常在ゆえ PATH 非依存 (pnpm ENOENT 回避)。
- *  - args = --import tsx <driverPath>: `demo:safety` = `tsx e2e/run-safety-demo.mts` と同経路。
- *  - cwd = apps/sidecar: tsx と @actradeck/sidecar workspace が解決する dir。
+ *  - args = --import tsx <driverPath>: tsx ローダで driver を直実行する。
+ *  - cwd = driver の親の親: driver が backend src 同居 (apps/backend/src/…) ゆえ apps/backend。
+ *    tsx (prod dep) と workspace パッケージが解決する dir (不変ロジック・driver 位置に追従)。
  */
 export function defaultDemoSpawnSpec(driverPath: string): {
   command: string;
   args: readonly string[];
   cwd: string;
 } {
-  // driverPath = <repo>/apps/sidecar/e2e/run-safety-demo.mts → cwd は apps/sidecar。
+  // driverPath = <repo>/apps/backend/src/safety-demo-driver.ts → cwd は apps/backend。
   return {
     command: process.execPath,
     args: ["--import", "tsx", driverPath],
@@ -167,7 +184,7 @@ export function defaultDemoSpawnSpec(driverPath: string): {
 
 /**
  * 実際に launcher へ配線される default spawner を組み立てる。`defaultDemoSpawnSpec` の spec
- * (command=process.execPath / args=--import tsx <driver> / cwd=apps/sidecar) を **必ず消費**して
+ * (command=process.execPath / args=--import tsx <driver> / cwd=apps/backend) を **必ず消費**して
  * spawn する。spawnFn は DI (既定 = node:child_process.spawn) で、テストが real spawn を起こさず
  * wire (spec→spawn 引数) を固定できる (QA-1: teeth を helper だけでなく load-bearing な wire にも
  * 効かせ、pnpm へ戻る回帰を CI で赤化する)。

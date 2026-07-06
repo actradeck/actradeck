@@ -47,6 +47,21 @@ export {
   type IngestStoreOptions,
 } from "./ingest-store.js";
 export { buildIngestionServer, type IngestionServerOptions } from "./ingestion-server.js";
+// ADR 019f22a7 P1 / decision 019f387f: セーフティデモの定数・イベント列の単一出所 (native-free)。
+// run-safety-demo.mts (sidecar 統合 e2e) がリテラル二重定義を避けて共有する。driver 本体は spawn 時のみ
+// ロードされるため index からは export しない (backend プロセスへ引き込まない)。
+export {
+  DEMO_AWS_ACCESS_KEY_ID,
+  DEMO_GITHUB_TOKEN,
+  DEMO_HIGH_RISK_COMMAND,
+  DEMO_CWD,
+  DEMO_TOOL_NAME,
+  DEMO_RISK_LEVEL,
+  DEMO_APPROVAL_TRIGGER,
+  DEMO_STEPS,
+  demoSecretCommand,
+  type DemoStep,
+} from "./safety-demo-script.js";
 export {
   RealtimeHub,
   UiConnectionHandle,

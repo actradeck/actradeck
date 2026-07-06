@@ -1,5 +1,12 @@
 /**
- * ActraDeck Safety Demo — 使い捨て「セーフティデモ」セッションの seed ドライバ (ADR 019f22a7 P1)。
+ * ActraDeck Safety Demo — **sidecar 統合 e2e** ドライバ (ADR 019f22a7 P1 / decision 019f387f)。
+ *
+ * ⚠️ 役割変更: これは **もはや launcher (`SafetyDemoLauncher`) が spawn する driver ではない**。
+ * cockpit CTA の実 driver は backend 内 native-free 単一 driver (`apps/backend/src/safety-demo-driver.ts`)
+ * へ昇格した (Docker cockpit image が apps/sidecar を COPY しないため)。本ファイルは **sidecar のフル
+ * スタック (HookReceiver → Sink redact → 実 WsClient)** が実 backend/PG まで貫通することを固定する
+ * 統合 e2e (`demo:safety` script + inv-safety-demo-e2e.test.ts) として残す。secret 定数は backend の
+ * safety-demo-script (単一出所) から import し、リテラル二重定義を排する。
  *
  * 目的: 「ダミー高リスク操作を実際に承認ゲートで止め、ダミー secret を実際に保存前 redact する」
  *       使い捨てデモセッションを **実パイプライン (sidecar → ingestion → event store)** で駆動する。
@@ -49,10 +56,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
+import {
+  DEMO_AWS_ACCESS_KEY_ID,
+  DEMO_CWD,
+  DEMO_GITHUB_TOKEN,
+  DEMO_HIGH_RISK_COMMAND,
+  SAFETY_DEMO_SESSION_PREFIX,
+  demoSecretCommand,
+} from "@actradeck/backend";
+
 import { resolveWsUrl } from "../src/cli.js";
 import { Sidecar } from "../src/sidecar.js";
 import { HOOK_TOKEN_HEADER } from "../src/settings-injection.js";
 import type { StoredRow } from "../src/store.js";
+
+// 後方互換: 既存 import 元 (inv-safety-demo-e2e.test.ts) が run-safety-demo.mjs から引き続き取得できるよう
+// re-export する。定義の単一出所は backend safety-demo-script (split-literal・at-rest 連続 secret 形なし)。
+export { DEMO_AWS_ACCESS_KEY_ID, DEMO_GITHUB_TOKEN };
 
 /** hold / auto-deny の 2 モード。既定は hold (UI が後で Deny を relay する想定)。 */
 export type SafetyDemoApprovalMode = "hold" | "auto-deny";
@@ -61,10 +81,6 @@ export type SafetyDemoApprovalMode = "hold" | "auto-deny";
 export const DEFAULT_HOLD_TIMEOUT_MS = 30_000;
 /** auto-deny (CI/ヘッドレス) の既定 timeout。短くして決定論的に安全側 deny へ倒す。 */
 export const DEFAULT_AUTO_DENY_TIMEOUT_MS = 1_500;
-
-/** 公開ダミー secret のみ (実在しない・redactor.ts の REDACTION_RULES に合致する形)。 */
-export const DEMO_AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"; // aws-access-key-id (AKIA + 16 字)
-export const DEMO_GITHUB_TOKEN = `ghp_${"DemoFakeSeedT0ken".padEnd(36, "x")}`; // github-token (ghp_ + 36 字)
 
 export interface SafetyDemoOptions {
   /** 送信先 backend ingestion WS (フル URL・/ingest/ws を含む)。既定は cli.resolveWsUrl()。 */
@@ -166,8 +182,9 @@ export async function runSafetyDemo(opts: SafetyDemoOptions = {}): Promise<Safet
   const approvalTimeoutMs =
     opts.approvalTimeoutMs ??
     (approvalMode === "auto-deny" ? DEFAULT_AUTO_DENY_TIMEOUT_MS : DEFAULT_HOLD_TIMEOUT_MS);
-  const sessionId = opts.sessionId ?? `demo-safety-${shortId()}`;
-  const demoCwd = opts.demoCwd ?? join(tmpdir(), "actradeck-demo");
+  // TDA-3: prefix / 既定 cwd は backend safety-demo-script の正典を共有 (ローカル再実装削除)。
+  const sessionId = opts.sessionId ?? `${SAFETY_DEMO_SESSION_PREFIX}${shortId()}`;
+  const demoCwd = opts.demoCwd ?? DEMO_CWD;
   const wsUrl = opts.wsUrl ?? resolveWsUrl();
   const ingestToken = opts.ingestToken ?? process.env.INGEST_TOKEN;
   const connectTimeoutMs = opts.connectTimeoutMs ?? 8_000;
@@ -214,7 +231,10 @@ export async function runSafetyDemo(opts: SafetyDemoOptions = {}): Promise<Safet
     // b. 高リスク PreToolUse (rm -rf) → 実 approval gate。permission_mode は載せない (= 既定モードで
     //    高リスク破壊操作をゲート。bypassPermissions を載せると defer されゲートが出ない)。
     //    POST は承認が解けるまで blocking (hold=UI/timeout, auto-deny=短 timeout)。
-    const dangerousCommand = `rm -rf ${demoCwd}/build`;
+    // TDA-3: 高リスクコマンドは backend 正典 DEMO_HIGH_RISK_COMMAND を共有 (ローカル再実装削除・fixed
+    // recursive-rm リテラル)。demoCwd 上書きは throwaway SQLite/dir の隔離用で、承認カードの illustrative
+    // コマンドは正典固定形とする (デモは実行しない・classifier は recursive-rm を返す)。
+    const dangerousCommand = DEMO_HIGH_RISK_COMMAND;
     log(`PreToolUse (blocking): ${dangerousCommand}`);
     const gateResp = await postHook(
       hookEndpoint,
@@ -233,7 +253,8 @@ export async function runSafetyDemo(opts: SafetyDemoOptions = {}): Promise<Safet
     // c. ダミー secret を含むコマンド出力を PostToolUse で流す (非ゲート経路)。
     //    normalizer は PostToolUse(Bash).tool_input.command を payload.command に carry し、
     //    Sink.emit が保存前 redact する (tool_response.stdout は carry されない → command に載せる)。
-    const secretCommand = `echo "deploy with ${DEMO_AWS_ACCESS_KEY_ID} and ${DEMO_GITHUB_TOKEN} to staging"`;
+    // TDA-3: dummy secret 入りコマンドは backend 正典 demoSecretCommand() を共有 (ローカル再実装削除・値同一)。
+    const secretCommand = demoSecretCommand();
     log(`PostToolUse (secret-bearing command output)`);
     await postHook(
       hookEndpoint,

@@ -52,6 +52,39 @@ No build step, no external Postgres, no secrets to set — the entrypoint genera
 ephemeral `INGEST_TOKEN` / `REALTIME_TOKEN` at boot (never printed, never baked into the
 image). To pin your own, pass them explicitly (see [Configuration](#configuration)).
 
+### Run the 30-second safety demo (no host wiring)
+
+The cockpit opens *empty* — no agent is wired yet. To see what ActraDeck actually does
+before wiring anything, run the built-in demo straight from the empty board:
+
+1. Open <http://localhost:55400>.
+2. On the empty board, click **Run the 30-second safety demo**.
+3. Watch a throwaway session drive **block → redact → audit** with real events:
+   - a high-risk `rm -rf …/build` raises an **approval card** and is held (not run);
+   - with no response it degrades safe-side to **deny** (never auto-allow) — or you can
+     Deny it yourself from the Approval Inbox;
+   - a command carrying dummy credentials is **redacted before it is stored** (the raw
+     secret never reaches Postgres — only per-kind redaction counts do);
+   - the whole run is replayable from the audit trail.
+
+This needs **zero host wiring** — the demo session is driven entirely inside the cockpit
+stack against the real ingestion → event-store → projection pipeline.
+
+**Honest scope of the demo** (it is a throwaway teaching aid, not your agents):
+
+- Observing *your own* agents still requires a host-side sidecar (see
+  [Observing a host agent](#observing-a-host-agent-wire-the-sidecar)). The demo does not
+  observe anything on your machine.
+- "Block" here proves the **event flow + approval card + audit trail**, not the halting of
+  a real command — the demo never executes the `rm -rf`.
+- The hold/timeout is owned by the **demo driver** for this throwaway session; a real
+  session's hold is owned by the sidecar's `ApprovalBridge`.
+- The risk level is a **fixed constant** in the demo; real sessions classify risk from the
+  actual command (`classifyCommandRisk`).
+- The **redaction is real** — it is the same backend ingress redaction floor that protects
+  every stored event, not a demo-only shim.
+- This is unrelated to Codex Attach approvals (Codex rollout tail is observe-only).
+
 ### Build it yourself
 
 The image is built from the repository root `Dockerfile` (the same one the release
@@ -217,3 +250,7 @@ same *authoritative-vs-secondary* shape as the leak face above:
   does); it is not a slimmed, precompiled single binary. Size optimization is a follow-up.
 - The container is the cockpit stack. It does not — and by design cannot — observe agents
   by itself. Agent observation is a host-side concern (see the matrix above).
+- The **30-second safety demo** is a self-contained teaching aid (block/redact/audit on a
+  throwaway session), not a substitute for wiring a sidecar to observe your own agents. Its
+  redaction is the real ingress floor; its "block" proves the event/approval/audit flow,
+  not the halting of a real command. See the demo scope note under Quick start.
