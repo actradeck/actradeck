@@ -80,6 +80,60 @@ describe("INV-CONTRACT-GOLDEN: docs/ingestion-contract.md の golden example", (
     });
   });
 
+  /**
+   * INV-CONTRACT-REDOS: contract-doc の抽出正規表現 (GOLDEN_RE / EVENT_TYPES_RE) は
+   * js/polynomial-redos を持たない。以前は `\s*([\s\S]*?)\s*` で `\s` が外側 `\s*` と内側
+   * `[\s\S]` の両方に一致し、空白多数入力で polynomial backtracking した。捕捉群に隣接する
+   * `\s*` を除去し固定リテラルで挟むことで overlap を構造的に消した。
+   *
+   * ここでは (a) 抽出結果が現行と byte 等価であること (whitespace 変動に不変)、(b) 病的な
+   * 大量空白入力で catastrophic backtracking しない (時間上限) こと、を pin する。
+   * falsifiable: regex を旧 `\s*([\s\S]*?)\s*` へ戻すと (b) の時間上限を超え RED になる。
+   */
+  describe("INV-CONTRACT-REDOS: 抽出 regex が polynomial-redos を持たない (js/polynomial-redos)", () => {
+    it("golden 抽出はフェンス内前後空白に不変 (capture byte 等価)", () => {
+      // フェンス内に余分な先頭/末尾空白を挿入しても、trim 後の JSON.parse 結果は不変。
+      const synthetic =
+        "冒頭\n<!-- GOLDEN-EVENT:START -->\n\n```json\n\n   " +
+        '{"event_id":"x","n":1}' +
+        "\n\n```\n<!-- GOLDEN-EVENT:END -->\n末尾";
+      expect(extractGoldenEvent(synthetic)).toEqual({ event_id: "x", n: 1 });
+      // 実 doc の抽出結果も従来どおり (schema drift テストと重複するが capture 不変を明示 pin)。
+      const golden = extractGoldenEvent(raw) as Record<string, unknown>;
+      expect(golden.event_id).toBeTypeOf("string");
+    });
+
+    it("event_type 抽出は marker 内前後空白に不変 (backtick token 集合等価)", () => {
+      const synthetic =
+        "<!-- EVENT-TYPES:START -->\n\n   `a.b` `c.d`   \n\n<!-- EVENT-TYPES:END -->";
+      expect(extractDocEventTypes(synthetic)).toEqual(["a.b", "c.d"]);
+    });
+
+    it("病的な大量空白入力で GOLDEN_RE が catastrophic backtracking しない (時間上限)", () => {
+      // START + ```json の後に大量空白 + 閉じフェンス無し → 旧 regex は O(N^2) で backtrack。
+      const pathological =
+        "<!-- GOLDEN-EVENT:START -->\n```json\n" + " ".repeat(100_000) + "no-close";
+      const start = performance.now();
+      expect(() => extractGoldenEvent(pathological)).toThrow(/GOLDEN-EVENT marker/);
+      const elapsed = performance.now() - start;
+      // 線形なら数 ms。旧 polynomial regex では 1s 超。300ms を分離閾値に置く。
+      expect(elapsed, `GOLDEN_RE backtracking suspected (${elapsed.toFixed(1)}ms)`).toBeLessThan(
+        300,
+      );
+    });
+
+    it("病的な大量空白入力で EVENT_TYPES_RE が catastrophic backtracking しない (時間上限)", () => {
+      const pathological = "<!-- EVENT-TYPES:START -->\n" + " ".repeat(100_000) + "no-end-marker";
+      const start = performance.now();
+      expect(() => extractDocEventTypes(pathological)).toThrow(/EVENT-TYPES marker/);
+      const elapsed = performance.now() - start;
+      expect(
+        elapsed,
+        `EVENT_TYPES_RE backtracking suspected (${elapsed.toFixed(1)}ms)`,
+      ).toBeLessThan(300);
+    });
+  });
+
   // contract-doc の fail-loud 契約 (marker 欠落 → throw)。「docs を黙って壊す」を CI で赤化させる。
   // 単一出所化 (PR-2 QA-3/TDA-1) で public API 化した抽出器の throw 分岐を pin する。
   describe("fail-loud: marker が欠けたら throw (docs 破壊を黙って通さない)", () => {

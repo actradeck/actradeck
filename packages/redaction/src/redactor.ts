@@ -1058,7 +1058,17 @@ function redactObject(
   cred = false,
   depth = 0,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  // SEC (js/remote-property-injection): 出力先を null-prototype 化する。素の `{}` だと
+  //   入力イベントに `__proto__` / `constructor` / `prototype` という名のキーがあると
+  //   `out["__proto__"] = <obj>` が **prototype setter を発火**し、(a) そのキーが JSON
+  //   round-trip で消える (own data property でなく prototype へ落ちる) correctness edge、
+  //   (b) CodeQL が "property name to write depends on user value" として prototype-pollution
+  //   クラスを flag する、の 2 点が起きる。`Object.create(null)` にすると setter が存在せず、
+  //   `__proto__`/`constructor`/`prototype` 名のキーは**通常のデータキー**として round-trip し
+  //   (値は redaction 済み)、クラスが構造的に消滅する。カウンタ側の蓄積オブジェクト
+  //   (countRedactionMarkersByKindDeep 等) が既に `Object.create(null)` なのと同一方針で単一化。
+  //   Object.entries/keys/JSON.stringify/spread/`hasOwnProperty.call` は null-proto でも動く。
+  const out: Record<string, unknown> = Object.create(null);
   // 4#SEC-v2 (perf): baseKey → 次に試す `#suffix` 値を記憶し、衝突毎の 2..k 再走査を排除する。
   //   `out` は本呼び出し内で append-only (キーは消えない) なので、ある baseKey の
   //   「最小の空き suffix」は単調非減少。よって counter を下限として持てば、線形走査が

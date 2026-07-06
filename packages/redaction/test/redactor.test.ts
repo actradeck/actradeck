@@ -540,6 +540,69 @@ describe("INV-REDACTION: redactDeep (再帰)", () => {
 });
 
 /**
+ * INV-REDACTION-PROTO: prototype-pollution 耐性 (CodeQL js/remote-property-injection)。
+ *
+ * redactObject は入力キーを redactString した値で `out[outKey] = …` と書く。出力先が素の `{}` だと
+ * 入力イベント (wire = JSON.parse 由来で `__proto__` は **own enumerable data property**) に
+ * `__proto__` / `constructor` / `prototype` という名のキーがあると:
+ *   (a) `out["__proto__"] = <obj>` が prototype **setter** を発火し、そのキーが own data property に
+ *       ならず JSON round-trip で**落ちる** correctness edge、
+ *   (b) property-injection として CodeQL が flag、
+ * が起きる。redactObject は `Object.create(null)` を使う (setter 無し) ことで、これらは通常の
+ * データキーとして round-trip し (値は redaction 済み)、クラスが構造的に消滅する。
+ *
+ * falsifiable: 出力先を素の `{}` に戻すと (b1) の own-key アサートが false になり fail する
+ *   (setter が __proto__ を own data property にしないため)。
+ */
+describe("INV-REDACTION-PROTO: prototype-pollution 耐性 (js/remote-property-injection)", () => {
+  // wire 表現に忠実に: JSON.parse は `__proto__` を own enumerable data property として生成する
+  //   (object literal だと setter を踏み prototype になってしまうため literal では書かない)。
+  const SECRET = "set API_KEY=topsecret123456";
+  const buildMalicious = () =>
+    JSON.parse(
+      `{"__proto__":{"leak":"${SECRET}"},"constructor":"${SECRET}",` +
+        `"prototype":"${SECRET}","normal":"${SECRET}"}`,
+    ) as Record<string, unknown>;
+
+  it("does not pollute the global Object.prototype", () => {
+    const out = redactDeep(buildMalicious());
+    // (i) グローバル汚染なし: 任意の素オブジェクトに polluted/leak が生えていない。
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(({} as Record<string, unknown>).leak).toBeUndefined();
+    expect(Object.prototype).not.toHaveProperty("leak");
+    // 出力自身の prototype も汚染されていない (null-proto)。
+    expect(Object.getPrototypeOf(out)).toBeNull();
+  });
+
+  it("keeps __proto__/constructor/prototype as normal data keys (round-trip) with redacted values", () => {
+    const out = redactDeep(buildMalicious()) as Record<string, unknown>;
+    // (ii-b1) own data property として存在する (素の {} だと setter に飲まれ false になり fail)。
+    for (const key of ["__proto__", "constructor", "prototype", "normal"]) {
+      expect(
+        Object.prototype.hasOwnProperty.call(out, key),
+        `key '${key}' must be an own data property (round-trip)`,
+      ).toBe(true);
+    }
+    expect(Object.keys(out).sort()).toEqual(
+      ["__proto__", "constructor", "normal", "prototype"].sort(),
+    );
+    // (ii-b2) 値は redaction 済み: 平文 secret が JSON round-trip 後に一切残らない。
+    const flat = JSON.stringify(out);
+    expect(flat).not.toContain("topsecret123456");
+    expect(flat).not.toContain("API_KEY=topsecret");
+    // string キー (constructor/prototype/normal) の secret はマーカーへ置換されている
+    //   (`REDACTION_MARKER_PATTERN` は regex-source 文字列ゆえ RegExp へ包んで部分一致で検査)。
+    const markerRe = () => new RegExp(REDACTION_MARKER_PATTERN);
+    expect(out.normal).toMatch(markerRe());
+    expect(out.constructor).toMatch(markerRe());
+    expect(out.prototype).toMatch(markerRe());
+    // __proto__ 値 (nested object) 配下の secret もマスク済み。
+    expect(JSON.stringify(out.__proto__)).not.toContain("topsecret123456");
+    expect(JSON.stringify(out.__proto__)).toMatch(markerRe());
+  });
+});
+
+/**
  * SEC-FINAL-3 (L, over-redaction): credential keyword の word-segment 化。短曖昧 keyword
  * (`auth`/`token`/`sig`/`sas`/`key`) が **substring** で benign キーを誤マスクしないこと。
  */

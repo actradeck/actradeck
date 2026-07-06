@@ -1146,13 +1146,16 @@ fi
 # ============================================================================
 # Supply-chain tripwire: a raw `@vN` action tag is a mutable, hijackable reference. C1
 # pins every third-party action to a 40-hex commit SHA (dependabot moves the pin, not
-# the CI). This gate reads EVERY .github/workflows/*.yml and fails if a remote `uses:`
-# carries anything other than `@<40-hex>`. Local (`./…`) uses are exempt (they resolve
-# inside the repo, not by a mutable Git tag). `docker://…` uses are UNCONDITIONALLY exempt
-# and the gate does NOT inspect them for a digest: `docker://image@sha256:…` would resolve
-# by digest, but `docker://image:tag` (a MUTABLE registry tag) is not caught — a known
-# coverage gap tracked in task 019f3460 to close before GHCR publish. (There are 0
-# `docker://` uses in the current tree, so nothing un-pinned slips through today.)
+# the CI). This gate reads EVERY .github/workflows/*.yml plus any composite
+# .github/actions/**/action.yml and fails if a remote `uses:` carries anything other than
+# `@<40-hex>`. Local (`./…`) uses are exempt (they resolve inside the repo, not by a
+# mutable Git tag). `docker://…` uses are NO LONGER exempt: `docker://image@sha256:<64hex>`
+# passes, but `docker://image:tag` (a MUTABLE registry tag) FAILS (SEC-PIN-R3-4, closed —
+# task 019f3460 landed). A NON-SCALAR `uses:` value is a violation, not a silent skip
+# (SEC-PIN-R3-3). HONEST SCOPE: this is a CI-side tripwire, not adversary-proof — an
+# expression ref (`uses: ${{ matrix.action }}`) does not match `@<40-hex>` and so fails
+# CLOSED (a spurious RED, never a silent pass). PyYAML must be preinstalled (ci.yml verifies
+# it fail-loud; the gate itself does no unpinned install).
 actions_sha_pinned() {  # $@ = workflow / composite-action YAML files; nonzero + prints violations
   # SEC-PIN-R2-1: parse each file with a real YAML parser and recursively walk EVERY key
   #   literally named `uses` (jobs.*.steps[].uses AND composite runs.steps[].uses). Because
@@ -1162,21 +1165,29 @@ actions_sha_pinned() {  # $@ = workflow / composite-action YAML files; nonzero +
   python3 - "$@" <<'PY'
 import sys, os, re
 sha_re = re.compile(r'@[0-9a-fA-F]{40}$')
+# a docker:// ref must carry a FULL 64-hex manifest digest (SEC-PIN-R3-4).
+digest_re = re.compile(r'@sha256:[0-9a-fA-F]{64}(?![0-9a-fA-F])')
 try:
     import yaml
 except Exception:
     sys.stderr.write("PyYAML unavailable — fail-closed\n")
     sys.exit(2)
 
-def walk_uses(node, out):
+def walk_uses(node, out, bad):
+    # collect every `uses` value; a NON-SCALAR value (list/mapping) is recorded in `bad`
+    # as a violation rather than silently skipped (SEC-PIN-R3-3) — a valid workflow never
+    # has a non-string uses.
     if isinstance(node, dict):
         for k, v in node.items():
-            if k == 'uses' and isinstance(v, str):
-                out.append(v)
-            walk_uses(v, out)
+            if k == 'uses':
+                if isinstance(v, str):
+                    out.append(v)
+                else:
+                    bad.append(type(v).__name__)
+            walk_uses(v, out, bad)
     elif isinstance(node, list):
         for it in node:
-            walk_uses(it, out)
+            walk_uses(it, out, bad)
 
 viol = []
 for p in sys.argv[1:]:
@@ -1188,11 +1199,18 @@ for p in sys.argv[1:]:
     except Exception as e:
         viol.append(f"{base}: YAML parse error ({e}) — fail-closed")
         continue
-    refs = []
-    walk_uses(doc, refs)
+    refs, bad = [], []
+    walk_uses(doc, refs, bad)
+    for t in bad:
+        viol.append(f"{base}: uses value is non-scalar ({t}) — scalar action ref required (SEC-PIN-R3-3)")
     for ref in refs:
         r = ref.strip().strip('"\'')
-        if r.startswith('./') or r.startswith('docker://'):
+        if r.startswith('./'):
+            continue                       # local action; resolves inside the repo, not a mutable tag
+        if r.startswith('docker://'):
+            # SEC-PIN-R3-4: docker://image:tag is a mutable registry tag; require @sha256:<64hex>.
+            if not digest_re.search(r):
+                viol.append(f"{base}: uses {r} (docker:// requires @sha256:<64hex>)")
             continue
         if not sha_re.search(r):
             viol.append(f"{base}: uses {r}")
@@ -1206,9 +1224,9 @@ WF_DIR="$ROOT/.github/workflows"
 # SEC-PIN-R2-2: discover action targets by glob, not by hardcoding ci/release/codeql:
 #   `.github/workflows/*.yml|*.yaml` plus any composite action
 #   (`.github/actions/**/action.yml|yaml`) if present. HONEST SCOPE: this covers `uses:`
-#   refs in workflows and composites only. It does NOT reach non-workflow ref sites such
-#   as `docker://image:tag` uses (see docker:// note above) — all 0-instance in the current
-#   tree, tracked in task 019f3460.
+#   refs (including docker://, SEC-PIN-R3-4) in workflows and composites. Composite
+#   `runs.image` refs are checked on the image side (INV-IMAGE-DIGEST-PINNED). Expression
+#   refs fail CLOSED (see note above).
 ACT_FILES=()
 for f in "$WF_DIR"/*.yml "$WF_DIR"/*.yaml; do [ -f "$f" ] && ACT_FILES+=("$f"); done
 ACT_COMPOSITE=0
@@ -1308,6 +1326,47 @@ YML
   else
     ng "INV-ACTIONS-SHA-PINNED: OVER-FAIL — a 40-hex-pinned flow-style step was rejected"
   fi
+  # RED 5 (SEC-PIN-R3-4 / QA-PIN-R3-1): a docker:// uses with a MUTABLE tag must FAIL.
+  DKR="$WORK/wf-docker-tag.yml"
+  cat > "$DKR" <<'YML'
+name: probe
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://alpine:latest
+YML
+  if actions_sha_pinned "$DKR" >/dev/null 2>&1; then
+    ng "INV-ACTIONS-SHA-PINNED: DEAD GATE — docker://alpine:latest (mutable tag) passed (SEC-PIN-R3-4)"
+  else
+    ok "INV-ACTIONS-SHA-PINNED: gate FAILS on docker://<image>:<tag> without a digest (SEC-PIN-R3-4 closed)"
+  fi
+  # RED 6 (SEC-PIN-R3-3): a non-scalar uses: value (list) must FAIL — no silent skip.
+  NSU="$WORK/wf-nonstr-uses.yml"
+  cat > "$NSU" <<'YML'
+name: probe
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses:
+          - actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+YML
+  if actions_sha_pinned "$NSU" >/dev/null 2>&1; then
+    ng "INV-ACTIONS-SHA-PINNED: DEAD GATE — a non-scalar uses: value was silently skipped (SEC-PIN-R3-3)"
+  else
+    ok "INV-ACTIONS-SHA-PINNED: gate FAILS on a non-scalar uses: value (SEC-PIN-R3-3 closed)"
+  fi
+  # GREEN (over-fail guard): a docker:// ref pinned by @sha256:<64hex> must PASS.
+  DKG="$WORK/wf-docker-ok.yml"; DKG_HEX="$(printf '0%.0s' $(seq 1 64))"
+  printf 'name: probe\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: docker://alpine@sha256:%s\n' "$DKG_HEX" > "$DKG"
+  if actions_sha_pinned "$DKG" >/dev/null 2>&1; then
+    ok "INV-ACTIONS-SHA-PINNED: a docker://<image>@sha256:<64hex> ref PASSES (no over-fail)"
+  else
+    ng "INV-ACTIONS-SHA-PINNED: OVER-FAIL — a digest-pinned docker:// ref was rejected"
+  fi
 fi
 
 # ============================================================================
@@ -1315,22 +1374,39 @@ fi
 # ============================================================================
 # Supply-chain tripwire: a bare `postgres:17.5-alpine` / `node:22-slim` tag is mutable —
 # the same tag can point at a different image tomorrow. C3 pins every image we consume by
-# manifest digest. This gate covers all three surfaces where an image ref lives: the
-# Dockerfile `FROM` lines, the workflow service-container `image:` lines (ci.yml postgres),
-# and docker-compose.yml `image:`. `FROM scratch` and internal multi-stage `FROM <stage>`
-# references (which resolve to a prior build stage, not a registry image) are exempt.
+# manifest digest. This gate covers every surface where an image ref lives: Dockerfile
+# `FROM` lines, external `COPY --from=<image>` and `RUN --mount=…,from=<image>` refs
+# (SEC-PIN-R3-1), the workflow service-container `image:` lines (ci.yml postgres),
+# docker-compose.yml `image:`, and composite action `runs.image` (TDA-PIN-R3-3). `FROM
+# scratch`, internal multi-stage self-references (`FROM <stage>` / `COPY --from=<stage>`,
+# case-insensitive) and numeric `--from=<index>` are exempt; a dynamic `FROM ${VAR}`
+# build-arg is unverifiable and REJECTED (SEC-PIN-R3-2).
 image_digest_pinned() {  # $@ = files (Dockerfile* parsed as FROM lines, else YAML-walked for image:)
-  # SEC-PIN-R2-1 / QA-PIN-R2-2 / QA-PIN-R2-3: YAML files (workflows + compose) are parsed with a
-  #   real YAML parser and EVERY key named `image` is walked (block/flow syntax alike). Dockerfiles
-  #   are not YAML: a robust FROM line-parser joins `\`-continuations, skips build flags
-  #   (`--platform=…`), and honors `scratch` + multi-stage self-references. All refs must carry a
-  #   FULL `@sha256:<64-hex>` digest (a truncated 8-hex digest is rejected). PyYAML absent =>
-  #   fail-closed.
-  python3 - "$@" <<'PY'
+  # SEC-PIN-R2-1 / QA-PIN-R2-2 / QA-PIN-R2-3: YAML files (workflows + compose + composite action.yml)
+  #   are parsed with a real YAML parser and EVERY key named `image` is walked (block/flow syntax
+  #   alike); a composite `runs.image: 'Dockerfile'` (local build) is exempt (TDA-PIN-R3-3). A
+  #   NON-SCALAR image value is a violation, not a silent skip (SEC-PIN-R3-3). Dockerfiles are not
+  #   YAML: a robust line-parser joins `\`-continuations, skips build flags (`--platform=…`), honors
+  #   `scratch` + multi-stage self-references, and additionally enforces external `COPY --from=<img>`
+  #   and `RUN --mount=…,from=<img>` refs (SEC-PIN-R3-1) — prior stage names (case-insensitive) and
+  #   numeric `--from=<index>` are exempt. A dynamic `FROM ${VAR}` build-arg is unverifiable and
+  #   REJECTED (SEC-PIN-R3-2). All literal refs must carry a FULL `@sha256:<64-hex>` digest (a
+  #   truncated 8-hex digest is rejected). PyYAML absent => fail-closed.
+  IMG_ROOT="$ROOT" python3 - "$@" <<'PY'
 import sys, os, re
 # full 64-hex digest; the negative lookahead rejects a 65+ hex run and (via the {64} minimum)
 # a truncated one like @sha256:deadbeef.
 digest_re = re.compile(r'@sha256:[0-9a-fA-F]{64}(?![0-9a-fA-F])')
+_root = os.environ.get('IMG_ROOT') or ''
+def rel_label(p):
+    # TDA-COV-2 / SEC-PIN-COV-3: repo-relative violation label so a subdir Dockerfile is not
+    # collapsed to an ambiguous `Dockerfile:1` (basename). Falls back to basename for files
+    # outside the repo root (temp-probe inputs) so no absolute path leaks into the label.
+    if _root:
+        r = os.path.relpath(p, _root)
+        if not r.startswith('..'):
+            return r
+    return os.path.basename(p)
 try:
     import yaml
 except Exception:
@@ -1353,76 +1429,138 @@ def logical_lines(path):
         out.append((start or 1, buf))
     return out
 
-def walk_images(node, out):
+def walk_images(node, out, bad):
+    # collect every `image` value; a NON-SCALAR value (list/mapping) is recorded in `bad`
+    # as a violation rather than silently skipped (SEC-PIN-R3-3).
     if isinstance(node, dict):
         for k, v in node.items():
-            if k == 'image' and isinstance(v, str):
-                out.append(v)
-            walk_images(v, out)
+            if k == 'image':
+                if isinstance(v, str):
+                    out.append(v)
+                else:
+                    bad.append(type(v).__name__)
+            walk_images(v, out, bad)
     elif isinstance(node, list):
         for it in node:
-            walk_images(it, out)
+            walk_images(it, out, bad)
+
+def is_dockerfile(base):
+    # mirror the recursive shell discovery: basename matches (case-insensitive)
+    #   dockerfile | Dockerfile.* | Dockerfile-* | *.dockerfile
+    b = base.lower()
+    return b == 'dockerfile' or b.startswith('dockerfile.') or b.startswith('dockerfile-') or b.endswith('.dockerfile')
+
+def check_ref(ref, base, lineno, kind, stages, viol):
+    # shared exemption logic for FROM / COPY --from / RUN --mount from image refs.
+    r = ref.strip().strip('"\'')
+    if r.lower() in stages:          # prior build stage (Docker resolves stage names casefold)
+        return
+    if r.isdigit():                  # numeric stage index (--from=0)
+        return
+    if '$' in r:                     # dynamic build-arg ref is unverifiable
+        viol.append(f"{base}:{lineno}: {kind} {r} — build-arg FROM は pin 検証不能。literal digest-pin へ")
+        return
+    if kind == 'FROM' and r.lower() == 'scratch':
+        return
+    if not digest_re.search(r):
+        viol.append(f"{base}:{lineno}: {kind} {r}")
 
 viol = []
 for p in sys.argv[1:]:
     if not os.path.isfile(p):
         continue
-    base = os.path.basename(p)
-    is_df = base == 'Dockerfile' or base.startswith('Dockerfile.')
-    if is_df:
-        stages = set()
+    base = os.path.basename(p)       # basename drives Dockerfile-name detection
+    disp = rel_label(p)              # repo-relative label for violation messages (TDA-COV-2)
+    if is_dockerfile(base):
+        stages = set()               # lowercased stage aliases seen so far (AS <stage>)
         for lineno, line in logical_lines(p):
-            m = re.match(r'^\s*FROM\s+(.*)', line, re.I)
-            if not m:
+            mkw = re.match(r'^\s*([A-Za-z_]+)\s+(.*)', line)
+            if not mkw:
                 continue
-            toks = m.group(1).split()
-            img, rest = None, []
-            for j, t in enumerate(toks):          # skip build flags (--platform=…); first bare token = image
-                if t.startswith('--'):
+            kw, rest_line = mkw.group(1).upper(), mkw.group(2)
+            if kw == 'FROM':
+                toks = rest_line.split()
+                img, rest = None, []
+                for j, t in enumerate(toks):      # skip build flags (--platform=…); first bare token = image
+                    if t.startswith('--'):
+                        continue
+                    img = t; rest = toks[j + 1:]; break
+                if img is None:
                     continue
-                img = t.strip('"\''); rest = toks[j + 1:]; break
-            if img is None:
-                continue
-            stage = None
-            for j, t in enumerate(rest):          # `AS <stage>` alias -> exempt later self-references
-                if t.upper() == 'AS' and j + 1 < len(rest):
-                    stage = rest[j + 1]; break
-            if img.lower() != 'scratch' and img not in stages and not digest_re.search(img):
-                viol.append(f"{base}:{lineno}: FROM {img}")
-            if stage:
-                stages.add(stage)
+                check_ref(img, disp, lineno, 'FROM', stages, viol)
+                for j, t in enumerate(rest):      # `AS <stage>` alias -> exempt later self-references
+                    if t.upper() == 'AS' and j + 1 < len(rest):
+                        stages.add(rest[j + 1].strip('"\'').lower()); break
+            elif kw == 'COPY':
+                for t in rest_line.split():        # SEC-PIN-R3-1: external COPY --from=<image> must be digest-pinned
+                    if t.startswith('--from='):
+                        check_ref(t[len('--from='):], disp, lineno, 'COPY --from', stages, viol)
+            elif kw == 'RUN':
+                for mnt in re.findall(r'--mount=(\S+)', rest_line):  # SEC-PIN-R3-1: RUN --mount=…,from=<image>
+                    for field in mnt.split(','):
+                        if field.startswith('from='):
+                            check_ref(field[len('from='):], disp, lineno, 'RUN --mount from', stages, viol)
     else:
         try:
             doc = yaml.safe_load(open(p))
         except Exception as e:
-            viol.append(f"{base}: YAML parse error ({e}) — fail-closed")
+            viol.append(f"{disp}: YAML parse error ({e}) — fail-closed")
             continue
-        imgs = []
-        walk_images(doc, imgs)
+        imgs, bad = [], []
+        walk_images(doc, imgs, bad)
+        for t in bad:
+            viol.append(f"{disp}: image value is non-scalar ({t}) — scalar digest ref required (SEC-PIN-R3-3)")
         for img in imgs:
             r = img.strip().strip('"\'')
+            if r == 'Dockerfile':      # TDA-PIN-R3-3: composite action runs.image: 'Dockerfile' = local build;
+                continue               #   its FROM is covered by recursive Dockerfile discovery
             if not digest_re.search(r):
-                viol.append(f"{base}: image {r}")
+                viol.append(f"{disp}: image {r}")
 if viol:
     sys.stderr.write("\n".join(viol) + "\n")
     sys.exit(1)
 sys.exit(0)
 PY
 }
-# SEC-PIN-R2-2: glob discovery (Dockerfile* at repo ROOT ONLY, all workflow YAML, compose
-#   files) — never hardcode ci/release/codeql. HONEST SCOPE — this discovery is NON-RECURSIVE
-#   and NAME-BOUND: it scans only `$ROOT/Dockerfile` + `$ROOT/Dockerfile.*`, root compose,
-#   and workflow YAML. A Dockerfile in a subdirectory or under a non-standard name (e.g.
-#   `backend/Dockerfile`, `deploy/app.dockerfile`) is NOT walked. It also does not resolve
-#   image refs living elsewhere: external `COPY --from=<image>` / `RUN --mount=…,from=<image>`
-#   in a Dockerfile, `docker://image:tag`, dynamic `FROM ${VAR}` build-args, or a compose
-#   `build:` context's Dockerfile. All of these are 0-instance in the current tree; the
-#   hardening to cover them is tracked in task 019f3460 (before GHCR publish).
+# SEC-PIN-R3-2: discover Dockerfiles RECURSIVELY + case-insensitively across the whole
+#   TRACKED tree — basename matches `dockerfile` | `Dockerfile.*` | `Dockerfile-*` |
+#   `*.dockerfile` (catches backend/Dockerfile, dev.Dockerfile, Dockerfile-legacy). We
+#   enumerate via `git ls-files` (NOT a filesystem walk) because CI checks out only tracked
+#   files, so this is byte-for-byte what CI sees, and it structurally excludes the untracked
+#   ./oss + .oss-sync mirror copies and node_modules — no prune list to keep in sync. git
+#   unavailable => fail-closed. HONEST SCOPE: a CI-side tripwire enforcing LITERAL digest
+#   pins, not an adversary-proof control. This is a NAME-PATTERN gate: a compose `build:`
+#   context that points at a conventionally-named Dockerfile (the patterns above) is covered,
+#   but an OCI `Containerfile` / `build.dockerfile: <arbitrary-name>` is NOT scanned (TDA-COV-1,
+#   0-instance today). Discovery is over TRACKED files (git ls-files) = the tree CI checks out,
+#   so an un-committed Dockerfile is invisible to a LOCAL run, covered once committed (TDA-COV-3).
+discover_dockerfiles() {  # $1 = repo root; prints tracked Dockerfile paths NUL-separated (recursive, case-insensitive)
+  # SEC-PIN-COV-1: force `core.quotepath=false` + `-z` so paths with non-ASCII (CJK/accent/emoji),
+  #   spaces or newlines are emitted VERBATIM and NUL-delimited. The default `quotepath=true`
+  #   octal-escapes such names (e.g. `"\346\227\245.../Dockerfile"`) which then MISS the grep and
+  #   SILENT-SKIP an unpinned FROM (unpinned image ships un-checked). NUL output pairs with a
+  #   `read -r -d ''` consumer so the whole transport-encoding blind-spot class is closed uniformly.
+  git -c core.quotepath=false -C "$1" ls-files -z 2>/dev/null \
+    | grep -z -iE '(^|/)(dockerfile(\.[^/]*|-[^/]*)?|[^/]*\.dockerfile)$'
+}
 IMG_FILES=()
-for f in "$ROOT"/Dockerfile "$ROOT"/Dockerfile.*; do [ -f "$f" ] && IMG_FILES+=("$f"); done
+GIT_OK=1
+if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  while IFS= read -r -d '' rel; do [ -n "$rel" ] || continue; IMG_FILES+=("$ROOT/$rel"); done \
+    < <(discover_dockerfiles "$ROOT")
+else
+  GIT_OK=0
+fi
 for f in "$ROOT"/docker-compose.yml "$ROOT"/docker-compose.yaml "$ROOT"/compose.yml "$ROOT"/compose.yaml; do [ -f "$f" ] && IMG_FILES+=("$f"); done
 for f in "$WF_DIR"/*.yml "$WF_DIR"/*.yaml; do [ -f "$f" ] && IMG_FILES+=("$f"); done
-if ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import yaml" >/dev/null 2>&1; then
+# TDA-PIN-R3-3: composite action.yml runs.image is an image surface too (walk finds `image`).
+if [ -d "$ROOT/.github/actions" ]; then
+  while IFS= read -r f; do IMG_FILES+=("$f"); done \
+    < <(find "$ROOT/.github/actions" -type f \( -name action.yml -o -name action.yaml \) 2>/dev/null)
+fi
+if [ "$GIT_OK" = 0 ]; then
+  ng "INV-IMAGE-DIGEST-PINNED: git ls-files unavailable — cannot enumerate Dockerfiles (fail-closed)"
+elif ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import yaml" >/dev/null 2>&1; then
   ng "INV-IMAGE-DIGEST-PINNED: python3 + PyYAML required to parse the image refs (fail-closed)"
 elif [ "${#IMG_FILES[@]}" -eq 0 ]; then
   ng "INV-IMAGE-DIGEST-PINNED: no Dockerfile / compose / workflow files discovered"
@@ -1502,6 +1640,166 @@ YML
     ok "INV-IMAGE-DIGEST-PINNED: FROM --platform=… <img>@sha256:<64hex> PASSES (no over-fail, QA-PIN-R2-3)"
   else
     ng "INV-IMAGE-DIGEST-PINNED: OVER-FAIL — a --platform-flagged, digest-pinned FROM was rejected"
+  fi
+  # RED (g): SEC-PIN-R3-1 — an external `COPY --from=<image>` must be digest-pinned.
+  DCPF="$WORK/Dockerfile.copyfrom"
+  printf 'FROM node:22@sha256:%s AS build\nCOPY --from=postgres:17.5-alpine /a /a\n' "$PLT_HEX" > "$DCPF"
+  if image_digest_pinned "$DCPF" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — external COPY --from=postgres:17.5-alpine passed (SEC-PIN-R3-1)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on external COPY --from=<image> without a digest (SEC-PIN-R3-1)"
+  fi
+  # RED (h): SEC-PIN-R3-1 — an external `RUN --mount=…,from=<image>` must be digest-pinned.
+  DMNT="$WORK/Dockerfile.mount"
+  printf 'FROM node:22@sha256:%s AS build\nRUN --mount=type=cache,from=node:22 echo hi\n' "$PLT_HEX" > "$DMNT"
+  if image_digest_pinned "$DMNT" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — external RUN --mount=…,from=node:22 passed (SEC-PIN-R3-1)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on external RUN --mount=…,from=<image> without a digest (SEC-PIN-R3-1)"
+  fi
+  # RED (i): SEC-PIN-R3-2 — a dynamic build-arg `FROM ${VAR}` is unverifiable -> REJECT.
+  DVAR="$WORK/Dockerfile.var"
+  printf 'ARG BASE\nFROM ${BASE}\n' > "$DVAR"
+  if image_digest_pinned "$DVAR" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a dynamic FROM \${BASE} build-arg passed (SEC-PIN-R3-2)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on a dynamic FROM \${VAR} build-arg (SEC-PIN-R3-2 — reject)"
+  fi
+  # RED (i'): QA-COV-R3-1 — a dynamic ref that ALSO embeds a valid 64-hex digest
+  #   (`FROM ${REG}/img@sha256:<64hex>`) must STILL be rejected: the registry/repo half is
+  #   build-arg-controlled so the pin is unverifiable. This makes the `$`-detection branch
+  #   LOAD-BEARING — remove it and digest_re would match the embedded digest and SLIP. (The
+  #   plain `FROM ${BASE}` probe (i) is vacuous: it already fails on the absent digest even
+  #   without the `$` check, so it does not lock the dynamic-reject branch on its own.)
+  DVARH="$WORK/Dockerfile.varhex"
+  printf 'ARG REG\nFROM ${REG}/img@sha256:%s\n' "$PLT_HEX" > "$DVARH"
+  if image_digest_pinned "$DVARH" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a dynamic FROM \${REG}/img@sha256:<64hex> passed (QA-COV-R3-1)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on a digest-embedding dynamic FROM \${REG}/… (QA-COV-R3-1 — \$-branch load-bearing)"
+  fi
+  # RED (j): SEC-PIN-R3-2 — recursive + non-standard-name discovery. A subdir Dockerfile and
+  #   non-standard names (*.Dockerfile / Dockerfile-*) must be DISCOVERED, and the checker must
+  #   FAIL on the discovered bare FROM. Probe a real temp git repo (discovery is git-ls-files based).
+  DREPO="$WORK/df-discovery"; rm -rf "$DREPO"; mkdir -p "$DREPO/backend"
+  git -C "$DREPO" init -q >/dev/null 2>&1
+  printf 'FROM node:22-alpine\n' > "$DREPO/backend/Dockerfile"
+  printf 'FROM node:22-alpine\n' > "$DREPO/dev.Dockerfile"
+  printf 'FROM node:22-alpine\n' > "$DREPO/Dockerfile-legacy"
+  git -C "$DREPO" add -A >/dev/null 2>&1
+  df_found=()   # NUL-read: discover_dockerfiles emits NUL-delimited paths (SEC-PIN-COV-1)
+  while IFS= read -r -d '' f; do df_found+=("$f"); done < <(discover_dockerfiles "$DREPO")
+  df_miss=0
+  for want in backend/Dockerfile dev.Dockerfile Dockerfile-legacy; do
+    df_hit=0
+    for got in ${df_found[@]+"${df_found[@]}"}; do [ "$got" = "$want" ] && { df_hit=1; break; }; done
+    [ "$df_hit" = 1 ] || df_miss=1
+  done
+  if [ "$df_miss" = 0 ]; then
+    ok "INV-IMAGE-DIGEST-PINNED: recursive discovery finds subdir + non-standard-name Dockerfiles (backend/Dockerfile, dev.Dockerfile, Dockerfile-legacy) (SEC-PIN-R3-2)"
+  else
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD DISCOVERY — recursive/non-standard Dockerfile not enumerated: [${df_found[*]-}]"
+  fi
+  if image_digest_pinned "$DREPO/backend/Dockerfile" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a discovered subdir backend/Dockerfile bare FROM passed"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on a subdir Dockerfile's bare FROM (falsifiable)"
+  fi
+  # RED (m): SEC-PIN-COV-1 — a NON-ASCII (CJK) path Dockerfile must be DISCOVERED verbatim and its
+  #   bare FROM must FAIL. Falsifiable PASS->FAIL transition: with the default core.quotepath=true
+  #   git octal-escapes the CJK name and the grep misses it (matched 0 -> unpinned FROM ships
+  #   SILENT-PASS); the `-c core.quotepath=false` + `-z` transport fix restores enumeration
+  #   (matched 1 -> INV FAIL). Reverting the fix flips THIS discovery assert to FAIL.
+  UREPO="$WORK/df-unicode"; rm -rf "$UREPO"; mkdir -p "$UREPO/サブディレクトリ"
+  git -C "$UREPO" init -q >/dev/null 2>&1
+  printf 'FROM node:22-alpine\n' > "$UREPO/サブディレクトリ/Dockerfile"
+  git -C "$UREPO" add -A >/dev/null 2>&1
+  u_found=()
+  while IFS= read -r -d '' f; do u_found+=("$f"); done < <(discover_dockerfiles "$UREPO")
+  u_hit=0
+  for got in ${u_found[@]+"${u_found[@]}"}; do [ "$got" = "サブディレクトリ/Dockerfile" ] && u_hit=1; done
+  if [ "$u_hit" = 1 ]; then
+    ok "INV-IMAGE-DIGEST-PINNED: non-ASCII (CJK) path Dockerfile discovered verbatim — no quotepath silent-skip (SEC-PIN-COV-1)"
+  else
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD DISCOVERY — non-ASCII path Dockerfile silent-skipped: [${u_found[*]-}] (SEC-PIN-COV-1)"
+  fi
+  if image_digest_pinned "$UREPO/サブディレクトリ/Dockerfile" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a discovered non-ASCII-path Dockerfile bare FROM passed (SEC-PIN-COV-1)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on a non-ASCII-path Dockerfile's bare FROM (SEC-PIN-COV-1 falsifiable)"
+  fi
+  # RED (n): SEC-PIN-COV-1 — a path containing a SPACE (same NUL transport that carries newlines)
+  #   must be enumerated verbatim and gate-checked. Guards the NUL read against whitespace field-splitting.
+  WREPO="$WORK/df-space"; rm -rf "$WREPO"; mkdir -p "$WREPO/my dir"
+  git -C "$WREPO" init -q >/dev/null 2>&1
+  printf 'FROM node:22-alpine\n' > "$WREPO/my dir/Dockerfile"
+  git -C "$WREPO" add -A >/dev/null 2>&1
+  w_found=()
+  while IFS= read -r -d '' f; do w_found+=("$f"); done < <(discover_dockerfiles "$WREPO")
+  w_hit=0
+  for got in ${w_found[@]+"${w_found[@]}"}; do [ "$got" = "my dir/Dockerfile" ] && w_hit=1; done
+  if [ "$w_hit" = 1 ] && ! image_digest_pinned "$WREPO/my dir/Dockerfile" >/dev/null 2>&1; then
+    ok "INV-IMAGE-DIGEST-PINNED: whitespace-in-path Dockerfile discovered verbatim and gate-checked (SEC-PIN-COV-1)"
+  else
+    ng "INV-IMAGE-DIGEST-PINNED: whitespace-in-path Dockerfile mis-handled (discovered=$w_hit) (SEC-PIN-COV-1)"
+  fi
+  # RED (k): TDA-PIN-R3-3 — a composite action.yml runs.image with a docker:// mutable tag must FAIL.
+  AYML="$WORK/action-docker.yml"
+  cat > "$AYML" <<'YML'
+name: probe
+runs:
+  using: docker
+  image: docker://alpine:3.19
+YML
+  if image_digest_pinned "$AYML" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — action.yml runs.image docker://alpine:3.19 passed (TDA-PIN-R3-3)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on composite action.yml runs.image docker://<tag> (TDA-PIN-R3-3)"
+  fi
+  # RED (l): SEC-PIN-R3-3 — a non-scalar image value must FAIL (no silent skip).
+  NSI="$WORK/compose-nonstr.yml"
+  cat > "$NSI" <<'YML'
+services:
+  db:
+    image:
+      - postgres:17.5
+YML
+  if image_digest_pinned "$NSI" >/dev/null 2>&1; then
+    ng "INV-IMAGE-DIGEST-PINNED: DEAD GATE — a non-scalar image: value was silently skipped (SEC-PIN-R3-3)"
+  else
+    ok "INV-IMAGE-DIGEST-PINNED: gate FAILS on a non-scalar image: value (SEC-PIN-R3-3 closed)"
+  fi
+  # GREEN (over-fail guard): internal COPY --from=<stage> (casefold: `AS Builder` + `--from=builder`)
+  #   and a numeric `--from=0` index must PASS (QA-PIN-R3-2 — no over-reject).
+  DINT="$WORK/Dockerfile.internal"
+  printf 'FROM node:22@sha256:%s AS Builder\nRUN true\nFROM node:22@sha256:%s AS runtime\nCOPY --from=builder /app /app\nCOPY --from=0 /x /x\n' "$PLT_HEX" "$PLT_HEX" > "$DINT"
+  if image_digest_pinned "$DINT" >/dev/null 2>&1; then
+    ok "INV-IMAGE-DIGEST-PINNED: internal COPY --from=<stage> (casefold AS Builder/--from=builder) + --from=0 index PASS (no over-fail, QA-PIN-R3-2)"
+  else
+    ng "INV-IMAGE-DIGEST-PINNED: OVER-FAIL — an internal stage/index COPY --from was rejected"
+  fi
+  # GREEN (over-fail guard): QA-COV-R3-3 — the REVERSE casefold (`AS builder` lower-case + `COPY
+  #   --from=Builder` upper-case) is valid Docker (stage names resolve case-insensitively) and must
+  #   PASS. The forward guard above only exercised `AS Builder`/`--from=builder`.
+  DINTR="$WORK/Dockerfile.internal-rev"
+  printf 'FROM node:22@sha256:%s AS builder\nRUN true\nFROM node:22@sha256:%s AS runtime\nCOPY --from=Builder /app /app\n' "$PLT_HEX" "$PLT_HEX" > "$DINTR"
+  if image_digest_pinned "$DINTR" >/dev/null 2>&1; then
+    ok "INV-IMAGE-DIGEST-PINNED: reverse-casefold stage (AS builder / COPY --from=Builder) PASSES (no over-fail, QA-COV-R3-3)"
+  else
+    ng "INV-IMAGE-DIGEST-PINNED: OVER-FAIL — reverse-casefold internal stage COPY --from=Builder rejected (QA-COV-R3-3)"
+  fi
+  # GREEN (over-fail guard): a composite action.yml runs.image: 'Dockerfile' (local build) must PASS.
+  ALOC="$WORK/action-local.yml"
+  cat > "$ALOC" <<'YML'
+name: probe
+runs:
+  using: docker
+  image: 'Dockerfile'
+YML
+  if image_digest_pinned "$ALOC" >/dev/null 2>&1; then
+    ok "INV-IMAGE-DIGEST-PINNED: composite runs.image: 'Dockerfile' (local build) PASSES (no over-fail)"
+  else
+    ng "INV-IMAGE-DIGEST-PINNED: OVER-FAIL — runs.image: 'Dockerfile' local build rejected"
   fi
 fi
 

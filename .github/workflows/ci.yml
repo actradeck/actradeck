@@ -109,11 +109,13 @@ jobs:
       #   (SBOM via pnpm licenses) — runs after Install; git + python3 present on the runner.
       #   Self-adapts in the public mirror (builds the tarball via `git archive HEAD` when the
       #   private prepare-oss tooling is absent). Wiring it here keeps the gate from going dead.
-      # SEC-PIN-R2-1: the supply-chain pin gates (INV-ACTIONS-SHA-PINNED / INV-IMAGE-DIGEST-PINNED)
-      #   parse workflows/compose with PyYAML and fail-closed if it is absent. Guarantee it here so
-      #   the gate is deterministic (ubuntu-latest usually ships python3-yaml, but do not rely on it).
-      - name: Ensure PyYAML (supply-chain pin gate parses YAML fail-closed)
-        run: python3 -c "import yaml" || python3 -m pip install --user pyyaml
+      # SEC-PIN-R2-1 / TDA-PIN-R3-1: the supply-chain pin gates (INV-ACTIONS-SHA-PINNED /
+      #   INV-IMAGE-DIGEST-PINNED) parse workflows/compose with PyYAML and fail-closed if it is
+      #   absent. ubuntu-latest ships python3-yaml preinstalled, so we only VERIFY its presence —
+      #   we deliberately do NOT `pip install` a fallback: an unpinned fetch inside a supply-chain
+      #   pin gate is self-contradictory. If PyYAML is ever missing, this step fails LOUD.
+      - name: Verify preinstalled PyYAML (no unpinned install)
+        run: python3 -c "import yaml"
 
       - name: Release prep gate (version/SBOM/tarball/perms/install-verify)
         run: bash scripts/test-release-prep.sh
