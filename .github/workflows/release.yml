@@ -48,13 +48,13 @@ jobs:
     # USER-GATED docker job below) must NOT re-run verify/release on an existing tag.
     if: github.event_name == 'push'
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: 10.28.2
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22.16.0"
           cache: pnpm
@@ -92,13 +92,13 @@ jobs:
       id-token: write # keyless OIDC signing for attestations
       attestations: write # record the SLSA build provenance
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: 10.28.2
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22.16.0"
           cache: pnpm
@@ -173,7 +173,7 @@ jobs:
       - name: Attest build provenance (tarball + SBOM)
         env:
           TARBALL: ${{ steps.id.outputs.tarball }} # SEC-1: reference via env below
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             ${{ env.TARBALL }}
@@ -246,7 +246,7 @@ jobs:
       id-token: write # keyless OIDC for cosign + attestation
       attestations: write # record the SLSA build provenance of the image
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       # TDA-7: a workflow_dispatch reaches THIS job without the verify job's tag↔version
       # check (verify is guarded to `push` events). Without re-asserting it here, a dispatch
@@ -279,10 +279,10 @@ jobs:
           echo "version=${version}"       >> "$GITHUB_OUTPUT"
           echo "resolved image=ghcr.io/${repo_lc} version=${version}"
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -296,7 +296,7 @@ jobs:
       # attestor; we attest separately below with the GitHub-native action.
       - name: Build image locally (load, not yet pushed)
         id: build_local
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           load: true
@@ -371,7 +371,7 @@ jobs:
           echo "pushed ${IMAGE}@${digest}"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Keyless signature (OIDC -> Fulcio cert -> Rekor transparency log). Sign the exact
       # digest, not a mutable tag, so the signature binds the immutable image content.
@@ -384,7 +384,7 @@ jobs:
       # SLSA build provenance for the image digest, pushed to the registry so consumers
       # can `gh attestation verify oci://<image>@<digest> --repo <owner>/<name>`.
       - name: Attest build provenance (image)
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ${{ steps.img.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
