@@ -234,12 +234,20 @@ node apps/sidecar/dist/cli.js approvals clear                # 全永続承認�
   rollout JSONL を passive tail して観測します（codex を spawn/kill しない）。承認の書き戻し（interrupt/approval relay）は
   CC 経路のみで、codex には適用しません（observe-only）。これは**未実装でなく構造的な制約**です — rollout JSONL は
   append-only の事後ログで、tailer は read-only、codex TUI へ決定を差し戻すチャネルが存在しません。
-- **cockpit から codex 承認を relay したいなら Managed Mode**: `agentmon codex -- "<prompt>"`（= `node apps/sidecar/dist/cli.js codex -- "<prompt>"`）
+- **cockpit から codex 承認を relay したいなら Managed Mode**: リポジトリで `./scripts/actradeck codex "<タスク>"`（1 コマンドの薄いラッパ
+  = 内部で `agentmon codex -- "<prompt>"` = `node apps/sidecar/dist/cli.js codex -- "<prompt>"`）
   で起動すると、ActraDeck が Codex を App Server 経由で spawn し、その approval flow を cockpit カードへ中継して
   allow / deny / allow-for-session を返せます（command / file / legacy-exec / legacy-patch は allow・deny 両方向。
   タイムアウト・child 消失時は安全側 deny に倒します）。**MVP 制限（正直開示）**: `item/permissions` の profile grant は
   現状 **deny 相当（空 grant）のみ**で、cockpit からの「許可」で追加権限を付与しません（安全側・over-permit しない）。
   `acceptWithExecpolicyAmendment` / `applyNetworkPolicyAmendment` 等の advanced 変種も MVP では送出しません。
+- **Managed Mode の起動サーフェス（正直開示）**: `./scripts/actradeck codex` は headless な Codex **App Server**
+  を起動します（素の Codex **TUI ではない**）。プロンプトは **1 発 passthrough**（multi-turn は未配線）で、
+  そのセッションの間 **foreground を占有**します（`up` の常駐 4 ティアとは別プロセス・Ctrl-C で終了）。
+  前提として cockpit stack（`./scripts/actradeck up` = backend/webui）が稼働している必要があり、sidecar dist
+  未ビルドなら `build` を促して停止します。**既存の Attach セッションを後から Managed へ切り替える retrofit は不可**
+  （Managed は起動時に App Server 経由で spawn する経路のため）。承認 relay + 予防はこの Managed 起動でのみ有効で、
+  素の Codex TUI（Attach 観測）は検知のみです。
 - 完全同期は非保証（hook 駆動。詳細は plan.md §11B / ADR 019ea476 D0）。
 
 ---

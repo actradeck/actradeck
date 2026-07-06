@@ -132,8 +132,9 @@ Now `cd ~/any/project && claude` and the session appears in the cockpit.
 > that ingress to your LAN. The trust model is single-operator / loopback / local-fs — the
 > same as the native install ([`docs/adr/0012`](./adr/0012-threat-model-and-local-fs.md)).
 
-Managed Mode (`agentmon codex -- "<prompt>"`) and Codex approval relay are host-side
-concerns unchanged by Docker — see [`docs/attach-mode.md`](./attach-mode.md).
+Managed Mode (`./scripts/actradeck codex "<task>"`, a wrapper over
+`agentmon codex -- "<prompt>"`) and Codex approval relay are host-side concerns
+unchanged by Docker — see [`docs/attach-mode.md`](./attach-mode.md).
 
 ## Configuration
 

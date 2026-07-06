@@ -87,7 +87,8 @@ agent) adds approval relay for Codex.
 
 So **observation, redaction, and audit are cross-vendor today** in the default Attach
 Mode. **Approval relay** works for Claude Code over Attach; for Codex it requires
-Managed Mode — launch it with `agentmon codex -- "<prompt>"` and its App Server
+Managed Mode — launch it with `./scripts/actradeck codex "<task>"` (a one-command
+wrapper over `agentmon codex -- "<prompt>"`) and its App Server
 approvals relay to the cockpit (allow / deny / allow-for-session). Over Attach, Codex is
 observed and its native approvals still happen in its own TUI. (Claude Code in Managed
 Mode is all ✅, omitted for brevity.)
@@ -139,7 +140,7 @@ cd ~/any/project && claude     # or: codex  → shows up in the cockpit
 
 > Both agents appear immediately. Over Attach (the default), **Codex is observed** —
 > its approvals stay in its own TUI. To relay Codex approvals to the cockpit, launch it
-> in **Managed Mode** instead: `agentmon codex -- "<prompt>"` (see the
+> in **Managed Mode** instead: `./scripts/actradeck codex "<task>"` (see the
 > [support matrix](#vendor--mode-support)). Claude Code approvals relay over Attach.
 
 `quickstart` is idempotent and generates a `.env` with random local secrets on first
@@ -163,7 +164,7 @@ troubleshooting). The precision/limits of Attach Mode are in
 > Attach Mode is observability + approval/redaction/audit oriented and does not
 > require launching agents through ActraDeck. **Managed Mode** (ActraDeck spawns the
 > agent via the Codex App Server) ships today and is what relays Codex approvals to the
-> cockpit — launch a session with `agentmon codex -- "<prompt>"`. See
+> cockpit — launch a session with `./scripts/actradeck codex "<task>"`. See
 > [`docs/attach-mode.md`](./docs/attach-mode.md) for its precise limits.
 
 ### Or one command with Docker

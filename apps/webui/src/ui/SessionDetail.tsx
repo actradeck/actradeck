@@ -557,7 +557,13 @@ export function SessionDetailView({
                 iconStart="warning-alt"
                 data-testid="detail-capture-mode"
                 data-capture-mode={normalizeCaptureMode(detail.capture_mode)}
-                title={t("detail.captureMode.nonManaged.title")}
+                title={
+                  // SEC-1/TDA-4: base tooltip は provider 非依存。Codex の Managed 導線追記は
+                  // provider==="codex" の時のみ (claude-attach は承認 relay 可ゆえ Codex 導線を出さない)。
+                  detail.provider === "codex"
+                    ? `${t("detail.captureMode.nonManaged.title")} ${t("detail.captureMode.nonManaged.codexHint")}`
+                    : t("detail.captureMode.nonManaged.title")
+                }
               >
                 {t("detail.captureMode.nonManaged", {
                   mode: normalizeCaptureMode(detail.capture_mode),

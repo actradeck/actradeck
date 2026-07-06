@@ -178,6 +178,81 @@ if [ -f "$ENV_FILE" ]; then
   done
 fi
 
+# 12. Managed Codex launch (ADR 019f3960 B): `actradeck codex "<task>"` は既存
+#     `agentmon codex -- <prompt>` (= node <dist/cli.js> codex -- <prompt>) の薄いラッパ。
+#     dry-run seam (ACTRADECK_CODEX_DRY_RUN) で実 codex を起動せず exec 契約と no-secret-in-argv を固定。
+#     ACTRADECK_CODEX_CLI で cli.js パスを差し替え、dist 未ビルドでも WIRE を検査できる。
+CODEX_CLI_STUB="$(mktemp)"   # 実 cli.js の代わりの存在ファイル (die 回避・dry-run の exec 対象)
+
+# INV-OPSCLI-CODEX-WIRE: `codex "hello world"` は `node <cli> codex -- hello world` 形で exec する
+#   (prompt は "$@" passthrough=複数語がそのまま `--` の後ろに載る)。
+assert_contains "codex -- hello world" "INV-OPSCLI-CODEX-WIRE: exec は 'codex -- <prompt>' passthrough 形" \
+  -- env ACTRADECK_CODEX_CLI="$CODEX_CLI_STUB" ACTRADECK_CODEX_DRY_RUN=1 bash "$AC" codex "hello world"
+assert_contains "$CODEX_CLI_STUB" "INV-OPSCLI-CODEX-WIRE: exec は解決済み cli.js を指す" \
+  -- env ACTRADECK_CODEX_CLI="$CODEX_CLI_STUB" ACTRADECK_CODEX_DRY_RUN=1 bash "$AC" codex "hello world"
+
+# INV-OPSCLI-CODEX-WIRE(b): .env source 後に INGEST_TOKEN が env に載る。ambient token を剥がして
+#   実行し、"set" が .env 由来であることを証明する。teeth: do_codex から `. "$ENV_FILE"` を除くと
+#   token 未ロード→"INGEST_TOKEN: set" が消え本アサートが RED になる (warning 経路へ縮退)。
+if [ -f "$ENV_FILE" ] && grep -qE '^INGEST_TOKEN=.' "$ENV_FILE"; then
+  assert_contains "INGEST_TOKEN: set" "INV-OPSCLI-CODEX-WIRE: .env source 後に INGEST_TOKEN が env に載る" \
+    -- env -u INGEST_TOKEN -u REALTIME_TOKEN ACTRADECK_CODEX_CLI="$CODEX_CLI_STUB" ACTRADECK_CODEX_DRY_RUN=1 bash "$AC" codex "hi"
+fi
+
+# INV-OPSCLI-CODEX-NO-SECRET-ARGV: dry-run 出力 (= 予定 exec argv) に INGEST_TOKEN/REALTIME_TOKEN の
+#   **値** が現れない (token は env 経由のみ・argv には prompt しか載せない)。捕捉→printf|grep で
+#   SIGPIPE×pipefail 偽 PASS を回避 (bash-gate-pipefail-sigpipe-inverts-on-match)。
+codex_out="$(env ACTRADECK_CODEX_CLI="$CODEX_CLI_STUB" ACTRADECK_CODEX_DRY_RUN=1 bash "$AC" codex "run task" 2>&1)"
+if [ -f "$ENV_FILE" ]; then
+  for k in INGEST_TOKEN REALTIME_TOKEN; do
+    val="$(grep -E "^$k=" "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    if [ -n "$val" ]; then
+      if printf '%s\n' "$codex_out" | grep -qF -- "$val"; then
+        ng "INV-OPSCLI-CODEX-NO-SECRET-ARGV: $k 値が codex exec argv に混入"
+      else ok "INV-OPSCLI-CODEX-NO-SECRET-ARGV: $k 値が codex exec argv に出ない"; fi
+    fi
+  done
+fi
+
+# INV-OPSCLI-CODEX-DIST-DIE: dist (cli.js) 不在なら exit 1 + 案内に `build` を含む (毎回 build しない)。
+assert_exit 1 "INV-OPSCLI-CODEX-DIST-DIE: dist 不在は exit 1" \
+  -- env ACTRADECK_CODEX_CLI=/nonexistent/actradeck-codex-cli.js bash "$AC" codex "x"
+assert_contains "sidecar dist not built" "INV-OPSCLI-CODEX-DIST-DIE: die 文言" \
+  -- env ACTRADECK_CODEX_CLI=/nonexistent/actradeck-codex-cli.js bash "$AC" codex "x"
+assert_contains "build" "INV-OPSCLI-CODEX-DIST-DIE: die は build 案内を含む" \
+  -- env ACTRADECK_CODEX_CLI=/nonexistent/actradeck-codex-cli.js bash "$AC" codex "x"
+
+# INV-OPSCLI-CODEX-ARG-GUARD (QA-3/TDA-5): 引数バリデーション。
+#   (a) 引数ゼロ (空 prompt) → exit 1 + usage。 (b) 第1引数 attach → exit 1 + Managed 専用 hint
+#   (誤って prompt="attach" の Managed を起動しないための安全ゲート)。副作用前に die するため
+#   dist stub 不要 (arg gate が dist check より前)。
+assert_exit 1 "INV-OPSCLI-CODEX-ARG-GUARD: 引数ゼロ (空 prompt) は exit 1" -- bash "$AC" codex
+assert_contains "usage: actradeck codex" "INV-OPSCLI-CODEX-ARG-GUARD: 引数ゼロは usage を出す" -- bash "$AC" codex
+assert_exit 1 "INV-OPSCLI-CODEX-ARG-GUARD: codex attach は exit 1 (Managed 専用)" -- bash "$AC" codex attach
+assert_contains "Managed 起動専用" "INV-OPSCLI-CODEX-ARG-GUARD: codex attach die は Managed 専用を明示" -- bash "$AC" codex attach
+# teeth: attach ゲートが無ければ `codex attach` は dry-run で prompt="attach" の Managed を exec してしまう。
+#   ゲート有りでは die するため dry-run 出力 (codex -- attach) が **出ない** ことを固定する。
+attach_out="$(env ACTRADECK_CODEX_CLI="$CODEX_CLI_STUB" ACTRADECK_CODEX_DRY_RUN=1 bash "$AC" codex attach 2>&1)"
+if printf '%s\n' "$attach_out" | grep -qF 'codex -- attach'; then
+  ng "INV-OPSCLI-CODEX-ARG-GUARD: codex attach が Managed 起動へ漏れている (ゲート不在)"
+else ok "INV-OPSCLI-CODEX-ARG-GUARD: codex attach は Managed 起動へ漏れない"; fi
+
+# INV-OPSCLI-CODEX-SINGLE-SOURCE (QA-1): dry-run と実 exec が同一 argv 配列 (codex_argv) を使う
+#   ことを source で固定する。実 exec 行が `exec "${codex_argv[@]}"` 形 (再構築でなく配列展開) で
+#   あること + dry-run も同配列を展開すること。single-source なら実 exec の `--` 除去 mutation が
+#   dry-run テスト (INV-OPSCLI-CODEX-WIRE) を RED にする (別ソース再構築だとすり抜けた)。
+if grep -qF 'exec "${codex_argv[@]}"' "$AC"; then ok "INV-OPSCLI-CODEX-SINGLE-SOURCE: 実 exec は codex_argv 配列展開"; else ng "INV-OPSCLI-CODEX-SINGLE-SOURCE: 実 exec が codex_argv を使っていない (別ソース再構築の退行)"; fi
+if grep -qF 'codex_argv=("$node_bin" "$cli" codex -- "$@")' "$AC"; then ok "INV-OPSCLI-CODEX-SINGLE-SOURCE: argv 配列に argv-injection 境界 -- が存在"; else ng "INV-OPSCLI-CODEX-SINGLE-SOURCE: argv 配列の -- 境界が無い (argv-injection 退行)"; fi
+
+# do_codex の source 自体に実 token 値が焼き込まれていない (二重の保険・§8 と同型・argv-leak 恒常 gate)。
+if [ -f "$ENV_FILE" ]; then
+  for k in INGEST_TOKEN REALTIME_TOKEN; do
+    val="$(grep -E "^$k=" "$ENV_FILE" | head -1 | cut -d= -f2-)"
+    [ -n "$val" ] && assert_absent "$val" "INV-OPSCLI-CODEX: $k 値が actradeck source に出ない" -- cat "$AC"
+  done
+fi
+rm -f "$CODEX_CLI_STUB"
+
 echo
 if [ "$fail" = 0 ]; then echo "actradeck smoke: ALL PASS"; else echo "actradeck smoke: FAILURES"; fi
 exit "$fail"

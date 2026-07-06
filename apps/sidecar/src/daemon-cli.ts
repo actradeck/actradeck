@@ -40,7 +40,9 @@ export interface DaemonArgs {
 /** codex は attach 非対応 (ADR D5)。CLI でこのエラーを投げる。 */
 export class CodexAttachUnsupportedError extends Error {
   constructor() {
-    super("codex は attach 非対応です。managed mode (`agentmon codex`) で観測してください。");
+    super(
+      'codex は attach 非対応です。Managed 起動 (`./scripts/actradeck codex "<task>"` = 内部 `agentmon codex`) で観測してください。',
+    );
     this.name = "CodexAttachUnsupportedError";
   }
 }

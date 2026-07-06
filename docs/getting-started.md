@@ -160,9 +160,16 @@ instead — ActraDeck spawns Codex via its App Server and bridges its approval r
 the cockpit inbox:
 
 ```bash
-# Run from the ActraDeck repo after `pnpm -r build`. (`agentmon` is the sidecar bin.)
-node apps/sidecar/dist/cli.js codex -- "<your prompt>"
+# One command from the ActraDeck repo (the cockpit stack must already be up via
+# `./scripts/actradeck up`). This is a thin wrapper over the sidecar bin
+# `agentmon codex -- "<prompt>"` (= `node apps/sidecar/dist/cli.js codex -- "<prompt>"`);
+# it sources `.env`, warns if `INGEST_TOKEN` is unset, and runs Codex in your current repo.
+./scripts/actradeck codex "<your task>"
 ```
+
+Managed Mode runs a **headless Codex App Server** (not the TUI), takes a **single prompt**
+(multi-turn is not wired yet), and stays in the **foreground** for that session. It cannot
+retrofit an already-running Attach session.
 
 Claude Code relays approvals over Attach already, so no Managed Mode is needed for it.
 See [`attach-mode.md`](./attach-mode.md) for the precise limits of each mode.

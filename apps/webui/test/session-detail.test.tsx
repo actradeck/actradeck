@@ -458,4 +458,37 @@ describe("SessionDetailView capture_mode バッジ (INV-DETAIL-CAPTURE-BADGE / T
     );
     expect(html).toMatch(/data-testid="risk-capture-mode"[\s\S]*?data-capture-mode="attach"/);
   });
+
+  // SEC-1/TDA-4: non-managed tooltip の Codex Managed 導線は provider==="codex" の時のみ。
+  //   claude-attach は承認 relay 可ゆえ Codex 導線を出すと誤導になる (provider-gate で構造遮断)。
+  function detailCmProvider(
+    captureMode: "attach" | "codex_rollout",
+    provider: string,
+  ): SessionDetail {
+    const d = detail([], "running.tool");
+    return { ...d, capture_mode: captureMode, provider };
+  }
+
+  it("codex 非 managed の tooltip には Codex Managed 導線が出る", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionDetailView, {
+        detail: detailCmProvider("codex_rollout", "codex"),
+        loading: false,
+      }),
+    );
+    expect(html).toContain('data-testid="detail-capture-mode"');
+    expect(html).toContain("./scripts/actradeck codex"); // Managed 導線 (title 属性)。
+  });
+
+  it("claude 非 managed の tooltip には Codex Managed 導線を出さない (誤導防止)", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionDetailView, {
+        detail: detailCmProvider("attach", "claude_code"),
+        loading: false,
+      }),
+    );
+    expect(html).toContain('data-testid="detail-capture-mode"'); // バッジ自体は出る。
+    expect(html).not.toContain("./scripts/actradeck codex"); // Codex 導線は出さない。
+    expect(html).not.toContain("Codex の承認 relay"); // ja 追記節も不在。
+  });
 });

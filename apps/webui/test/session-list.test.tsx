@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { SessionList } from "../src/ui/SessionList.js";
+import { FixedLocaleProvider } from "../src/ui/LocaleProvider.js";
 
 import type { SessionListItem } from "../src/realtime/contract.js";
 
@@ -165,6 +166,85 @@ describe("SessionList", () => {
     expect(html).toContain('data-testid="readiness-agent-claude"');
     expect(html).toContain('data-state="missing"');
     expect(html).toContain("未検出");
+  });
+
+  // INV-READINESS-CODEX-MANAGED-HINT (ADR 019f3960 C): Managed 導線 hint は codex が
+  // observable/detected の時のみ出す (missing は非表示)。command は runnable な共有リテラル
+  // (./scripts/actradeck codex …)・locale 非依存。文言 (散文) は ja/en 両カタログに存在 (parity)。
+  it("readiness codex observable で Managed 導線 hint を出す (runnable command + 検知のみ 開示)", () => {
+    const html = renderToStaticMarkup(
+      <SessionList
+        sessions={[]}
+        selectedId={null}
+        nowMs={0}
+        onSelect={() => {}}
+        readiness={{
+          daemonCount: 1,
+          claude: { binaryOnPath: true, anyHook: true },
+          codex: { binaryOnPath: true, rolloutDirResolved: true },
+        }}
+      />,
+    );
+    expect(html).toContain('data-testid="readiness-codex-managed-hint"');
+    expect(html).toContain("./scripts/actradeck codex"); // PATH に依存しない runnable 表記。
+    expect(html).toContain("Managed"); // 導線文言 (ja)。
+  });
+
+  it("readiness codex detected でも Managed 導線 hint を出す", () => {
+    const html = renderToStaticMarkup(
+      <SessionList
+        sessions={[]}
+        selectedId={null}
+        nowMs={0}
+        onSelect={() => {}}
+        readiness={{
+          daemonCount: 1,
+          claude: { binaryOnPath: true, anyHook: false },
+          codex: { binaryOnPath: true, rolloutDirResolved: false },
+        }}
+      />,
+    );
+    expect(html).toContain('data-testid="readiness-codex-managed-hint"');
+    expect(html).toContain("./scripts/actradeck codex");
+  });
+
+  it("readiness codex missing では Managed 導線 hint を出さない (未検出は非表示)", () => {
+    const html = renderToStaticMarkup(
+      <SessionList
+        sessions={[]}
+        selectedId={null}
+        nowMs={0}
+        onSelect={() => {}}
+        readiness={{
+          daemonCount: 1,
+          claude: { binaryOnPath: false, anyHook: false },
+          codex: { binaryOnPath: false, rolloutDirResolved: false },
+        }}
+      />,
+    );
+    expect(html).not.toContain('data-testid="readiness-codex-managed-hint"');
+    expect(html).not.toContain("./scripts/actradeck codex");
+  });
+
+  it("readiness codex managed hint は en カタログでも描画される (locale parity)", () => {
+    const html = renderToStaticMarkup(
+      <FixedLocaleProvider locale="en">
+        <SessionList
+          sessions={[]}
+          selectedId={null}
+          nowMs={0}
+          onSelect={() => {}}
+          readiness={{
+            daemonCount: 1,
+            claude: { binaryOnPath: true, anyHook: true },
+            codex: { binaryOnPath: true, rolloutDirResolved: true },
+          }}
+        />
+      </FixedLocaleProvider>,
+    );
+    expect(html).toContain('data-testid="readiness-codex-managed-hint"');
+    expect(html).toContain("launch Managed"); // en 文言。
+    expect(html).toContain("./scripts/actradeck codex"); // command は locale 非依存リテラル。
   });
 
   it("readiness per-agent 省略 (2a coarse 形・daemonCount のみ) は doctor ヒントへフォールバック (後方互換)", () => {

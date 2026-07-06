@@ -27,6 +27,9 @@
 #   actradeck status        全4ティアの systemd/launchd 状態を表示。
 #   actradeck logs <svc>    journalctl -f (systemd) / tail -f (launchd) (svc = backend|webui|attach|codex)。
 #   actradeck build         全ワークスペースパッケージ (共有 packages dist / sidecar dist / webui .next) をビルド。
+#   actradeck codex "<task>" 現在のリポジトリで Managed Codex を foreground 起動 (承認 relay + 予防)。
+#                           = 既存 `agentmon codex -- "<prompt>"` の薄いラッパ。cockpit stack (actradeck up)
+#                           稼働が前提。観測専用の `codex attach` (ad-attach) とは別物。
 #   actradeck print-unit  <backend|webui>   生成 systemd unit を標準出力 (確認用・単一ソース)。
 #   actradeck print-plist <backend|webui>   生成 launchd LaunchAgent plist を標準出力 (print-unit の twin)。
 #   actradeck doctor        .env 権限 / node / linger / 4ティア unit・plist / ポート到達性を点検 (秘匿非表示)。
@@ -118,6 +121,21 @@ resolve_node() {
   n="$(command -v node || true)"
   [ -n "$n" ] || die "node が PATH に見つかりません。Node.js を入れてください。"
   printf '%s' "$n"
+}
+
+# .env を guarded source する共通ヘルパ (TDA-2: do_up_foreground / do_codex の 2 コピーを 1 本へ統合)。
+# set -a で子/後続に export・set +e で malformed 行 (KEY=$(failing) 等) が set -e 下で不透明に
+# abort させないよう best-effort 化する (source 後に元へ復元)。.env が無ければ 1 を返し、呼び出し側が
+# 文脈別の warning を出す (backend 拒否 / ingestion 401 で文言が異なるため)。挙動は旧インライン版と同一。
+source_env_guarded() {
+  [ -f "$ENV_FILE" ] || return 1
+  set -a
+  set +e
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set -e
+  set +a
+  return 0
 }
 
 # --- サーバ層サービスレジストリ (backend / webui・generalize-reusable-tooling) ----------
@@ -381,15 +399,8 @@ do_up_foreground() {
   # QA-4: source は set +e で囲い、malformed な .env の途中行 (KEY=$(failing) 等) が set -e で
   # supervisor を不透明に abort させないよう best-effort 化する。未ロードの token は下流の backend
   # 起動エラーとして可視化される (.env は operator 作の KEY=VALUE という trust model 前提)。
-  # well-formed な .env は従来どおり無影響。set +e/+a は直後に元へ戻す。
-  if [ -f "$ENV_FILE" ]; then
-    set -a
-    set +e
-    # shellcheck disable=SC1090
-    . "$ENV_FILE"
-    set -e
-    set +a
-  else
+  # well-formed な .env は従来どおり無影響。TDA-2: source ロジックは source_env_guarded に集約。
+  if ! source_env_guarded; then
     err "[actradeck] 警告: $ENV_FILE が無い。INGEST_TOKEN/REALTIME_TOKEN 未設定だと backend が起動を拒否します。"
   fi
 
@@ -618,6 +629,74 @@ do_doctor() {
   doctor_port_line webui "$wport"
 }
 
+# --- codex (Managed): 承認 relay + 予防つき Codex を 1 コマンドで起動 -----------------
+# 既存の `agentmon codex -- <prompt>` (= node <dist/cli.js> codex -- <prompt>) 経路の薄い
+# ラッパ (ADR 019f3960 の B)。新しい実行サーフェスは作らない — cli.js を無改変で exec する。
+# operator の **現在の cwd** で foreground 実行し、その repo の Managed Codex になる (= 仕様)。
+# app-server JSON-RPC 経由で承認を cockpit へ relay し、high-risk 操作を予防する (ADR 019ea31b)。
+# 観測専用の `codex attach` (rollout JSONL の passive tail・ad-attach 委譲) とは別物。
+#
+# 秘匿規律 (do_up_foreground と同一): INGEST_TOKEN 等は .env → env 経由でのみ渡し、
+# **argv には prompt 以外 (= token 値) を一切載せない** (no-secret-in-argv)。
+#
+# テスト seam (実 codex を起動せず契約を固定するため):
+#   ACTRADECK_CODEX_CLI     … exec する cli.js のパスを上書き (既定=<repo>/apps/sidecar/dist/cli.js)。
+#   ACTRADECK_CODEX_DRY_RUN … 非空なら exec せず、exec するはずの argv 形 + INGEST_TOKEN の
+#                             有無のみ (値は出さない=NO-RAW) を stdout に出して exit 0。
+do_codex() {
+  # L1 (QA-3/TDA-5): 引数バリデーションを最初に行う (副作用前)。
+  # (a) 引数ゼロ (空 prompt) は Managed 起動の意味を成さない → usage を出して die。
+  if [ "$#" -eq 0 ]; then
+    err "usage: actradeck codex \"<task/prompt>\"   # 現在のリポジトリで Managed Codex を起動 (承認 relay + 予防)"
+    die "codex には prompt が必要です (例: actradeck codex \"リファクタして\")。観測専用は actradeck up (ad-attach)。"
+  fi
+  # (b) 第1引数 attach は「観測専用の codex attach」と混同されやすい。Managed とは別物と明示して die
+  #     (誤って `node cli codex -- attach` = prompt="attach" の Managed を起動しないための安全ゲート)。
+  if [ "$1" = "attach" ]; then
+    err "[actradeck] codex attach (rollout 観測) は本コマンドではありません。観測専用は: actradeck up (= ad-attach codex install)。"
+    die "actradeck codex は Managed 起動専用です (承認 relay + 予防)。観測は actradeck up を使ってください。"
+  fi
+
+  local node_bin cli
+  node_bin="$(resolve_node)"
+  cli="${ACTRADECK_CODEX_CLI:-$REPO_ROOT/apps/sidecar/dist/cli.js}"
+  [ -f "$cli" ] || die "sidecar dist not built — run: scripts/actradeck build"
+
+  # .env を guarded source して INGEST_TOKEN / ACTRADECK_WS_URL 等を env へ載せる (TDA-2: 共通ヘルパ)。
+  # 未ロードの token は下記 warning + 下流 cli の warning で可視化される。
+  if ! source_env_guarded; then
+    err "[actradeck] 警告: $ENV_FILE が無い。INGEST_TOKEN 未設定だと ingestion が 401 で拒否されます。"
+  fi
+
+  # INGEST_TOKEN parity (cli.ts:379-384): backend ingestion は Bearer 認証必須。未設定だと
+  # upgrade が 401 で拒否され送信ループになる旨を正直に警告する (続行は cli 側判断に委ねる)。
+  if [ -z "${INGEST_TOKEN:-}" ]; then
+    err "[actradeck] 警告: INGEST_TOKEN 未設定。backend ingestion は認証必須のため、このままでは upgrade が 401 で拒否され送信ループになります (.env の INGEST_TOKEN を設定してください)。"
+  fi
+
+  # QA-1 (single-source): exec する argv 配列を **一度だけ** 構築し、dry-run 出力と実 exec の
+  # 両経路で同一配列を使う。以前は dry-run を printf で別途再構築していたため、実 exec 行から `--`
+  # を除去する mutation が dry-run テストをすり抜けた (`--` は argv-injection 境界=`--<flag>` 形
+  # prompt が codex CLI フラグに化けるのを防ぐ)。single-source 化で dry-run が実 exec を忠実に反映する。
+  # 秘匿規律: token 値は配列に **入れない** (env 経由のみ)。argv-leak の真の恒常 gate は
+  # test-actradeck.sh §8 の静的 source scan (実 token 値が source に焼き込まれないこと) と、
+  # single-source 化で忠実になった dry-run の NO-SECRET-ARGV (var 展開値が argv に出ないこと) の二段。
+  local -a codex_argv=("$node_bin" "$cli" codex -- "$@")
+
+  if [ -n "${ACTRADECK_CODEX_DRY_RUN:-}" ]; then
+    # 実 codex を起動せず、exec するはずの **同一 argv 配列** と .env source 後の INGEST_TOKEN の
+    # **有無のみ** (値は出さない) を出力して終了する。token 値は argv にも出力にも載らない。
+    printf '[codex dry-run] exec:'
+    printf ' %s' "${codex_argv[@]}"
+    printf '\n'
+    printf '[codex dry-run] INGEST_TOKEN: %s\n' "${INGEST_TOKEN:+set}"
+    exit 0
+  fi
+
+  # 現在の cwd で foreground 実行。dry-run と同一配列を使う (single-source)。
+  exec "${codex_argv[@]}"
+}
+
 main() {
   local cmd="${1:-status}"
   shift || true
@@ -627,6 +706,7 @@ main() {
     restart) do_restart ;;
     status) do_status ;;
     build) do_build ;;
+    codex) do_codex "$@" ;;
     logs) do_logs "${1:-}" ;;
     doctor) do_doctor ;;
     print-unit) use_service "${1:-}"; generate_unit ;;

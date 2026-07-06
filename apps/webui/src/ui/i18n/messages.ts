@@ -181,6 +181,10 @@ const ja = {
   "readiness.agent.codex.observable": "Codex: 観測可能",
   "readiness.agent.codex.detected": "Codex: 検出済みだが rollout 未解決",
   "readiness.agent.codex.missing": "Codex: 未検出",
+  // Managed 導線 (ADR 019f3960 C): observable/detected の codex 行の下に出す。承認 relay + 予防は
+  // Managed 起動でのみ有効 (rollout 観測は検知のみ)。command は SessionList の共有リテラルを <code> で表示。
+  "readiness.agent.codex.managedHint":
+    "承認 relay と予防を有効にするには Managed で起動します（rollout 観測は検知のみ）:",
 
   // ── first-run セーフティデモ (ADR 019f22a7 P1・空状態 CTA) ─────────────────────
   // 「止める・残さない・証明できる」を静的✓で断定せず、使い捨て30秒デモで実証する capability として提示する。
@@ -400,6 +404,10 @@ const ja = {
   "detail.captureMode.nonManaged": "外部起動 ({mode})",
   "detail.captureMode.nonManaged.title":
     "このセッションは ActraDeck が起動を所有しない経路で取得されています。一部の制御 (停止など) は効きません。承認 relay の可否は agent と mode により異なります。",
+  // SEC-1/TDA-4: Codex 導線は provider 非依存の base title と分離し、SessionDetail が
+  // detail.provider === "codex" の時のみ追記する (claude-attach は承認 relay 可ゆえ誤導しない)。
+  "detail.captureMode.nonManaged.codexHint":
+    'Codex の承認 relay と予防を有効にするには Managed で起動してください: `./scripts/actradeck codex "<タスク>"`。',
   "detail.interrupt": "中断 (SIGINT)",
   "detail.interrupt.title":
     "managed claude へ SIGINT を送り協調的に停止を要求します。実行中ツールの巻き戻しではありません。managed でない場合は安全に無視されます。",
@@ -860,6 +868,11 @@ const en: Record<MessageKey, string> = {
   "readiness.agent.codex.observable": "Codex: observable",
   "readiness.agent.codex.detected": "Codex: detected but rollout dir unresolved",
   "readiness.agent.codex.missing": "Codex: not detected",
+  // Managed launch hint (ADR 019f3960 C): shown under the codex row when observable/detected.
+  // Approval relay + prevention require Managed launch (rollout observation is detection-only).
+  // The command itself is a shared literal rendered in <code> by SessionList (parity, runnable).
+  "readiness.agent.codex.managedHint":
+    "To relay approvals (prevention), launch Managed — rollout observation is detection-only:",
 
   // ── first-run safety demo (ADR 019f22a7 P1; empty-state CTA) ──
   "safetyDemo.title": "Protected on this machine",
@@ -1084,6 +1097,10 @@ const en: Record<MessageKey, string> = {
   "detail.captureMode.nonManaged": "External launch ({mode})",
   "detail.captureMode.nonManaged.title":
     "This session is captured through a path ActraDeck does not launch. Some controls, such as stop, have no effect. Approval relay support depends on the agent and mode.",
+  // SEC-1/TDA-4: Codex-only hint split from the provider-agnostic base title; SessionDetail
+  // appends it only when detail.provider === "codex" (claude-attach relays approvals, so no misdirection).
+  "detail.captureMode.nonManaged.codexHint":
+    'To relay Codex approvals (and prevention), launch it Managed: `./scripts/actradeck codex "<task>"`.',
   "detail.interrupt": "Interrupt (SIGINT)",
   "detail.interrupt.title":
     "Sends SIGINT to the managed claude to request a cooperative stop. This is not a rollback of the running tool. If not managed, it is safely ignored.",

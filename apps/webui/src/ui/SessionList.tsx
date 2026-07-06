@@ -219,6 +219,14 @@ function readinessMark(state: ClaudeState | CodexState): string {
   return "—";
 }
 
+// Managed Codex 起動コマンド (ADR 019f3960 C)。docs/README の呼び出し規約 (`./scripts/actradeck up`)
+// と完全一致させ、bare `actradeck` が PATH に無い既定環境で command-not-found を作らない。静的
+// リテラルで locale 非依存 (i18n 文言は散文のみ・command はここに直書き・NO-RAW)。
+// SEC-2/TDA-3 正直開示: ここは **readiness hint の <code> 表示** の単一出所にすぎない。同じコマンド文字列は
+// SessionDetail の nonManaged tooltip (messages.ts の codexHint) と docs/README にも別掲されており、
+// リポジトリ全体での完全な単一出所化 (cross-file の共有定数) は follow-up。現状は表示専用リテラルの重複。
+const MANAGED_CODEX_CMD = './scripts/actradeck codex "<task>"';
+
 export function SessionList({
   sessions,
   selectedId,
@@ -262,6 +270,19 @@ export function SessionList({
                     </span>
                     <span>{t(`readiness.agent.codex.${cd}` as const)}</span>
                   </li>
+                  {/* ADR 019f3960 C: codex が observable/detected の時のみ Managed 導線 hint を出す
+                      (missing は非表示)。承認 relay + 予防は Managed 起動でのみ有効・rollout は検知のみ。
+                      command は静的リテラル (MANAGED_CODEX_CMD)・ユーザーデータ非注入 (NO-RAW 自明)。 */}
+                  {cd === "observable" || cd === "detected" ? (
+                    <li
+                      className="ad-readiness__managed-hint"
+                      data-testid="readiness-codex-managed-hint"
+                      data-state={cd}
+                    >
+                      <span>{t("readiness.agent.codex.managedHint")}</span>{" "}
+                      <code>{MANAGED_CODEX_CMD}</code>
+                    </li>
+                  ) : null}
                 </ul>
               ) : (
                 <span className="ad-readiness__hint">{t("readiness.connected.hint")}</span>

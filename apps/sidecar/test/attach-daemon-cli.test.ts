@@ -65,6 +65,13 @@ describe("parseDaemonArgs", () => {
     );
   });
 
+  // TDA-1: エラーメッセージは Managed 起動 (ops-CLI ラッパ) の実際に打てる案内を指す
+  //   (bare `agentmon` は既定 PATH に無いため `./scripts/actradeck codex "<task>"` を主導・内部実体併記)。
+  it("codex attach error は ./scripts/actradeck codex を案内する (TDA-1)", () => {
+    expect(() => parseDaemonArgs(["attach", "codex"], cwd)).toThrow(/\.\/scripts\/actradeck codex/);
+    expect(() => parseDaemonArgs(["attach", "codex"], cwd)).toThrow(/agentmon codex/);
+  });
+
   it("rejects invalid scope / token-mode / subcommand", () => {
     expect(() => parseDaemonArgs(["daemon", "start", "--scope", "global"], cwd)).toThrow();
     expect(() => parseDaemonArgs(["daemon", "start", "--token-mode", "jwt"], cwd)).toThrow();
