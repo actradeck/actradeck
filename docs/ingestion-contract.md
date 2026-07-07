@@ -232,3 +232,12 @@ curl -sS -X POST "$ACTRADECK_INGEST_URL/ingest" \
 `docs/examples/ingest-adapter/` に、外部ツールの行イベントを NormalizedEvent へ写像して直 POST する
 最小の Node アダプタ (単一ファイル) があります。`provider` に slug・`source: "external"` を使います。
 実行方法は同ディレクトリの `README.md` を参照してください。
+
+`docs/examples/opencode-adapter/` は **実プロダクト (opencode) 向けの外部アダプタ第1号**です。opencode の
+plugin フック (event bus + `tool.execute.before/after`) をライフサイクル毎の NormalizedEvent
+(`session.started` / `turn.started` / `command.started`・`command.completed`(exit code) /
+`agent.message.delta` / `diff.updated`(counts のみ) / `error`(封筒最小化) / `turn.completed(idle)`) へ
+写像します (`provider=opencode` / `source=external` / observe-only)。REAL 捕獲 fixture で駆動する契約
+テスト `INV-OPENCODE-ADAPTER-*` (`packages/event-model/test/inv-opencode-adapter.test.ts`) を伴います。
+写像表・ローカル実走手順・**backend 床が唯一の redaction 防御である旨の正直な開示**は同ディレクトリの
+`README.md` を参照してください。

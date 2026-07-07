@@ -93,6 +93,20 @@ approvals relay to the cockpit (allow / deny / allow-for-session). Over Attach, 
 observed and its native approvals still happen in its own TUI. (Claude Code in Managed
 Mode is all ✅, omitted for brevity.)
 
+**Other agents via external adapters.** Any third-party CLI can be observed by mapping
+its events to the public ingestion contract (`provider=<slug>`, `source=external`). The
+first shipped example is **opencode** (`docs/examples/opencode-adapter/`): a dependency-zero
+opencode plugin that maps its hooks into the normalized event model — **observe-only** (state,
+current action, command exit codes, diffs, streaming), redaction happens at the backend
+ingress floor, and it does **not** relay approvals.
+
+| Capability                                     | opencode (external adapter) |
+| ---------------------------------------------- | :-------------------------: |
+| Observe — state, current action, diffs         |             ✅              |
+| Redaction before persist (backend floor)       |             ✅              |
+| Audit log + replay                             |             ✅              |
+| Approval relay — allow / deny from the cockpit |       ⛔ observe-only       |
+
 ## Quickstart
 
 One line — fetch the source and bring up the cockpit (needs `git`, Node 22.16+, and
