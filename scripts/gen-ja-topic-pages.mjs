@@ -139,7 +139,10 @@ function generateJapanese(topic) {
 }
 
 function clean(html) {
-  return html.replace(/[ \t]+\n/g, "\n");
+  // HTML5 parsing re-parents the trailing newline after </html> into <body>,
+  // so a naive parse→serialize→"\n" round-trip grows one blank line per run.
+  // Collapse the whitespace run before </body></html> so output is idempotent.
+  return html.replace(/[ \t]+\n/g, "\n").replace(/\s+(<\/body><\/html>)/, "\n$1");
 }
 
 for (const topic of TOPICS) {

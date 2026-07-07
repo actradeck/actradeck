@@ -49,8 +49,10 @@ the setup, and it handles no credentials (quickstart still generates the `0600` 
 - **See the plan without changing anything** with `--dry-run` (checks prerequisites and
   prints where it would clone).
 - **Overrides:** `ACTRADECK_REPO` (fork URL), `ACTRADECK_REF` (branch/tag/commit),
-  `ACTRADECK_INSTALL_DIR` (source location). It never runs as root and refuses to clobber
-  a non-empty directory that is not an existing ActraDeck checkout.
+  `ACTRADECK_INSTALL_DIR` (source location). If run as root it **warns and continues**
+  (some CI images and containers legitimately run as root), leaving the checkout and data
+  dir root-owned — a normal user account is preferred. It refuses to clobber a non-empty
+  directory that is not an existing ActraDeck checkout.
 
 For a signed release tarball with SLSA provenance and sha256 verification, fetch the
 installer first and opt into the verified path:

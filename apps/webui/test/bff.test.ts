@@ -87,14 +87,43 @@ describe("BFF upstream config", () => {
     expect(cfg.url).not.toContain("secret-token-xyz");
   });
 
-  it("falls back to BACKEND_REALTIME_WS_URL then a default", () => {
+  it("falls back to BACKEND_REALTIME_WS_URL then an ACTRADECK_BACKEND_PORT-derived default (DOC-2)", () => {
+    // (c) BACKEND_REALTIME_WS_URL が最優先 (現行維持)。
     const cfg = resolveUpstreamConfig({
       REALTIME_TOKEN: "t",
       BACKEND_REALTIME_WS_URL: "ws://backend:9000/realtime/ws",
+      // 明示 WS URL があれば PORT は無視される。
+      ACTRADECK_BACKEND_PORT: "9999",
     });
     expect(cfg.url).toBe("ws://backend:9000/realtime/ws");
+
+    // (a) 両 env 未設定 → backend 既定 55410 から導出 (旧 stale 8787 ではない)。
     const def = resolveUpstreamConfig({ REALTIME_TOKEN: "t" });
-    expect(def.url).toBe("ws://127.0.0.1:8787/realtime/ws");
+    expect(def.url).toBe("ws://127.0.0.1:55410/realtime/ws");
+    expect(def.url).not.toContain("8787");
+
+    // (b) ACTRADECK_BACKEND_PORT 設定・WS URL 未設定 → 当該ポートから導出 (docker-entrypoint と同義)。
+    const derived = resolveUpstreamConfig({
+      REALTIME_TOKEN: "t",
+      ACTRADECK_BACKEND_PORT: "55411",
+    });
+    expect(derived.url).toBe("ws://127.0.0.1:55411/realtime/ws");
+
+    // 空文字の ACTRADECK_BACKEND_PORT は既定 55410 へ倒す (shell `:-` と同義)。
+    const empty = resolveUpstreamConfig({
+      REALTIME_TOKEN: "t",
+      ACTRADECK_BACKEND_PORT: "",
+    });
+    expect(empty.url).toBe("ws://127.0.0.1:55410/realtime/ws");
+
+    // SEC-2: 非数値は authority 脱出 (`0@evil…` で hostname が loopback を離れる) を防ぐため
+    // 既定 55410 へ fail-safe。host は必ず loopback に留まる。
+    const hostile = resolveUpstreamConfig({
+      REALTIME_TOKEN: "t",
+      ACTRADECK_BACKEND_PORT: "0@evil.example.com",
+    });
+    expect(hostile.url).toBe("ws://127.0.0.1:55410/realtime/ws");
+    expect(new URL(hostile.url).hostname).toBe("127.0.0.1");
   });
 
   it("SEC-3: rejects a non-ws upstream URL before attaching the Bearer token", () => {

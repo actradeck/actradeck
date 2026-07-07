@@ -8,8 +8,8 @@ What the viewer should walk away believing:
 
 1. One cockpit shows **both** a Claude Code and a Codex session at once.
 2. You **approve/deny from one inbox** — relayed for Claude Code over Attach (the
-   default). Codex over Attach is **observed** in the same inbox/list; relaying
-   Codex approvals needs **Managed Mode**.
+   default). Codex over Attach is **observed** in the same cockpit list (no approval
+   cards over Attach); relaying Codex approvals needs **Managed Mode**.
 3. A secret is **redacted before it is ever stored** — you see the masked value and
    a per-kind count, never the secret.
 4. There is **one audit trail / replay** spanning both agents.
@@ -44,8 +44,8 @@ Synthetic secrets to use on camera (public, non-functional dummies):
 > Approvals: Claude Code approval interception works over **Attach** (hooks). Codex
 > approval **interception** is most reliable in **Managed Mode** (App Server); over
 > Attach, Codex is observed. If you want a live Codex _approval_ on camera, launch
-> Codex managed; otherwise show the Codex session **observed** in the same inbox/list
-> and do the live approve/deny on the Claude Code card. Verify which your build does
+> Codex managed; otherwise show the Codex session **observed** in the same cockpit
+> list and do the live approve/deny on the Claude Code card. Verify which your build does
 > before recording.
 
 ---

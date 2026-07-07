@@ -103,7 +103,7 @@ fi
 
 HAVE_SYSTEMD=0
 command -v systemctl >/dev/null 2>&1 && HAVE_SYSTEMD=1
-[ "$HAVE_SYSTEMD" = 1 ] || warn "systemctl not found (e.g. macOS): tiers run in the foreground via './scripts/actradeck up' (see the final message)."
+[ "$HAVE_SYSTEMD" = 1 ] || warn "systemctl not found (e.g. macOS): bring the tiers up with './scripts/actradeck up' — it daemonizes via launchd LaunchAgents if launchctl is present, otherwise runs them in the foreground (see the final message)."
 
 # At least one agent (Claude Code / Codex) is needed to *see* sessions. The stack still
 # comes up without one, so warn (don't die) — otherwise the cockpit just stays empty and
@@ -219,14 +219,15 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
   Trouble?  see docs/getting-started.md
 DONE
 else
-  # No systemd (e.g. macOS): we do NOT auto-start here, because the foreground
-  # supervisor blocks (it must stay attached to this terminal). Tell the user the
-  # one command that brings the stack up, and do NOT claim the cockpit is ready —
-  # it is not yet. (A persistent launchd path for macOS is planned.)
+  # No systemd (e.g. macOS): we do NOT auto-start here. `up` picks its supervisor —
+  # launchd LaunchAgents when launchctl is present (macOS: daemonizes, survives this
+  # shell), otherwise a foreground supervisor that must stay attached to this terminal.
+  # Either way we can't run it inline, so tell the user the one command and do NOT
+  # claim the cockpit is ready — it is not yet.
   cat <<DONE
 
 [quickstart] Setup complete — but the cockpit is NOT running yet (no systemd on this machine).
-  Start it (foreground; keeps running, Ctrl-C stops all tiers):
+  Start it (with launchctl -> daemonized via launchd; otherwise foreground, keep the terminal open, Ctrl-C stops all tiers):
       ./scripts/actradeck up
   Then open:  http://localhost:${webui_port}
   Try:        click "Run the 30-second safety demo" on the empty board to experience

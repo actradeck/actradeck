@@ -36,7 +36,7 @@ ActraDeck consolidates on the `554xx` block to avoid colliding with other local 
 | `ACTRADECK_BACKEND_PORT` | `55410` | backend, sidecar | Ingestion + realtime API. |
 | `ACTRADECK_BACKEND_HOST` | `127.0.0.1` | backend | Loopback by default; the trust model assumes it stays local. |
 | `ACTRADECK_WEBUI_HOST` | `127.0.0.1` | webui | Bind address for the cockpit (e.g. `0.0.0.0` to expose on a LAN — understand [`../SECURITY.md`](../SECURITY.md) first). |
-| `BACKEND_REALTIME_WS_URL` | `ws://127.0.0.1:55410/realtime/ws` | webui (BFF) | Where the webui server relays browser realtime connections. `ws://`/`wss://` only, env-sourced only (clients cannot pick it — SSRF guard). Keep the port consistent with `ACTRADECK_BACKEND_PORT`. |
+| `BACKEND_REALTIME_WS_URL` | derived: `ws://127.0.0.1:${ACTRADECK_BACKEND_PORT:-55410}/realtime/ws` | webui (BFF) | Where the webui server relays browser realtime connections. When unset, the BFF derives it from `ACTRADECK_BACKEND_PORT` (default `55410`), so a missing `.env` still reaches the backend. `ws://`/`wss://` only, env-sourced only (clients cannot pick it — SSRF guard). |
 | `ACTRADECK_WS_URL` | _(unset)_ | sidecar | Explicit backend WS base for the daemons; overrides the port-derived default. |
 
 ## Authentication tokens

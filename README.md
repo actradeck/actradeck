@@ -38,10 +38,12 @@ vendor structurally will not build: **neutral governance across competing agents
 - **Approval governance, not just a prompt.** A structural risk classifier gates
   high-risk commands; an opt-in persistent allowlist lets you skip re-approving
   _safe_ operations without ever auto-allowing dangerous ones.
-- **Secrets are redacted before persist or transmit.** A single choke-point redactor
-  (INV-REDACTION) masks detected secret keys, tokens, and `.env` contents _before_ any
-  event reaches disk or the network, with per-kind counts shown in the UI. Detection is
-  best-effort pattern matching (gitleaks-style rules + custom regexes) — a strong safety
+- **Secrets are redacted before persist or transmit.** A two-layer redactor
+  (INV-REDACTION) masks detected secret keys, tokens, and `.env` contents: the sidecar
+  redacts _before_ an event it collects reaches disk or the network, and backend ingress
+  applies the same unconditional floor to every event — including direct POSTs from
+  external adapters — before it is stored. Per-kind counts are shown in the UI. Detection
+  is best-effort pattern matching (gitleaks-style rules + custom regexes) — a strong safety
   net, not an absolute guarantee (see [honest limits](./docs/approval-policy.md#honest-limits)).
 - **Audit & replay.** Every session can be replayed after the fact for review,
   incident analysis, or compliance. Session reports export to HTML/Markdown with an
@@ -158,12 +160,14 @@ cd ~/any/project && claude     # or: codex  → shows up in the cockpit
 > [support matrix](#vendor--mode-support)). Claude Code approvals relay over Attach.
 
 `quickstart` is idempotent and generates a `.env` with random local secrets on first
-run. It daemonizes the four tiers via `systemd --user` (Linux) or **launchd
-LaunchAgents** (macOS) — `./scripts/actradeck up` picks the supervisor automatically.
+run. On Linux it finishes by daemonizing the four tiers via `systemd --user`. On macOS
+(no systemd) it stops just short of the last step and prints the one command to run —
+`./scripts/actradeck up` — which then picks the supervisor automatically: **launchd
+LaunchAgents** when `launchctl` is present, or a foreground supervisor otherwise.
 The macOS LaunchAgents run in your login session (always-on while logged in, and they
 auto-start on next login); a fully headless, survives-logout daemon would need a root
 `LaunchDaemon`, which is out of scope. On a host with neither systemd nor launchd,
-`up` falls back to a foreground supervisor (keep the terminal open; Ctrl-C stops it).
+`up` runs a foreground supervisor (keep the terminal open; Ctrl-C stops it).
 
 > **macOS launchd is experimental.** The Linux `systemd` path is used daily; the launchd
 > path is structurally verified (plist generation, secret hygiene, XML well-formedness are
@@ -214,8 +218,10 @@ signature, and how to wire a host agent are all in
 [Ingestion API] → [Event Store + State Engine] → [Realtime WS/SSE] → [Web Cockpit]
 ```
 
-Design principle: the Web UI never connects directly to local CLIs. The sidecar is
-the single choke point where redaction is applied before anything is stored or sent.
+Design principle: the Web UI never connects directly to local CLIs. On the agent
+path the sidecar redacts events before anything is stored or sent; every event —
+including direct POSTs from external adapters via the public ingestion contract —
+also passes an unconditional redaction floor at backend ingress before it is stored.
 
 - Public ingestion contract: [`docs/ingestion-contract.md`](./docs/ingestion-contract.md)
 - Architecture decision records: [`docs/adr/`](./docs/adr/)

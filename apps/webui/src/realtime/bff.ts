@@ -59,7 +59,8 @@ export class InvalidReplayRequestPathError extends Error {
  *   (SEC-1: query はアクセスログ/プロキシログに漏れる)。
  *
  * @param env  読み取り元 (既定 process.env; テスト注入用)。
- * @param backendUrl backend realtime WS URL (既定 env.BACKEND_REALTIME_WS_URL)。
+ * @param backendUrl backend realtime WS URL (既定 env.BACKEND_REALTIME_WS_URL; 未設定なら
+ *   ACTRADECK_BACKEND_PORT (既定 55410) から導出)。
  */
 export function resolveUpstreamConfig(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -68,7 +69,18 @@ export function resolveUpstreamConfig(
   const token = env["REALTIME_TOKEN"];
   if (!token || token.length === 0) throw new MissingRealtimeTokenError();
 
-  const url = backendUrl ?? env["BACKEND_REALTIME_WS_URL"] ?? "ws://127.0.0.1:8787/realtime/ws";
+  // fallback は backend の既定ポートから導出する (DOC-2)。優先順位:
+  //   1. 明示引数 backendUrl → 2. env.BACKEND_REALTIME_WS_URL → 3. ACTRADECK_BACKEND_PORT 導出。
+  // backend は `Number(process.env.ACTRADECK_BACKEND_PORT ?? 55410)` で listen し (apps/backend/src/index.ts)、
+  // docker-entrypoint.sh も `ws://127.0.0.1:${ACTRADECK_BACKEND_PORT:-55410}/realtime/ws` を組む。
+  // `.env` の該当行を消した / `.env` 無しで webui を立てても silent に旧 stale ポート (8787) へ relay して
+  // realtime が死なないよう、fallback も同じ 55410 導出に揃える。導出値は数値ポートのみ受理し、
+  // 空文字・非数値 (例 `0@evil.example.com` — `@` で URL authority を脱出し Bearer relay 先の host を
+  // 動かせる形) は 55410 へ fail-safe (SEC-2: 「port」契約外の値を authority へ interpolate しない)。
+  const rawBackendPort = env["ACTRADECK_BACKEND_PORT"];
+  const backendPort = rawBackendPort && /^\d+$/.test(rawBackendPort) ? rawBackendPort : "55410";
+  const url =
+    backendUrl ?? env["BACKEND_REALTIME_WS_URL"] ?? `ws://127.0.0.1:${backendPort}/realtime/ws`;
   // SEC-3 (防御的検証): token を載せる前に upstream URL を構造検証する。
   //  - scheme は ws:/wss: のみ (http(s):// への誤配や平文ダウングレードで Bearer を誤送しない)。
   //  - 不正な env はここで throw (token をヘッダに載せない)。url は素の endpoint で query は付けない。

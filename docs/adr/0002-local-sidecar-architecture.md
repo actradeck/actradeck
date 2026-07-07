@@ -22,11 +22,16 @@ Pipeline:
 Sidecar → Ingestion API → Event Store + State Engine → Realtime (WS/SSE) → Web Cockpit
 ```
 
-The sidecar is the single egress and redaction choke point.
+The sidecar is the single egress and redaction choke point for agent-collected
+data. (External adapters that POST directly to the ingestion API bypass the
+sidecar and are covered by an unconditional backend ingress redaction floor —
+see ADR 0007, Amendment.)
 
 ## Consequences
 
-- Redaction and auth are enforced at one place (see ADR 0007, 0008).
+- Redaction and auth are enforced at defined choke points — the sidecar for
+  agent-collected data, plus the unconditional backend ingress floor for
+  everything else (see ADR 0007 incl. Amendment, 0008).
 - Works behind NAT/firewalls (outbound connections only).
 - Structured events only — no terminal scraping, so the data is stable against
   cosmetic CLI changes.

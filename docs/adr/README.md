@@ -19,7 +19,7 @@ Status values: **Accepted** (in force) · **Superseded** · **Proposed**.
 | [0004](0004-liveness-decomposed-heartbeats.md) | Liveness from decomposed heartbeats; "stalled" is shown with evidence              | Accepted |
 | [0005](0005-session-identity-model.md)         | Session identity: canonical = Claude hook session_id, learn-once                   | Accepted |
 | [0006](0006-cockpit-presence-live-model.md)    | Cockpit "live" = connection presence, not last-event guesswork                     | Accepted |
-| [0007](0007-redaction-before-emit.md)          | Redaction before emit: one choke point; diffs are metrics-only or redacted-pull    | Accepted |
+| [0007](0007-redaction-before-emit.md)          | Redaction before emit: sidecar choke + backend ingress floor (amended); diffs are metrics-only or redacted-pull | Accepted |
 | [0008](0008-hook-receiver-auth.md)             | Hook receiver auth: per-launch token + loopback guard                              | Accepted |
 | [0009](0009-approval-governance.md)            | Approval governance: fail-safe gate, allow-for-session, persistent allowlist       | Accepted |
 | [0010](0010-auto-guard-secret-in-input.md)     | Auto-guard: a secret in tool input escalates to an approval                        | Accepted |
