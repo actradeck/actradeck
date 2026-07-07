@@ -24,3 +24,9 @@ Quick orientation:
   reporting: [SECURITY.md](../SECURITY.md).
 - **Media**: the GIFs/videos embedded in these pages are real captures and live in
   [`media/`](./media/).
+- **Languages**: shipped docs are English-canonical; `*.ja.md` are Japanese companions. Update
+  the canonical file first, then sync the companion and its sync marker. Japanese companions
+  currently exist for [`ingestion-contract.ja.md`](./ingestion-contract.ja.md),
+  [`attach-mode.ja.md`](./attach-mode.ja.md),
+  [`examples/opencode-adapter/README.ja.md`](./examples/opencode-adapter/README.ja.md), and
+  [`examples/ingest-adapter/README.ja.md`](./examples/ingest-adapter/README.ja.md).

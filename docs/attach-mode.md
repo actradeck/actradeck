@@ -1,264 +1,300 @@
-# Attach Mode — 既存の Claude Code を「どのディレクトリからでも」観測する
+# Attach Mode — observe an existing Claude Code "from any directory"
 
-ActraDeck の **Attach Mode** は、ActraDeck が起動を所有しない（=あなたが普段どおり起動する）
-Claude Code (CC) を、後付けで観測するモードです。Sidecar が CC を PTY 子プロセスとして起動する
-**Managed Mode**（`agentmon claude`）とは異なり、Attach は CC が必ず読む settings に hook を
-**非破壊配線**するだけで、CC の起動方法は一切変えません。
+> 日本語版: [attach-mode.ja.md](./attach-mode.ja.md)
 
-- 仕組みの確定: ADR `019ea476`（設計）/ `019ea48a`（実装）/ `019ea499`（裁定）
-- 常用パッケージング: ADR `019eac8a`（`ad-attach` + systemd）/ `019ee134`（codex 常駐）/ `019ee25e`（全スタック `actradeck`）
+ActraDeck's **Attach Mode** observes, after the fact, a Claude Code (CC) whose startup ActraDeck
+does not own (i.e. you start it as usual). Unlike **Managed Mode**, where the Sidecar starts CC
+as a PTY child process (`agentmon claude`), Attach only **non-destructively wires** a hook into
+the settings that CC always reads, and does not change how CC is started at all.
+
+- How it is settled: ADR `019ea476` (design) / `019ea48a` (implementation) / `019ea499` (ruling)
+- Everyday packaging: ADR `019eac8a` (`ad-attach` + systemd) / `019ee134` (codex daemon) /
+  `019ee25e` (whole-stack `actradeck`)
 
 ---
 
-## 全スタックを 1 コマンドで常駐（推奨）— `actradeck up`
+## Run the whole stack as a daemon with one command (recommended) — `actradeck up`
 
-ActraDeck は 4 ティア（backend `:55410` / webui `:55400` / attach daemon / codex daemon）で構成されます。
-`scripts/actradeck` は **全ティアを常駐**させるワンコマンド orchestrator です（ADR `019ee25e`）。
-常駐機構は **3-way で自動選択**します（ADR `019ef084`）:
+ActraDeck consists of 4 tiers (backend `:55410` / webui `:55400` / attach daemon / codex daemon).
+`scripts/actradeck` is a one-command orchestrator that **daemonizes all tiers** (ADR `019ee25e`).
+The daemon mechanism is **auto-selected 3-way** (ADR `019ef084`):
 
-- **Linux**: `systemd --user` unit（`actradeck-*.service`）
-- **macOS**: **launchd LaunchAgents**（`io.actradeck.*`・`~/Library/LaunchAgents`）— ログイン中常駐 +
-  再ログイン自動起動。ログアウト後も残す常駐は root `LaunchDaemon` が要るため対象外。
-  launchd 経路は experimental（構造検証済・Mac 実機での runtime 検証は募集中）。
-- **どちらも無し**: foreground 実行（端末を開いたまま・Ctrl-C で全停止）。
+- **Linux**: `systemd --user` unit (`actradeck-*.service`)
+- **macOS**: **launchd LaunchAgents** (`io.actradeck.*` · `~/Library/LaunchAgents`) — persists
+  while logged in + auto-starts on re-login. Persistence that survives logout requires a root
+  `LaunchDaemon` and is out of scope.
+  The launchd path is experimental (structurally verified · runtime verification on a real Mac
+  is wanted).
+- **Neither present**: foreground execution (keep the terminal open · Ctrl-C stops everything).
 
-`ad-attach` が観測 daemon を担うのに対し、`actradeck` は cockpit サーバ層も含めた
-**スタック全体**を管理します。`down` / `restart` / `status` / `logs` はどの機構でも同じ動きです。
+Whereas `ad-attach` handles the observation daemon, `actradeck` manages the **whole stack**
+including the cockpit server layer. `down` / `restart` / `status` / `logs` behave the same under
+any mechanism.
 
 ```bash
 cd /path/to/ActraDeck
-chmod 600 .env                 # 秘匿（INGEST_TOKEN/REALTIME_TOKEN 等）を含むので必須
-./scripts/actradeck up         # 全ワークスペース build → backend+webui 常駐 → ad-attach install-all
-loginctl enable-linger "$USER" # Linux のみ: ログアウト後も常駐（macOS はログインセッション常駐）
+chmod 600 .env                 # required, since it contains secrets (INGEST_TOKEN/REALTIME_TOKEN, etc.)
+./scripts/actradeck up         # build all workspaces → daemonize backend+webui → ad-attach install-all
+loginctl enable-linger "$USER" # Linux only: keep running after logout (macOS persists per login session)
 ```
 
-| コマンド | 動作 |
+| Command | Behavior |
 |---|---|
-| `actradeck up` | 全ワークスペースパッケージ（共有 packages dist / sidecar dist / webui .next）をビルド → backend+webui を常駐化（systemd unit / launchd plist） → 観測 daemon を `ad-attach install-all` で常駐。 |
-| `actradeck down` | 全4ティアを停止・無効化・削除。 |
-| `actradeck restart` | 全4ティアを再起動（`systemctl restart` / `launchctl kickstart`）。 |
-| `actradeck status` | 全4ティアの supervisor 状態（systemd unit / launchd agent）。 |
-| `actradeck logs <backend\|webui\|attach\|codex>` | `journalctl -f`（systemd）/ ログファイル `tail -f`（launchd）。 |
-| `actradeck doctor` | `.env` 権限 / node / linger / 4ティア unit・plist / ポート到達性を点検（秘匿は非表示）。 |
-| `actradeck print-unit <backend\|webui>` | 生成 systemd unit を表示（確認用・単一ソース）。 |
-| `actradeck print-plist <backend\|webui>` | 生成 launchd LaunchAgent plist を表示（print-unit の macOS twin）。 |
+| `actradeck up` | Builds all workspace packages (shared packages dist / sidecar dist / webui .next) → daemonizes backend+webui (systemd unit / launchd plist) → daemonizes the observation daemon with `ad-attach install-all`. |
+| `actradeck down` | Stops, disables, and removes all 4 tiers. |
+| `actradeck restart` | Restarts all 4 tiers (`systemctl restart` / `launchctl kickstart`). |
+| `actradeck status` | Supervisor status of all 4 tiers (systemd unit / launchd agent). |
+| `actradeck logs <backend\|webui\|attach\|codex>` | `journalctl -f` (systemd) / `tail -f` a log file (launchd). |
+| `actradeck doctor` | Checks `.env` permissions / node / linger / the 4-tier units & plists / port reachability (secrets not shown). |
+| `actradeck print-unit <backend\|webui>` | Show the generated systemd unit (for verification · single source). |
+| `actradeck print-plist <backend\|webui>` | Show the generated launchd LaunchAgent plist (the macOS twin of print-unit). |
 
-> **秘匿の扱い**: backend/webui unit は `.env` を node の `--env-file-if-exists` で読みます。unit 本体にも
-> argv にも token の**値は載りません**（argv には `.env` の path だけ）。`ad-attach` の daemon unit と同方針。
-> node を更新したら `actradeck up` を再実行して unit を更新してください（旧 node パス消滅による `203/EXEC` 回避）。
+> **Handling secrets**: the backend/webui units read `.env` via node's `--env-file-if-exists`.
+> Neither the unit body nor the argv carries the token **value** (the argv only has the path of
+> `.env`). Same policy as the `ad-attach` daemon unit. After you update node, re-run
+> `actradeck up` to update the units (avoids `203/EXEC` from a vanished old node path).
 
-> daemon だけを常駐させたい（backend/webui は別管理）なら、下記 `ad-attach` を直接使ってください。
+> If you want only the daemon to run (managing backend/webui separately), use `ad-attach`
+> directly, below.
 
 ---
 
-## いちばん簡単な使い方（daemon のみ）— どのディレクトリでも常時観測
+## The simplest way (daemon only) — always observe from any directory
 
-「どのディレクトリからでも」は技術的に、CC が必ず読む **user scope の
-`~/.claude/settings.json`** に hook を配線することを意味します（project-local 配線は
-1 リポジトリしかカバーしません）。これをサービスとして常駐させます — Linux は
-systemd `--user` unit、macOS は launchd LaunchAgent（`ad-attach` が自動検出。
-`actradeck` と同じ 3-way: どちらも無ければ foreground）。
+"From any directory" technically means wiring the hook into the **user-scope
+`~/.claude/settings.json`** that CC always reads (project-local wiring covers only 1
+repository). This is run as a persistent service — on Linux a systemd `--user` unit, on macOS a
+launchd LaunchAgent (`ad-attach` auto-detects. Same 3-way as `actradeck`: if neither is present,
+foreground).
 
-### 前提
-1. `.env` を用意（`.env.example` 参照）。最低限、backend と**同一値**の `INGEST_TOKEN`。
-   秘匿を含むので `chmod 600 .env` 推奨。
-2. backend / webui が起動済み（既定 `:55410` / `:55400`）。スタックごと常駐させるなら上記 `actradeck up` が backend/webui の起動も担います。
+### Prerequisites
+1. Prepare `.env` (see `.env.example`). At minimum, the `INGEST_TOKEN` with the **same value**
+   as the backend. Since it contains secrets, `chmod 600 .env` is recommended.
+2. backend / webui are running (defaults `:55410` / `:55400`). If you daemonize the whole stack,
+   the `actradeck up` above also handles starting backend/webui.
 
-### 一度だけ
+### One time only
 ```bash
 cd /path/to/ActraDeck
-chmod 600 .env                   # 秘匿（INGEST_TOKEN 等）を含むので必須
-./scripts/ad-attach install      # sidecar build → systemd unit / launchd plist 配置 → 自動起動（attach）
-# Codex TUI も常駐観測する場合（任意）:
-./scripts/ad-attach codex install   # actradeck-codex-attach.service を配置・自動起動
-# あるいは両方まとめて:
-./scripts/ad-attach install-all     # attach + codex を一括常駐化
-# (ログアウト中も常駐させたい場合) loginctl enable-linger "$USER"
+chmod 600 .env                   # required, since it contains secrets (INGEST_TOKEN, etc.)
+./scripts/ad-attach install      # sidecar build → place systemd unit / launchd plist → auto-start (attach)
+# If you also want to observe the Codex TUI as a daemon (optional):
+./scripts/ad-attach codex install   # place & auto-start actradeck-codex-attach.service
+# or both at once:
+./scripts/ad-attach install-all     # daemonize attach + codex together
+# (if you want it to persist even while logged out) loginctl enable-linger "$USER"
 ```
 
-`install` がやること:
-- `apps/sidecar` をビルド（`dist/cli.js` 生成）。
-- **Linux**: `~/.config/systemd/user/actradeck-attach.service` を**実パスで生成**（`node` 絶対パス・
-  リポジトリ絶対パスを解決）。秘匿は `EnvironmentFile=-<repo>/.env` で読むため **unit 本体には書かない**。
-  生成される unit の中身は `./scripts/ad-attach print-unit` で確認できます（手書きの定義は持たず
-  これが単一ソースです）。unit には `TimeoutStopSec=30`（`SIGTERM` 後の graceful flush 猶予）と
-  `NoNewPrivileges=yes`（観測 daemon は権限昇格不要）を付与します。
-- **macOS**: `~/Library/LaunchAgents/` に reverse-DNS label（`io.actradeck.*`）の LaunchAgent plist を
-  同じ方針（実パス解決・秘匿値は plist 本体に書かない）で生成します。
-  `./scripts/ad-attach print-plist` が print-unit の twin です。
-- 起動＋ログイン時自動起動を有効化（`systemctl --user enable --now` / `launchctl bootstrap`）。
+What `install` does:
+- Builds `apps/sidecar` (generating `dist/cli.js`).
+- **Linux**: **generates `~/.config/systemd/user/actradeck-attach.service` with real paths**
+  (resolving the absolute `node` path and the absolute repository path). Secrets are read via
+  `EnvironmentFile=-<repo>/.env`, so they are **not written into the unit body**. You can check
+  the generated unit's content with `./scripts/ad-attach print-unit` (there is no hand-written
+  definition; this is the single source). The unit is given `TimeoutStopSec=30` (a graceful
+  flush grace period after `SIGTERM`) and `NoNewPrivileges=yes` (the observation daemon needs no
+  privilege escalation).
+- **macOS**: generates a reverse-DNS label (`io.actradeck.*`) LaunchAgent plist under
+  `~/Library/LaunchAgents/` with the same policy (real path resolution · secret values not
+  written into the plist body). `./scripts/ad-attach print-plist` is the twin of print-unit.
+- Enables startup + auto-start at login (`systemctl --user enable --now` / `launchctl
+  bootstrap`).
 
-> **`.env` の権限**: 秘匿（`INGEST_TOKEN` 等）を含むため `chmod 600 .env` を推奨します。
-> `./scripts/ad-attach doctor` が緩い権限・`INGEST_TOKEN` 未設定・unit 未配置を点検します（値は表示しません）。
+> **`.env` permissions**: since it contains secrets (`INGEST_TOKEN`, etc.), `chmod 600 .env` is
+> recommended. `./scripts/ad-attach doctor` checks for loose permissions · unset `INGEST_TOKEN`
+> · an unplaced unit (it does not display values).
 
-> **Codex 常駐（任意）**: `ad-attach codex install` は素の Codex TUI を rollout JSONL の passive tail で
-> 観測する `actradeck-codex-attach.service` を配置します（codex を spawn/kill しない純観測）。
-> `CODEX_HOME` や poll 間隔は `.env` か drop-in（`override.conf`）で渡します（unit 本体は既定の `codex attach`）。
-> `ad-attach codex print-unit` で生成内容を確認、`ad-attach codex service logs` でログ追尾できます。
+> **Codex daemon (optional)**: `ad-attach codex install` places the
+> `actradeck-codex-attach.service` that observes the bare Codex TUI via a passive tail of the
+> rollout JSONL (pure observation without spawning/killing codex). `CODEX_HOME` and the poll
+> interval are passed via `.env` or a drop-in (`override.conf`) (the unit body is the default
+> `codex attach`). Check the generated content with `ad-attach codex print-unit`, and follow the
+> log with `ad-attach codex service logs`.
 
-> **node を更新したら再 install**: unit / plist には `node` の絶対パスが焼き込まれます（systemd `--user`
-> も launchd も対話シェルの PATH/nvm を継承しないため）。`nvm install` 等で node のパスが変わったら
-> `./scripts/ad-attach install` を再実行して unit / plist を更新してください（旧パス消滅で無言停止しないため）。
+> **Re-install after updating node**: the unit / plist bakes in the absolute `node` path (neither
+> systemd `--user` nor launchd inherits the interactive shell's PATH/nvm). If the node path
+> changes via `nvm install`, etc., re-run `./scripts/ad-attach install` to update the unit /
+> plist (so it does not stop silently on a vanished old path).
 
-### 以後
+### From then on
 ```bash
 cd ~/any/project
-claude            # いつもどおり起動するだけ → ActraDeck の一覧に capture_mode=attach で出る
+claude            # just start it as usual → it appears in ActraDeck's list with capture_mode=attach
 ```
 
-### 状態・停止
+### Status / stop
 ```bash
-./scripts/ad-attach service status   # systemctl --user status（attach）
-./scripts/ad-attach service stop     # サービス運用中の停止はこちら（systemctl --user stop）
+./scripts/ad-attach service status   # systemctl --user status (attach)
+./scripts/ad-attach service stop     # use this to stop when running as a service (systemctl --user stop)
 ./scripts/ad-attach service logs     # journalctl -f
-./scripts/ad-attach uninstall        # 停止・無効化・unit 削除（settings から hooks を detach 込み）
+./scripts/ad-attach uninstall        # stop, disable, remove the unit (also detaches hooks from settings)
 
-# Codex 側 / 一括（任意）
-./scripts/ad-attach codex service status   # codex サービスの状態
-./scripts/ad-attach codex service logs     # codex サービスのログ追尾
-./scripts/ad-attach codex uninstall        # codex サービスのみ停止・無効化・削除
-./scripts/ad-attach status-all             # attach + codex の状態をまとめて表示
-./scripts/ad-attach uninstall-all          # 両サービスを停止・無効化・削除
-./scripts/ad-attach doctor                 # .env 権限 / node パス / unit 配置を点検（秘匿は非表示）
+# Codex side / all-at-once (optional)
+./scripts/ad-attach codex service status   # status of the codex service
+./scripts/ad-attach codex service logs     # follow the codex service logs
+./scripts/ad-attach codex uninstall        # stop, disable, remove only the codex service
+./scripts/ad-attach status-all             # show attach + codex status together
+./scripts/ad-attach uninstall-all          # stop, disable, remove both services
+./scripts/ad-attach doctor                 # check .env permissions / node path / unit placement (secrets not shown)
 ```
 
-> **INGEST_TOKEN を rotate したら**: 両サービスは同一 `<repo>/.env` を `EnvironmentFile` 経由で読みます。
-> token を更新したら実行中プロセスの env に反映するため `./scripts/ad-attach service restart` と
-> `./scripts/ad-attach codex service restart`（または `uninstall-all`→`install-all`）を実行してください。
+> **After you rotate INGEST_TOKEN**: both services read the same `<repo>/.env` via
+> `EnvironmentFile`. After updating the token, run `./scripts/ad-attach service restart` and
+> `./scripts/ad-attach codex service restart` (or `uninstall-all`→`install-all`) to reflect it
+> in the env of the running processes.
 
-> サービスとして常駐させているときの一時停止は `ad-attach service stop` を使ってください。
-> `ad-attach stop`（= `daemon stop`）は foreground/単発起動向けで、サービスの PID を直接落とすため
-> `systemctl` の状態表示と食い違うことがあります（detach 自体はどちらでも正しく行われます）。
+> To temporarily pause while running as a service, use `ad-attach service stop`. `ad-attach stop`
+> (= `daemon stop`) is for foreground / one-shot startup and directly kills the service's PID, so
+> it can disagree with `systemctl`'s status display (the detach itself is done correctly either
+> way).
 
-`stop`/`uninstall` 時の `SIGTERM` で CLI の shutdown ハンドラが
-`~/.claude/settings.json` から **ActraDeck の hook entry のみ** を可逆 detach します
-（あなたが追加した hooks は温存）。
+On `SIGTERM` at `stop`/`uninstall`, the CLI's shutdown handler reversibly detaches **only
+ActraDeck's hook entries** from `~/.claude/settings.json` (the hooks you added are preserved).
 
 ---
 
-## サービスを使わず単発で試す
+## Try it once without a service
 
 ```bash
-./scripts/ad-attach            # .env を読み、user scope で foreground 常駐（Ctrl-C で detach）
-./scripts/ad-attach stop       # 別端末から停止＋detach
-./scripts/ad-attach status     # 稼働状況・endpoint・配線先
-./scripts/ad-attach build      # sidecar をビルドし直す
+./scripts/ad-attach            # read .env, run in the foreground with user scope (Ctrl-C to detach)
+./scripts/ad-attach stop       # stop + detach from another terminal
+./scripts/ad-attach status     # running status · endpoint · wiring target
+./scripts/ad-attach build      # rebuild the sidecar
 ```
 
-`ad-attach -h` で全サブコマンドを表示します。
+`ad-attach -h` shows all subcommands.
 
 ---
 
-## 素の CLI（`agentmon`）で細かく制御する
+## Fine-grained control with the bare CLI (`agentmon`)
 
-`ad-attach` は下記 `agentmon attach`（= `apps/sidecar/dist/cli.js`）の薄いラッパです。
+`ad-attach` is a thin wrapper over `agentmon attach` (= `apps/sidecar/dist/cli.js`) below.
 
 ```bash
-node apps/sidecar/dist/cli.js attach --scope user --yes      # user scope（どこでも）
-node apps/sidecar/dist/cli.js attach --dry-run               # 配線内容を確認（書き込まない）
-node apps/sidecar/dist/cli.js attach                         # 既定 project-local（このリポジトリのみ）
+node apps/sidecar/dist/cli.js attach --scope user --yes      # user scope (anywhere)
+node apps/sidecar/dist/cli.js attach --dry-run               # check the wiring content (does not write)
+node apps/sidecar/dist/cli.js attach                         # default project-local (this repository only)
 node apps/sidecar/dist/cli.js daemon stop --scope user
 node apps/sidecar/dist/cli.js daemon status --scope user
 ```
 
-scope と安全ガード:
+Scope and safety guards:
 
-| scope | 配線先 | 備考 |
+| scope | Wiring target | Notes |
 |---|---|---|
-| `project-local`（既定） | `<cwd>/.claude/settings.local.json` | gitignore 対象。1 リポジトリのみ。 |
-| `project` | `<cwd>/.claude/settings.json` | 共有。`--yes` 必須。literal token-mode は **拒否**（tracked file に nonce 漏洩）→ `--token-mode env` か project-local を使う。 |
-| `user` | `~/.claude/settings.json` | グローバル＝「どこでも」。`--yes` 必須。`ad-attach` はこれを使う。 |
+| `project-local` (default) | `<cwd>/.claude/settings.local.json` | gitignored. One repository only. |
+| `project` | `<cwd>/.claude/settings.json` | Shared. `--yes` required. literal token-mode is **rejected** (a nonce would leak into a tracked file) → use `--token-mode env` or project-local. |
+| `user` | `~/.claude/settings.json` | Global = "anywhere". `--yes` required. `ad-attach` uses this. |
 
-- `user`/`project` scope は共有/グローバル設定の書き換えなので、`--yes`（または確認応答）が
-  無いと**安全側 deny で中止**します。`ad-attach` は user scope に `--yes` を付けて起動します。
-- token-mode は **literal 既定**。user scope は git-tracked でないため nonce 平文を置いても
-  漏洩対象外で、かつ「配線するだけで効く」を保証します（`env` mode は CC 起動 shell に
-  `ACTRADECK_HOOK_TOKEN` の export が必要となり「どこからでも」要件を壊します）。
+- `user`/`project` scope rewrites shared/global settings, so without `--yes` (or a confirmation
+  response) it **aborts with a safe-side deny**. `ad-attach` starts with `--yes` for user scope.
+- token-mode is **literal by default**. Because user scope is not git-tracked, placing a nonce in
+  plaintext is not a leak target, and it guarantees "just wiring makes it work" (`env` mode
+  requires exporting `ACTRADECK_HOOK_TOKEN` in CC's startup shell, which breaks the "from
+  anywhere" requirement).
 
 ---
 
-## 承認の再起動跨ぎ永続化（Persistent Approval Allowlist・ADR 019ee0c0）
+## Persistent approval allowlist across restarts (Persistent Approval Allowlist · ADR 019ee0c0)
 
-同じコマンドの承認を毎回求められる手間を、**危険でない操作に限り**減らす opt-in 機能。
-UI の承認カードで「再起動後も許可」を選ぶと、その操作の署名（`sha256`・生コマンドは保存しない）が
-`~/.actradeck/approvals/allowlist.json`（`0600`）へ記録され、再起動を跨いでも同一コマンド・同一 repo
-なら UI を経ず自動許可されます。
+An opt-in feature that reduces the hassle of being asked for approval of the same command every
+time, **only for non-dangerous operations**. When you choose "allow after restart" on a UI
+approval card, that operation's signature (`sha256` · the raw command is not stored) is recorded
+into `~/.actradeck/approvals/allowlist.json` (`0600`), and the same command · same repo is
+auto-allowed across restarts without going through the UI.
 
-**既定 OFF**。有効化と調整は環境変数で行います:
+**Default OFF**. Enabling and tuning are done via environment variables:
 
-| 環境変数 | 既定 | 役割 |
+| Environment variable | Default | Role |
 |---|---|---|
-| `ACTRADECK_PERSIST_APPROVALS` | （未設定=OFF） | `1` / `true` で永続化を有効化。OFF のときは記録済みエントリも honor しない（kill-switch）。 |
-| `ACTRADECK_PERSIST_APPROVALS_TTL_MS` | `604800000`（7 日） | 永続 grant の TTL（自動失効）。`[60000, 7776000000]`（1 分〜90 日）に clamp。 |
+| `ACTRADECK_PERSIST_APPROVALS` | (unset=OFF) | `1` / `true` enables persistence. When OFF, even recorded entries are not honored (kill-switch). |
+| `ACTRADECK_PERSIST_APPROVALS_TTL_MS` | `604800000` (7 days) | The TTL of a persistent grant (auto-expiry). Clamped to `[60000, 7776000000]` (1 minute–90 days). |
 
-**永続化の対象は「構造的に単純で危険 program を含まない」medium-risk の bash コマンドのみ**。
-次は「再起動後も許可」を出さず、毎回（またはセッション内）確認のままです（恒久迂回を防ぐため）:
+**The persistence target is only medium-risk bash commands that are "structurally simple and
+contain no dangerous program".** The following do not get "allow after restart" and remain a
+per-time (or per-session) confirmation (to prevent a permanent bypass):
 
-- high-risk（`rm -rf` 等）/ secret 混入 / `.env`・credential 編集 / MCP / WebFetch
-- 合成メタ文字を含むコマンド（パイプ `|`、コマンド置換 `$(…)`/`` `…` ``、プロセス置換 `<(…)`、
-  連結 `&&`/`;`、リダイレクト `>`/`<`、サブシェル）→ `curl … | sh` / `. <(curl …)` 等を構造的に除外
-- 先頭 program が危険集合: 権限昇格（`sudo`/`su`/`doas`/`pkexec`）/ shell 起動（`sh -c` 等）/
-  言語インタプリタ inline（`node -e`/`python3 -c`/`perl -e`/`ruby -e`/`php -r` 等の任意コード実行）/
-  公開（`npm`/`pnpm`/`yarn publish`）/ network-exec（`curl`/`wget`/`ssh` 等）/ ラッパ（`env`/`xargs` 等）/
-  破壊的ファイルシステム・システム変更（`chown -R`/`chgrp -R`（不可逆）/ `chmod`/`rm`/`dd`/`mv`/`ln`/`kill` 等）
-- `find … -exec`/`-execdir`/`-ok`（配下で任意コマンド実行）
+- high-risk (`rm -rf`, etc.) / secret-laden / `.env`·credential edits / MCP / WebFetch
+- commands containing composite metacharacters (pipe `|`, command substitution `$(…)`/`` `…` ``,
+  process substitution `<(…)`, concatenation `&&`/`;`, redirection `>`/`<`, subshells) →
+  structurally excluding `curl … | sh` / `. <(curl …)`, etc.
+- the leading program being in the dangerous set: privilege escalation (`sudo`/`su`/`doas`/
+  `pkexec`) / shell invocation (`sh -c`, etc.) / language interpreter inline (`node -e`/`python3
+  -c`/`perl -e`/`ruby -e`/`php -r`, etc. arbitrary code execution) / publishing (`npm`/`pnpm`/
+  `yarn publish`) / network-exec (`curl`/`wget`/`ssh`, etc.) / wrappers (`env`/`xargs`, etc.) /
+  destructive filesystem·system changes (`chown -R`/`chgrp -R` (irreversible) / `chmod`/`rm`/
+  `dd`/`mv`/`ln`/`kill`, etc.)
+- `find … -exec`/`-execdir`/`-ok` (arbitrary command execution underneath)
 
-（例: `find /tmp/build -delete` は永続可。`sudo systemctl restart x` / `node -e "…"` / `curl … | sh` /
-`chown -R me /srv` は永続不可＝毎回確認。実用上、永続可になるのは `find … -delete` のような
-限定的な medium コマンドのみ。日常的な低リスク操作はそもそも承認カードを出しません。）
+(Example: `find /tmp/build -delete` can be persisted. `sudo systemctl restart x` / `node -e
+"…"` / `curl … | sh` / `chown -R me /srv` cannot be persisted = confirm every time. In
+practice, only a limited set of medium commands like `find … -delete` become persistable.
+Everyday low-risk operations do not raise an approval card in the first place.)
 
-失効・確認は **in-UI パネル**または **CLI** の二経路で行えます（PAL-v2・ADR 019ee147）:
+Revocation · review can be done via two paths, an **in-UI panel** or the **CLI** (PAL-v2 · ADR
+019ee147):
 
-- **in-UI**: Cockpit の Session 詳細にある「永続承認（この端末）」パネルで一覧・失効（machine-global。
-  一覧は遅延 pull、失効は POST で除去。永続化 OFF 時は dormant エントリも掃除可）。
+- **in-UI**: list and revoke in the "Persistent approvals (this machine)" panel in the cockpit's
+  Session detail (machine-global. The list is a lazy pull, revoke is a POST removal. When
+  persistence is OFF, even dormant entries can be swept).
 - **CLI**:
 
 ```bash
-node apps/sidecar/dist/cli.js approvals list                 # 永続承認を一覧（署名・repo・残り期限）
-node apps/sidecar/dist/cli.js approvals revoke <sig|prefix>  # 署名（完全一致 or 一意プレフィックス）を失効
-node apps/sidecar/dist/cli.js approvals clear                # 全永続承認を削除
+node apps/sidecar/dist/cli.js approvals list                 # list persistent approvals (signature · repo · remaining TTL)
+node apps/sidecar/dist/cli.js approvals revoke <sig|prefix>  # revoke a signature (exact match or unique prefix)
+node apps/sidecar/dist/cli.js approvals clear                # delete all persistent approvals
 ```
 
-セキュリティ前提: ストアは `file-lock` と同じく **single-operator / local-fs** 前提（`~/.actradeck`・
-`0600`）。書き込み権はユーザー権限と同一信頼境界（同権限の攻撃者は元来コマンド実行可能）。
+Security assumption: the store is, like `file-lock`, a **single-operator / local-fs** assumption
+(`~/.actradeck` · `0600`). Write access is the same trust boundary as the user's own privilege
+(an attacker with the same privilege could already execute commands).
 
 ---
 
-## 制約（Attach は起動非所有・制御限定）
+## Constraints (Attach does not own startup · control is limited)
 
-- **停止制御は非対応**: Attach 対象 CC は daemon の子プロセスではないため、interrupt は
-  非所有 PID を kill せず **no-op**（安全側）。
-- **Claude Code の承認 relay は対応**: Claude Code Attach は hooks の応答経路で cockpit から
-  allow / deny を返せます。一方で ActraDeck が起動を所有しないため、停止制御とは別物です。
-- **codex は観測専用**: 素の Codex TUI は Codex Attach（`agentmon codex attach` / `ad-attach codex install`）が
-  rollout JSONL を passive tail して観測します（codex を spawn/kill しない）。承認の書き戻し（interrupt/approval relay）は
-  CC 経路のみで、codex には適用しません（observe-only）。これは**未実装でなく構造的な制約**です — rollout JSONL は
-  append-only の事後ログで、tailer は read-only、codex TUI へ決定を差し戻すチャネルが存在しません。
-- **cockpit から codex 承認を relay したいなら Managed Mode**: リポジトリで `./scripts/actradeck codex "<タスク>"`（1 コマンドの薄いラッパ
-  = 内部で `agentmon codex -- "<prompt>"` = `node apps/sidecar/dist/cli.js codex -- "<prompt>"`）
-  で起動すると、ActraDeck が Codex を App Server 経由で spawn し、その approval flow を cockpit カードへ中継して
-  allow / deny / allow-for-session を返せます（command / file / legacy-exec / legacy-patch は allow・deny 両方向。
-  タイムアウト・child 消失時は安全側 deny に倒します）。**MVP 制限（正直開示）**: `item/permissions` の profile grant は
-  現状 **deny 相当（空 grant）のみ**で、cockpit からの「許可」で追加権限を付与しません（安全側・over-permit しない）。
-  `acceptWithExecpolicyAmendment` / `applyNetworkPolicyAmendment` 等の advanced 変種も MVP では送出しません。
-- **Managed Mode の起動サーフェス（正直開示）**: `./scripts/actradeck codex` は headless な Codex **App Server**
-  を起動します（素の Codex **TUI ではない**）。プロンプトは **1 発 passthrough**（multi-turn は未配線）で、
-  そのセッションの間 **foreground を占有**します（`up` の常駐 4 ティアとは別プロセス・Ctrl-C で終了）。
-  前提として cockpit stack（`./scripts/actradeck up` = backend/webui）が稼働している必要があり、sidecar dist
-  未ビルドなら `build` を促して停止します。**既存の Attach セッションを後から Managed へ切り替える retrofit は不可**
-  （Managed は起動時に App Server 経由で spawn する経路のため）。承認 relay + 予防はこの Managed 起動でのみ有効で、
-  素の Codex TUI（Attach 観測）は検知のみです。
-- 完全同期は非保証（hook 駆動。詳細は plan.md §11B / ADR 019ea476 D0）。
+- **Stop control is unsupported**: because the Attach-target CC is not the daemon's child
+  process, interrupt does not kill a non-owned PID and is a **no-op** (safe side).
+- **Claude Code's approval relay is supported**: Claude Code Attach can return allow / deny from
+  the cockpit via the hooks' response path. Meanwhile, because ActraDeck does not own startup,
+  this is separate from stop control.
+- **codex is observation-only**: the bare Codex TUI is observed by Codex Attach (`agentmon codex
+  attach` / `ad-attach codex install`) passively tailing the rollout JSONL (without
+  spawning/killing codex). The write-back of approvals (interrupt/approval relay) is CC-path only
+  and does not apply to codex (observe-only). This is **not unimplemented but a structural
+  constraint** — the rollout JSONL is an append-only after-the-fact log, the tailer is
+  read-only, and no channel exists to push decisions back into the codex TUI.
+- **To relay codex approvals from the cockpit, use Managed Mode**: if you start with
+  `./scripts/actradeck codex "<task>"` (a one-command thin wrapper = internally `agentmon codex
+  -- "<prompt>"` = `node apps/sidecar/dist/cli.js codex -- "<prompt>"`) in a repository, ActraDeck
+  spawns Codex via the App Server, relays its approval flow to cockpit cards, and can return allow
+  / deny / allow-for-session (command / file / legacy-exec / legacy-patch are allow · deny both
+  directions. On timeout · child loss it falls to a safe-side deny). **MVP limitation (honest
+  disclosure)**: the profile grant of `item/permissions` is currently **deny-equivalent (empty
+  grant) only**, and an "allow" from the cockpit does not grant additional permissions (safe side
+  · does not over-permit). Advanced variants like `acceptWithExecpolicyAmendment` /
+  `applyNetworkPolicyAmendment` are also not sent in the MVP.
+- **The startup surface of Managed Mode (honest disclosure)**: `./scripts/actradeck codex` starts
+  a headless Codex **App Server** (not the bare Codex **TUI**). The prompt is a **single
+  passthrough** (multi-turn is not wired), and it **occupies the foreground** for the duration of
+  that session (a separate process from the daemonized 4 tiers of `up` · Ctrl-C ends it). It
+  requires the cockpit stack (`./scripts/actradeck up` = backend/webui) to be running, and if the
+  sidecar dist is not built it stops prompting you to `build`. **A retrofit that later switches an
+  existing Attach session to Managed is not possible** (because Managed is a path that spawns via
+  the App Server at startup). Approval relay + prevention are effective only with this Managed
+  startup; the bare Codex TUI (Attach observation) is detection only.
+- Complete synchronization is not guaranteed (hook-driven. Details in plan.md §11B / ADR 019ea476
+  D0).
 
 ---
 
-## トラブルシュート
+## Troubleshooting
 
-| 症状 | 原因/対処 |
+| Symptom | Cause/remedy |
 |---|---|
-| 一覧に出ない | backend/webui 未起動、または `INGEST_TOKEN` が backend と不一致（`ad-attach service logs` で 401 を確認）。 |
-| `dist/cli.js が無い` | `./scripts/ad-attach build`（`ad-attach` は自動ビルドも試みます）。 |
-| node 更新後にサービスが起動しない（`203/EXEC` 等） | unit / plist に旧 node 絶対パスが残存。`./scripts/ad-attach install` を再実行して更新。 |
-| ログアウトで止まる（Linux） | `loginctl enable-linger "$USER"`。 |
-| ログアウトで止まる（macOS） | LaunchAgent はログインセッション常駐（再ログインで自動復帰）。ログアウト後も残す常駐は root `LaunchDaemon` が要るため対象外。 |
-| 設定を元に戻したい | `./scripts/ad-attach uninstall`（`~/.claude/settings.json` から ActraDeck hooks を detach）。 |
+| Not in the list | backend/webui not started, or `INGEST_TOKEN` mismatched with the backend (check for 401 in `ad-attach service logs`). |
+| `dist/cli.js not present` | `./scripts/ad-attach build` (`ad-attach` also attempts an auto-build). |
+| Service does not start after node update (`203/EXEC`, etc.) | The old node absolute path lingers in the unit / plist. Re-run `./scripts/ad-attach install` to update. |
+| Stops on logout (Linux) | `loginctl enable-linger "$USER"`. |
+| Stops on logout (macOS) | A LaunchAgent persists per login session (auto-recovers on re-login). Persistence that survives logout requires a root `LaunchDaemon` and is out of scope. |
+| Want to revert the settings | `./scripts/ad-attach uninstall` (detaches ActraDeck hooks from `~/.claude/settings.json`). |

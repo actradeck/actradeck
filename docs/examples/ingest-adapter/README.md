@@ -1,82 +1,90 @@
-# ingest-adapter — 最小の ActraDeck 取込アダプタ例
+# ingest-adapter — a minimal ActraDeck ingestion adapter example
 
-任意の外部ツール/CLI の stdout を [ActraDeck 公開取込コントラクト](../../ingestion-contract.md)
-の NormalizedEvent へ写像し、backend の `POST /ingest` へ直接送る、**依存ゼロ (Node 組込みのみ)**
-の単一ファイル実装です (`adapter.mjs`)。
+> 日本語版: [README.ja.md](./README.ja.md)
 
-自分のツールを ActraDeck に載せるための最小テンプレートとして使えます。
+A **dependency-zero (Node built-ins only)** single-file implementation (`adapter.mjs`) that
+maps the stdout of any external tool/CLI into the NormalizedEvent of the
+[ActraDeck public ingestion contract](../../ingestion-contract.md) and POSTs it directly to
+the backend's `POST /ingest`.
 
-## 何をするか
+Use it as a minimal template for putting your own tool onto ActraDeck.
 
-外部ツールの stdout 各行を、次のように ActraDeck のイベントへ写像します:
+## What it does
 
-| タイミング | 送るイベント |
+It maps each line of an external tool's stdout into ActraDeck events as follows:
+
+| Timing | Event(s) sent |
 |---|---|
-| 起動時 | `session.started` + `command.started` |
-| stdout 1 行ごと | `command.output.delta` |
-| EOF (プロセス終了) | `command.completed` + `session.ended` |
+| On startup | `session.started` + `command.started` |
+| Per stdout line | `command.output.delta` |
+| On EOF (process exit) | `command.completed` + `session.ended` |
 
-- `provider` は自分のツールの **slug** (WHO・`^[a-z][a-z0-9_-]{0,31}$`)。
-- `source` は必ず **`external`** (HOW・第三者直取込)。
-- `event_id` は UUIDv7 を自前採番 (ActraDeck は UUIDv7 のみ受理)。
-- 入力行はそのまま端末にも pass-through するので、既存のパイプに割り込ませても表示は保てます。
+- `provider` is your tool's **slug** (WHO · `^[a-z][a-z0-9_-]{0,31}$`).
+- `source` is always **`external`** (HOW · third-party direct ingestion).
+- `event_id` is a UUIDv7 you mint yourself (ActraDeck only accepts UUIDv7).
+- Input lines are also passed through to the terminal verbatim, so display is preserved even
+  when you splice the adapter into an existing pipe.
 
-## 前提
+## Prerequisites
 
-- Node.js 20+ (グローバル `fetch` と `node:crypto` / `node:readline` を使用)。
-- 稼働中の ActraDeck backend (ローカル開発なら `apps/backend`)。その `INGEST_TOKEN` を控えておく。
+- Node.js 20+ (uses the global `fetch` and `node:crypto` / `node:readline`).
+- A running ActraDeck backend (for local development, `apps/backend`). Keep its `INGEST_TOKEN`
+  handy.
 
-## 実行方法
+## How to run
 
 ```bash
-# 1) backend の取込トークンと URL を設定
-export INGEST_TOKEN="<backend の INGEST_TOKEN と同じ値>"
-export ACTRADECK_INGEST_URL="http://127.0.0.1:55410"   # backend の HTTP ポート
+# 1) Set the ingestion token and URL of the backend
+export INGEST_TOKEN="<same value as the backend's INGEST_TOKEN>"
+export ACTRADECK_INGEST_URL="http://127.0.0.1:55410"   # the backend's HTTP port
 
-# 2) 自分のツールの provider slug (省略時 example_tool)
+# 2) Your tool's provider slug (defaults to example_tool)
 export ACTRADECK_PROVIDER="my_tool"
 
-# 3) 任意のコマンドの出力をパイプで流し込む (第1引数は表示ラベル)
+# 3) Pipe the output of any command into it (the 1st argument is the display label)
 my-cli --do-stuff | node adapter.mjs "my-cli --do-stuff"
 ```
 
-cockpit を開くと、`provider=my_tool` / `source=external` のセッションがライブ表示され、
-コマンド出力が delta として流れ、完了で終端します。
+Open the cockpit and a session with `provider=my_tool` / `source=external` appears live, the
+command output flows as deltas, and it terminates on completion.
 
-### 環境変数
+### Environment variables
 
-| 変数 | 既定 | 説明 |
+| Variable | Default | Description |
 |---|---|---|
-| `INGEST_TOKEN` | (必須) | backend の Bearer トークン。未設定なら exit 2。 |
-| `ACTRADECK_INGEST_URL` | `http://127.0.0.1:55410` | backend のベース URL (`/ingest` を付けて POST)。 |
-| `ACTRADECK_PROVIDER` | `example_tool` | 自ツールの provider slug。非 slug なら exit 2。 |
-| `ACTRADECK_SESSION` | 自動採番 | canonical session_id を固定したい場合に指定。 |
+| `INGEST_TOKEN` | (required) | The backend's Bearer token. Exits 2 if unset. |
+| `ACTRADECK_INGEST_URL` | `http://127.0.0.1:55410` | The backend's base URL (`/ingest` is appended for the POST). |
+| `ACTRADECK_PROVIDER` | `example_tool` | Your tool's provider slug. Exits 2 if not a valid slug. |
+| `ACTRADECK_SESSION` | auto-minted | Specify to pin the canonical session_id. |
 
-第1コマンドライン引数は `command.started` / `command.completed` の表示ラベルになります。
+The 1st command-line argument becomes the display label for `command.started` / `command.completed`.
 
-## 動作確認 (この例が実際に通ることの検証)
+## Verifying it works (that this example actually goes through)
 
-このアダプタは隔離 backend (spare ポート + 実 PostgreSQL) に対して実走検証済みです:
+This adapter has been verified end-to-end against an isolated backend (spare port + real
+PostgreSQL):
 
 ```bash
-# 例: 実コマンドの出力を流す
+# e.g. stream the output of a real command
 git log --oneline -3 | node adapter.mjs "git log --oneline -3"
-# => events に session.started / command.started / command.output.delta×3 /
-#    command.completed / session.ended が provider=my_tool・source=external で着地する
+# => events land as session.started / command.started / command.output.delta×3 /
+#    command.completed / session.ended with provider=my_tool · source=external
 ```
 
-秘匿値を含む行を流しても、**backend の ingress redaction 床**が保存前にマスクします
-(コントラクト §5)。例えば `ghp_...` トークンを含む行は PG に `[REDACTED:github-token]` として
-着地し、raw 値は保存されません (アダプタ側の追加実装は不要)。ただしアダプタ側でも不要な機微情報は
-そもそも送らないのが安全です。
+Even if you stream lines containing secrets, the **backend's ingress redaction floor** masks
+them before storage (contract §5). For example, a line containing a `ghp_...` token lands in
+PG as `[REDACTED:github-token]` and the raw value is not stored (no extra work on the adapter
+side is required). That said, it is safest not to send unnecessary sensitive information from
+the adapter in the first place.
 
-## 注意 (production 品質にするには)
+## Notes (to make it production quality)
 
-この例は**最小**です。実運用アダプタでは次を検討してください:
+This example is **minimal**. For a production adapter, consider the following:
 
-- **バッチ送信**: 1 行 1 POST ではなく、`command.output.delta` を配列でまとめて `POST /ingest`
-  (バッチ受理) に送りスループットを上げる。
-- **再送/バックオフ**: `fetch` 失敗時のリトライ (冪等キー = `event_id` なので安全に再送可)。
-- **豊富な写像**: ツール固有のイベント (ファイル差分・承認要求・ツール呼び出し) を、対応する
-  `event_type` (`file.change.proposed` / `tool.permission.requested` 等) へ写像する。
-  `event_type` は closed enum ゆえ、未知の種別は正規化してから送る (コントラクト §4.3)。
+- **Batch sending**: instead of 1 line = 1 POST, send `command.output.delta` batched as an
+  array to `POST /ingest` (which accepts batches) to raise throughput.
+- **Retry/backoff**: retry on `fetch` failure (the idempotency key = `event_id`, so re-sending
+  is safe).
+- **Richer mapping**: map tool-specific events (file diffs, approval requests, tool calls) to
+  the corresponding `event_type` (`file.change.proposed` / `tool.permission.requested`, etc.).
+  Because `event_type` is a closed enum, normalize unknown kinds before sending (contract §4.3).
