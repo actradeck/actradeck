@@ -112,8 +112,16 @@ jobs:
       #     - git diff --exit-code landing/ で committed 生成物 == 再生成 を assert (source drift 込み)。
       #   jsdom は apps/webui 依存 (install 済)。実害は marketing HTML の churn のみ (secret/correctness
       #   非該当) だが、silent drift で公開ページが陳腐化するのを防ぐ軽量ゲート。
+      #   **公開ミラーで self-adapt**: `landing/` は private 専用で OSS mirror から除外され (LP は
+      #   landing-sync で別 website repo へ同期・decision 019f051f)、公開ミラーには存在しない。
+      #   landing/ 不在なら gate を graceful skip する (release prep gate と同じ mirror 自己適応)。
+      #   これが無いと gen-ja-topic-pages が landing/ source の ENOENT で公開ミラー CI を赤化させる。
       - name: Landing gen idempotency + drift gate (docs-lp QA-1)
         run: |
+          if [ ! -d landing ]; then
+            echo "landing/ absent (OSS mirror surface) — landing gate is private-only; skipping."
+            exit 0
+          fi
           node scripts/gen-ja-topic-pages.mjs
           node scripts/gen-ja-topic-pages.mjs
           node scripts/verify-en-landing.mjs
