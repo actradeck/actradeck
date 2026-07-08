@@ -6,20 +6,20 @@
 > [Publishing](#publishing-the-signed-image-maintainers)).
 
 The Docker image gets you a running **cockpit** with one command and no external
-database. It is the fastest way to *look at* ActraDeck; it is **not** the whole product.
+database. It is the fastest way to _look at_ ActraDeck; it is **not** the whole product.
 Read [What runs where](#what-runs-where-the-honest-support-matrix) before you rely on it.
 
 ## What runs where (the honest support matrix)
 
 ActraDeck is four tiers plus a database. They do **not** all belong in a container.
 
-| Tier | Where it runs | Why |
-| --- | --- | --- |
-| **backend** (ingestion + realtime, `:55410`) | **container** | pure network service |
-| **webui / BFF** (Cockpit UI, `:55400`) | **container** | pure network service |
-| **embedded PostgreSQL** (PGlite) | **container** (`/data` volume) | in-process; no external DB needed |
-| **sidecar** — Claude Code attach (`ad-attach`) | **host** | observes the host's Claude Code **hooks** + process liveness |
-| **sidecar** — Codex attach (`codex attach`) | **host** | tails the host's Codex **rollout files** (`CODEX_HOME`) |
+| Tier                                           | Where it runs                  | Why                                                          |
+| ---------------------------------------------- | ------------------------------ | ------------------------------------------------------------ |
+| **backend** (ingestion + realtime, `:55410`)   | **container**                  | pure network service                                         |
+| **webui / BFF** (Cockpit UI, `:55400`)         | **container**                  | pure network service                                         |
+| **embedded PostgreSQL** (PGlite)               | **container** (`/data` volume) | in-process; no external DB needed                            |
+| **sidecar** — Claude Code attach (`ad-attach`) | **host**                       | observes the host's Claude Code **hooks** + process liveness |
+| **sidecar** — Codex attach (`codex attach`)    | **host**                       | tails the host's Codex **rollout files** (`CODEX_HOME`)      |
 
 The sidecar's entire job is to watch coding-agent CLIs **on your machine** — their hook
 callbacks, their rollout JSONL, whether the process is alive. Those live in the host's
@@ -29,7 +29,7 @@ observation. The container therefore runs the **cockpit stack**, and the sidecar
 the host and connects back over loopback. This mirrors how `scripts/actradeck` already
 splits the cockpit server tier from the observation-daemon tier.
 
-**Consequence:** `docker run` alone gives you a cockpit that is *up* but *empty* until a
+**Consequence:** `docker run` alone gives you a cockpit that is _up_ but _empty_ until a
 host-side agent is wired to it. That is expected and honest — the same way the native
 quickstart's cockpit stays empty until you run an agent.
 
@@ -54,7 +54,7 @@ image). To pin your own, pass them explicitly (see [Configuration](#configuratio
 
 ### Run the 30-second safety demo (no host wiring)
 
-The cockpit opens *empty* — no agent is wired yet. To see what ActraDeck actually does
+The cockpit opens _empty_ — no agent is wired yet. To see what ActraDeck actually does
 before wiring anything, run the built-in demo straight from the empty board:
 
 1. Open <http://localhost:55400>.
@@ -72,7 +72,7 @@ stack against the real ingestion → event-store → projection pipeline.
 
 **Honest scope of the demo** (it is a throwaway teaching aid, not your agents):
 
-- Observing *your own* agents still requires a host-side sidecar (see
+- Observing _your own_ agents still requires a host-side sidecar (see
   [Observing a host agent](#observing-a-host-agent-wire-the-sidecar)). The demo does not
   observe anything on your machine.
 - "Block" here proves the **event flow + approval card + audit trail**, not the halting of
@@ -84,6 +84,11 @@ stack against the real ingestion → event-store → projection pipeline.
 - The **redaction is real** — it is the same backend ingress redaction floor that protects
   every stored event, not a demo-only shim.
 - This is unrelated to Codex Attach approvals (Codex rollout tail is observe-only).
+- The demo driver is TypeScript executed through `tsx` from the backend **source** tree
+  (`apps/backend/src/safety-demo-driver.ts`). The shipped image copies that source, so the
+  demo works out of the box. A custom **dist-only** deployment (one that strips `src/`)
+  disables the demo: the CTA fails loud with `503` (never a silent no-op), while the rest
+  of the cockpit keeps working.
 
 ### Build it yourself
 
@@ -141,14 +146,14 @@ unchanged by Docker — see [`docs/attach-mode.md`](./attach-mode.md).
 Everything is overridable with `-e` (nothing is required — sensible container defaults
 are applied by `scripts/docker-entrypoint.sh`).
 
-| Env var | Container default | Meaning |
-| --- | --- | --- |
-| `INGEST_TOKEN` | generated at boot | sidecar → backend ingestion auth. **Set it** to wire a host sidecar. |
-| `REALTIME_TOKEN` | generated at boot | backend → UI realtime auth. Set it if you proxy the UI. |
-| `ACTRADECK_WEBUI_PORT` | `55400` | Cockpit UI port inside the container. |
-| `ACTRADECK_BACKEND_PORT` | `55410` | Backend ingestion/realtime port inside the container. |
-| `ACTRADECK_PGDATA` | `/data/pgdata` | Embedded DB data dir (mount `/data` to persist). |
-| `DATABASE_URL` | _(unset)_ | Set to use an **external** Postgres instead of the embedded DB. |
+| Env var                  | Container default | Meaning                                                              |
+| ------------------------ | ----------------- | -------------------------------------------------------------------- |
+| `INGEST_TOKEN`           | generated at boot | sidecar → backend ingestion auth. **Set it** to wire a host sidecar. |
+| `REALTIME_TOKEN`         | generated at boot | backend → UI realtime auth. Set it if you proxy the UI.              |
+| `ACTRADECK_WEBUI_PORT`   | `55400`           | Cockpit UI port inside the container.                                |
+| `ACTRADECK_BACKEND_PORT` | `55410`           | Backend ingestion/realtime port inside the container.                |
+| `ACTRADECK_PGDATA`       | `/data/pgdata`    | Embedded DB data dir (mount `/data` to persist).                     |
+| `DATABASE_URL`           | _(unset)_         | Set to use an **external** Postgres instead of the embedded DB.      |
 
 Secrets are only ever taken from the environment or generated in-process; the image ships
 tokenless and the entrypoint never logs a token value.
@@ -173,7 +178,7 @@ native (non-container) external-DB path; it is independent of this image.
 ## Verifying the image signature
 
 Published images are signed **keyless** (OIDC → Sigstore) and carry a SLSA build
-provenance attestation of the image digest — a *different* trust root from the product's
+provenance attestation of the image digest — a _different_ trust root from the product's
 own audit-export signature, and never reused (ADR 0013 §D3). Verify before you run:
 
 ```bash
@@ -219,7 +224,7 @@ built image, it catches a real leak regardless of how the workflow YAML is shape
 
 The invariant checks in [`scripts/test-release-prep.sh`](../scripts/test-release-prep.sh)
 (`INV-DOCKER-SCAN-BEFORE-PUSH`, `INV-DOCKERFILE-RUNTIME-ALLOWLIST`) are **secondary**: they only
-assert that the workflows *wire the real scan in correctly* (present, before the push, not
+assert that the workflows _wire the real scan in correctly_ (present, before the push, not
 disabled or no-op) and that the Dockerfile does not broad-copy the whole tree. A gap in one of
 those config-checkers cannot ship a leak on its own — any change to baked-in content re-fires the
 authoritative scan in CI.
@@ -227,16 +232,16 @@ authoritative scan in CI.
 ### How publishing is gated (the parallel structure for the publish face)
 
 Publishing to GHCR is defended in **three layers**, ordered from static to authoritative — the
-same *authoritative-vs-secondary* shape as the leak face above:
+same _authoritative-vs-secondary_ shape as the leak face above:
 
 1. **closed-enum whitelist** (`INV-IF-GATE-PARSER`) — the job `if:` may reference only the gate's
    own inputs (`github.ref`, `github.event_name`, `vars.ENABLE_GHCR_PUBLISH`), so a bypass that
-   pulls in an unrelated context is *unexpressible*.
+   pulls in an unrelated context is _unexpressible_.
 2. **canonical AST pin** (`INV-GHCR-PUBLISH-GATED`) — the job `if:` must match a canonical
-   expression exactly, so any *enum-inside* weakening (which a sampled truth-table would miss)
+   expression exactly, so any _enum-inside_ weakening (which a sampled truth-table would miss)
    breaks the pin and forces a review-visible change.
 3. **runtime publish guard** (`INV-PUBLISH-RUNTIME-GUARD`) — the **authoritative** layer: a step
-   that runs *before the push* and **exits non-zero** unless the ref is a tag AND
+   that runs _before the push_ and **exits non-zero** unless the ref is a tag AND
    (`workflow_dispatch` OR `vars.ENABLE_GHCR_PUBLISH == 'true'`) truly holds at run time. Even if
    the `if:` were weakened, this blocks the push. Like the leak scan, it is real behavior, not a
    YAML shape check; the two config-checkers above are secondary wiring checks around it.

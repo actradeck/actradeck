@@ -27,11 +27,9 @@
  *    の再 truncation。詳細は @actradeck/redaction redact-for-persist.ts。直 POST 経路の権威は backend。
  *  - **preClose**: graceful shutdown で接続を閉じる。
  */
-import { timingSafeEqual } from "node:crypto";
-
 import fastifyWebsocket from "@fastify/websocket";
 import { parseEvent } from "@actradeck/event-model";
-import { redactEventWithAuthoritativeCounts } from "@actradeck/redaction";
+import { redactEventWithAuthoritativeCounts, tokenEquals } from "@actradeck/redaction";
 import Fastify, {
   type FastifyInstance,
   type FastifyRequest,
@@ -97,16 +95,7 @@ export interface IngestionServerOptions {
 
 const DEFAULT_MAX_PAYLOAD = 1024 * 1024; // 1 MiB
 
-/**
- * 定数時間トークン比較 (タイミング攻撃耐性)。長さ不一致は即 false。
- */
-function tokenEquals(expected: string, provided: string | undefined): boolean {
-  if (!provided) return false;
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(provided, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
+// 定数時間トークン比較は @actradeck/redaction の正典 `tokenEquals` を使う (TDA-5 sweep で単一出所化)。
 
 /**
  * リクエストから bearer token を抽出する。

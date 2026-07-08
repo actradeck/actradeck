@@ -16,6 +16,7 @@
  */
 import { ActionTimeline } from "./ActionTimeline";
 import { formatCurrentAction } from "./action-units-display";
+import { MANAGED_CODEX_PREFIX } from "./managed-codex";
 import { interruptEnabledForState, type AckState, type ApprovalDecision } from "./approval-display";
 import { ApprovalCard } from "./ApprovalCard";
 import {
@@ -561,7 +562,7 @@ export function SessionDetailView({
                   // SEC-1/TDA-4: base tooltip は provider 非依存。Codex の Managed 導線追記は
                   // provider==="codex" の時のみ (claude-attach は承認 relay 可ゆえ Codex 導線を出さない)。
                   detail.provider === "codex"
-                    ? `${t("detail.captureMode.nonManaged.title")} ${t("detail.captureMode.nonManaged.codexHint")}`
+                    ? `${t("detail.captureMode.nonManaged.title")} ${t("detail.captureMode.nonManaged.codexHint", { cmd: MANAGED_CODEX_PREFIX })}`
                     : t("detail.captureMode.nonManaged.title")
                 }
               >

@@ -24,6 +24,11 @@ backend の `POST /ingest` へ直接送ります。
 - **プロジェクト単位**: `<project>/.opencode/plugins/adapter.js`
 - **グローバル**: `~/.config/opencode/plugins/adapter.js`
 
+> **設置は 1 箇所のみ** (プロジェクト単位 **か** グローバルの一方・両方に置かない)。opencode は
+> 両ディレクトリから plugin を読み込むため、両方に置くと factory が **二重起動**し、各イベントが
+> 毎回 **異なる `event_id`** で二重送出されます。backend の冪等は `event_id` 単位ゆえこの重複は
+> 吸収できません (§8)。
+
 環境変数を設定します。
 
 ```bash
@@ -103,7 +108,7 @@ opencode の観測面 (plugin フック) → ActraDeck `NormalizedEvent`。写�
 | `tool.execute.before` (bash 以外)            | `tool.started` / `running.tool_preparing`                 | read/edit/write/grep/glob/webfetch 等。**tool 引数 (`args`) を最小化せず転送**（§4・QA-5） |
 | `tool.execute.after` (bash 以外)             | `tool.completed` / `running.model_wait`                   | **tool 出力は非搭載**（源流最小化・§4） |
 | `session.diff`                               | `diff.updated`                                            | **counts のみ**・生 diff は送らない |
-| `session.error`                              | `error`                                                  | payload は `{message, retryable}` のみ (下記 §5) |
+| `session.error`                              | `error`                                                  | payload は `{kind, message, retryable}` のみ (`kind = "error"`・下記 §5) |
 | `session.idle`                               | `turn.completed` / `idle`                                 | **session.ended を捏造しない** (ADR D8) |
 
 **意図的 drop** (写像しない): `session.status` / `session.updated` / `message.updated` role=assistant
@@ -136,8 +141,8 @@ text・step-start・step-finish part / `catalog.updated` / `integration.updated`
   - **適用しない (backend 床に依存)**: **bash 以外の tool (`read`/`edit`/`write`/`grep`/…) は
     `tool.execute.before` の引数 (`args`) を最小化せず verbatim 転送します** (QA-5)。`write`/`edit` の
     `content`・`read` の `filePath` 等がそのまま送られ、secret は backend 床でのみ redaction されます。
-    **`write`/`edit` は未 grounding** (本 adapter は `read` 実発火のみで検証済・§6) で、これらの実引数
-    形状は実測前提です。機微を含む編集を扱うなら §4 冒頭の免責を再確認してください。
+    **`read`/`write`/`edit`/`webfetch` は grounding 済** (実 opencode run から捕獲・QA-5・§6) で、実引数
+    形状は実測です (前提でなく)。機微を含む編集を扱うなら §4 冒頭の免責を再確認してください。
 - **観測の限界 (QA-7)**: opencode は **session 終端シグナルを持たない**ため adapter は `session.ended`
   を **一切発行しません** (§3 の `session.idle` → `turn.completed(idle)`)。cockpit の「終わったか」判断は
   `turn.completed(idle)` の settling 信号 + liveness 合成 (process/event/stdout heartbeat) が担い、
@@ -188,6 +193,10 @@ opencode 1.17.14 の plugin ローダの実挙動は、公式 docs の記述と�
   正しくても**永遠にロードされません**。
 - **ローダは (走査対象ファイルの) 全 export を factory として呼び出します** (named も default も両方)。
   同じ factory を named と default で二重 export すると、hook が **二重登録**されます。
+- **ローダはプロジェクト単位とグローバルの両ディレクトリを走査します。** 両方
+  (`<project>/.opencode/plugins/` と `~/.config/opencode/plugins/`) に置くと factory が **二重起動**し、
+  各イベントが **コピーごとに異なる `event_id`** で二重送出されます。backend は `event_id` 単位で
+  重複排除する (payload 内容では見ない) ため 1 つにまとめられません — **設置は 1 箇所のみ** (§1)。
 - **非関数 export が 1 つでもあると、モジュール全体を silent reject します** (何も呼ばれない)。
   例えば `export const RING_CAP = 1000;` (数値) を 1 つ足すだけで、plugin ファイルごと捨てられ、
   hook が一切登録されません (エラーも出ません)。

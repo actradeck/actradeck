@@ -332,6 +332,21 @@ describe("INV-SAFETY-DEMO route (POST /realtime/demo/safety)", () => {
     const res = await app.inject({ method: "GET", url: "/realtime/demo/safety", headers: auth });
     expect(res.statusCode).toBe(404);
   });
+
+  it("SEC 注記 pin (sweep 019f38b9): content-type JSON + 空 body は 400 (fail-loud・5xx/起動なし)", async () => {
+    // Fastify は空 JSON body を content parser 段で FST_ERR_CTP_EMPTY_JSON_BODY として 400 にする。
+    // 実 client (use-safety-demo.ts) は常に body "{}" を送るため到達しないが、「空 body でも
+    // 5xx にならず・デモ子プロセスも起動しない」ことを回帰 pin する (脆さの開示・挙動固定)。
+    const { spawner, requests } = recordingSpawner();
+    await mount(new SafetyDemoLauncher({ ingestToken: "tok", spawner }));
+    const res = await app.inject({
+      method: "POST",
+      url: "/realtime/demo/safety",
+      headers: { ...auth, "content-type": "application/json" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(requests.length).toBe(0); // parser 段で弾かれ launcher は呼ばれない。
+  });
 });
 
 describe("INV-DEMO-SPAWN-PATH-INDEPENDENT: default spawner は pnpm でなく node(execPath)+tsx", () => {

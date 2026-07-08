@@ -128,6 +128,59 @@ describe("WsClient: inbound dispatch + publish", () => {
     store.close();
   });
 
+  // QA-2 (裁定 019f3ed6): **configured** client への不一致/欠落/非文字列 token は破棄される。
+  // isAuthorizedControl → canonical tokenEquals 委譲の falsifying pin — このテストが無いと
+  // isAuthorizedControl を常 true 化する mutant / canonical kill mutant が全緑で通っていた
+  // (回帰ネットの穴・無認証 peer の approval/interrupt/policy 注入バリア SEC-1 が無防備になる)。
+  it("drops approval/interrupt/policy.request with WRONG or MISSING token when a token IS configured (QA-2)", async () => {
+    const { port, conns } = await startServer();
+    const store = new EventStore(":memory:");
+    const TOKEN = "test-control-token-mismatch";
+    client = new WsClient({ url: `ws://127.0.0.1:${port}`, store, controlToken: TOKEN });
+    const approval = vi.fn();
+    const interrupt = vi.fn();
+    const policyRequest = vi.fn();
+    client.on("approval", approval);
+    client.on("interrupt", interrupt);
+    client.on("policyRequest", policyRequest);
+    client.connect();
+    for (let i = 0; i < 50 && conns.length === 0; i++) await sleep(10);
+    expect(conns.length).toBe(1);
+
+    // 同長の別値 (長さ先行 false でなく timingSafeEqual 本体で不一致になる敵対値)。
+    const wrongSameLen = TOKEN.slice(0, -1) + (TOKEN.endsWith("h") ? "x" : "h");
+    expect(wrongSameLen.length).toBe(TOKEN.length);
+    conns[0]!.send(
+      JSON.stringify({
+        type: "approval",
+        request_id: "r1",
+        decision: "allow",
+        token: wrongSameLen,
+      }),
+    );
+    conns[0]!.send(
+      JSON.stringify({ type: "approval", request_id: "r1", decision: "allow", token: "short" }),
+    );
+    conns[0]!.send(JSON.stringify({ type: "approval", request_id: "r1", decision: "allow" })); // 欠落
+    conns[0]!.send(JSON.stringify({ type: "interrupt", session_id: "s1", token: wrongSameLen }));
+    conns[0]!.send(JSON.stringify({ type: "interrupt", session_id: "s1", token: 42 })); // 非文字列
+    conns[0]!.send(
+      JSON.stringify({ type: "policy.request", request_id: "p1", op: "get", token: wrongSameLen }),
+    );
+    await sleep(40);
+    expect(approval, "wrong/missing token → drop approval").not.toHaveBeenCalled();
+    expect(interrupt, "wrong/non-string token → drop interrupt").not.toHaveBeenCalled();
+    expect(policyRequest, "wrong token → drop policy.request").not.toHaveBeenCalled();
+
+    // 生存証明: 同一接続で一致 token は依然 dispatch される (デッド接続による vacuous pass を排除)。
+    conns[0]!.send(
+      JSON.stringify({ type: "approval", request_id: "r2", decision: "allow", token: TOKEN }),
+    );
+    await sleep(40);
+    expect(approval).toHaveBeenCalledTimes(1);
+    store.close();
+  });
+
   // 3#SEC-1 (fail-safe): token 未設定クライアント (= backend 未統合) は inbound 制御を全破棄。
   it("drops ALL inbound approval/interrupt when no control token is configured (fail-safe)", async () => {
     const { port, conns } = await startServer();

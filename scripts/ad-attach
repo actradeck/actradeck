@@ -118,11 +118,17 @@ ensure_built() {
 }
 
 # .env を環境へ取り込む (foreground 起動時のみ。systemd は EnvironmentFile で読む)。
+# TDA-2 (sweep 019f397c): set -euo pipefail 下で malformed な .env の途中行 (KEY=$(failing) 等)
+# が set -e で ad-attach を不透明に abort させないよう best-effort 化する (actradeck の
+# source_env_guarded と同一意味論)。未ロード token は下流 backend の 401/起動エラーで可視化される
+# (.env は operator 作の KEY=VALUE という trust model 前提)。
 load_env() {
   if [ -f "$ENV_FILE" ]; then
     set -a
+    set +e
     # shellcheck disable=SC1090
     . "$ENV_FILE"
+    set -e
     set +a
   else
     err "[ad-attach] 警告: $ENV_FILE が無い。INGEST_TOKEN 未設定だと backend が 401 で ingestion を拒否します。"

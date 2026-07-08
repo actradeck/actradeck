@@ -8,12 +8,12 @@
  *
  * backend (Phase 3) 未完のため、検証では最小 WS sink (ws-sink.ts) で受ける。
  */
-import { timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 import { WebSocket } from "ws";
 
 import type { AgentVisibilityWire, PolicyCategory } from "@actradeck/event-model";
+import { tokenEquals } from "@actradeck/redaction";
 
 import type { EventStore } from "./store.js";
 
@@ -316,11 +316,8 @@ export class WsClient extends EventEmitter {
   private isAuthorizedControl(msgToken: unknown): boolean {
     const expected = this.controlToken;
     if (expected === undefined || expected.length === 0) return false; // backend 未統合 → 全破棄
-    if (typeof msgToken !== "string" || msgToken.length === 0) return false;
-    const a = Buffer.from(expected, "utf8");
-    const b = Buffer.from(msgToken, "utf8");
-    if (a.length !== b.length) return false; // timingSafeEqual は長さ一致前提
-    return timingSafeEqual(a, b);
+    // 比較本体は @actradeck/redaction の正典 tokenEquals (TDA-5 sweep で単一出所化・fail-safe deny)。
+    return tokenEquals(expected, msgToken);
   }
 
   get connected(): boolean {

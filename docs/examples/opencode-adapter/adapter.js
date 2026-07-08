@@ -370,21 +370,92 @@ function backoffMs(attempt) {
   return Math.min(2000, 200 * 2 ** attempt);
 }
 
+// ── fail-open 可観測性 (TDA-4b) ──────────────────────────────────────────────
+// fail-open は「opencode を壊さない」ために drop / mapping-error を **握り潰す** が、
+// 握り潰しが完全に silent だと運用時に「なぜ cockpit に出ないか」を診断できない。
+// そこで **原文非依存の件数** (drop 累計 / mapping-error 累計) を計上し、
+// env `ACTRADECK_ADAPTER_DEBUG` (非空) のときのみ **enum + 件数のみ** の診断を stderr へ出す。
+// NO-RAW: raw な event 内容・path・command・secret は一切書かない (kind/hook enum と非負整数のみ)。
+// production (flag 無し) では stderr へ何も書かず挙動は不変。
+// **module export しない** (loader-safe) — default factory のプロパティとして公開する。
+function isDebugEnabled(env) {
+  const e = env ?? (typeof process !== "undefined" ? process.env : {});
+  const v = e.ACTRADECK_ADAPTER_DEBUG;
+  return typeof v === "string" && v.length > 0;
+}
+
+// 診断カウンタ (drop / mapping-error)。件数は非負整数のみ。stderr 出力は debug 有効時のみ。
+// opts.env / opts.write はテスト注入用 (既定は process.env / process.stderr.write)。
+function createDiagnostics(opts = {}) {
+  const env = opts.env; // 省略時 isDebugEnabled が process.env を参照
+  const write =
+    typeof opts.write === "function"
+      ? opts.write
+      : (s) => {
+          if (typeof process !== "undefined" && process.stderr) process.stderr.write(s);
+        };
+  let dropCount = 0;
+  let mappingErrorCount = 0;
+  function writeDebug(line) {
+    if (!isDebugEnabled(env)) return;
+    // SEC-1 (裁定後 unblock): 診断 write は **決して throw を呼び元へ戻さない**。
+    // stderr が閉じた pipe (daemon 化 opencode) で EPIPE を投げると、noteDrop→enqueue→hook を
+    // 貫通して opencode を壊す (fail-open 契約の破れ)。debug 診断は best-effort ゆえ握り潰す
+    // (件数カウンタは既に更新済・診断が書けなくても drop 計数は保たれる)。
+    try {
+      write(`[actradeck-adapter] ${line}\n`);
+    } catch {
+      /* fail-open: 診断出力の失敗は enqueue/hook へ伝播させない */
+    }
+  }
+  return {
+    // reason は closed enum "ring-overflow" | "retry-cap"。n は今回落とした件数 (>=1)。
+    noteDrop(reason, n = 1) {
+      dropCount += n;
+      writeDebug(`drop ${reason} count=${dropCount}`);
+    },
+    // hook は closed enum "event" | "tool.before" | "tool.after"。
+    noteMappingError(hook) {
+      mappingErrorCount += 1;
+      writeDebug(`mapping-error hook=${hook} count=${mappingErrorCount}`);
+    },
+    drops: () => dropCount,
+    mappingErrors: () => mappingErrorCount,
+  };
+}
+
+// 写像フック共通の安全ラッパ。写像関数が throw したら diag へ計上し **空配列**を返す
+// (fail-open: opencode を壊さない)。factory の 3 フックと共有し、mapping-error を可観測にする。
+function safeMap(hook, fn, diag) {
+  try {
+    return fn();
+  } catch {
+    diag.noteMappingError(hook);
+    return [];
+  }
+}
+
 // opts (QA-2・全て任意・既定は production 挙動不変):
 //   fetchImpl  — 注入可能な fetch (既定 globalThis.fetch)。テストで失敗/記録 fetch を差せる。
 //   sleepImpl  — 注入可能な backoff sleep (既定 sleep)。テストで実時間待ちを無効化。
 //   autoDrain  — enqueue が自動 drain するか (既定 true)。テストで false にして ring を決定的に検査。
-// 返り値に pending()/size()/drain() を含め、有界リング/retry-drop/順序を外部から検証可能にする。
+//   diag       — 注入可能な診断カウンタ (TDA-4b・既定は内部生成)。factory は自身の diag を共有させる。
+// 返り値に pending()/size()/drain()/dropped() を含め、有界リング/retry-drop/順序を外部から検証可能にする。
 function createDelivery(config, opts = {}) {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const sleepImpl = opts.sleepImpl ?? sleep;
   const autoDrain = opts.autoDrain !== false;
+  const diag = opts.diag ?? createDiagnostics(); // TDA-4b: drop 可観測性
   const ring = [];
   let draining = false;
 
   function enqueue(ev) {
     ring.push(ev);
-    if (ring.length > RING_CAP) ring.splice(0, ring.length - RING_CAP); // 有界リング: 最古を drop
+    if (ring.length > RING_CAP) {
+      const overflow = ring.length - RING_CAP;
+      ring.splice(0, overflow); // 有界リング: 最古を drop
+      diag.noteDrop("ring-overflow", overflow); // TDA-4b: silent drop を計上
+    }
     if (autoDrain) void drain();
   }
 
@@ -428,7 +499,8 @@ function createDelivery(config, opts = {}) {
       }
       if (attempt < MAX_RETRY) await sleepImpl(backoffMs(attempt));
     }
-    // 再送上限を超えたら drop (fail-open)
+    // 再送上限を超えたら drop (fail-open)。TDA-4b: 落とした batch 件数を計上。
+    diag.noteDrop("retry-cap", batch.length);
   }
 
   return {
@@ -436,6 +508,8 @@ function createDelivery(config, opts = {}) {
     drain,
     pending: () => ring.slice(),
     size: () => ring.length,
+    // TDA-4b: ring 溢れ + retry 上限の drop 累計 (非負整数)。fail-open の可観測性。
+    dropped: () => diag.drops(),
   };
 }
 
@@ -450,7 +524,7 @@ function createDelivery(config, opts = {}) {
  * する (実測: 数値 `export const RING_CAP` があるとファイルごと捨てられ、hook が一切登録されない)。
  * よって本 plugin は **default 関数ただ 1 つだけを export** し、pure helpers/定数 (uuidv7 /
  * createAdapterState / mapEvent / mapToolBefore / mapToolAfter / mapCaptureLine / resolveConfig /
- * createDelivery / RING_CAP / MAX_RETRY) は **この default 関数のプロパティ**として付与する
+ * createDelivery / createDiagnostics / safeMap / RING_CAP / MAX_RETRY) は **この default 関数のプロパティ**として付与する
  * (末尾)。named export は使わない (ローダが factory として誤呼出し + 非関数で poison するため)。
  * 公式 docs の named-export 例と実挙動は乖離しており、実挙動が勝つ (T1 > T3・README §8)。
  * INV-OPENCODE-ADAPTER-LOADER-SAFE が「namespace は default 単独・かつ関数」を回帰固定する。
@@ -461,32 +535,24 @@ export default async function ActraDeckOpencodeAdapter() {
     return {}; // 静かに無効 (fail-open の一部)
   }
   const state = createAdapterState();
-  const delivery = createDelivery(config);
+  const diag = createDiagnostics(); // TDA-4b: drop + mapping-error 可観測性 (factory クロージャ内)
+  const delivery = createDelivery(config, { diag });
   const emit = (events) => {
     for (const ev of events) delivery.enqueue(ev);
   };
   return {
     // フックは enqueue のみ (配送を await しない = opencode をブロックしない fail-open)。
+    // 写像は safeMap で包み、throw を diag へ計上して空配列に縮退する (fail-open 維持 + 可観測)。
+    // enqueue は throw-free (SEC-1: writeDebug が診断 write の throw を握るため noteDrop→enqueue は
+    // 決して throw しない)。ゆえに emit も throw-free で opencode を壊さない (fail-open 契約)。
     event: async ({ event }) => {
-      try {
-        emit(mapEvent(event, state));
-      } catch {
-        /* fail-open */
-      }
+      emit(safeMap("event", () => mapEvent(event, state), diag));
     },
     "tool.execute.before": async (input, output) => {
-      try {
-        emit(mapToolBefore(input, output, state));
-      } catch {
-        /* fail-open */
-      }
+      emit(safeMap("tool.before", () => mapToolBefore(input, output, state), diag));
     },
     "tool.execute.after": async (input, output) => {
-      try {
-        emit(mapToolAfter(input, output, state));
-      } catch {
-        /* fail-open */
-      }
+      emit(safeMap("tool.after", () => mapToolAfter(input, output, state), diag));
     },
   };
 }
@@ -504,5 +570,7 @@ ActraDeckOpencodeAdapter.mapToolAfter = mapToolAfter;
 ActraDeckOpencodeAdapter.mapCaptureLine = mapCaptureLine;
 ActraDeckOpencodeAdapter.resolveConfig = resolveConfig;
 ActraDeckOpencodeAdapter.createDelivery = createDelivery;
+ActraDeckOpencodeAdapter.createDiagnostics = createDiagnostics; // TDA-4b (fail-open 可観測性)
+ActraDeckOpencodeAdapter.safeMap = safeMap; // TDA-4b (写像 throw の計上ラッパ)
 ActraDeckOpencodeAdapter.RING_CAP = RING_CAP;
 ActraDeckOpencodeAdapter.MAX_RETRY = MAX_RETRY;

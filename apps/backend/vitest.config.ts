@@ -18,6 +18,7 @@ const REAL_PG_TESTS = [
   "test/inv-safety-demo-backend-e2e.test.ts",
   "test/inv-audit-packet-route.test.ts",
   "test/inv-audit-report-route.test.ts",
+  "test/inv-demo-state-reap.test.ts",
   "test/inv-detail-pull.test.ts",
   "test/inv-inbox.test.ts",
   "test/inv-ingest-store.test.ts",

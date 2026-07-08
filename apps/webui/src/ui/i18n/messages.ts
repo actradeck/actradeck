@@ -407,7 +407,7 @@ const ja = {
   // SEC-1/TDA-4: Codex 導線は provider 非依存の base title と分離し、SessionDetail が
   // detail.provider === "codex" の時のみ追記する (claude-attach は承認 relay 可ゆえ誤導しない)。
   "detail.captureMode.nonManaged.codexHint":
-    'Codex の承認 relay と予防を有効にするには Managed で起動してください: `./scripts/actradeck codex "<タスク>"`。',
+    'Codex の承認 relay と予防を有効にするには Managed で起動してください: `{cmd} "<タスク>"`。',
   "detail.interrupt": "中断 (SIGINT)",
   "detail.interrupt.title":
     "managed claude へ SIGINT を送り協調的に停止を要求します。実行中ツールの巻き戻しではありません。managed でない場合は安全に無視されます。",
@@ -1100,7 +1100,7 @@ const en: Record<MessageKey, string> = {
   // SEC-1/TDA-4: Codex-only hint split from the provider-agnostic base title; SessionDetail
   // appends it only when detail.provider === "codex" (claude-attach relays approvals, so no misdirection).
   "detail.captureMode.nonManaged.codexHint":
-    'To relay Codex approvals (and prevention), launch it Managed: `./scripts/actradeck codex "<task>"`.',
+    'To relay Codex approvals (and prevention), launch it Managed: `{cmd} "<task>"`.',
   "detail.interrupt": "Interrupt (SIGINT)",
   "detail.interrupt.title":
     "Sends SIGINT to the managed claude to request a cooperative stop. This is not a rollback of the running tool. If not managed, it is safely ignored.",

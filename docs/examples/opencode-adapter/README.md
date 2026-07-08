@@ -26,6 +26,11 @@ Place `adapter.js` into opencode's plugin directory.
 - **Per project**: `<project>/.opencode/plugins/adapter.js`
 - **Global**: `~/.config/opencode/plugins/adapter.js`
 
+> **Install in exactly ONE location** (either per-project **or** global, never both). opencode
+> loads plugins from both directories, so placing the adapter in both makes the factory start
+> **twice** and every event is emitted twice under a **different `event_id`** each time. The
+> backend's idempotency is keyed on `event_id`, so it cannot absorb this duplication (§8).
+
 Set the environment variables.
 
 ```bash
@@ -100,18 +105,18 @@ opencode's observation surface (plugin hooks) → ActraDeck `NormalizedEvent`. T
 of the mapping logic is the pure functions in `adapter.js` (`mapEvent` / `mapToolBefore` /
 `mapToolAfter`).
 
-| opencode input                               | → NormalizedEvent (`event_type` / `state`)                | Notes |
-| -------------------------------------------- | --------------------------------------------------------- | ---- |
-| `session.created`                            | `session.started` / `starting`                            | `cwd = info.directory` |
-| `message.updated` role=user (first)          | `turn.started` / `running.model_wait`                     | `turn_id = messageID` · refires are ignored |
-| `message.part.delta` (field=text)            | `agent.message.delta` / `running.model_streaming`         | Each delta is an independent event. Delivery is **batched into an array in submission order** (below · no per-messageID coalescing) |
-| `tool.execute.before` (bash)                 | `command.started` / `running.command_executing`           | `request_id = tu:<callID>` |
-| `tool.execute.after` (bash)                  | `command.completed` / `running.model_wait`                | `exit_code = metadata.exit` · **non-zero is also completed** · **stdout is not carried** (source minimization · §4) |
-| `tool.execute.before` (non-bash)             | `tool.started` / `running.tool_preparing`                 | read/edit/write/grep/glob/webfetch, etc. **The tool arguments (`args`) are forwarded without minimization** (§4 · QA-5) |
-| `tool.execute.after` (non-bash)              | `tool.completed` / `running.model_wait`                   | **Tool output is not carried** (source minimization · §4) |
-| `session.diff`                               | `diff.updated`                                            | **Counts only** · the raw diff is not sent |
-| `session.error`                              | `error`                                                  | The payload is `{message, retryable}` only (below · §5) |
-| `session.idle`                               | `turn.completed` / `idle`                                 | **session.ended is not fabricated** (ADR D8) |
+| opencode input                      | → NormalizedEvent (`event_type` / `state`)        | Notes                                                                                                                               |
+| ----------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `session.created`                   | `session.started` / `starting`                    | `cwd = info.directory`                                                                                                              |
+| `message.updated` role=user (first) | `turn.started` / `running.model_wait`             | `turn_id = messageID` · refires are ignored                                                                                         |
+| `message.part.delta` (field=text)   | `agent.message.delta` / `running.model_streaming` | Each delta is an independent event. Delivery is **batched into an array in submission order** (below · no per-messageID coalescing) |
+| `tool.execute.before` (bash)        | `command.started` / `running.command_executing`   | `request_id = tu:<callID>`                                                                                                          |
+| `tool.execute.after` (bash)         | `command.completed` / `running.model_wait`        | `exit_code = metadata.exit` · **non-zero is also completed** · **stdout is not carried** (source minimization · §4)                 |
+| `tool.execute.before` (non-bash)    | `tool.started` / `running.tool_preparing`         | read/edit/write/grep/glob/webfetch, etc. **The tool arguments (`args`) are forwarded without minimization** (§4 · QA-5)             |
+| `tool.execute.after` (non-bash)     | `tool.completed` / `running.model_wait`           | **Tool output is not carried** (source minimization · §4)                                                                           |
+| `session.diff`                      | `diff.updated`                                    | **Counts only** · the raw diff is not sent                                                                                          |
+| `session.error`                     | `error`                                           | The payload is `{kind, message, retryable}` only (`kind = "error"` · below · §5)                                                    |
+| `session.idle`                      | `turn.completed` / `idle`                         | **session.ended is not fabricated** (ADR D8)                                                                                        |
 
 **Intentional drops** (not mapped): `session.status` / `session.updated` / `message.updated`
 role=assistant (metrics harvest) / the tool part of `message.part.updated` (the hook is
@@ -120,8 +125,8 @@ authoritative · callID overlap) / text · step-start · step-finish parts / `ca
 
 ### Delivery semantics
 
-- **fail-open**: the hooks only enqueue (they do not await delivery). Every POST is a try/catch
-  + fetch timeout.
+- **fail-open**: the hooks only enqueue (they do not await delivery). Every POST is wrapped in a
+  try/catch with a fetch timeout.
 - **Bounded ring buffer** (cap 1000 · oldest dropped). After the **resend cap + backoff**, it
   drops.
 - **at-least-once + idempotent**: resends use the same `event_id` (UUIDv7), and the backend
@@ -149,14 +154,14 @@ authoritative · callID overlap) / text · step-start · step-finish parts / `ca
   - **Not applied (relies on the backend floor)**: **non-bash tools (`read`/`edit`/`write`/
     `grep`/…) forward the `tool.execute.before` arguments (`args`) verbatim without
     minimization** (QA-5). The `content` of `write`/`edit`, the `filePath` of `read`, etc. are
-    sent as-is, and secrets are only redacted by the backend floor. **`write`/`edit` are
-    un-grounded** (this adapter is verified only against actual `read` firing · §6), so their
-    actual argument shapes are assumed by measurement. If you handle edits containing sensitive
-    data, re-read the disclaimer at the top of §4.
+    sent as-is, and secrets are only redacted by the backend floor. **`read`/`write`/`edit`/`webfetch`
+    are grounded** (captured from a real opencode run · QA-5 · §6), so their argument shapes are
+    measured, not assumed. If you handle edits containing sensitive data, re-read the disclaimer at
+    the top of §4.
 - **Observation limit (QA-7)**: because opencode **has no session-termination signal**, the
   adapter **never emits `session.ended` at all** (§3's `session.idle` → `turn.completed(idle)`).
   The cockpit's "is it done" judgment is carried by the settling signal of `turn.completed(idle)`
-  + liveness synthesis (process/event/stdout heartbeat), and stop is not asserted.
+  plus liveness synthesis (process/event/stdout heartbeat), and stop is not asserted.
 - The trust boundary is **inside single-operator / loopback / `INGEST_TOKEN`**. If you change to
   an operation that uses it across this boundary (a different machine · a shared network), add
   client-side redaction separately.
@@ -169,7 +174,7 @@ minimal fields `{error.name, error.data.message, error.data.isRetryable}`. **The
 is closed to the allowlist `{kind, message, retryable}`** (`name` is folded into the display-only
 `summary`, and `statusCode` is not carried); if surplus keys are mixed in,
 `INV-OPENCODE-ADAPTER-ERROR-MINIMIZED` goes RED (two-stage verification: positive key-allowlist
-+ deep-walk negative match of the envelope values).
+plus a deep-walk negative match of the envelope values).
 
 ---
 
@@ -208,6 +213,11 @@ The actual behavior of opencode 1.17.14's plugin loader diverges from what the o
   make the extension `.mjs`, it is **never loaded**, no matter how correct the content is.
 - **The loader calls every export (of a scanned file) as a factory** (both named and default).
   If you double-export the same factory as named and default, the hook is **registered twice**.
+- **The loader scans both the per-project and global plugin directories.** Placing the adapter in
+  **both** (`<project>/.opencode/plugins/` and `~/.config/opencode/plugins/`) starts the factory
+  **twice**, so each event is emitted twice with a **distinct `event_id`** per copy. Because the
+  backend deduplicates on `event_id` (not on payload content), it cannot collapse these into one —
+  **install in exactly one location** (§1).
 - **If even one non-function export exists, the whole module is silently rejected** (nothing is
   called). For example, just adding one `export const RING_CAP = 1000;` (a number) causes the
   entire plugin file to be discarded, and no hook is registered at all (no error either).

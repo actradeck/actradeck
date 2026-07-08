@@ -82,6 +82,8 @@ export function useSafetyDemo(options?: UseSafetyDemoOptions): SafetyDemoState {
     void fetch(DEMO_PATH, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
+      // SEC 注記 (sweep 019f38b9): backend は content-type JSON + 空 body を 400
+      // (FST_ERR_CTP_EMPTY_JSON_BODY) にするため、body "{}" は省略不可 (backend 側テストで pin 済)。
       body: "{}",
     })
       .then(async (res) => {

@@ -46,6 +46,7 @@ const FIXTURE_PATH = resolve(HERE, FIXTURE_RELPATH);
 //   よってテストは module namespace `mod` (LOADER-SAFE 検証用) と、helper アクセス用の `mod.default`
 //   (= `adapter`) の 2 つを保持する。
 type AdapterFactory = ((ctx?: unknown) => Promise<Record<string, unknown>>) & {
+  uuidv7: () => string;
   mapCaptureLine: (line: unknown, state: unknown) => Record<string, unknown>[];
   mapToolBefore: (input: unknown, output: unknown, state: unknown) => Record<string, unknown>[];
   mapToolAfter: (input: unknown, output: unknown, state: unknown) => Record<string, unknown>[];
@@ -62,15 +63,33 @@ type AdapterFactory = ((ctx?: unknown) => Promise<Record<string, unknown>>) & {
       fetchImpl?: (url: string, init: { body: string }) => Promise<{ ok: boolean } | undefined>;
       sleepImpl?: (ms: number) => Promise<void>;
       autoDrain?: boolean;
+      diag?: Diagnostics;
     },
   ) => {
     enqueue: (ev: Record<string, unknown>) => void;
     drain: () => Promise<void>;
     pending: () => Record<string, unknown>[];
     size: () => number;
+    dropped: () => number;
   };
+  createDiagnostics: (opts?: {
+    env?: Record<string, string | undefined>;
+    write?: (s: string) => void;
+  }) => Diagnostics;
+  safeMap: (
+    hook: string,
+    fn: () => Record<string, unknown>[],
+    diag: Diagnostics,
+  ) => Record<string, unknown>[];
   RING_CAP: number;
   MAX_RETRY: number;
+};
+
+type Diagnostics = {
+  noteDrop: (reason: string, n?: number) => void;
+  noteMappingError: (hook: string) => void;
+  drops: () => number;
+  mappingErrors: () => number;
 };
 const mod = (await import(pathToFileURL(ADAPTER_PATH).href)) as { default: AdapterFactory };
 const adapter = mod.default;
@@ -142,6 +161,8 @@ describe("INV-OPENCODE-ADAPTER-*: opencode plugin adapter (ADR 019f3c3b D8 / R1 
       // 実 opencode が呼ぶのは default のみ。helpers は default のプロパティとして存在する。
       expect(typeof adapter.mapEvent).toBe("function");
       expect(typeof adapter.createDelivery).toBe("function");
+      // TDA-R3-3: uuidv7 も default のプロパティ (event_id 生成器・型定義の 10 プロパティ整合)。
+      expect(typeof adapter.uuidv7).toBe("function");
     });
   });
 
@@ -220,6 +241,54 @@ describe("INV-OPENCODE-ADAPTER-*: opencode plugin adapter (ADR 019f3c3b D8 / R1 
       ]);
       expect([...produced].sort()).toEqual([...expected].sort());
     });
+  });
+
+  // ── QA-5: write / edit / webfetch tool の実 grounding 写像 ───────────────
+  // REAL captured (opencode 1.17.14 · ollama llama3.1:8b-16k・値のみ neutral 化) の
+  //   write/edit/webfetch tool.execute.before/after を mapToolBefore/mapToolAfter が
+  //   tool.started / tool.completed へ正しく写像することを固定する。
+  // - before(非bash) → tool.started(running.tool_preparing)・args を payload.input へ verbatim 転送。
+  // - after(非bash)  → tool.completed(running.model_wait)・tool 出力は **載せない** (NO-RAW/最小化)。
+  describe("QA-5: write/edit/webfetch tool 写像 (REAL grounded)", () => {
+    function findTool(kind: "tool.before" | "tool.after", tool: string): CaptureLine {
+      const found = fixture.find(
+        (l) => l.kind === kind && (l.data.input as { tool?: string })?.tool === tool,
+      );
+      expect(found, `fixture に ${tool} の ${kind} がある`).toBeTruthy();
+      return found!;
+    }
+
+    for (const tool of ["write", "edit", "webfetch"]) {
+      it(`${tool}: before → tool.started(args 転送) / after → tool.completed(出力非載)`, () => {
+        const state = adapter.createAdapterState();
+        const before = findTool("tool.before", tool);
+        const startedEvents = adapter.mapCaptureLine(before, state);
+        expect(startedEvents.length).toBe(1);
+        const started = startedEvents[0]!;
+        expect(started.event_type).toBe("tool.started");
+        expect(started.state).toBe("running.tool_preparing");
+        expect(safeParseEvent(started).success).toBe(true);
+        const sp = started.payload as Record<string, unknown>;
+        expect(sp.kind).toBe("tool.started");
+        expect(sp.tool_name).toBe(tool);
+        // args (before.output.args) が payload.input へ verbatim 転送される (QA-5 の grounding 対象)。
+        const expectedArgs = (before.data.output as { args?: unknown })?.args;
+        expect(sp.input).toEqual(expectedArgs);
+
+        const after = findTool("tool.after", tool);
+        const completedEvents = adapter.mapCaptureLine(after, state);
+        expect(completedEvents.length).toBe(1);
+        const completed = completedEvents[0]!;
+        expect(completed.event_type).toBe("tool.completed");
+        expect(completed.state).toBe("running.model_wait");
+        expect(safeParseEvent(completed).success).toBe(true);
+        const cp = completed.payload as Record<string, unknown>;
+        expect(cp.kind).toBe("tool.completed");
+        expect(cp.tool_name).toBe(tool);
+        // NO-RAW/源流最小化: tool 出力 (after.output) は payload へ一切載せない (tool_name のみ)。
+        expect(Object.keys(cp).sort()).toEqual(["kind", "tool_name"]);
+      });
+    }
   });
 
   // ── INV-OPENCODE-ADAPTER-PAYLOAD ────────────────────────────────────────
@@ -473,6 +542,129 @@ describe("INV-OPENCODE-ADAPTER-*: opencode plugin adapter (ADR 019f3c3b D8 / R1 
       for (const id of order) d.enqueue({ event_id: id });
       await d.drain();
       expect(batches.flat()).toEqual(order);
+    });
+  });
+
+  // ── TDA-4b: fail-open 可観測性 (drop / mapping-error カウンタ + ACTRADECK_ADAPTER_DEBUG stderr) ──
+  // fail-open の silent 握り潰し (ring 溢れ / retry 上限 drop / 写像 throw) を **原文非依存の件数**で
+  // 可観測にする。ACTRADECK_ADAPTER_DEBUG (非空) のときのみ enum+件数のみ stderr へ出す (NO-RAW)。
+  // カウンタ除去 (mutation) で各 assert が RED になる (falsifiable)。
+  describe("TDA-4b: fail-open 可観測性", () => {
+    it("(a) ring 溢れ drop が dropped() に計上される (autoDrain:false)", () => {
+      const d = adapter.createDelivery(
+        { url: "http://127.0.0.1:1/x", token: "t" },
+        { autoDrain: false },
+      );
+      expect(d.dropped()).toBe(0);
+      for (let i = 0; i < adapter.RING_CAP + 3; i++) d.enqueue({ event_id: `e${i}` });
+      expect(d.size()).toBe(adapter.RING_CAP);
+      // 3 件溢れ → dropped() が 3 (最古 e0,e1,e2 が落ちた)。
+      expect(d.dropped()).toBe(3);
+    });
+
+    it("(b) retry 上限 drop が dropped() に計上される", async () => {
+      const d = adapter.createDelivery(
+        { url: "http://127.0.0.1:1/x", token: "t" },
+        {
+          autoDrain: false,
+          sleepImpl: async () => {},
+          fetchImpl: async () => {
+            throw new Error("network down");
+          },
+        },
+      );
+      d.enqueue({ event_id: "e0" });
+      d.enqueue({ event_id: "e1" });
+      await d.drain(); // fail-open: throw しない。batch(2 件) が retry 上限で drop。
+      expect(d.size()).toBe(0);
+      expect(d.dropped()).toBe(2); // batch.length 分計上
+    });
+
+    it("(c) mapping-error は safeMap 経由で計上され fail-open (空配列) に縮退する", () => {
+      const diag = adapter.createDiagnostics();
+      const state = adapter.createAdapterState();
+      // getter が throw する壊れた event を mapEvent へ通す (defensive: 通常 mapEvent は throw しない)。
+      const broken: Record<string, unknown> = { type: "session.created" };
+      Object.defineProperty(broken, "properties", {
+        get() {
+          throw new Error("boom");
+        },
+        enumerable: true,
+      });
+      const out = adapter.safeMap("event", () => adapter.mapEvent(broken, state), diag);
+      expect(out).toEqual([]); // fail-open: 空配列に縮退
+      expect(diag.mappingErrors()).toBe(1);
+      // 正常写像は counter を増やさない。
+      const ok = adapter.safeMap(
+        "event",
+        () =>
+          adapter.mapEvent(
+            {
+              type: "session.created",
+              properties: { sessionID: "ses_x", info: { id: "ses_x" } },
+            },
+            state,
+          ),
+        diag,
+      );
+      expect(ok.length).toBe(1);
+      expect(diag.mappingErrors()).toBe(1);
+    });
+
+    it("(d) ACTRADECK_ADAPTER_DEBUG 有効時のみ stderr へ書く・enum+件数のみ (NO-RAW)", () => {
+      // 無効 (env 未設定): 一切書かない。
+      const linesOff: string[] = [];
+      const diagOff = adapter.createDiagnostics({ env: {}, write: (s) => linesOff.push(s) });
+      diagOff.noteDrop("ring-overflow", 2);
+      diagOff.noteMappingError("event");
+      expect(linesOff).toEqual([]);
+
+      // 有効: enum + 非負整数のみの診断を書く。
+      const linesOn: string[] = [];
+      const diagOn = adapter.createDiagnostics({
+        env: { ACTRADECK_ADAPTER_DEBUG: "1" },
+        write: (s) => linesOn.push(s),
+      });
+      diagOn.noteDrop("ring-overflow", 2);
+      diagOn.noteDrop("retry-cap", 1);
+      diagOn.noteMappingError("tool.before");
+      expect(linesOn.length).toBe(3);
+      for (const l of linesOn) {
+        expect(l.startsWith("[actradeck-adapter] ")).toBe(true);
+        // NO-RAW: 行に許可された enum / count 語彙以外の英字トークンが無いことを確認する。
+        // 許容: adapter ラベル / drop kind / hook enum / count=N の非負整数。
+        expect(l).toMatch(
+          /^\[actradeck-adapter\] (drop (ring-overflow|retry-cap) count=\d+|mapping-error hook=(event|tool\.before|tool\.after) count=\d+)\n$/,
+        );
+      }
+      // 累計が単調増加している (drops 2→3, mappingErrors 1)。
+      expect(diagOn.drops()).toBe(3);
+      expect(diagOn.mappingErrors()).toBe(1);
+    });
+
+    // SEC-1 回帰 (裁定後 unblock): 診断 stderr write が throw (EPIPE 等) しても
+    //   enqueue/hook へ throw を戻さない = fail-open を維持する。writeDebug の try/catch を外すと
+    //   RED (enqueue が overflow 時に throw する)。debug 診断が **まさに drop 時に host を壊す**
+    //   回帰を構造固定する。
+    it("(e) SEC-1: 診断 write が throw しても enqueue は fail-open (throw を opencode へ戻さない)", () => {
+      const throwingWrite = () => {
+        throw new Error("EPIPE: broken pipe (daemon 化 opencode の閉じた stderr)");
+      };
+      const diag = adapter.createDiagnostics({
+        env: { ACTRADECK_ADAPTER_DEBUG: "1" }, // debug 有効 → writeDebug が write を呼ぶ
+        write: throwingWrite,
+      });
+      const d = adapter.createDelivery(
+        { url: "http://127.0.0.1:1/x", token: "t" },
+        { autoDrain: false, diag },
+      );
+      // ring を溢れさせる → noteDrop("ring-overflow") → writeDebug → throwingWrite。
+      // writeDebug が guard していれば enqueue は throw しない (fail-open)。guard を外すと throw。
+      expect(() => {
+        for (let i = 0; i < adapter.RING_CAP + 2; i++) d.enqueue({ event_id: `e${i}` });
+      }).not.toThrow();
+      // 診断 write が失敗しても drop 計数は保たれる (best-effort write・カウンタは先に更新)。
+      expect(d.dropped()).toBe(2);
     });
   });
 

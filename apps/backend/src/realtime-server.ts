@@ -17,9 +17,8 @@
  * (SEC-1: 旧コメントは「ingestion フックが /realtime も認証」と誤記。T1=コード優先で修正。
  *  この認証契約は 401 e2e 2 ケース inv-realtime-server.test.ts が固定している。)
  */
-import { timingSafeEqual } from "node:crypto";
-
 import { ApprovalDecision, sanitizeRepoLabel } from "@actradeck/event-model";
+import { tokenEquals } from "@actradeck/redaction";
 
 import type { ClientFrame, RealtimeHub, RealtimeSink } from "./realtime-hub.js";
 import {
@@ -95,14 +94,7 @@ export interface RealtimeRouteOptions {
 
 const VALID_DECISIONS: ReadonlySet<string> = new Set(ApprovalDecision.options);
 
-/** 定数時間トークン比較 (ingestion と同じ様式)。 */
-function realtimeTokenEquals(expected: string, provided: string | undefined): boolean {
-  if (!provided) return false;
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(provided, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
+// 定数時間トークン比較は @actradeck/redaction の正典 `tokenEquals` を使う (TDA-5 sweep で単一出所化)。
 
 /**
  * /realtime/ws を Fastify app に登録する。upgrade 前認証 (onRequest) も掛ける。
@@ -120,7 +112,7 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
       typeof auth === "string" && auth.startsWith("Bearer ")
         ? auth.slice("Bearer ".length).trim()
         : undefined;
-    if (!realtimeTokenEquals(opts.realtimeToken, token)) {
+    if (!tokenEquals(opts.realtimeToken, token)) {
       await reply.code(401).send({ error: "unauthorized" });
     }
   });

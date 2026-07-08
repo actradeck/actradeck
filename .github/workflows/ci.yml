@@ -102,6 +102,27 @@ jobs:
           bash scripts/test-install.sh
           bash scripts/test-install-e2e.sh
 
+      # Landing drift + idempotency gate (docs-lp QA-1・sweep 019f3d77 / decision 019f3d77).
+      #   landing/ja/<slug> と landing/en/index.html は bilingual source から **生成**され commit
+      #   される。以前は再生成ガードが CI に無く、(a) gen-ja-topic-pages の非冪等バグ (末尾空行の
+      #   累積・実害あり f5853ba で修正) や (b) source を編集して ja/en を再生成し忘れる drift を
+      #   CI が素通りさせていた。ここで committed 生成物が再生成と一致することを固定する:
+      #     - gen-ja を **2 回**実行 (冪等性: 2 回目で出力が動けば非冪等 → git diff で RED)。
+      #     - verify-en-landing で landing/en が landing/index.html と in-sync か (in-memory 比較)。
+      #     - git diff --exit-code landing/ で committed 生成物 == 再生成 を assert (source drift 込み)。
+      #   jsdom は apps/webui 依存 (install 済)。実害は marketing HTML の churn のみ (secret/correctness
+      #   非該当) だが、silent drift で公開ページが陳腐化するのを防ぐ軽量ゲート。
+      - name: Landing gen idempotency + drift gate (docs-lp QA-1)
+        run: |
+          node scripts/gen-ja-topic-pages.mjs
+          node scripts/gen-ja-topic-pages.mjs
+          node scripts/verify-en-landing.mjs
+          if ! git diff --exit-code -- landing/; then
+            echo "::error::landing/ drifted — committed generated pages differ from regeneration."
+            echo "Run: node scripts/gen-ja-topic-pages.mjs && node scripts/gen-en-landing.mjs, then commit landing/."
+            exit 1
+          fi
+
       # Release / supply-chain gate (ADR 0013): lockstep version single-source, tag↔version
       #   match, tarball has no internal/secret content, SBOM covers prod deps + carries no
       #   raw paths, release.yml permissions are least-privilege, and install.sh's verify

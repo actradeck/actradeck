@@ -153,6 +153,11 @@ export interface SafetyDemoLauncherOptions {
  * driver (`safety-demo-driver.ts`) を backend 自身の src に同居させ、`import.meta.url` の dir 相対で解決する
  * ことで、Docker (COPY apps/backend で載る) でも repo でも同じパスで解決する。ACTRADECK_REPO_ROOT による
  * repo-root 上書きは不要になったため撤去した (sibling は import.meta.url から決定論的)。
+ *
+ * SEC 注記 (sweep 019f38b9): 返すのは **`.ts` ハードコード = tsx 実行前提**。出荷 Docker image と
+ * repo 実行は src+tsx を同梱するため動くが、src を strip した **dist-only カスタム配備**では
+ * existsSync が false → enabled=false → CTA は 503 で fail-loud (silent no-op にはならない・機能は不可)。
+ * dist entrypoint への昇格は需要が出たら別 PR (docs/docker.md の demo 節に開示済み)。
  */
 export function resolveDefaultDriverPath(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "safety-demo-driver.ts");

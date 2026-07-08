@@ -11,8 +11,9 @@
  * - PreToolUse は { hookSpecificOutput: { hookEventName, permissionDecision, permissionDecisionReason } }。
  * - PermissionRequest は { hookSpecificOutput: { hookEventName, decision: { behavior } } }。
  */
-import { timingSafeEqual } from "node:crypto";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
+
+import { tokenEquals } from "@actradeck/redaction";
 
 import { buildEvent } from "./event-factory.js";
 import { type HookCommonInput, type NormalizeContext, normalizeHook } from "./normalize.js";
@@ -89,18 +90,10 @@ function isLoopbackHostHeader(value: string | undefined): boolean {
 /**
  * 定数時間トークン比較 (タイミング攻撃耐性) — SEC-2。
  *
- * 素の `provided !== expected` は不一致位置で早期 return しうるため、トークンの長さ・内容を
- * タイミングで推測する side-channel を残す。長さ不一致は先行 false で弾き、同長は
- * node:crypto.timingSafeEqual で比較する。挙動は素の比較と非破壊 (一致/不一致の結果は不変)。
- * backend の ingestion-server.ts:tokenEquals と同型に統一する (正典一本化)。
+ * 実体は `@actradeck/redaction` の正典 `tokenEquals` (TDA-5 sweep で 5 コピーを単一出所化)。
+ * 既存 import 互換のためここから re-export する。
  */
-export function tokenEquals(expected: string, provided: string | undefined): boolean {
-  if (provided === undefined) return false;
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(provided, "utf8");
-  if (a.length !== b.length) return false; // 長さ不一致は timingSafeEqual の前提 (同長) を満たさない。
-  return timingSafeEqual(a, b);
-}
+export { tokenEquals };
 
 const MAX_BODY = 4 * 1024 * 1024; // 4MB 上限 (巨大 payload 防御)。
 

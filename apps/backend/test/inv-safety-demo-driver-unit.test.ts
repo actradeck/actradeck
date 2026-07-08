@@ -4,8 +4,14 @@
  * driver 本体の block/redact 貫通は inv-safety-demo-backend-e2e (実 PG) が担う。ここは URL 補完 /
  * env パース / decision 正規化 / control-token 定数時間比較の **分岐**を falsifiable に固定する
  * (特に token 不一致 fail-safe = SEC 面の回帰ゲート)。
+ * 加えて QA-R2-1 (sweep task 019f38b9): finally backstop の **実 emit 分岐**
+ * (requested 済 ∧ 未 resolved で異常 unwind → resolved(deny) を 1 件だけ emit) を
+ * in-process WS server + onLog throw 注入で決定論的に被覆する。
  */
+import { AddressInfo } from "node:net";
+
 import { describe, expect, it } from "vitest";
+import { WebSocketServer } from "ws";
 
 import {
   denySafeResolveHold,
@@ -13,6 +19,7 @@ import {
   parseDriverEnv,
   resolveDriverWsUrl,
   resolvePort,
+  runSafetyDemoDriver,
   tokenMatches,
 } from "../src/safety-demo-driver.js";
 
@@ -114,4 +121,72 @@ describe("parseDriverEnv: CLI env → driver options", () => {
     ).toBeUndefined();
     expect(parseDriverEnv({ ACTRADECK_DEMO_SESSION_ID: "" }).sessionId).toBeUndefined();
   });
+});
+
+describe("QA-R2-1: finally backstop の実 emit 分岐 (requested 後の異常 unwind → resolved(deny) を 1 件)", () => {
+  interface ReceivedEvent {
+    readonly event_type?: string;
+    readonly payload?: { readonly request_id?: string; readonly decision?: string };
+  }
+
+  it("requested 直後に throw しても ws 生存中なら resolved(deny) が丁度 1 件 emit される", async () => {
+    // in-process WS server (`/ingest/ws`・ephemeral port)。受信 JSON を収集する。
+    const received: ReceivedEvent[] = [];
+    const wss = new WebSocketServer({ port: 0, path: "/ingest/ws" });
+    wss.on("connection", (socket) => {
+      socket.on("message", (data: Buffer) => {
+        try {
+          const msg = JSON.parse(data.toString("utf8")) as ReceivedEvent & { type?: string };
+          if (msg.type === "hello") return; // handshake frame はイベントでない。
+          received.push(msg);
+        } catch {
+          /* 非 JSON は無視 */
+        }
+      });
+    });
+    await new Promise<void>((resolve) => wss.once("listening", () => resolve()));
+    const port = (wss.address() as AddressInfo).port;
+
+    // 注入: requested emit 直後の "hold: …" 進捗ログで throw → 正常路の resolved 前に unwind。
+    // ws は OPEN のままなので finally backstop の emitStep(resolved deny) は実送信に成功する。
+    const sentinel = new Error("injected-after-requested (QA-R2-1)");
+    const sessionId = "demo-safety-backstop-unit";
+    await expect(
+      runSafetyDemoDriver({
+        wsUrl: `ws://127.0.0.1:${port}`,
+        sessionId,
+        pacingMs: 0,
+        onLog: (msg) => {
+          if (msg.startsWith("hold:")) throw sentinel;
+        },
+      }),
+    ).rejects.toThrow("injected-after-requested");
+
+    // backstop emit の到着を poll (send コールバックは flush 済みだが受信は非同期)。
+    const deadline = Date.now() + 2_000;
+    while (
+      Date.now() < deadline &&
+      !received.some((e) => e.event_type === "tool.permission.resolved")
+    ) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+
+    const types = received.map((e) => e.event_type);
+    expect(types).toContain("session.started");
+    expect(types).toContain("tool.permission.requested");
+    // backstop の実 emit: resolved(deny) が **丁度 1 件** (0→1 の emit を pin)。
+    // QA-3 訂正 + QA-3R 再訂正 (裁定 019f3ed6): この注入経路は正常路 resolved に未到達のため、
+    // 二重 resolved 抑止ガード (!resolvedEmitted) 自体は発火せず本テストでは falsify されない
+    // (ガード弱体 mutant でも緑。e2e の resolved assert も >=1 で同様に緑)。dedup の実質的担保は
+    // driver でなく **projection 層の冪等性** (request_id ベースの pending 除去は二重 resolved に
+    // 対し構造的 no-op) にある — inv-safety-demo-backend-e2e.test.ts:263-267 の帰属と同じ。
+    const resolved = received.filter((e) => e.event_type === "tool.permission.resolved");
+    expect(resolved.length).toBe(1);
+    expect(resolved[0]?.payload?.decision).toBe("deny");
+    expect(resolved[0]?.payload?.request_id).toBe(`${sessionId}:apr-1`);
+    // 正常路はこの後の redact/end 脚に到達していない (異常 unwind の証跡)。
+    expect(types).not.toContain("command.completed");
+    expect(types).not.toContain("session.ended");
+  }, 15_000);
 });

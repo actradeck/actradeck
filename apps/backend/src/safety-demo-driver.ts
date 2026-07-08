@@ -27,7 +27,7 @@
  *     throwaway デモ)。block はイベントフロー + 承認カード + 監査証跡の実証であり、コマンド実行の停止では
  *     ない (デモは実コマンドを走らせない)。risk は固定定数 (実セッションは classifyCommandRisk)。
  */
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 import { WebSocket } from "ws";
 
@@ -38,6 +38,7 @@ import {
   newEventId,
   parseEvent,
 } from "@actradeck/event-model";
+import { tokenEquals } from "@actradeck/redaction";
 
 import {
   DEMO_APPROVAL_TRIGGER,
@@ -130,13 +131,10 @@ export function normalizeDecision(raw: unknown): ApprovalDecision | undefined {
 /**
  * relay の control token を定数時間比較で検証する (ws-client.ts SEC-1 と同原則・fail-safe)。
  * 自 control_token と一致しない token を載せた approval は **無視**する (無認証 peer の注入を遮断)。
+ * 比較本体は @actradeck/redaction の正典 `tokenEquals` (TDA-5 sweep で単一出所化)。
  */
 export function tokenMatches(expected: string, provided: unknown): boolean {
-  if (typeof provided !== "string" || provided.length === 0) return false;
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(provided, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+  return tokenEquals(expected, provided);
 }
 
 /** DemoStep + payload から NormalizedEvent を組み、parseEvent (ingress と同一検証) で検証して返す。 */

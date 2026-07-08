@@ -687,6 +687,38 @@ interface PersistedLiveness {
   invalid_transition_count?: number;
 }
 
+/** stale デモ projection 行の既定 TTL (24h)。 */
+export const DEFAULT_DEMO_STATE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * SEC-2 sweep (docker-safety-demo R1・task 019f38b9): 使い捨てデモ session
+ * (`demo-safety-*`) の **stale な session_state projection 行**を boot 時に reap する。
+ *
+ * 背景: 中途で死んだデモ run の projection 行が at-rest に残留する (表示層は
+ * approvalsSnapshot の isLive gate で self-heal 済みだが、行そのものは無期限に残る)。
+ * デモ session は使い捨てゆえ、TTL (既定 24h) を過ぎた projection 行のみ削除する。
+ *
+ * 削除は **session_state (projection・再導出可能) のみ**。events / sessions は append-only の
+ * 監査証跡としてそのまま残す (INV-REDACTION / audit 履歴を壊さない)。
+ * prefix は LIKE メタ文字を escape して先頭一致させる (定数前提だが防御的に)。
+ * 戻り値は削除行数 (非負整数・原文非依存)。
+ */
+export async function reapStaleDemoSessionState(
+  pool: Pool,
+  opts: { readonly prefix: string; readonly olderThanMs?: number },
+): Promise<number> {
+  const olderThanMs = opts.olderThanMs ?? DEFAULT_DEMO_STATE_TTL_MS;
+  const cutoffIso = new Date(Date.now() - olderThanMs).toISOString();
+  const likePattern = `${opts.prefix.replace(/([\\%_])/g, "\\$1")}%`;
+  const res = await pool.query(
+    `DELETE FROM session_state
+      WHERE session_id LIKE $1
+        AND COALESCE(last_event_at, updated_at) < $2::timestamptz`,
+    [likePattern, cutoffIso],
+  );
+  return res.rowCount ?? 0;
+}
+
 /**
  * TDA-2: 永続済み liveness jsonb を LivenessResult へ復元する (冪等 no-op 用)。
  * no-op は新情報ゼロなので、保存済みの合成結果をそのまま返す (再合成しない)。

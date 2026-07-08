@@ -224,12 +224,16 @@ assert_contains "build" "INV-OPSCLI-CODEX-DIST-DIE: die は build 案内を含�
 
 # INV-OPSCLI-CODEX-ARG-GUARD (QA-3/TDA-5): 引数バリデーション。
 #   (a) 引数ゼロ (空 prompt) → exit 1 + usage。 (b) 第1引数 attach → exit 1 + Managed 専用 hint
-#   (誤って prompt="attach" の Managed を起動しないための安全ゲート)。副作用前に die するため
-#   dist stub 不要 (arg gate が dist check より前)。
-assert_exit 1 "INV-OPSCLI-CODEX-ARG-GUARD: 引数ゼロ (空 prompt) は exit 1" -- bash "$AC" codex
-assert_contains "usage: actradeck codex" "INV-OPSCLI-CODEX-ARG-GUARD: 引数ゼロは usage を出す" -- bash "$AC" codex
-assert_exit 1 "INV-OPSCLI-CODEX-ARG-GUARD: codex attach は exit 1 (Managed 専用)" -- bash "$AC" codex attach
-assert_contains "Managed 起動専用" "INV-OPSCLI-CODEX-ARG-GUARD: codex attach die は Managed 専用を明示" -- bash "$AC" codex attach
+#   (誤って prompt="attach" の Managed を起動しないための安全ゲート)。arg gate は dist check より前。
+#   QA-R2-1 (sweep 019f397c) 帰属分離: exit-1 assert に **CODEX_CLI_STUB + DRY_RUN** を付す。
+#   これが無いと未ビルド tree で「arg gate 除去」しても後続 dist-die が exit 1 を再現し assert が
+#   緑のまま=guard を単体で falsify できない。stub で dist を通し dry-run で実 codex を起こさない
+#   ことで、guard 除去時のみ dry-run が exit 0 化 → RED になり guard 帰属が成立する。
+CODEX_GUARD_ENV=(env ACTRADECK_CODEX_CLI="$CODEX_CLI_STUB" ACTRADECK_CODEX_DRY_RUN=1)
+assert_exit 1 "INV-OPSCLI-CODEX-ARG-GUARD: 引数ゼロ (空 prompt) は exit 1" -- "${CODEX_GUARD_ENV[@]}" bash "$AC" codex
+assert_contains "usage: actradeck codex" "INV-OPSCLI-CODEX-ARG-GUARD: 引数ゼロは usage を出す" -- "${CODEX_GUARD_ENV[@]}" bash "$AC" codex
+assert_exit 1 "INV-OPSCLI-CODEX-ARG-GUARD: codex attach は exit 1 (Managed 専用)" -- "${CODEX_GUARD_ENV[@]}" bash "$AC" codex attach
+assert_contains "Managed 起動専用" "INV-OPSCLI-CODEX-ARG-GUARD: codex attach die は Managed 専用を明示" -- "${CODEX_GUARD_ENV[@]}" bash "$AC" codex attach
 # teeth: attach ゲートが無ければ `codex attach` は dry-run で prompt="attach" の Managed を exec してしまう。
 #   ゲート有りでは die するため dry-run 出力 (codex -- attach) が **出ない** ことを固定する。
 attach_out="$(env ACTRADECK_CODEX_CLI="$CODEX_CLI_STUB" ACTRADECK_CODEX_DRY_RUN=1 bash "$AC" codex attach 2>&1)"
@@ -242,7 +246,11 @@ else ok "INV-OPSCLI-CODEX-ARG-GUARD: codex attach は Managed 起動へ漏れな
 #   あること + dry-run も同配列を展開すること。single-source なら実 exec の `--` 除去 mutation が
 #   dry-run テスト (INV-OPSCLI-CODEX-WIRE) を RED にする (別ソース再構築だとすり抜けた)。
 if grep -qF 'exec "${codex_argv[@]}"' "$AC"; then ok "INV-OPSCLI-CODEX-SINGLE-SOURCE: 実 exec は codex_argv 配列展開"; else ng "INV-OPSCLI-CODEX-SINGLE-SOURCE: 実 exec が codex_argv を使っていない (別ソース再構築の退行)"; fi
-if grep -qF 'codex_argv=("$node_bin" "$cli" codex -- "$@")' "$AC"; then ok "INV-OPSCLI-CODEX-SINGLE-SOURCE: argv 配列に argv-injection 境界 -- が存在"; else ng "INV-OPSCLI-CODEX-SINGLE-SOURCE: argv 配列の -- 境界が無い (argv-injection 退行)"; fi
+# QA-R2-2 (sweep 019f397c): argv-injection 境界 `--` の存在は **緩い不変条件** (codex_argv 定義行に
+#   ` -- ` トークン + `"$@"` passthrough) で固定し、`--` の厳密位置は上の dynamic WIRE assert
+#   (dry-run 出力に `codex -- hello world` が出る) に委譲する。以前の完全リテラル一致は、`--` 境界を
+#   保ったまま flag を足す等の正当な変更にも false-RED した (安全側だが保守負債)。
+if grep -qE 'codex_argv=\(.*[[:space:]]--[[:space:]].*"\$@"' "$AC"; then ok "INV-OPSCLI-CODEX-SINGLE-SOURCE: argv 配列に argv-injection 境界 -- + \"\$@\" passthrough が存在"; else ng "INV-OPSCLI-CODEX-SINGLE-SOURCE: argv 配列の -- 境界 or \"\$@\" が無い (argv-injection 退行)"; fi
 
 # do_codex の source 自体に実 token 値が焼き込まれていない (二重の保険・§8 と同型・argv-leak 恒常 gate)。
 if [ -f "$ENV_FILE" ]; then

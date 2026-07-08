@@ -15,6 +15,13 @@ export default tseslint.config(
       ".claude/**",
       "**/*.cjs",
       "**/*.mjs",
+      // docs/examples scope (QA-R3-2): the shipped adapter **source** `docs/examples/**/adapter.js`
+      //   IS lint-checked (it is a `.js` file · commit 7476ceb brought it under the standard glob),
+      //   so its loader-safety / no-undef discipline is machine-enforced. The accompanying
+      //   `README.md` and `.jsonl` fixtures are **docs artifacts** and are NOT covered by eslint
+      //   (eslint targets `.js`/`.ts`) nor by the prettier/format glob — intentional, not an
+      //   oversight. Do not add a new gate for them; the contract test + SEC-1 fixture regression
+      //   guard the fixture instead.
       // oss/ は publish ミラーの再生成成果物 (.gitignore 済・prepare-oss が source から再生成)。
       //   dist/.next と同じ生成物カテゴリなので lint 対象外。source (landing/, packages/ 等) を
       //   直接 lint すれば足り、ミラーの二重 lint は gate を不整合にする (oss/landing/app.js の重複)。

@@ -14,7 +14,9 @@ import { pathToFileURL } from "node:url";
 import { EVENT_MODEL_PACKAGE } from "@actradeck/event-model";
 
 import { createPool } from "./db.js";
+import { reapStaleDemoSessionState } from "./ingest-store.js";
 import { buildIngestionServer } from "./ingestion-server.js";
+import { SAFETY_DEMO_SESSION_PREFIX as DEMO_SESSION_PREFIX } from "./safety-demo-script.js";
 
 export const BACKEND_NAME = "@actradeck/backend" as const;
 
@@ -151,6 +153,19 @@ export async function startFromEnv(): Promise<{
     ...(realtimeToken ? { realtimeToken } : {}),
     logger: true,
   });
+  // SEC-2 sweep (task 019f38b9): 使い捨てデモ session の stale projection 行を boot 時に reap。
+  // best-effort — 失敗しても起動を妨げない (デモ GC は可用性より劣後・エラーは名前のみ開示)。
+  try {
+    const reaped = await reapStaleDemoSessionState(pool, { prefix: DEMO_SESSION_PREFIX });
+    if (reaped > 0) {
+      process.stderr.write(
+        `[actradeck-backend] reaped ${reaped} stale demo session_state row(s)\n`,
+      );
+    }
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "UnknownError";
+    process.stderr.write(`[actradeck-backend] stale demo reap skipped (${name})\n`);
+  }
   // port=0 を渡すと OS が空きポートを割り当てる (smoke は衝突回避にこれを使う)。
   const port = Number(process.env.ACTRADECK_BACKEND_PORT ?? 55410);
   const host = process.env.ACTRADECK_BACKEND_HOST ?? "127.0.0.1";

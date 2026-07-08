@@ -16,6 +16,7 @@ import {
   waitingKind,
 } from "./liveness-display";
 import { formatCurrentAction } from "./action-units-display";
+import { MANAGED_CODEX_CMD } from "./managed-codex";
 import type { SafetyDemoPhase } from "./use-safety-demo";
 
 import type { SessionListItem } from "../realtime/contract";
@@ -220,12 +221,9 @@ function readinessMark(state: ClaudeState | CodexState): string {
 }
 
 // Managed Codex 起動コマンド (ADR 019f3960 C)。docs/README の呼び出し規約 (`./scripts/actradeck up`)
-// と完全一致させ、bare `actradeck` が PATH に無い既定環境で command-not-found を作らない。静的
-// リテラルで locale 非依存 (i18n 文言は散文のみ・command はここに直書き・NO-RAW)。
-// SEC-2/TDA-3 正直開示: ここは **readiness hint の <code> 表示** の単一出所にすぎない。同じコマンド文字列は
-// SessionDetail の nonManaged tooltip (messages.ts の codexHint) と docs/README にも別掲されており、
-// リポジトリ全体での完全な単一出所化 (cross-file の共有定数) は follow-up。現状は表示専用リテラルの重複。
-const MANAGED_CODEX_CMD = './scripts/actradeck codex "<task>"';
+// command は locale 非依存の静的リテラル (i18n 文言は散文のみ・NO-RAW)。TDA-3 sweep 019f397c:
+// rename-sensitive な prefix は managed-codex.ts へ単一出所化し、SessionDetail の codexHint と共有する
+// (webui の 2 表示面はこれで drift しない・docs 側は同モジュールの grep 註記で追う)。
 
 export function SessionList({
   sessions,
