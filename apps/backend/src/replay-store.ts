@@ -6,7 +6,7 @@
  * payload exposure surface.
  */
 import { eventTypeToActionKind } from "@actradeck/event-model";
-import { deriveActionSubject } from "@actradeck/projection";
+import { boundTurnSummary, deriveActionSubject } from "@actradeck/projection";
 
 import { REPLAY_ORDER } from "./replay-contract.js";
 
@@ -86,6 +86,9 @@ interface EventRow {
   query: string | null;
   reason: string | null;
   error: string | null;
+  // turn.started / turn.completed の subject 出所 (ADR 019f47c2)。payload->> 由来 = at-rest redacted。
+  prompt_summary: string | null;
+  response_summary: string | null;
   risk_level: string | null;
   decision: string | null;
   auto_allowed: boolean | null;
@@ -158,8 +161,9 @@ function displayText(row: EventRow): string {
  * EventRow の at-rest redacted な `payload->>` 列から **payload-like** を組み、`@actradeck/projection`
  * の `deriveActionSubject(event_type, payload)` へ委譲する (kind→field 写像の二重実装を断つ・TDA)。
  *
- * 渡すフィールドは shared 写像が参照する allowlist (command/path/server/tool/query/tool_name/error/reason)
- * のみ。すべて redacted 列由来で backend は再 redaction しない (INV-REPLAY-SUBJECT-NO-LEAK)。
+ * 渡すフィールドは shared 写像が参照する allowlist (command/path/server/tool/query/tool_name/error/
+ * reason/prompt_summary/response_summary) のみ。すべて redacted 列由来で backend は再 redaction
+ * しない (INV-REPLAY-SUBJECT-NO-LEAK)。
  * `summary` は **渡さない** (日本語が焼き付いているため subject 出所にしない契約)。
  */
 function subjectOf(row: EventRow): string | undefined {
@@ -172,6 +176,8 @@ function subjectOf(row: EventRow): string | undefined {
     tool_name: row.tool_name ?? undefined,
     error: row.error ?? undefined,
     reason: row.reason ?? undefined,
+    prompt_summary: row.prompt_summary ?? undefined,
+    response_summary: row.response_summary ?? undefined,
   });
 }
 
@@ -205,6 +211,8 @@ const EVENT_COLUMNS = `event_id,
         payload->>'query' AS query,
         payload->>'reason' AS reason,
         payload->>'error' AS error,
+        payload->>'prompt_summary' AS prompt_summary,
+        payload->>'response_summary' AS response_summary,
         payload->>'risk_level' AS risk_level,
         payload->>'decision' AS decision,
         CASE
@@ -223,7 +231,28 @@ const EVENT_COLUMNS = `event_id,
           ELSE NULL
         END AS elapsed_ms`;
 
+/**
+ * turn.started / turn.completed の DTO 搬送有界化 (gemini-obs SEC-3=TDA-3・防御的 bound)。
+ *
+ * gemini adapter は straddle leak 回避のため prompt/response を小 cap で切詰めず送出する
+ * (SUMMARY_SANITY_CAP=512KiB・redact-before-truncate)。その結果 turn イベントの top-level `summary`
+ * は **redacted だが有界でない**まま at-rest に載り、DTO の `summary` / `display_text` が unbounded 値を
+ * webui へ搬送していた (leak ではない・搬送のみ肥大。timeline/detail の描画は bounded subject 優先)。
+ * turn 経路に限り projection 正典の `boundTurnSummary` (SUMMARY_SUBJECT_CAP=200 + ellipsis) で
+ * **床の後** に有界化する (redact→bound 順は不変・redacted 値の slice は raw を新規導入しない)。
+ * 他 event_type の summary は normalizer 側で有界 (command 100 字 cap 等) ゆえ据え置き (挙動不変)。
+ */
+function isTurnSummaryEventType(eventType: string): boolean {
+  return eventType === "turn.started" || eventType === "turn.completed";
+}
+
 export function rowToReplayEvent(row: EventRow): ReplayEventDTO {
+  // turn 経路のみ summary を bound した row で summary/display_text を組む (displayText のロジック自体は
+  // 変更しない契約ゆえ、入力 row 側を bound する)。subject は deriveActionSubject が内部で同じ
+  // boundTurnSummary を通すため元 row のままでよい。
+  const bounded = isTurnSummaryEventType(row.event_type)
+    ? { ...row, summary: boundTurnSummary(row.summary ?? undefined) ?? null }
+    : row;
   return {
     event_id: row.event_id,
     provider: row.provider,
@@ -234,8 +263,8 @@ export function rowToReplayEvent(row: EventRow): ReplayEventDTO {
     timestamp: row.timestamp.toISOString(),
     state: row.state ?? undefined,
     cwd: row.cwd ?? undefined,
-    summary: row.summary ?? undefined,
-    display_text: displayText(row),
+    summary: bounded.summary ?? undefined,
+    display_text: displayText(bounded),
     subject: subjectOf(row),
     request_id: value(row.request_id),
     tool_name: value(row.tool_name),

@@ -714,6 +714,83 @@ textarea {
   color: var(--ad-status-danger-fg, var(--ad-status-warn-fg));
 }
 
+// ADR 019f4206 A段: Codex Managed spawn フォーム (空状態 readiness パネル内)。
+.ad-spawn {
+  display: grid;
+  gap: 0.625rem;
+  width: 100%;
+  max-width: 34rem;
+  margin-top: 0.5rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: 0.5rem;
+  background: var(--ad-bg-subtle, transparent);
+  text-align: left;
+}
+
+.ad-spawn__title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ad-fg);
+}
+
+.ad-spawn__lead {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  color: var(--ad-fg-muted);
+}
+
+.ad-spawn__field {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+  color: var(--ad-fg);
+
+  textarea,
+  input,
+  select {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 0.375rem 0.5rem;
+    border: 1px solid var(--ad-border-subtle);
+    border-radius: 0.375rem;
+    background: var(--ad-bg, transparent);
+    color: var(--ad-fg);
+    font: inherit;
+  }
+
+  textarea {
+    resize: vertical;
+  }
+}
+
+.ad-spawn__limits {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.1rem;
+  color: var(--ad-fg-muted);
+}
+
+.ad-spawn__disabled {
+  margin: 0.375rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.1rem;
+  color: var(--ad-fg-muted);
+}
+
+.ad-spawn__ok {
+  font-size: 0.75rem;
+  color: var(--ad-status-success-fg);
+}
+
+.ad-spawn__error {
+  font-size: 0.75rem;
+  color: var(--ad-status-danger-fg, var(--ad-status-warn-fg));
+}
+
 .ad-session-table {
   table-layout: fixed;
 }

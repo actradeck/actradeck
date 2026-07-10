@@ -339,4 +339,102 @@ describe("SessionList", () => {
     expect(html).toContain('data-attention="true"');
     expect(html).toContain("approval");
   });
+
+  // ── ADR 019f41ec-c549: capture_mode の一覧レベル正直表示 (非 managed のみバッジ) ──────────────
+  // detail pill と同一意味論を維持: 「外部起動 ({mode})」・attach=warn / codex_rollout=muted・
+  // observe-only とは呼ばない・欠落/managed=バッジ無し=既定。存在/不在の両方向を固定する。
+  describe("capture_mode バッジ (行レベル正直表示)", () => {
+    it("attach 行はバッジを出す (warn tone + data-capture-mode)", () => {
+      const html = renderToStaticMarkup(
+        <SessionList
+          sessions={[item({ capture_mode: "attach" })]}
+          selectedId={null}
+          nowMs={0}
+          onSelect={() => {}}
+        />,
+      );
+      expect(html).toContain('data-testid="session-capture-mode"');
+      expect(html).toContain('data-capture-mode="attach"');
+      expect(html).toContain("ad-tag--warn");
+      expect(html).toContain("外部起動");
+      // observe-only とは呼ばない (意味論契約)。
+      expect(html).not.toContain("observe-only");
+    });
+
+    it("codex_rollout 行はバッジを出す (muted tone)", () => {
+      const html = renderToStaticMarkup(
+        <SessionList
+          sessions={[item({ capture_mode: "codex_rollout" })]}
+          selectedId={null}
+          nowMs={0}
+          onSelect={() => {}}
+        />,
+      );
+      expect(html).toContain('data-testid="session-capture-mode"');
+      expect(html).toContain('data-capture-mode="codex_rollout"');
+      expect(html).toContain("ad-tag--muted");
+      expect(html).toContain("外部起動");
+    });
+
+    it("managed 行はバッジを出さない (既定・断定表示しない)", () => {
+      const html = renderToStaticMarkup(
+        <SessionList
+          sessions={[item({ capture_mode: "managed" })]}
+          selectedId={null}
+          nowMs={0}
+          onSelect={() => {}}
+        />,
+      );
+      expect(html).not.toContain('data-testid="session-capture-mode"');
+    });
+
+    it("capture_mode 欠落 (legacy/unknown) 行はバッジを出さない (Managed と断定しない)", () => {
+      const base = item();
+      // 欠落を明示 (item() は capture_mode を持たないが、override で undefined を保証)。
+      const html = renderToStaticMarkup(
+        <SessionList
+          sessions={[{ ...base, capture_mode: undefined }]}
+          selectedId={null}
+          nowMs={0}
+          onSelect={() => {}}
+        />,
+      );
+      expect(html).not.toContain('data-testid="session-capture-mode"');
+      expect(html).not.toContain("外部起動");
+    });
+
+    // ADR 019f47c2: source=external (gemini/opencode 等) は capture_mode 欠落でも managed と
+    //   誤表示せず external バッジ (observe-only) を出す。
+    it("source=external 行は external バッジを出す (managed 誤表示しない)", () => {
+      const html = renderToStaticMarkup(
+        <SessionList
+          sessions={[{ ...item(), capture_mode: undefined, source: "external" }]}
+          selectedId={null}
+          nowMs={0}
+          onSelect={() => {}}
+        />,
+      );
+      expect(html).toContain('data-testid="session-capture-mode"');
+      expect(html).toContain('data-capture-mode="external"');
+      expect(html).toContain("外部 (observe-only)");
+      // managed と誤表示しない (誤導防止)。
+      expect(html).not.toContain('data-capture-mode="managed"');
+    });
+
+    it("en カタログでもバッジ文言を描画する (locale parity)", () => {
+      const html = renderToStaticMarkup(
+        <FixedLocaleProvider locale="en">
+          <SessionList
+            sessions={[item({ capture_mode: "attach" })]}
+            selectedId={null}
+            nowMs={0}
+            onSelect={() => {}}
+          />
+        </FixedLocaleProvider>,
+      );
+      expect(html).toContain('data-testid="session-capture-mode"');
+      expect(html).toContain("External launch");
+      expect(html).not.toContain("外部起動");
+    });
+  });
 });

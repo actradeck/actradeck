@@ -45,6 +45,7 @@ import { AuditStore } from "./audit-store.js";
 import { SafetyDemoLauncher } from "./safety-demo.js";
 import {
   isAllowlistResponseFrame,
+  isCodexSpawnResponseFrame,
   isDiffResponseFrame,
   isHelloFrame,
   isPolicyResponseFrame,
@@ -374,6 +375,13 @@ async function handleWsMessage(
   //   (要求元の HTTP endpoint が Promise 解決で応答する)。event ingest 経路には載せない。
   if (isPolicyResponseFrame(parsed)) {
     registry.resolvePolicy(parsed);
+    return;
+  }
+  // ADR 019f4206 A段: sidecar からの codex.spawn.response を pending 要求へ解決する。ok + closed enum error
+  //   code + optional session_id のみ (NO-RAW・prompt/cwd 非含)。ack 不要 (要求元の HTTP endpoint が Promise
+  //   解決で応答する)。event ingest 経路には載せない。
+  if (isCodexSpawnResponseFrame(parsed)) {
+    registry.resolveCodexSpawn(parsed);
     return;
   }
   const ack = await ingestOne(store, parsed);

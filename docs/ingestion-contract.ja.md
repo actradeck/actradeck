@@ -244,3 +244,15 @@ observe-only)。写像の全表は同ディレクトリ `README.md` §3 を参�
 テスト `INV-OPENCODE-ADAPTER-*` (`packages/event-model/test/inv-opencode-adapter.test.ts`) を伴います。
 写像表・ローカル実走手順・**backend 床が唯一の redaction 防御である旨の正直な開示**は同ディレクトリの
 `README.md` を参照してください。
+
+`docs/examples/gemini-adapter/` は **実プロダクト (Gemini CLI) 向けの外部アダプタ第2号**です。opencode
+plugin と違い、これは Gemini の **hook `command`** — **1 イベントにつき 1 回起動される短命プロセス** —
+で、Gemini のライフサイクル hook を NormalizedEvent へ写像します (`session.started` / `turn.started` /
+`run_shell_command`→`command.started`・`command.completed` / 他 tool→`tool.started`・`tool.completed` /
+`turn.completed(idle)` / `session.ended`) (`provider=gemini` / `source=external` / observe-only・
+never-deny: stdout は常に `{}`)。Gemini は **実終端シグナル** (`SessionEnd`) を持つため `session.ended`
+は正当に発行されます (SessionEnd 由来のみ・捏造しない)。契約テスト `INV-GEMINI-ADAPTER-*`
+(`packages/event-model/test/inv-gemini-adapter.test.ts`) と backend 統合テスト
+(`apps/backend/test/inv-gemini-lifecycle.test.ts`) を伴い、どちらも Gemini CLI 0.42.0 の REAL 捕獲で
+駆動されます。写像表・正準 hook 設定・**backend 床が唯一の redaction 防御である旨の正直な開示**は
+同ディレクトリの `README.md`（日本語は `README.ja.md`）を参照してください。

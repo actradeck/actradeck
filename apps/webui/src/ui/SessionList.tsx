@@ -8,6 +8,7 @@
  * Adaptive Clarity: Carbon Table/Tag を kit（ネイティブ table + token 駆動 Tag/StatusBadge）へ置換。
  */
 import { Button, StatusBadge, Table, TBody, Tag, Td, Th, THead, Tr } from "./kit";
+import { CaptureModeBadge } from "./CaptureModeBadge";
 import { useLocale } from "./LocaleProvider";
 import {
   effectiveLivenessState,
@@ -17,6 +18,7 @@ import {
 } from "./liveness-display";
 import { formatCurrentAction } from "./action-units-display";
 import { MANAGED_CODEX_CMD } from "./managed-codex";
+import { ManagedCodexSpawnPanel } from "./ManagedCodexSpawnPanel";
 import type { SafetyDemoPhase } from "./use-safety-demo";
 
 import type { SessionListItem } from "../realtime/contract";
@@ -105,6 +107,13 @@ export function SessionRow({ item, selected, nowMs, onSelect }: SessionRowProps)
         <Tag tone="neutral" size="sm">
           {item.provider}
         </Tag>
+        {/* capture provenance (ADR 019f41ec-c549): 非 managed のみバッジ。managed/欠落=無し=既定。
+            detail pill と同一意味論 (observe-only とは呼ばない)・単一出所 CaptureModeBadge。 */}
+        <CaptureModeBadge
+          captureMode={item.capture_mode}
+          source={item.source}
+          testId="session-capture-mode"
+        />
       </Td>
     </Tr>
   );
@@ -144,6 +153,13 @@ export interface SessionListProps {
   readonly safety?: {
     readonly phase: SafetyDemoPhase;
     readonly onLaunch: () => void;
+  };
+  /**
+   * ADR 019f4206 A段: Codex Managed spawn 導線。spawn 可能 (spawn_capable) な attach デーモンの id 群。
+   * 1 つ以上あるときだけ readiness パネルに spawn フォームを描画する (ゼロなら env opt-in 促し hint)。
+   */
+  readonly codexSpawn?: {
+    readonly spawnDaemonIds: readonly string[];
   };
 }
 
@@ -234,6 +250,7 @@ export function SessionList({
   emptyAction,
   readiness,
   safety,
+  codexSpawn,
 }: SessionListProps) {
   const { t } = useLocale();
   if (sessions.length === 0) {
@@ -285,6 +302,17 @@ export function SessionList({
               ) : (
                 <span className="ad-readiness__hint">{t("readiness.connected.hint")}</span>
               )}
+              {/* ADR 019f4206 A段: spawn 可能 daemon が 1 つ以上あるときだけ Managed Codex 起動フォームを出す。
+                  ゼロでも codex が観測可能/検出済なら env opt-in が必要な旨を hint 表示 (正直な開示)。 */}
+              {codexSpawn ? (
+                codexSpawn.spawnDaemonIds.length > 0 ? (
+                  <ManagedCodexSpawnPanel spawnDaemonIds={codexSpawn.spawnDaemonIds} />
+                ) : cd === "observable" || cd === "detected" ? (
+                  <p className="ad-spawn__disabled" data-testid="codex-spawn-disabled">
+                    {t("codexSpawn.disabledHint")}
+                  </p>
+                ) : null
+              ) : null}
             </>
           ) : (
             <span data-testid="readiness-disconnected">{t("readiness.disconnected")}</span>

@@ -1336,6 +1336,13 @@ function toolUseCorrelationId(input: HookCommonInput): string | undefined {
  * が emit 後の redactDeep でも未マッチのまま summary/payload に残留しうる。よって
  * **redactString → 1 行化 → slice** の順にして、切り詰める時点で値が既にマスク済みである
  * ことを保証する (INV-REDACTION の順序: redact→persist→send を normalize 段でも先取り)。
+ *
+ * ── gemini adapter summarize との意図的 dup (TDA-3) ────────────────────────────────────────────
+ * `docs/examples/gemini-adapter/adapter.mjs` の `summarize` は **依存ゼロで redact できない**ため、
+ * こちらのように redact 先行はできない。代わりに「adapter では secret を分割しない (小 cap で truncate
+ * せず sanity 上限のみ) + 表示 ≤N 有界化は床の後 (backend projection)」で同じ straddle 安全性を得る
+ * (SEC-1 019f47f0)。CC 経路 (本関数) は redactString 先行ゆえ床に依らず単体で安全。両者は意図的 dup
+ * (redact 可 vs 依存ゼロ) で、bound 契約 (単一行・連続空白畳み・ellipsis・summary キー名) を揃える。
  */
 function summarize(s: string, max = 120): string {
   const masked = redactString(s);

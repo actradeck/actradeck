@@ -20,10 +20,9 @@ import { MANAGED_CODEX_PREFIX } from "./managed-codex";
 import { interruptEnabledForState, type AckState, type ApprovalDecision } from "./approval-display";
 import { ApprovalCard } from "./ApprovalCard";
 import {
+  captureProvenance,
   currentActionSnapshot,
   deriveSessionFacts,
-  isNonManagedCapture,
-  normalizeCaptureMode,
   type SessionRiskFacts,
 } from "./current-action-display";
 import { Button, Icon, InlineAlert, Table, TBody, Tag, Td, Th, THead, Tr, type Tone } from "./kit";
@@ -340,7 +339,11 @@ function RiskPane({
             data-testid="risk-capture-mode"
             data-capture-mode={facts.captureMode}
           >
-            {t("risk.captureMode", { mode: facts.captureMode })}
+            {/* external (source 由来・observe-only 取込) は managed と誤表示しない (ADR 019f47c2)。
+                managed/attach/codex_rollout の既存表示は不変 (raw enum を {mode} へ素通し)。 */}
+            {facts.captureMode === "external"
+              ? t("risk.captureMode.external")
+              : t("risk.captureMode", { mode: facts.captureMode })}
           </Tag>
         </li>
         {/* 段階2 (D3): permission_mode (sandbox) を明示。どこまで自動許可されているか = 介入要否の手がかり。
@@ -527,6 +530,9 @@ export function SessionDetailView({
   const pending = detail.pending_approvals;
   // interrupt は非 terminal の managed/非 managed どちらにも安全に出せる (sidecar が no-op 担保)。
   const canInterrupt = onInterrupt !== undefined && interruptEnabledForState(detail.state);
+  // capture provenance (TDA-1・ADR 019f47c2): ヘッダ badge も右 risk ペイン (deriveSessionFacts) と
+  //   同一の source-aware 単一出所 captureProvenance を使う (external を managed 誤表示しない)。
+  const captureProv = captureProvenance(detail.capture_mode, detail.source);
 
   return (
     <section className="ad-detail" data-testid="detail">
@@ -548,16 +554,30 @@ export function SessionDetailView({
                 {t("detail.attention")}
               </Tag>
             ) : null}
-            {/* capture_mode バッジ (ADR 019ea4ba D4 / TDA-1)。
-                non-managed capture は ActraDeck が起動を所有しないことだけを示す。
-                approval relay 可否とは直交するため "observe-only" とは呼ばない。 */}
-            {isNonManagedCapture(detail.capture_mode) ? (
+            {/* capture provenance バッジ (ADR 019ea4ba D4 / 019f47c2・TDA-1)。
+                provenance = captureProvenance(capture_mode, source) の単一出所 (captureProv)。
+                source=external は observe-only 直取込ゆえ external を独立分類し managed 誤表示を断つ
+                (欠落 capture_mode + 非 external のみ managed 既定)。managed はバッジ無し。
+                non-managed capture は ActraDeck が起動を所有しないことだけを示す (approval relay 可否とは
+                直交・"observe-only" は external にのみ用いる)。 */}
+            {captureProv === "managed" ? null : captureProv === "external" ? (
               <Tag
-                tone="warn"
+                tone="muted"
                 size="md"
                 iconStart="warning-alt"
                 data-testid="detail-capture-mode"
-                data-capture-mode={normalizeCaptureMode(detail.capture_mode)}
+                data-capture-mode="external"
+                title={t("detail.captureMode.external.title")}
+              >
+                {t("detail.captureMode.external")}
+              </Tag>
+            ) : (
+              <Tag
+                tone={captureProv === "attach" ? "warn" : "muted"}
+                size="md"
+                iconStart="warning-alt"
+                data-testid="detail-capture-mode"
+                data-capture-mode={captureProv}
                 title={
                   // SEC-1/TDA-4: base tooltip は provider 非依存。Codex の Managed 導線追記は
                   // provider==="codex" の時のみ (claude-attach は承認 relay 可ゆえ Codex 導線を出さない)。
@@ -567,10 +587,10 @@ export function SessionDetailView({
                 }
               >
                 {t("detail.captureMode.nonManaged", {
-                  mode: normalizeCaptureMode(detail.capture_mode),
+                  mode: captureProv,
                 })}
               </Tag>
-            ) : null}
+            )}
           </div>
           <p className="ad-detail-action" data-testid="detail-action">
             {formatCurrentAction(

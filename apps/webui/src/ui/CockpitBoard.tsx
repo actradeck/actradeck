@@ -8,6 +8,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { isPresentOrRecentlyActive } from "@actradeck/event-model";
+
 import { formatCurrentAction } from "./action-units-display";
 import { ApprovalInbox } from "./ApprovalInbox";
 import { ApprovalPolicyView } from "./ApprovalPolicyView";
@@ -56,6 +58,10 @@ function statusKitTone(status: string): Tone {
 export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
   const { locale, t } = useLocale();
   const url = wsUrl ?? deriveSameOriginWsUrl();
+  // 相対時刻表示を 1 秒粒度で更新 (受け入れ基準: heartbeat/最終イベントの新鮮さを刻む)。
+  // ADR 019f474e: この既存 tick を useRealtime にも供給し、external adapter の表示包含窓
+  // (recency proxy) を毎秒再評価する (新規タイマを増やさない=既存 nowMs 供給機構の再利用)。
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   // 通知（強み(a)）: 設定 + 発火エンジン。delta.list の prev→curr を notify へ流す（snapshot は通さない）。
   const notifications = useNotifications();
   const {
@@ -74,6 +80,7 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
   } = useRealtime({
     url,
     onListDelta: notifications.notify,
+    nowMs,
   });
   // ADR 019f0eca §8: 承認ポリシー画面の「観測 repo」サジェスト材料。既知セッションの distinct cwd
   // (空/欠落は除外)。webui が既に保持する一覧から導出 (新規取得なし)。生パスは panel が basename へ畳む。
@@ -84,8 +91,6 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
       ].sort(),
     [sessions],
   );
-  // 相対時刻表示を 1 秒粒度で更新 (受け入れ基準: heartbeat/最終イベントの新鮮さを刻む)。
-  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [view, setView] = useState<"detail" | "replay">("detail");
   // 監査 → Replay の deep-link 制御 (ユーザー指摘: 調査面から Replay へ直行できない)。
   //  - requestedViewRef: 選択時に view を既定 detail へ戻す effect を、deep-link のときだけ replay に上書きさせる。
@@ -107,7 +112,7 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
   // sweep 019f15a9 (TDA-2 副): session が relay-target のとき daemon 一覧は不要 (firstDaemonId 不使用)。
   // policy タブ表示中 **かつ session 未接続**、または board 空状態のときだけ /realtime/daemons を pull し、
   // 接続中の無駄 pull を抑える。
-  const { daemonIds } = useDaemons({
+  const { daemonIds, spawnDaemonIds } = useDaemons({
     enabled: (policyActive && connectedSessionId === null) || boardEmpty,
     refreshKey: connectedCount,
   });
@@ -203,10 +208,12 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
         );
   const attentionCount = sessions.filter((s) => s.needs_attention).length;
   const runningCount = sessions.filter((s) => s.state?.startsWith("running.")).length;
-  // Live Wall の live nudge (ADR 019ead7a D1): connected な session の last_event_at が進むと
+  // Live Wall の live nudge (ADR 019ead7a D1): 表示対象 session の last_event_at が進むと
   // 値が変わる refreshKey。delta.list の更新で Wall を軽量再 fetch する (新 frame 型を作らない)。
+  // ADR 019f474e: connected だけでなく external adapter の直近 active (recency proxy) も加算対象に
+  // 含め、external 活動でも Wall が再 fetch されるようにする (共有正準述語・backend wall と同一集合)。
   const wallRefreshKey = sessions.reduce((acc, s) => {
-    if (!s.connected || typeof s.last_event_at !== "string") return acc;
+    if (!isPresentOrRecentlyActive(s, nowMs) || typeof s.last_event_at !== "string") return acc;
     const t = Date.parse(s.last_event_at);
     return Number.isNaN(t) ? acc : acc + t;
   }, 0);
@@ -219,11 +226,14 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
         : undefined;
   // 履歴ゲート緩和 (C): 検索一致0 かつ履歴OFF かつ過去 session が存在するとき、その場で
   // 「履歴も含めて検索」を出す。既定 起動中のみで過去 session が隠れる罠 (Replay 到達性) を解く。
+  // ADR 019f474e / TDA-2: 隠れ件数は **真の表示集合** (sessions=toDisplayList 出力) から導出する。
+  // 既定表示は connected + external-recent へ拡張済ゆえ、connectedCount 基準だと external-recent 分を
+  // 「隠れ履歴」に過大計上する(external が 1 つ active でも履歴 (1)・トグルで新規ゼロ)。
   const canSearchHistory =
     normalizedQuery.length > 0 &&
     filteredSessions.length === 0 &&
     !showHistory &&
-    totalCount > connectedCount;
+    totalCount > sessions.length;
   // 真の初回/空状態: 検索一致0 でも 履歴OFF (過去 session 隠し) でもなく、観測 session が 0 のとき。
   // emptyLabel===undefined はこの 2 文脈を既に除外している (検索→noMatch / 履歴OFF→noLive で defined)。
   // 既存の noMatch / noLive 文言は不変のまま、ここでは readiness パネルを優先描画する。
@@ -395,7 +405,9 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
                       {showHistory
                         ? t("workspace.history.showOnlyLive")
                         : t("workspace.history.withHistory", {
-                            count: Math.max(0, totalCount - connectedCount),
+                            // ADR 019f474e / TDA-2: 隠れ件数は真の表示集合 (sessions) 基準。
+                            // connectedCount 基準だと external-recent を隠れ履歴に過大計上する。
+                            count: Math.max(0, totalCount - sessions.length),
                           })}
                     </Button>
                   </div>
@@ -427,6 +439,8 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
                           readiness: agentReadiness ?? { daemonCount: daemonIds.length },
                           // ADR 019f22a7 P1: 空状態の安全性訴求 + 30秒セーフティデモ CTA (BFF 経由起動)。
                           safety: { phase: safetyDemo.phase, onLaunch: safetyDemo.launch },
+                          // ADR 019f4206 A段: spawn 可能 daemon への Codex Managed 起動導線 (spawn_capable のみ)。
+                          codexSpawn: { spawnDaemonIds },
                         }
                       : {})}
                     {...(canSearchHistory

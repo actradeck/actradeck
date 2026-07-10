@@ -176,6 +176,11 @@ export function normalizeReplayRequestPath(requestPath: string): string {
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/set$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/unset$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/resolve$/.test(parsed.pathname) ||
+    // ADR 019f4206 A段: cockpit からの Codex Managed spawn (daemon-addressed・新実行サーフェス)。daemonId
+    //   セグメントは `[^/]+` (traversal は `/` 不在で構造遮断)。実行を起動する mutating-class ゆえ POST-only +
+    //   same-origin CSRF を isCodexSpawnPath で強制する (policy set / demo と同扱い)。anchored で緩めない。
+    //   **approve/interrupt の daemon 宛 route は依然存在しない** (INV-REALTIME-RELAY-SCOPE 維持)。
+    /^\/realtime\/daemons\/[^/]+\/codex\/spawn$/.test(parsed.pathname) ||
     // ADR 019f22a7 P1: first-run セーフティデモの起動 (POST 固定 path・segment/query なし)。実行を
     //   起動する mutating-class ゆえ isDemoLaunchPath で POST-only + same-origin CSRF を強制する
     //   (set/unset/resolve と同扱い)。anchored・traversal 不可。
@@ -260,6 +265,22 @@ export function isPolicyResolvePath(requestPath: string): boolean {
   return /^\/realtime\/(?:sessions|daemons)\/[^/]+\/approvals\/policy\/resolve$/.test(
     parsed.pathname,
   );
+}
+
+/**
+ * ADR 019f4206 A段: POST (in-process の managed codex を起動する mutating-class) Codex spawn path =
+ * `/realtime/daemons/:daemonId/codex/spawn`。policy set / demo launch と同じく method-pure に分離し、proxy が
+ * 「POST-only + same-origin CSRF」を強制する (cross-site の spawn 乱起動を構造遮断)。daemonId セグメントは
+ * `[^/]+`・anchored で緩めない。
+ */
+export function isCodexSpawnPath(requestPath: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestPath, "http://local");
+  } catch {
+    return false;
+  }
+  return /^\/realtime\/daemons\/[^/]+\/codex\/spawn$/.test(parsed.pathname);
 }
 
 /**

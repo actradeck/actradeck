@@ -28,11 +28,38 @@ import {
 export const MAX_REDACT_INPUT = 256 * 1024;
 
 /**
- * redaction 適用「前」の先行 slice 長 (3#SEC-2)。
- * MAX_REDACT_INPUT より「最長ルールの最大捕捉長」ぶん広く取る。これにより
+ * redaction 適用「前」の先行 slice 長 (3#SEC-2 / SEC-2 straddle)。
+ * MAX_REDACT_INPUT より「最長 bounded ルールの最大捕捉長」ぶん広く取る。これにより
  * MAX_REDACT_INPUT 境界を跨ぐ secret も先行 slice では完全に保持され、redaction で
  * 確実にマスクされてから最終 slice される (= 境界跨ぎの未マスク断片を残さない)。
- * 各 credential ルールの最大捕捉は概ね MAX_VALUE_LEN なので 2*MAX_VALUE_LEN の余裕を取る。
+ *
+ * ## bounded 捕捉ルール (token 系: github {20,255} / high-entropy {40,MAX_VALUE_LEN} 等):
+ *   最大捕捉は概ね MAX_VALUE_LEN。2*MAX_VALUE_LEN の余裕で、境界を跨いでも token 全体が
+ *   先行 slice 内に収まり必ずマスクされる (redact→truncate 順・INV-REDACTION-SUMMARY-STRADDLE)。
+ * ## private-key (PEM) は本 margin に依存しない (SEC-2・task 019f482c-0904):
+ *   PEM は body 長が可変 (数 KiB〜数十 KiB) で terminator (`-----END ... PRIVATE KEY-----`) が
+ *   MAX_VALUE_LEN margin を超えて window 外へ落ちうる。旧実装は literal terminator に依存したため、
+ *   terminator が切り落とされると match 全体が失敗し露出した base64 本体 (>MAX_VALUE_LEN の連続 run)
+ *   が raw 残存した (実 PG 実証)。現在は private-key ルールが **terminator 欠落時に head から window
+ *   末尾まで greedy にマスクする fallback** を内包し (REDACTION_RULES の private-key 参照)、margin の
+ *   大小に関わらず境界跨ぎ PEM の raw 露出ゼロを保証する。したがって本 margin を私鍵の最大長へ
+ *   合わせて拡大する必要はない (INV-REDACTION-PEM-STRADDLE)。
+ * ## JWT も本 margin に依存しない (SEC-1・task 019f4c0d):
+ *   JWT payload (claims) も可変長で 2 個目の `.` delimiter + signature が margin を超えて window 外へ
+ *   落ちうる。private-key と同型に、jwt ルールが terminator 欠落時に `eyJ...\.eyJ` anchor 以降を head
+ *   →window 末尾まで greedy マスクする fallback を内包し、margin 非依存で raw 露出ゼロを保証する
+ *   (REDACTION_RULES の jwt 参照・INV-REDACTION-JWT-STRADDLE)。straddle class は census 上
+ *   private-key + jwt の 2 ルールのみ (**secret-bearing な**無界セグメント + 必須 literal terminator を
+ *   持つ = 無界部が実入力で KB 級に伸び、terminator が window 外へ落ちると raw secret を露出しうるのは
+ *   両者だけ)。
+ * ## census 述語の厳密化 (SEC-1 ≡ TDA-CENSUS-1・docs-precision):
+ *   sentry-dsn ルール (下記) も構造上は「無界 `*` セグメント (`(?:[A-Za-z0-9-]{1,63}\.)*`) + 必須
+ *   literal terminator (`sentry.io`)」を持つが、**non-leaking structural instance** であり straddle
+ *   class に含めない: 無界部は非機密 host (subdomain 連鎖)、機密 userinfo (publicKey/secret) は
+ *   terminator より手前の bounded 捕捉 (`[0-9a-f]{16,64}`) で、terminator が窓外へ落ちる straddle でも
+ *   非 straddle の url-credential ルールが userinfo を被覆する (raw secret は残らない・実 DSN に KB 級
+ *   サブドメイン連鎖は非実在)。census を「無界+terminator」だけの機械適用で sentry-dsn へ誤 extension
+ *   しないこと (判定軸は **無界セグメント自体が secret を運ぶか**)。
  */
 export const PRE_REDACT_SLICE = MAX_REDACT_INPUT + 2 * 4096;
 
@@ -318,11 +345,39 @@ const token = (kind: string): string => redactionMarker(kind);
  * 特異トークンを飲み込まないように)。すべて global flag。
  */
 export const REDACTION_RULES: readonly RedactionRule[] = [
-  // --- 鍵ブロック (複数行) -------------------------------------------------
+  // --- 鍵ブロック (PEM private key・複数行折返し / 単一行本体の両方) ------------------
+  // SEC-2 (境界跨ぎ PEM straddle leak・ADR 019f482a / task 019f482c-0904):
+  //   旧実装 `-----BEGIN...-----[\s\S]*?-----END...-----` は **literal terminator 依存**だった。
+  //   redaction 前の先行 slice (PRE_REDACT_SLICE) が `-----END ... PRIVATE KEY-----` を window 外へ
+  //   切り落とすと lazy match が全体失敗し、露出した base64 本体 (>MAX_VALUE_LEN の連続 run) は
+  //   high-entropy ルール {40,MAX_VALUE_LEN} にもマッチせず (run が上限超で trailing lookahead を
+  //   満たせない) **raw 鍵本体が at-rest 残存**した (実 PG 実証・単一行本体 PEM で raw 616 字)。
+  //   他の unbounded ルール (anthropic/openai `{20,}` + `\b` 等) は truncated token を greedy match し
+  //   EOS で anchor 満足するため self-heal するが、private-key の literal terminator のみが破綻する。
+  //   対策 (approach b・terminator 欠落時の安全側 fallback を単一ルールに内包):
+  //     `-----BEGIN ... PRIVATE KEY-----` head を検出し、
+  //       branch1: window 内に対応 `-----END ... PRIVATE KEY-----` があれば従来どおり block を最小マスク
+  //                (末尾以降のテキストは温存)。
+  //       branch2: 無ければ **head から window 末尾まで** (`[\s\S]{0,PRE_REDACT_SLICE}` は現時点の
+  //                value 長 ≤ PRE_REDACT_SLICE 以上ゆえ残り全体に届く) を greedy に consume して
+  //                private-key としてマスクする (raw 露出ゼロ・under-redaction 絶対回避 > over-redaction)。
+  //   ReDoS (INV-REDACTION-REDOS-*): 両 branch とも **有界量指定子** (`{0,PRE_REDACT_SLICE}?` /
+  //     `{0,PRE_REDACT_SLICE}`)・`+`/`*` 裸出現・否定先読み反復なし。terminator 欠落時は branch1 が
+  //     window 端まで O(n) の lazy scan で fail → branch2 が **残り全体を 1 回で consume** し lastIndex を
+  //     末尾へ進めるため、多数の未終端 BEGIN があっても per-BEGIN 再走査による n^2 は起きず O(n)。
+  //     INV-REDACTION-PEM-STRADDLE (redactor unit + real PG) が raw 0 を回帰固定する。
+  //   観測信号の scope (SEC-2・意図的 accept): branch2 の masked-span 長は観測信号を持たない
+  //     (10B の未終端 block でも 264KB の straddle でも redaction_count=1・[REDACT-TRUNCATED] 相当も
+  //     出ない)。fail-safe 方向 (over-redaction) の bounded な縮退であり、masked-span 長 / magnitude
+  //     信号の追加は将来の design decision とする。
   {
     kind: "private-key",
-    pattern:
-      /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/g,
+    pattern: new RegExp(
+      "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----" +
+        `(?:[\\s\\S]{0,${PRE_REDACT_SLICE}}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----` +
+        `|[\\s\\S]{0,${PRE_REDACT_SLICE}})`,
+      "g",
+    ),
   },
 
   // --- クラウド / ベンダ固有 token ----------------------------------------
@@ -385,9 +440,39 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   },
 
   // --- JWT (header.payload.signature, base64url) ---------------------------
+  // SEC-1 (境界跨ぎ JWT straddle leak・task 019f4c0d / decision 019f4c09):
+  //   旧実装 `\beyJ...{8,}\.eyJ...{8,}\.[..]{8,}\b` は各セグメントが **無界 `{8,}`** かつ
+  //   **必須 literal `.` delimiter** 依存で、private-key と同型の terminator-straddle gap を持つ。
+  //   長尺 payload (claims) の JWT では 2 個目の `.` + signature が redaction 前の先行 slice
+  //   (PRE_REDACT_SLICE) の外へ落ち、3-segment match が全体失敗 → 露出した raw payload (base64url の
+  //   連続 run) が high-entropy {40,MAX_VALUE_LEN} にもマッチせず **at-rest 残存**した (実 PG 実証・
+  //   14000 字 payload で raw 4117 字)。header/payload は共に JSON object の base64url ゆえ必ず `eyJ`
+  //   で始まる (RFC 7519) — この `eyJ...\.eyJ` を JWT 確定 anchor とし、private-key と同じ
+  //   2-branch bounded-fallback を 3-segment 用に適用する:
+  //     branch1 (完全構造が window 内): `<payload>\.<signature>\b` を bounded ({8,MAX_VALUE_LEN}) で
+  //             最小マスク (後続テキスト温存・over-redaction 回避)。通常 JWT はここで処理。
+  //     branch2 (2 個目の `.`/signature が straddle で window 外): anchor 以降を **head→window 末尾**
+  //             まで bounded greedy (`[A-Za-z0-9_.-]{0,PRE_REDACT_SLICE}`) で consume しマスク
+  //             (raw 露出ゼロ・under-redaction 絶対回避 > over-redaction)。straddle 時の window 内
+  //             tail は純 base64url ゆえ完全に飲み込む。
+  //   ReDoS (INV-REDACTION-REDOS-*): 全量指定子が有界 (`{8,MAX_VALUE_LEN}` / `{0,PRE_REDACT_SLICE}`)・
+  //     `+`/`*` 裸出現・入れ子量指定子なし。branch2 は残り全体を 1 回で consume し lastIndex を末尾へ
+  //     進めるため、多数の `eyJ.eyJ` anchor があっても per-anchor 再走査の n^2 は起きず O(n)。
+  //   残差 (accepted): header 自体が window 末尾を跨ぐ場合は anchor が消え header 断片が残るが、header は
+  //     公開メタ (alg/typ) で secret でない (秘匿対象の payload claims はさらに外側=完全に window 外)。
+  //     また in-window で signature が MAX_VALUE_LEN(4096) を超える JWT は branch1 成功後に signature の
+  //     tail (>4096 部分) が残り得る (SEC-2'・pre-existing)。signature は非機密の完全性タグで実 JWT の
+  //     sig は ≤512 字・standalone >4096 連続 base64 の tail は high-entropy {40,MAX_VALUE_LEN} の
+  //     設計境界 (SEC-3・high-entropy ルールの scope 境界コメント参照) に subsume する。
+  //   INV-REDACTION-JWT-STRADDLE (redactor unit + real PG) が raw 0 を回帰固定する。
   {
     kind: "jwt",
-    pattern: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+    pattern: new RegExp(
+      `\\beyJ[A-Za-z0-9_-]{8,${MAX_VALUE_LEN}}\\.eyJ` +
+        `(?:[A-Za-z0-9_-]{8,${MAX_VALUE_LEN}}\\.[A-Za-z0-9_-]{8,${MAX_VALUE_LEN}}\\b` +
+        `|[A-Za-z0-9_.-]{0,${PRE_REDACT_SLICE}})`,
+      "g",
+    ),
   },
 
   // --- Authorization: Basic <base64> (Bearer より前: "Basic" を先取り) -------
@@ -579,6 +664,12 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   // パディング `={0,2}` は維持。`=` は symbol class に数える (urlsafe 鍵の末尾 `=`)。
   // ReDoS: lookbehind で run 先頭のみ start、{40,N}/{0,2} は有界、貪欲だが backtrack は
   //   高々 (N-40+2) 歩/run start で線形 (`+`/`*` 裸出現なし)。
+  // scope 境界 (SEC-3・設計境界の開示): {40,MAX_VALUE_LEN} bound により、**単独の >MAX_VALUE_LEN(4096)
+  //   連続 base64 run** (PEM マーカー / vendor prefix / credential キー文脈のいずれも無い) は trailing
+  //   lookahead を満たせず position-independent に leak し得る (straddle 特有でなく window 内でも同じ)。
+  //   これは ReDoS / over-redaction (巨大な正当 base64 = 画像・ファイル埋込を過剰マスクしない) との
+  //   意図的 tradeoff で、branch2 型の補償は PEM/JWT マーカー付きのみ持つ。汎用の長尺 blob マスクは
+  //   別の design decision とする。
   {
     kind: "high-entropy-secret",
     pattern: new RegExp(

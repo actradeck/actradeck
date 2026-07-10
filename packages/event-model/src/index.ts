@@ -32,6 +32,7 @@ export {
   TERMINAL_STATES,
   STATE_TRANSITIONS,
   isTerminalState,
+  isTerminalStateValue,
   isValidTransition,
   assertValidTransition,
   InvalidStateTransitionError,
@@ -93,10 +94,29 @@ export { normalizeScopePath, isPathWithinScope, sanitizeRepoLabel } from "./path
 export { parseAgentVisibilityWire, aggregateAgentReadiness } from "./agent-visibility-wire.js";
 export type { AgentVisibilityWire } from "./agent-visibility-wire.js";
 
+// codex spawn wire 検証 + 失敗 enum (T1 single source: backend route/relay + sidecar daemon handler・ADR 019f4206)
+export {
+  parseCodexSpawnRequest,
+  asCodexSpawnErrorCode,
+  CODEX_SPAWN_ERROR_MESSAGE,
+  MAX_SPAWN_PROMPT_LEN,
+  MAX_SPAWN_CWD_LEN,
+} from "./codex-spawn-wire.js";
+export type {
+  CodexSpawnParams,
+  CodexSpawnErrorCode,
+  CodexSpawnResult,
+} from "./codex-spawn-wire.js";
+
 // 契約 docs 抽出ヘルパ (INV テスト共有基盤・runtime プロダクトロジックではない・PR-2 QA-3/TDA-1)
 // docs/ingestion-contract.md の golden example / event_type 列挙を event-model 契約テストと
 // backend real-POST 契約テストが同一規則で抽出するための単一出所 (verbatim 二重定義の解消)。
 export { GOLDEN_DOC_RELPATH, extractGoldenEvent, extractDocEventTypes } from "./contract-doc.js";
+
+// presence / recency 表示包含述語 (LiveWall/Board 既定・external adapter を recency proxy で包含・ADR 019f474e)
+// backend(wall)と webui(toDisplayList/purgeStale/liveness) が共有し境界跨ぎ drift を排除する単一出所。
+export { WALL_RECENT_MS, isPresentOrRecentlyActive } from "./presence.js";
+export type { PresenceRecencyInput } from "./presence.js";
 
 // event id (UUIDv7)
 export { EventId, newEventId, isUuidV7 } from "./id.js";

@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import {
   type AgentVisibilityWire,
   aggregateAgentReadiness,
+  asCodexSpawnErrorCode,
   parseAgentVisibilityWire,
   type PolicyCategory,
   projectPolicyCategories,
@@ -61,6 +62,13 @@ interface SidecarConn {
    */
   policyCapable: boolean;
   /**
+   * ADR 019f4206 A段: この daemon が codex.spawn.request を処理して managed codex を起動できるか (hello の
+   * spawn_capable)。`ACTRADECK_ENABLE_CODEX_SPAWN` opt-in の attach daemon のみ true。cockpit の spawn 宛先
+   * 候補 (connectedDaemons の spawn_capable) をこれで絞り、非対応 daemon への spawn addressing timeout を防ぐ。
+   * 既定 false (未広告 daemon は安全側で spawn 非対応扱い)。
+   */
+  spawnCapable: boolean;
+  /**
    * ADR 019f1972 §2b (decision 019f1a29): この daemon が hello に相乗りさせた agent 観測可能性
    * (Claude/Codex が「セッションが cockpit に出る状態か」). NO-RAW (boolean のみ・parseAgentVisibilityWire で
    * 検証済み射影)。未報告 (旧 dist / 非対応 daemon) は undefined のまま (agentReadiness の集約から除外)。
@@ -88,6 +96,8 @@ interface HelloFrame {
   session_ids?: unknown;
   /** ADR 019f1582 follow-up: daemon が policy.request を処理できるか (true の daemon のみ policy addressing 対象)。 */
   policy_capable?: unknown;
+  /** ADR 019f4206 A段: daemon が codex.spawn.request を処理できるか (true の daemon のみ spawn addressing 対象)。 */
+  spawn_capable?: unknown;
   /**
    * ADR 019f1972 §2b: agent 観測可能性の相乗り (NO-RAW). unknown 受け — handleHello が
    * parseAgentVisibilityWire で検証射影する (wire を盲信しない・多層防御)。
@@ -250,6 +260,33 @@ export function isPolicyResponseFrame(v: unknown): v is PolicyResponseFrame {
 export const POLICY_REQUEST_TIMEOUT_MS = 5000;
 
 /**
+ * ADR 019f4206 A段: sidecar が返す Codex spawn 応答 (NO-RAW: ok + closed enum error code + optional session_id)。
+ * prompt/cwd は決して載らない。error は closed enum ゆえ backend が asCodexSpawnErrorCode で再投影する。
+ */
+interface CodexSpawnResponseFrame {
+  type: "codex.spawn.response";
+  request_id?: unknown;
+  ok?: unknown;
+  session_id?: unknown;
+  error?: unknown;
+}
+
+/** sidecar codex.spawn.response か判定する (ingest event / hello / 他 response と区別)。 */
+export function isCodexSpawnResponseFrame(v: unknown): v is CodexSpawnResponseFrame {
+  return (
+    typeof v === "object" && v !== null && (v as { type?: unknown }).type === "codex.spawn.response"
+  );
+}
+
+/** codex spawn relay 結果 (HTTP endpoint へ返す)。transient=timeout/disconnect (→503) を区別する。 */
+export type CodexSpawnRelayResult =
+  | { readonly ok: true; readonly session_id?: string }
+  | { readonly ok: false; readonly error: string; readonly transient?: boolean };
+
+/** codex spawn 要求の既定タイムアウト (ms)。応答が来なければ安全側で reject する。 */
+export const CODEX_SPAWN_REQUEST_TIMEOUT_MS = 8000;
+
+/**
  * SEC-2 / SEC-R3-4 (decision 019f0e2d): sidecar 由来の relay error 文字列を呼び元 (→ browser) へ反射する
  * 前の長さ上限。正規 sidecar は固定文言のみ送るが、buggy/adversarial sidecar の無制限文字列を構造的に
  * 抑える defense-in-depth (loopback/single-operator 境界内ゆえ実害は低いが原文非依存・有界化)。
@@ -344,6 +381,17 @@ export class SidecarRegistry {
   >();
   /** policy 要求のタイムアウト (ms)。テストで短縮注入可能。 */
   private readonly policyTimeoutMs: number;
+  /**
+   * ADR 019f4206 A段: 未解決の codex spawn 要求 (request_id → 解決/タイムアウト)。sidecar が
+   * codex.spawn.response を返したら resolveCodexSpawn が該当 Promise を解決する。pendingPolicy と同型
+   * (応答を at-rest に貯めず解決後即破棄・タイムアウトで安全側 reject)。prompt/cwd は載らない。
+   */
+  private readonly pendingSpawn = new Map<
+    string,
+    { resolve: (r: CodexSpawnRelayResult) => void; timer: ReturnType<typeof setTimeout> }
+  >();
+  /** codex spawn 要求のタイムアウト (ms)。テストで短縮注入可能。 */
+  private readonly spawnTimeoutMs: number;
 
   constructor(
     opts: {
@@ -351,12 +399,14 @@ export class SidecarRegistry {
       diffTimeoutMs?: number;
       allowlistTimeoutMs?: number;
       policyTimeoutMs?: number;
+      spawnTimeoutMs?: number;
     } = {},
   ) {
     this.graceMs = opts.graceMs ?? PRESENCE_GRACE_MS;
     this.diffTimeoutMs = opts.diffTimeoutMs ?? DIFF_REQUEST_TIMEOUT_MS;
     this.allowlistTimeoutMs = opts.allowlistTimeoutMs ?? ALLOWLIST_REQUEST_TIMEOUT_MS;
     this.policyTimeoutMs = opts.policyTimeoutMs ?? POLICY_REQUEST_TIMEOUT_MS;
+    this.spawnTimeoutMs = opts.spawnTimeoutMs ?? CODEX_SPAWN_REQUEST_TIMEOUT_MS;
   }
 
   /** 接続を登録する (handshake 前。controlToken はまだ無い)。 */
@@ -368,6 +418,7 @@ export class SidecarRegistry {
       daemonId,
       controlToken: undefined,
       policyCapable: false,
+      spawnCapable: false,
       sessions: new Set(),
     };
     this.conns.set(link, conn);
@@ -408,6 +459,9 @@ export class SidecarRegistry {
     // observe-only daemon (codex-rollout) を connectedDaemons から除外し、UI が timeout する事故を防ぐ。
     // 未広告 (旧 dist / 非対応) は false のまま (安全側・除外)。
     conn.policyCapable = frame.policy_capable === true;
+    // ADR 019f4206 A段: codex spawn 対応能力を hello から記録する。ACTRADECK_ENABLE_CODEX_SPAWN opt-in の
+    // attach daemon のみ true。未広告 (既定 OFF / 非対応) は false のまま (安全側・spawn 宛先から除外)。
+    conn.spawnCapable = frame.spawn_capable === true;
     // ADR 019f1972 §2b: agent 観測可能性を hello から記録する。wire は untrusted (信頼境界 sidecar→backend)
     // ゆえ event-model の正準パーサで再検証射影し (boolean のみ・余剰 field を構造的に落とす=NO-RAW)、
     // 不正/未報告 (undefined) のときは前回値を保持する (= 上書きしない・最新の有効報告を残す)。reannounce で
@@ -559,6 +613,12 @@ export class SidecarRegistry {
       pending.resolve({ ok: false, error: "server shutting down" });
     }
     this.pendingPolicy.clear();
+    // ADR 019f4206 A段: 未解決の spawn 要求も安全側 reject (transient・呼び元 HTTP は 503)。
+    for (const [, pending] of this.pendingSpawn) {
+      clearTimeout(pending.timer);
+      pending.resolve({ ok: false, error: "server shutting down", transient: true });
+    }
+    this.pendingSpawn.clear();
   }
 
   /** 接続数 (テスト/監視)。 */
@@ -578,14 +638,16 @@ export class SidecarRegistry {
    * 判定は fanOutPolicyMutation と同一 (link.open && controlToken)。**approve/interrupt 等の
    * session-semantic relay には使わない** (INV-REALTIME-RELAY-SCOPE は session-scoped 維持)。
    */
-  connectedDaemons(): { id: string }[] {
-    const out: { id: string }[] = [];
+  connectedDaemons(): { id: string; spawn_capable: boolean }[] {
+    const out: { id: string; spawn_capable: boolean }[] = [];
     for (const conn of this.conns.values()) {
       // open + controlToken (relay 認可) に加え policyCapable を要求する。policy.request を処理しない
       // observe-only daemon (codex-rollout) を除外し、UI が policy 非対応 daemon を addressing して
       // timeout する事故を構造的に防ぐ (ADR 019f1582 follow-up・capability gating)。
       if (conn.link.open && typeof conn.controlToken === "string" && conn.policyCapable) {
-        out.push({ id: conn.daemonId });
+        // ADR 019f4206 A段: spawn_capable を併記し、cockpit の spawn 導線が spawn 対応 daemon のみを
+        // 宛先候補にできるようにする (非対応 daemon への spawn addressing timeout を UI 側で防ぐ)。NO-RAW boolean。
+        out.push({ id: conn.daemonId, spawn_capable: conn.spawnCapable });
       }
     }
     return out;
@@ -1045,5 +1107,87 @@ export class SidecarRegistry {
   /** pending policy 要求数 (テスト/監視: タイムアウト・解決後の破棄を pin する)。 */
   get pendingPolicyCount(): number {
     return this.pendingPolicy.size;
+  }
+
+  /**
+   * ADR 019f4206 A段: Codex Managed spawn を接続中 daemon へ **session 非依存**で中継する。spawn は
+   * attach daemon の制御チャネル経由で in-process の managed codex を起動する新実行サーフェスゆえ、policy と
+   * 同じ daemon-addressed relay に乗せる (**session-scoped の approve/interrupt とは別・INV-REALTIME-RELAY-SCOPE
+   * 維持**)。未知 daemonId / 切断 / controlToken 未受領は安全側 reject。prompt/cwd は payload transient で at-rest
+   * に残さない (pendingSpawn は request_id と resolver のみ保持)。fan-out はしない (spawn は machine-global config
+   * でなく単一 daemon 上の 1 回きりの起動)。
+   */
+  requestCodexSpawnByDaemon(
+    daemonId: string,
+    params: { prompt: string; cwd: string; resolveScope?: readonly string[] },
+  ): Promise<CodexSpawnRelayResult> {
+    const conn = this.byDaemon.get(daemonId);
+    if (!conn) return Promise.resolve({ ok: false, error: "daemon not registered" });
+    if (!conn.link.open)
+      return Promise.resolve({ ok: false, error: "sidecar disconnected", transient: true });
+    if (typeof conn.controlToken !== "string") {
+      return Promise.resolve({ ok: false, error: "no control channel (handshake incomplete)" });
+    }
+    const requestId = randomUUID();
+    return new Promise<CodexSpawnRelayResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingSpawn.delete(requestId);
+        resolve({ ok: false, error: "codex spawn request timed out", transient: true });
+      }, this.spawnTimeoutMs);
+      timer.unref?.();
+      this.pendingSpawn.set(requestId, { resolve, timer });
+      try {
+        conn.link.send(
+          JSON.stringify({
+            type: "codex.spawn.request" as const,
+            request_id: requestId,
+            token: conn.controlToken,
+            // transient: 制御チャネル 1 回きりの payload。at-rest に残さない (NO-RAW・契約点6)。
+            prompt: params.prompt,
+            cwd: params.cwd,
+            ...(params.resolveScope !== undefined && params.resolveScope.length > 0
+              ? { resolve_scope: [...params.resolveScope] }
+              : {}),
+          }),
+        );
+      } catch {
+        clearTimeout(timer);
+        this.pendingSpawn.delete(requestId);
+        resolve({ ok: false, error: "relay send failed", transient: true });
+      }
+    });
+  }
+
+  /**
+   * ADR 019f4206 A段: sidecar からの codex.spawn.response を該当 pending 要求へ解決する (ingestion-server が
+   * 配線)。request_id 未知 (タイムアウト済 / 二重応答) なら no-op。error は **closed enum へ投影**
+   * (asCodexSpawnErrorCode — 敵対 sidecar の未知 code は spawn_failed へ縮退)。解決後は pending から即破棄。
+   * session_id は string のときのみ載せる (NO-RAW: prompt/cwd は元より frame に無い)。
+   */
+  resolveCodexSpawn(frame: {
+    request_id?: unknown;
+    ok?: unknown;
+    session_id?: unknown;
+    error?: unknown;
+  }): void {
+    if (typeof frame.request_id !== "string") return;
+    const pending = this.pendingSpawn.get(frame.request_id);
+    if (!pending) return; // 未知 / タイムアウト済 → 黙殺。
+    clearTimeout(pending.timer);
+    this.pendingSpawn.delete(frame.request_id);
+    if (frame.ok === true) {
+      pending.resolve({
+        ok: true,
+        ...(typeof frame.session_id === "string" ? { session_id: frame.session_id } : {}),
+      });
+      return;
+    }
+    // 失敗: daemon-report の error を closed enum へ投影 (未知/欠落は spawn_failed)。原文非依存。
+    pending.resolve({ ok: false, error: asCodexSpawnErrorCode(frame.error) });
+  }
+
+  /** pending codex spawn 要求数 (テスト/監視: タイムアウト・解決後の破棄を pin する)。 */
+  get pendingSpawnCount(): number {
+    return this.pendingSpawn.size;
   }
 }

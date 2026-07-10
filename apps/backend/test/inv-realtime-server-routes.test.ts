@@ -1400,4 +1400,114 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     expect(res.body).not.toContain("passwd");
     expect(res.body).not.toContain("secret");
   });
+
+  // --- ADR 019f4206 A段: POST /realtime/daemons/:daemonId/codex/spawn -----------------------
+  //   route + handleCodexSpawn helper の分岐 (invalid daemonId / invalid body / scope gate / relay
+  //   result mapping) を fake link + REAL SidecarRegistry で決定論的に固定する。
+  /** send で codex.spawn.request を捕捉し、任意の応答で pending を即解決する auto-respond link。 */
+  function autoRespondLink(reg: SidecarRegistry, respond: (reqId: string) => void) {
+    return {
+      open: true,
+      send(data: string): void {
+        const f = JSON.parse(data) as { type?: string; request_id?: string };
+        if (f.type === "codex.spawn.request" && typeof f.request_id === "string") {
+          respond(f.request_id);
+        }
+      },
+    };
+  }
+  function registerDaemon(reg: SidecarRegistry, link: SidecarLink): string {
+    reg.add(link);
+    reg.handleHello(link, {
+      type: "hello",
+      control_token: "ctl-spawn",
+      session_ids: [],
+      policy_capable: true,
+      spawn_capable: true,
+    });
+    return reg.connectedDaemons()[0]!.id;
+  }
+  const VALID_UUID = "11111111-2222-3333-4444-555555555555";
+
+  it("spawn: 奇形 daemonId → 400 invalid daemon id", async () => {
+    await mount({});
+    const res = await app.inject({
+      method: "POST",
+      url: "/realtime/daemons/not-a-uuid/codex/spawn",
+      headers: auth,
+      payload: { prompt: "p", cwd: "/r" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("spawn: 不正 body (prompt 欠落) → 400 invalid spawn request (prompt/cwd 非 echo)", async () => {
+    await mount({});
+    const res = await app.inject({
+      method: "POST",
+      url: `/realtime/daemons/${VALID_UUID}/codex/spawn`,
+      headers: auth,
+      payload: { cwd: "/r" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("spawn: cwd が project-scope 外 → 403 (封じ込め第一段・relay しない)", async () => {
+    const link = autoRespondLink(registry, (id) =>
+      registry.resolveCodexSpawn({ request_id: id, ok: true }),
+    );
+    const daemonId = registerDaemon(registry, link);
+    await mount({ projectScope: ["/allowed"] });
+    const res = await app.inject({
+      method: "POST",
+      url: `/realtime/daemons/${daemonId}/codex/spawn`,
+      headers: auth,
+      payload: { prompt: "p", cwd: "/other/repo" },
+    });
+    expect(res.statusCode).toBe(403);
+    // 生 cwd は echo されない (固定リテラルのみ)。
+    expect(res.body).not.toContain("/other/repo");
+  });
+
+  it("spawn: 成功応答 → 200 ok + session_id", async () => {
+    const link = autoRespondLink(registry, (id) =>
+      registry.resolveCodexSpawn({ request_id: id, ok: true, session_id: "thread_x" }),
+    );
+    const daemonId = registerDaemon(registry, link);
+    await mount({ projectScope: ["/allowed"] });
+    const res = await app.inject({
+      method: "POST",
+      url: `/realtime/daemons/${daemonId}/codex/spawn`,
+      headers: auth,
+      payload: { prompt: "do it", cwd: "/allowed/repo" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, session_id: "thread_x" });
+  });
+
+  it("spawn: daemon-report deny → 409 (closed enum error・transient でない)", async () => {
+    const link = autoRespondLink(registry, (id) =>
+      registry.resolveCodexSpawn({ request_id: id, ok: false, error: "spawn_cap_reached" }),
+    );
+    const daemonId = registerDaemon(registry, link);
+    await mount({});
+    const res = await app.inject({
+      method: "POST",
+      url: `/realtime/daemons/${daemonId}/codex/spawn`,
+      headers: auth,
+      payload: { prompt: "p", cwd: "/r" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: "spawn_cap_reached" });
+  });
+
+  it("spawn: 未登録 daemonId → 409 daemon not registered", async () => {
+    await mount({});
+    const res = await app.inject({
+      method: "POST",
+      url: `/realtime/daemons/${VALID_UUID}/codex/spawn`,
+      headers: auth,
+      payload: { prompt: "p", cwd: "/r" },
+    });
+    expect(res.statusCode).toBe(409);
+  });
 });

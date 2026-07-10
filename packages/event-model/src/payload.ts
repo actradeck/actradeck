@@ -199,7 +199,13 @@ const TurnPlanUpdated = variant("turn.plan.updated", {
   plan: z.string().optional(),
   steps: z.array(z.string()).optional(),
 });
-const TurnCompleted = variant("turn.completed", {});
+const TurnCompleted = variant("turn.completed", {
+  // 応答要約 (エージェント公開メッセージの有界要約・plan.md「エージェントの公開メッセージ」表示許可)。
+  //   出所は adapter/normalizer が summarize(prompt_response, N) で有界化した文字列。projection
+  //   `deriveActionSubject` が current_action_subject / replay subject の出所に使う (TurnStarted の
+  //   prompt_summary と対・ADR 019f47c2)。**秘匿値は含まない** (backend ingress 床で redaction 済)。
+  response_summary: z.string().optional(),
+});
 const TurnFailed = variant("turn.failed", {
   // `error` が正典の失敗要因フィールド (UI / projection subject の出所)。
   error: z.string().optional(),

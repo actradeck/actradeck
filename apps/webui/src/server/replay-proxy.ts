@@ -8,6 +8,7 @@ import {
   isAllowlistRevokePath,
   isAuditPacketVerifyPath,
   isAuditVerifyPath,
+  isCodexSpawnPath,
   isDemoLaunchPath,
   isPolicyResolvePath,
   isPolicySetPath,
@@ -139,6 +140,8 @@ export async function proxyReplayHistory(
   const isPolicyResolve = isPolicyResolvePath(req.url ?? "");
   // ADR 019f22a7 P1: セーフティデモ起動も mutating-class (POST-only + CSRF) 扱い。
   const isDemoLaunch = isDemoLaunchPath(req.url ?? "");
+  // ADR 019f4206 A段: Codex Managed spawn も実行を起動する mutating-class (POST-only + same-origin CSRF)。
+  const isCodexSpawn = isCodexSpawnPath(req.url ?? "");
   // ADR 6点強化 #1: tamper-evidence の検証も POST-only + CSRF。純粋検証だが body で manifest を運ぶ。
   const isAuditVerify = isAuditVerifyPath(req.url ?? "");
   // ADR 6点強化 #2: レビュー・パケット検証も同扱い (POST-only + CSRF + 大 body)。
@@ -148,6 +151,7 @@ export async function proxyReplayHistory(
     isPolicyMutating ||
     isPolicyResolve ||
     isDemoLaunch ||
+    isCodexSpawn ||
     isAuditVerify ||
     isAuditPacketVerify;
   if (method === "POST" && !isMutating) {

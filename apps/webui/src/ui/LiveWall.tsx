@@ -15,6 +15,7 @@ import { useRef, useState } from "react";
 
 import { formatCurrentAction } from "./action-units-display";
 import { ApprovalCard } from "./ApprovalCard";
+import { CaptureModeBadge } from "./CaptureModeBadge";
 import { Button, Icon, InlineAlert, StatusBadge, Tag } from "./kit";
 import { useLocale } from "./LocaleProvider";
 import { livenessBadge } from "./liveness-display";
@@ -264,6 +265,13 @@ export function WallLaneRow({
               {t("wall.lane.attention")}
             </Tag>
           ) : null}
+          {/* capture provenance (ADR 019f41ec-c549): 非 managed のみバッジ。managed/欠落=無し=既定。
+              detail pill と同一意味論 (observe-only とは呼ばない)・単一出所 CaptureModeBadge。 */}
+          <CaptureModeBadge
+            captureMode={item.capture_mode}
+            source={item.source}
+            testId="wall-lane-capture-mode"
+          />
           <span className="ad-wall__lane-actions">
             {onOpenSession ? (
               <Button

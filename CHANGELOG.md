@@ -43,10 +43,12 @@ relays.
   _before_ any event reaches disk or the network, with per-kind counts surfaced in
   the cockpit. Detection is best-effort pattern matching (gitleaks-style rules plus
   custom regexes) — a strong safety net, not an absolute guarantee.
-- **Approval governance.** A structural risk classifier gates high-risk commands and
-  relays approval cards to the cockpit; an opt-in persistent allowlist skips
-  re-approving _safe_ operations without ever auto-allowing dangerous ones. Per-repo
-  approval policy and a default-on catastrophic-operation gate for bypass/YOLO modes.
+- **Approval governance (selective by mode).** A structural risk classifier gates
+  high-risk commands and relays approval cards to the cockpit — for Claude Code over
+  Attach and for Codex in Managed Mode; external adapters are observe-only. An opt-in
+  persistent allowlist skips re-approving _safe_ operations without ever auto-allowing
+  dangerous ones. Per-repo approval policy and a default-on catastrophic-operation gate
+  for bypass/YOLO modes.
 - **Cross-vendor observation.** Claude Code (via hooks) and Codex (via rollout
   tailing in Attach Mode, or the App Server in Managed Mode) are normalized into one
   common event model, surfaced in one approval inbox.

@@ -448,6 +448,34 @@ describe("SessionDetailView capture_mode バッジ (INV-DETAIL-CAPTURE-BADGE / T
     expect(html).not.toContain('data-testid="detail-capture-mode"');
   });
 
+  // TDA-1 (ADR 019f47c2): source=external (第三者 adapter 直取込・capture_mode 欠落) は
+  //   ヘッダ badge を **managed と誤表示せず** external 独立分類で描く。captureProvenance 単一出所へ
+  //   移行するまでヘッダの external 回帰テストは 0 件だった (右 risk ペインのみ被覆)。
+  function detailExternal(captureMode?: "managed" | "attach" | "codex_rollout"): SessionDetail {
+    const d = detail([], "running.tool");
+    const base = { ...d, source: "external", provider: "gemini" };
+    return captureMode === undefined ? base : { ...base, capture_mode: captureMode };
+  }
+
+  it("source=external (capture_mode 欠落) のヘッダは external バッジを描く (managed 誤表示しない)", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionDetailView, { detail: detailExternal(), loading: false }),
+    );
+    expect(html).toContain('data-testid="detail-capture-mode"'); // managed 抑止でなく badge が出る。
+    expect(html).toContain('data-capture-mode="external"'); // provenance=external を data 属性へ。
+    expect(html).toContain("外部 (observe-only)"); // external 専用 i18n。
+    expect(html).not.toContain("外部起動"); // nonManaged (attach/codex) ラベルは出さない。
+  });
+
+  it("source=external は capture_mode の値に依らず external を優先する (誤 managed を断つ)", () => {
+    // 仮に capture_mode が managed でも、source=external なら external 分類が勝つ (observe-only)。
+    const html = renderToStaticMarkup(
+      createElement(SessionDetailView, { detail: detailExternal("managed"), loading: false }),
+    );
+    expect(html).toContain('data-capture-mode="external"');
+    expect(html).toContain("外部 (observe-only)");
+  });
+
   it("右 risk ペインの取得バッジに capture_mode を反映 (attach)", () => {
     const html = renderToStaticMarkup(
       createElement(SessionDetailView, {

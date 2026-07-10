@@ -566,3 +566,49 @@ describe("INV-COMMAND-UNIT-FOLD: foldActionUnits (command 相関)", () => {
     expect(units.map((u) => u.id)).toEqual(["ev:x", `cmd:${TU}`, "ev:y"]);
   });
 });
+
+describe("INV-ACTION-UNIT-SUBJECT-FALLBACK: turn の subject を対象に出す (ADR 019f47c2)", () => {
+  it("turn.started/completed は command/path/tool_name を持たず subject を target に出す (対象なし にしない)", () => {
+    const units = foldActionUnits([
+      ev({
+        event_id: "ts",
+        event_type: "turn.started",
+        kind: "turn",
+        subject: "依頼: echo hello-actradeck して note.txt を読んで",
+      }),
+      ev({
+        event_id: "tc",
+        event_type: "turn.completed",
+        kind: "turn",
+        subject: "応答: note.txt の内容は …",
+      }),
+    ]);
+    expect(units.map((u) => u.id)).toEqual(["ev:ts", "ev:tc"]);
+    // target が subject になっている (= ActionTimeline の「(対象なし)」を回避)。
+    expect(units[0]!.target).toBe("依頼: echo hello-actradeck して note.txt を読んで");
+    expect(units[1]!.target).toBe("応答: note.txt の内容は …");
+    // targetKind は command/path/tool のいずれでもない (subject fallback は未分類)。
+    expect(units[0]!.targetKind).toBeUndefined();
+  });
+
+  it("command は subject を持っても command を優先 (subject fallback は最下位・既存表示不変)", () => {
+    const units = foldActionUnits([
+      ev({
+        event_id: "cs",
+        event_type: "command.started",
+        kind: "command",
+        command: "ls -la",
+        subject: "ls -la",
+      }),
+    ]);
+    expect(units[0]!.target).toBe("ls -la");
+    expect(units[0]!.targetKind).toBe("command");
+  });
+
+  it("subject も target 素材も無ければ従来どおり target 未定義 (mutation: subject fallback 除去で turn が RED)", () => {
+    const units = foldActionUnits([
+      ev({ event_id: "tc", event_type: "turn.completed", kind: "turn", subject: undefined }),
+    ]);
+    expect(units[0]!.target).toBeUndefined();
+  });
+});

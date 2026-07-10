@@ -8,6 +8,8 @@
  * SEC: ここは PendingApproval (backend が redaction 済みで載せた DTO) の値をそのまま見せ方に
  * 落とすだけ。生 tool_input を独自取得しない・新規の秘匿情報を描かない (security.md)。
  */
+import { isTerminalStateValue } from "@actradeck/event-model";
+
 import { t, type Locale, type MessageKey } from "./i18n/messages";
 import { isKnownKind, redactionKindLabelKey } from "./redaction-display";
 
@@ -341,13 +343,11 @@ export function approvalTimeRemainingMs(
  * (live / running.x / waiting.x / compacting / starting / stalled / idle 等) では sidecar が
  * 安全に処理 (managed でなければ no-op) するため true。state 不明 (undefined) は安全側で false。
  *
- * 注: `@actradeck/event-model` の `isTerminalState` は `State` 型を要求するが detail.state は
- * `string | undefined` のため、ここでは UI ローカルに terminal 集合を当てて判定する
- * (T1 の TERMINAL_STATES = completed/failed/interrupted に追従)。
+ * 注: detail.state は `string | undefined` のため、`State` 型を要求する `isTerminalState` でなく
+ * event-model 正典の string 緩包含版 `isTerminalStateValue` (TERMINAL_STATES 帰着・単一出所) で
+ * 判定する (旧 UI ローカル列挙 TERMINAL_STATE_NAMES は wall-ended-badge TDA-1 で正典へ統合)。
  */
-const TERMINAL_STATE_NAMES: ReadonlySet<string> = new Set(["completed", "failed", "interrupted"]);
-
 export function interruptEnabledForState(state: string | undefined): boolean {
   if (state === undefined) return false;
-  return !TERMINAL_STATE_NAMES.has(state);
+  return !isTerminalStateValue(state);
 }

@@ -1,6 +1,6 @@
 # ActraDeck
 
-**The vendor-neutral control plane for coding agents — secret redaction, cross-vendor audit, and approval governance in one cockpit.**
+**The vendor-neutral control plane for coding agents — cross-vendor secret redaction and audit, with selective approval governance (Claude Code today, Codex in Managed Mode).**
 
 ActraDeck sits beside your coding agents — Claude Code, Codex, and whatever comes
 next — and gives you **one place to watch what they do, stop secrets before they
@@ -37,7 +37,9 @@ vendor structurally will not build: **neutral governance across competing agents
 
 - **Approval governance, not just a prompt.** A structural risk classifier gates
   high-risk commands; an opt-in persistent allowlist lets you skip re-approving
-  _safe_ operations without ever auto-allowing dangerous ones.
+  _safe_ operations without ever auto-allowing dangerous ones. Relay to the cockpit
+  is selective by mode — Claude Code over Attach, Codex in Managed Mode (see the
+  [support matrix](#vendor--mode-support)); external adapters are observe-only.
 - **Secrets are redacted before persist or transmit.** A two-layer redactor
   (INV-REDACTION) masks detected secret keys, tokens, and `.env` contents: the sidecar
   redacts _before_ an event it collects reaches disk or the network, and backend ingress
@@ -96,18 +98,23 @@ observed and its native approvals still happen in its own TUI. (Claude Code in M
 Mode is all ✅, omitted for brevity.)
 
 **Other agents via external adapters.** Any third-party CLI can be observed by mapping
-its events to the public ingestion contract (`provider=<slug>`, `source=external`). The
-first shipped example is **opencode** (`docs/examples/opencode-adapter/`): a dependency-zero
-opencode plugin that maps its hooks into the normalized event model — **observe-only** (state,
-current action, command exit codes, diffs, streaming), redaction happens at the backend
-ingress floor, and it does **not** relay approvals.
+its events to the public ingestion contract (`provider=<slug>`, `source=external`). Two
+adapters ship today, both dependency-zero and **observe-only** (state, current action,
+command exit codes, diffs; redaction happens at the backend ingress floor; approvals are
+**not** relayed):
 
-| Capability                                     | opencode (external adapter) |
-| ---------------------------------------------- | :-------------------------: |
-| Observe — state, current action, diffs         |             ✅              |
-| Redaction before persist (backend floor)       |             ✅              |
-| Audit log + replay                             |             ✅              |
-| Approval relay — allow / deny from the cockpit |       ⛔ observe-only       |
+- **opencode** (`docs/examples/opencode-adapter/`): a long-lived opencode plugin.
+- **Gemini CLI** (`docs/examples/gemini-adapter/`): a Gemini hook `command` — a short-lived
+  process run once per event — that also **never denies** (its stdout is always `{}`). Tested
+  with Gemini CLI 0.42.0; it can migrate from a Claude Code hook config via
+  `gemini hooks migrate --from-claude`.
+
+| Capability                                     | opencode (external adapter) | Gemini CLI (external adapter) |
+| ---------------------------------------------- | :-------------------------: | :---------------------------: |
+| Observe — state, current action, diffs         |             ✅              |              ✅               |
+| Redaction before persist (backend floor)       |             ✅              |              ✅               |
+| Audit log + replay                             |             ✅              |              ✅               |
+| Approval relay — allow / deny from the cockpit |       ⛔ observe-only       |        ⛔ observe-only         |
 
 ## Quickstart
 
@@ -185,13 +192,15 @@ troubleshooting). The precision/limits of Attach Mode are in
 > cockpit — launch a session with `./scripts/actradeck codex "<task>"`. See
 > [`docs/attach-mode.md`](./docs/attach-mode.md) for its precise limits.
 
-### Or one command with Docker
+### Or run the cockpit in Docker
 
 If you'd rather not install Node/pnpm, the **cockpit** (backend + webui + embedded
-database) runs from a single image — no external database, no build step:
+database) runs from a single image — no external database. Build it locally from the
+repo (the Dockerfile is the same one the release workflow signs), then run it:
 
 ```bash
-docker run --rm -p 127.0.0.1:55400:55400 ghcr.io/actradeck/actradeck:latest
+docker build -t actradeck .
+docker run --rm -p 127.0.0.1:55400:55400 actradeck
 # then open http://localhost:55400
 ```
 
@@ -202,9 +211,10 @@ honest support matrix, the exact `docker run` flags, verifying the image's cosig
 signature, and how to wire a host agent are all in
 [`docs/docker.md`](./docs/docker.md).
 
-> The image is **published on demand** (ADR 0013 Phase 2). Until a maintainer opts in to
-> the GHCR publish, build it locally with `docker build -t actradeck .` — the Dockerfile
-> and compose are the same ones the release workflow signs.
+> **Prebuilt GHCR image — roadmap, not yet published.** A signed
+> `ghcr.io/actradeck/actradeck:latest` is wired into the release workflow, but the image
+> job is **opt-in and off by default** (ADR 0013 Phase 2), so `docker pull` from GHCR does
+> **not** work yet. Build locally with the command above until an image is published.
 
 ## Architecture
 

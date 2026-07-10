@@ -192,8 +192,11 @@ export interface SessionRiskFacts {
   readonly changedPathCount: number;
   /** 非ゼロ exit code の command があったか (失敗シグナル)。 */
   readonly hadCommandFailure: boolean;
-  /** capture_mode (欠落は managed 既定; capture provenance バッジ判定の出所)。 */
-  readonly captureMode: "managed" | "attach" | "codex_rollout";
+  /**
+   * capture provenance (取得来歴)。source=external は observe-only 取込ゆえ external を独立分類し
+   * managed 誤表示を断つ (ADR 019f47c2)。欠落 capture_mode + 非 external は managed 既定。
+   */
+  readonly captureMode: CaptureProvenance;
 }
 
 const RISK_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
@@ -203,6 +206,29 @@ export function normalizeCaptureMode(
   v: string | undefined,
 ): "managed" | "attach" | "codex_rollout" {
   return v === "attach" || v === "codex_rollout" ? v : "managed";
+}
+
+/**
+ * capture の provenance (取得来歴) の表示分類 (ADR 019f47c2)。
+ * `capture_mode` enum (managed/attach/codex_rollout) は **ActraDeck が起動を所有する観測モード**であり
+ * external 値を持たない (ADR 019ea4ba D4)。ゆえに第三者 adapter 直取込 (`source==="external"`・gemini/
+ * opencode 等) は capture_mode を持たず、`normalizeCaptureMode` 単独だと欠落を **managed と誤表示**する。
+ * 本 helper は source を優先的に見て external を独立分類し、その誤表示を断つ (単一出所)。
+ */
+export type CaptureProvenance = "managed" | "attach" | "codex_rollout" | "external";
+
+/**
+ * (capture_mode, source) → 表示 provenance の正準写像 (単一出所)。
+ * source=external は ActraDeck が観測経路を所有しない observe-only 取込ゆえ external を返す
+ * (capture_mode の値に依らない)。それ以外は既存の capture_mode 正規化に委ねる (managed/attach/
+ * codex_rollout の既存表示は不変)。
+ */
+export function captureProvenance(
+  captureMode: string | undefined,
+  source: string | undefined,
+): CaptureProvenance {
+  if (source === "external") return "external";
+  return normalizeCaptureMode(captureMode);
 }
 
 /**
@@ -221,7 +247,8 @@ export function isNonManagedCapture(captureMode: string | undefined): boolean {
  * 既存データのみ・redaction 済み値のみ参照 (security.md)。
  */
 export function deriveSessionFacts(
-  detail: Pick<SessionDetail, "capture_mode">,
+  // source は optional 受理 (external 判定に使うが、旧 caller/test が capture_mode のみ渡す後方互換)。
+  detail: Pick<SessionDetail, "capture_mode"> & { readonly source?: string },
   events: readonly ReplayEventDTO[] = [],
 ): SessionRiskFacts {
   let riskRank = 0;
@@ -254,7 +281,7 @@ export function deriveSessionFacts(
     fileChanges,
     changedPathCount: changedPaths.size,
     hadCommandFailure,
-    captureMode: normalizeCaptureMode(detail.capture_mode),
+    captureMode: captureProvenance(detail.capture_mode, detail.source),
   };
 }
 

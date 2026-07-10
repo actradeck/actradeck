@@ -1,7 +1,15 @@
 import { newEventId, parseEvent, type NormalizedEvent } from "@actradeck/event-model";
 import { describe, expect, it } from "vitest";
 
-import { applyEvent, initialProjection, parsePendingApprovals, reduceEvents } from "./index.js";
+import {
+  SUMMARY_SUBJECT_CAP,
+  applyEvent,
+  boundTurnSummary,
+  deriveActionSubject,
+  initialProjection,
+  parsePendingApprovals,
+  reduceEvents,
+} from "./index.js";
 
 function ev(o: {
   readonly session_id?: string;
@@ -835,6 +843,43 @@ describe("@actradeck/projection reducer", () => {
         ).projection;
         expect(out.current_action_subject).toBeUndefined();
       }
+    });
+  });
+
+  // gemini-obs QA-1 (DB-free unit): turn.* の要約→subject **positive 導出** + boundTurnSummary の
+  //   有界化を DB 非依存で pin する (real-PG straddle test (D) + anti-skip guard の二重 enforce に
+  //   対する defense-in-depth。ADR 019f47c2 / SEC-1 有界化は SUMMARY_SUBJECT_CAP コメント参照)。
+  describe("INV-TURN-SUBJECT-BOUND (gemini-obs QA-1): turn.* 要約の positive 導出 + 有界化 (DB-free)", () => {
+    it("turn.started → prompt_summary / turn.completed → response_summary を subject に正導出する", () => {
+      expect(deriveActionSubject("turn.started", { prompt_summary: "依頼: run tests" })).toBe(
+        "依頼: run tests",
+      );
+      expect(deriveActionSubject("turn.completed", { response_summary: "応答: 完了した" })).toBe(
+        "応答: 完了した",
+      );
+      // projection 経路 (applyEvent) でも同じ導出になる (deriveCurrentActionSubject が共有写像)。
+      const out = applyEvent(
+        initialProjection("s1"),
+        ev({ event_type: "turn.started", payload: { prompt_summary: "依頼: run tests" } }),
+      ).projection;
+      expect(out.current_action_subject).toBe("依頼: run tests");
+    });
+
+    it(`cap 超過 (${SUMMARY_SUBJECT_CAP + 1} 字) は ${SUMMARY_SUBJECT_CAP} 字 + … へ有界化する`, () => {
+      const long = "x".repeat(SUMMARY_SUBJECT_CAP + 1); // 201 字
+      const expected = "x".repeat(SUMMARY_SUBJECT_CAP) + "…"; // 200 + ellipsis
+      expect(deriveActionSubject("turn.started", { prompt_summary: long })).toBe(expected);
+      expect(deriveActionSubject("turn.completed", { response_summary: long })).toBe(expected);
+      // bound 実装点そのもの (boundTurnSummary) も直接 pin (replay-store の DTO 搬送 bound と共有)。
+      expect(boundTurnSummary(long)).toBe(expected);
+      expect(boundTurnSummary(long)!.length).toBe(SUMMARY_SUBJECT_CAP + 1);
+    });
+
+    it("cap ちょうど / 以下は ellipsis なしでそのまま・undefined は undefined", () => {
+      const exact = "y".repeat(SUMMARY_SUBJECT_CAP);
+      expect(deriveActionSubject("turn.started", { prompt_summary: exact })).toBe(exact);
+      expect(boundTurnSummary(exact)).toBe(exact);
+      expect(boundTurnSummary(undefined)).toBeUndefined();
     });
   });
 

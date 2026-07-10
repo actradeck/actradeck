@@ -186,6 +186,33 @@ const ja = {
   "readiness.agent.codex.managedHint":
     "承認 relay と予防を有効にするには Managed で起動します（rollout 観測は検知のみ）:",
 
+  // ── Codex Managed spawn (ADR 019f4206 A段・cockpit から起動) ─────────────────
+  // 正直な開示: 一発 prompt (multi-turn 未配線)・headless (TUI でない)・spawn 可能 daemon ゼロ時は env opt-in が必要。
+  "codexSpawn.title": "Managed Codex を起動",
+  "codexSpawn.lead":
+    "接続中の attach デーモン経由で Codex app-server を Managed 起動します（承認 relay と予防が有効）。",
+  "codexSpawn.field.prompt": "プロンプト",
+  "codexSpawn.field.promptPlaceholder": "Codex に依頼する内容を入力…",
+  "codexSpawn.field.cwd": "作業ディレクトリ（絶対パス）",
+  "codexSpawn.field.cwdPlaceholder": "/path/to/repo",
+  "codexSpawn.field.daemon": "対象デーモン",
+  "codexSpawn.submit": "起動",
+  "codexSpawn.submitting": "起動中…",
+  "codexSpawn.ok": "Managed Codex を起動しました。セッションが一覧に表示されます。",
+  "codexSpawn.limits":
+    "一発プロンプトのみ（multi-turn は未配線）・headless（TUI ではありません）。起動後は承認カードが Inbox に届きます。",
+  "codexSpawn.disabledHint":
+    "spawn 可能なデーモンがありません。attach デーモンで環境変数 ACTRADECK_ENABLE_CODEX_SPAWN=1 を設定して再起動すると有効になります。",
+  // 失敗文言 (backend/daemon の closed enum code に 1:1・原文非依存・prompt/cwd を含まない)。
+  "codexSpawn.error.invalid_request":
+    "リクエストが不正です（プロンプト／作業ディレクトリを確認してください）。",
+  "codexSpawn.error.cwd_out_of_scope": "作業ディレクトリがプロジェクトスコープ外です。",
+  "codexSpawn.error.spawn_disabled":
+    "Codex spawn が無効です（ACTRADECK_ENABLE_CODEX_SPAWN=1 を設定してください）。",
+  "codexSpawn.error.spawn_cap_reached": "Managed Codex の同時起動数が上限に達しています。",
+  "codexSpawn.error.spawn_failed": "Codex の起動に失敗しました。",
+  "codexSpawn.error.generic": "起動に失敗しました。",
+
   // ── first-run セーフティデモ (ADR 019f22a7 P1・空状態 CTA) ─────────────────────
   // 「止める・残さない・証明できる」を静的✓で断定せず、使い捨て30秒デモで実証する capability として提示する。
   "safetyDemo.title": "この端末で守られています",
@@ -404,6 +431,10 @@ const ja = {
   "detail.captureMode.nonManaged": "外部起動 ({mode})",
   "detail.captureMode.nonManaged.title":
     "このセッションは ActraDeck が起動を所有しない経路で取得されています。一部の制御 (停止など) は効きません。承認 relay の可否は agent と mode により異なります。",
+  // ADR 019f47c2: source=external (第三者 adapter 直取込・gemini/opencode 等) の observe-only バッジ。
+  "detail.captureMode.external": "外部 (observe-only)",
+  "detail.captureMode.external.title":
+    "このセッションは第三者 adapter が直接取り込んだ外部イベントです (observe-only)。ActraDeck は起動を所有せず、停止・承認 relay はできません (検知のみ)。",
   // SEC-1/TDA-4: Codex 導線は provider 非依存の base title と分離し、SessionDetail が
   // detail.provider === "codex" の時のみ追記する (claude-attach は承認 relay 可ゆえ誤導しない)。
   "detail.captureMode.nonManaged.codexHint":
@@ -550,6 +581,7 @@ const ja = {
   "risk.web": "Web/ネットワークあり",
   "risk.failure": "非ゼロ exit あり",
   "risk.captureMode": "取得: {mode}",
+  "risk.captureMode.external": "取得: 外部 (observe-only)",
   "risk.permission": "権限: {mode}",
   "risk.permission.title":
     "このセッションの権限モード (sandbox)。bypassPermissions / acceptEdits は自動許可が広いため注意。",
@@ -874,6 +906,30 @@ const en: Record<MessageKey, string> = {
   "readiness.agent.codex.managedHint":
     "To relay approvals (prevention), launch Managed — rollout observation is detection-only:",
 
+  // ── Codex Managed spawn (ADR 019f4206 phase A; launch from cockpit) ──
+  "codexSpawn.title": "Launch Managed Codex",
+  "codexSpawn.lead":
+    "Launch Codex app-server in Managed mode via a connected attach daemon (approval relay and prevention enabled).",
+  "codexSpawn.field.prompt": "Prompt",
+  "codexSpawn.field.promptPlaceholder": "What should Codex do…",
+  "codexSpawn.field.cwd": "Working directory (absolute path)",
+  "codexSpawn.field.cwdPlaceholder": "/path/to/repo",
+  "codexSpawn.field.daemon": "Target daemon",
+  "codexSpawn.submit": "Launch",
+  "codexSpawn.submitting": "Launching…",
+  "codexSpawn.ok": "Managed Codex launched. The session will appear in the list.",
+  "codexSpawn.limits":
+    "Single prompt only (multi-turn not wired) and headless (not the TUI). After launch, approval cards arrive in the Inbox.",
+  "codexSpawn.disabledHint":
+    "No spawn-capable daemon. Set ACTRADECK_ENABLE_CODEX_SPAWN=1 on an attach daemon and restart to enable.",
+  "codexSpawn.error.invalid_request": "Invalid request (check the prompt and working directory).",
+  "codexSpawn.error.cwd_out_of_scope": "Working directory is outside the project scope.",
+  "codexSpawn.error.spawn_disabled":
+    "Codex spawn is disabled (set ACTRADECK_ENABLE_CODEX_SPAWN=1).",
+  "codexSpawn.error.spawn_cap_reached": "Too many concurrent Managed Codex sessions.",
+  "codexSpawn.error.spawn_failed": "Failed to launch Codex.",
+  "codexSpawn.error.generic": "Launch failed.",
+
   // ── first-run safety demo (ADR 019f22a7 P1; empty-state CTA) ──
   "safetyDemo.title": "Protected on this machine",
   "safetyDemo.lead":
@@ -1097,6 +1153,10 @@ const en: Record<MessageKey, string> = {
   "detail.captureMode.nonManaged": "External launch ({mode})",
   "detail.captureMode.nonManaged.title":
     "This session is captured through a path ActraDeck does not launch. Some controls, such as stop, have no effect. Approval relay support depends on the agent and mode.",
+  // ADR 019f47c2: observe-only badge for source=external (third-party adapter ingest; gemini/opencode/etc.).
+  "detail.captureMode.external": "External (observe-only)",
+  "detail.captureMode.external.title":
+    "This session is external events ingested directly by a third-party adapter (observe-only). ActraDeck does not own its launch and cannot stop it or relay approvals (detection only).",
   // SEC-1/TDA-4: Codex-only hint split from the provider-agnostic base title; SessionDetail
   // appends it only when detail.provider === "codex" (claude-attach relays approvals, so no misdirection).
   "detail.captureMode.nonManaged.codexHint":
@@ -1233,6 +1293,7 @@ const en: Record<MessageKey, string> = {
   "risk.web": "Web/network present",
   "risk.failure": "Non-zero exit present",
   "risk.captureMode": "Capture: {mode}",
+  "risk.captureMode.external": "Capture: external (observe-only)",
   "risk.permission": "Permission: {mode}",
   "risk.permission.title":
     "This session's permission mode (sandbox). bypassPermissions / acceptEdits auto-allow broadly — take care.",

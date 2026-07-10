@@ -124,12 +124,49 @@ export type PolicyRequestMsg = {
   /** 3#SEC-1: per-session 制御トークン。 */
   readonly token?: string;
 };
+/**
+ * ADR 019f4206 A段: cockpit からの Codex Managed spawn 要求 (backend が daemon 宛に relay)。
+ * prompt / cwd は **transient** (ログ・at-rest に残さない・NO-RAW)。token 未一致は handleInbound で
+ * dispatch されない (fail-safe deny)。処理は attach daemon の CodexSpawnManager (値ベース deny)。
+ */
+export type CodexSpawnRequestMsg = {
+  readonly type: "codex.spawn.request";
+  /** 応答を突合する相関 ID (backend が採番)。 */
+  readonly request_id?: string;
+  /** turn/start へ渡す初期プロンプト (JSON-RPC 経由・shell/argv 非接触)。transient。 */
+  readonly prompt?: string;
+  /** 起動作業ディレクトリ (絶対パス・二段封じ込め対象)。transient。 */
+  readonly cwd?: string;
+  /**
+   * ADR 契約点3 第二段: backend の project-scope prefix 群 (ACTRADECK_PROJECT_SCOPE)。sidecar が解決済の
+   * 物理 git root をこの scope と再照合する (二段封じ込めの第二段)。secret でない・非永続・非 echo。
+   */
+  readonly resolve_scope?: readonly string[];
+  /** 3#SEC-1: per-connection 制御トークン。 */
+  readonly token?: string;
+};
+
 export type InboundMsg =
   | ApprovalDecisionMsg
   | InterruptMsg
   | DiffRequestMsg
   | AllowlistRequestMsg
-  | PolicyRequestMsg;
+  | PolicyRequestMsg
+  | CodexSpawnRequestMsg;
+
+/**
+ * ADR 019f4206 A段: Codex spawn 応答 (sidecar→backend)。**NO-RAW** — prompt/cwd を echo せず、失敗は closed
+ * enum の error code のみ (event-model CodexSpawnErrorCode)。session_id は resolve 済のときのみ。
+ */
+export type CodexSpawnResponseMsg = {
+  readonly type: "codex.spawn.response";
+  readonly request_id: string;
+  readonly ok: boolean;
+  /** 成功時・canonical (thread.id) 確定済のときのみ。 */
+  readonly session_id?: string;
+  /** 失敗時のみ・closed enum code (原文非依存・prompt/cwd 非含)。 */
+  readonly error?: string;
+};
 
 /** PAL-v2: allowlist エントリの NO-RAW ワイヤ形 (生コマンドは構造的に含まない・sha256/scope/label のみ)。 */
 export type AllowlistEntryWire = {
@@ -247,6 +284,13 @@ export interface WsClientOptions {
    */
   readonly policyCapable?: boolean;
   /**
+   * ADR 019f4206 A段: この daemon が codex.spawn.request を処理して managed codex を起動できるか。true のとき
+   * hello に `spawn_capable: true` を載せ、backend が cockpit の spawn 宛先候補に含める。`ACTRADECK_ENABLE_CODEX_SPAWN`
+   * opt-in 時のみ true (既定 OFF = 非広告・out-of-box 安全)。policy_capable と同パターンで buildHelloFrame 単一出所
+   * から connect/reannounce 一様広告 (TDA-1 019f1859 教訓: 片方欠落だと reannounce で capability 降格)。
+   */
+  readonly spawnCapable?: boolean;
+  /**
    * ADR 019f1972 §2b (decision 019f1a29): hello に optional `agent_visibility` を相乗りさせるための
    * provider。**送信直前に毎回呼ぶ** (accepted-staleness 最小化: hook 配線/binary 設置がランタイム中に
    * 変わっても次の hello で反映)。返り値が undefined なら field を省略する (provider 未注入と同じ後方互換)。
@@ -272,6 +316,8 @@ export interface WsClientEvents {
   allowlistRequest: (msg: AllowlistRequestMsg) => void;
   /** ADR 019f0c3e Phase 2: token 検証済みの承認ポリシー get/set 要求。上流が ApprovalBridge で応答する。 */
   policyRequest: (msg: PolicyRequestMsg) => void;
+  /** ADR 019f4206 A段: token 検証済みの Codex spawn 要求。上流 (attach daemon) が CodexSpawnManager で応答する。 */
+  spawnRequest: (msg: CodexSpawnRequestMsg) => void;
   connected: () => void;
   disconnected: () => void;
 }
@@ -285,6 +331,7 @@ export class WsClient extends EventEmitter {
   private readonly sessionIds: readonly string[];
   private readonly sessionIdsProvider: (() => readonly string[]) | undefined;
   private readonly policyCapable: boolean;
+  private readonly spawnCapable: boolean;
   private readonly agentVisibilityProvider: (() => AgentVisibilityWire | undefined) | undefined;
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
@@ -302,6 +349,7 @@ export class WsClient extends EventEmitter {
     this.sessionIds = opts.sessionIds ?? [];
     this.sessionIdsProvider = opts.sessionIdsProvider;
     this.policyCapable = opts.policyCapable ?? false;
+    this.spawnCapable = opts.spawnCapable ?? false;
     this.agentVisibilityProvider = opts.agentVisibilityProvider;
     this.reconnectBaseMs = opts.reconnectBaseMs ?? 500;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 10_000;
@@ -381,7 +429,8 @@ export class WsClient extends EventEmitter {
       msg.type === "interrupt" ||
       msg.type === "diff.request" ||
       msg.type === "allowlist.request" ||
-      msg.type === "policy.request"
+      msg.type === "policy.request" ||
+      msg.type === "codex.spawn.request"
     ) {
       if (!this.isAuthorizedControl(msg.token)) return; // fail-safe deny
     }
@@ -396,6 +445,7 @@ export class WsClient extends EventEmitter {
       else if (msg.type === "diff.request") this.emit("diffRequest", msg);
       else if (msg.type === "allowlist.request") this.emit("allowlistRequest", msg);
       else if (msg.type === "policy.request") this.emit("policyRequest", msg);
+      else if (msg.type === "codex.spawn.request") this.emit("spawnRequest", msg);
     } catch {
       // graceful 層が処理しない想定外 throw のみ到達する最終 crash net。daemon を生存させる。
     }
@@ -426,6 +476,14 @@ export class WsClient extends EventEmitter {
    * 接続断時は応答が届かず backend 側がタイムアウトで安全側 reject する。
    */
   respondPolicy(msg: PolicyResponseMsg): void {
+    this.sendRaw(JSON.stringify(msg));
+  }
+
+  /**
+   * ADR 019f4206 A段: Codex spawn 応答を backend へ返す (egress WS の fire-and-forget)。**NO-RAW** —
+   * prompt/cwd を含まず、失敗は closed enum の error code のみ。接続断時は backend 側が timeout で安全側 reject。
+   */
+  respondCodexSpawn(msg: CodexSpawnResponseMsg): void {
     this.sendRaw(JSON.stringify(msg));
   }
 
@@ -511,6 +569,10 @@ export class WsClient extends EventEmitter {
       // 載せない (=false) と backend は connectedDaemons から除外し UI が addressing しない。
       // connect/reannounce 両経路で一様に載せる (TDA-1: 片方欠落だと reannounce で capability 降格)。
       ...(this.policyCapable ? { policy_capable: true } : {}),
+      // ADR 019f4206 A段: codex.spawn.request を処理できる daemon のみ広告 (ACTRADECK_ENABLE_CODEX_SPAWN
+      // opt-in 時のみ true)。既定 OFF = 非広告 (out-of-box 安全)。policy_capable と同じ conditional field で、
+      // connect/reannounce 両経路を本 builder が単一出所として通る (TDA-1: 片方欠落だと reannounce で降格)。
+      ...(this.spawnCapable ? { spawn_capable: true } : {}),
       // ADR 019f1972 §2b: agent 観測可能性 (NO-RAW boolean 4 個)。policy_capable と同じ conditional field
       // (値があるときだけ載せる)。connect/reannounce 両経路を本 builder が単一出所として通る。
       ...(agentVisibility !== undefined ? { agent_visibility: agentVisibility } : {}),

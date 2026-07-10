@@ -6,6 +6,8 @@
  * needs_attention / waiting 系を短いラベルに落とす。意味づけ (live/stalled の判定) は
  * backend liveness が正典。ここは見せ方だけ。
  */
+import { isPresentOrRecentlyActive } from "@actradeck/event-model";
+
 import type { LivenessState, SessionListItem, SessionDetail } from "../realtime/contract";
 
 export type LivenessTone = "ok" | "idle" | "warn" | "muted";
@@ -39,19 +41,34 @@ export const LIVE_FRESH_MS = 60_000;
  * 鮮度は now に対する相対量なので、age 列と同じく **クライアントが毎秒評価**して補正する。
  *
  * 規則 (優先順):
- *  1. 切断 (`!connected`) → `offline`。sidecar との live 接続が無いという**観測事実**を出す。
- *     凍結された古い `liveness_state` (履歴に残る "live" 等) より接続の有無を優先する。
- *     「停止/dead」とは断定しない (INV-STALLED-UI): "offline"=接続が観測できないだけ。
+ *  1. 切断 (`!connected`):
+ *     a. ADR 019f474e: **external adapter(source==="external")の直近 active**(last_event_at が
+ *        WALL_RECENT_MS 内)は `offline` へ倒さず、connected 分岐と同じ鮮度ロジックで live/idle を出す。
+ *        external は presence(WS 接続)を構造的に持てず connected を要求できないため、recency を
+ *        presence の代理として扱う(LiveWall/Board 既定に出す判断=isPresentOrRecentlyActive と一貫)。
+ *        「停止/dead」断定回避は不変(offline に倒さないだけで stalled/dead を主張しない)。
+ *     b. それ以外の切断(managed/attach/codex_rollout、または external でも WALL_RECENT_MS 超過/
+ *        last_event_at 欠落)→ `offline`。sidecar との live 接続が無いという**観測事実**を出す。
+ *        凍結された古い `liveness_state` (履歴に残る "live" 等) より接続の有無を優先する。
+ *        「停止/dead」とは断定しない (INV-STALLED-UI): "offline"=接続が観測できないだけ。
  *  2. 接続中で保存が "live" のとき、最終イベントが鮮度窓内 (≤60s) なら `live`、外なら `idle`。
  *  3. 接続中で "live" 以外 (idle/stalled/unknown) は据え置く (既に非断定)。
  * last_event_at にはハートビート event も反映されるため、その age が全シグナルの鮮度の代理に
  * なる (backend anyFresh と整合)。
  */
 export function effectiveLivenessState(
-  item: Pick<SessionListItem, "liveness_state" | "connected" | "last_event_at">,
+  item: Pick<
+    SessionListItem,
+    "liveness_state" | "connected" | "last_event_at" | "source" | "state"
+  >,
   nowMs: number,
 ): LivenessDisplay {
-  if (!item.connected) return "offline";
+  if (!item.connected) {
+    // external-recent は presence 代理で表示に出しているため offline に倒さず鮮度で live/idle を出す。
+    // 非 external / stale external / terminal external(session.ended→completed) / last_event_at 欠落は
+    // false → 従来通り offline へ落ちる(終了済み external を ✓LIVE で残さない・ADR 019f4c19 wall-ended-badge)。
+    if (!isPresentOrRecentlyActive(item, nowMs)) return "offline";
+  }
   if (item.liveness_state !== "live") return item.liveness_state;
   const t = item.last_event_at ? Date.parse(item.last_event_at) : NaN;
   const fresh = Number.isFinite(t) && nowMs - t <= LIVE_FRESH_MS;

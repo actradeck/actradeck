@@ -42,12 +42,13 @@ const FLUSH_MAX_BATCH = 200; // 1 POST あたりの最大イベント数
 // ActraDeck の event_id は UUIDv7 のみ受理 (crypto.randomUUID は v4 で reject される)。
 // globalThis.crypto (Web Crypto) は Node 22+ / Bun 双方で global に存在するため import 不要。
 //
-// TDA-5 (相互参照): UUIDv7 の hand-rolled 実装はリポジトリ内に 3 箇所ある —
-//   (1) 本ファイル (外部 adapter・依存ゼロ制約ゆえ独立実装)、
-//   (2) docs/examples/ingest-adapter/adapter.mjs (同・別の外部 adapter 例)、
-//   (3) packages/event-model/src/id.ts (T1 正典・uuid@11 の v7 を使用)。
-//   (1)(2) は「読者がコピペして動く単一ファイル」制約のため意図的に自前化しており、正典 (3) へ
-//   依存しない (共通化しない設計判断)。ビット配置 (version 7 / variant 10xx) は 3 者で一致させる。
+// TDA-5 (相互参照): UUIDv7 の hand-rolled 実装はリポジトリ内に 4 箇所ある —
+//   (1) 本ファイル (外部 adapter #1・依存ゼロ制約ゆえ独立実装)、
+//   (2) docs/examples/gemini-adapter/adapter.mjs (外部 adapter #2・同・依存ゼロ)、
+//   (3) docs/examples/ingest-adapter/adapter.mjs (最小取込 adapter 例・同)、
+//   (4) packages/event-model/src/id.ts (T1 正典・uuid@11 の v7 を使用)。
+//   (1)(2)(3) は「読者がコピペして動く単一ファイル」制約のため意図的に自前化しており、正典 (4) へ
+//   依存しない (共通化しない設計判断)。ビット配置 (version 7 / variant 10xx) は 4 者で一致させる。
 function randomBytes16() {
   const b = new Uint8Array(16);
   globalThis.crypto.getRandomValues(b);

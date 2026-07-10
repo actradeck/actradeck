@@ -33,9 +33,31 @@ export function parseDaemons(raw: unknown): string[] {
   return out;
 }
 
+/**
+ * ADR 019f4206 A段: 応答から **spawn_capable===true の daemon id のみ**抽出する (Codex Managed spawn の宛先候補)。
+ * spawn_capable は closed boolean。非対応 daemon (既定 OFF / observe-only) を除外し、cockpit の spawn 導線が
+ * 非対応 daemon を addressing して timeout する事故を UI 側で防ぐ (backend capability gating の対称)。
+ */
+export function parseSpawnDaemons(raw: unknown): string[] {
+  if (typeof raw !== "object" || raw === null) return [];
+  const list = (raw as { daemons?: unknown }).daemons;
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  for (const d of list) {
+    if (typeof d === "object" && d !== null) {
+      const id = (d as { id?: unknown }).id;
+      const cap = (d as { spawn_capable?: unknown }).spawn_capable;
+      if (typeof id === "string" && id.length > 0 && cap === true) out.push(id);
+    }
+  }
+  return out;
+}
+
 export interface UseDaemonsResult {
   /** 接続中 daemon の id 群 (決定的順序にソート済・「先頭」を安定選択するため)。 */
   readonly daemonIds: readonly string[];
+  /** ADR 019f4206: spawn_capable な daemon の id 群 (Codex Managed spawn の宛先候補・ソート済)。 */
+  readonly spawnDaemonIds: readonly string[];
   /** 手動再取得 (mutation が daemon not registered で失敗したとき等に呼ぶ)。 */
   readonly refresh: () => void;
 }
@@ -46,6 +68,7 @@ export function useDaemons(opts: {
 }): UseDaemonsResult {
   const { enabled, refreshKey = 0 } = opts;
   const [daemonIds, setDaemonIds] = useState<readonly string[]>([]);
+  const [spawnDaemonIds, setSpawnDaemonIds] = useState<readonly string[]>([]);
   const [nonce, setNonce] = useState(0);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
@@ -53,6 +76,7 @@ export function useDaemons(opts: {
   useEffect(() => {
     if (!enabled) {
       setDaemonIds([]); // 非表示時は破棄 (メモリ衛生・use-wall-feed 同方針)。
+      setSpawnDaemonIds([]);
       return;
     }
     let cancelled = false;
@@ -64,7 +88,10 @@ export function useDaemons(opts: {
         })
         .then((data) => {
           // 決定的順序へソート (複数 daemon 時に「先頭」を安定選択し read 一貫性を緩和)。
-          if (!cancelled) setDaemonIds([...parseDaemons(data)].sort());
+          if (!cancelled) {
+            setDaemonIds([...parseDaemons(data)].sort());
+            setSpawnDaemonIds([...parseSpawnDaemons(data)].sort());
+          }
         })
         .catch(() => {
           // 取得失敗 (一時的) は last-known を保持して flicker を避ける。daemon が本当に消えたら次回 pull で
@@ -80,5 +107,5 @@ export function useDaemons(opts: {
     };
   }, [enabled, refreshKey, nonce]);
 
-  return { daemonIds, refresh };
+  return { daemonIds, spawnDaemonIds, refresh };
 }

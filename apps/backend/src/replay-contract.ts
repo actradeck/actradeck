@@ -32,6 +32,11 @@ export interface ReplayEventDTO {
   readonly timestamp: string;
   readonly state: string | undefined;
   readonly cwd: string | undefined;
+  /**
+   * legacy summary (normalizer が焼き込んだ表示文字列・redacted)。turn.started/completed のみ
+   * `boundTurnSummary` (projection 正典・SUMMARY_SUBJECT_CAP=200+…) で搬送有界化される
+   * (gemini-obs SEC-3=TDA-3: adapter uncapped 送出の at-rest 値を DTO で unbounded 搬送しない)。
+   */
   readonly summary: string | undefined;
   /**
    * @deprecated 後方互換 fallback。`row.summary ?? command ?? path ?? tool_name ?? event_type` で

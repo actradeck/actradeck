@@ -17,7 +17,12 @@
  * (SEC-1: 旧コメントは「ingestion フックが /realtime も認証」と誤記。T1=コード優先で修正。
  *  この認証契約は 401 e2e 2 ケース inv-realtime-server.test.ts が固定している。)
  */
-import { ApprovalDecision, sanitizeRepoLabel } from "@actradeck/event-model";
+import {
+  ApprovalDecision,
+  sanitizeRepoLabel,
+  parseCodexSpawnRequest,
+  isPresentOrRecentlyActive,
+} from "@actradeck/event-model";
 import { tokenEquals } from "@actradeck/redaction";
 
 import type { ClientFrame, RealtimeHub, RealtimeSink } from "./realtime-hub.js";
@@ -66,6 +71,7 @@ import { isPathWithinProjectScope, parseProjectScope } from "./project-scope.js"
 import type { RealtimeStore } from "./realtime-store.js";
 import type { SafetyDemoLauncher } from "./safety-demo.js";
 import type {
+  CodexSpawnRelayResult,
   PolicyRelayOp,
   PolicyRelayParams,
   PolicyRelayResult,
@@ -472,6 +478,28 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
     );
   });
 
+  // ─── ADR 019f4206 A段: cockpit からの Codex Managed spawn (daemon-addressed・新実行サーフェス) ─────────
+  //   attach daemon (spawn_capable) の制御チャネル経由で in-process の managed codex を起動する。policy relay と
+  //   同型の daemon-addressed route: /realtime prefix Bearer gate (上の onRequest) 背後・**method-pure POST**
+  //   (app.post ゆえ GET 等は route 不一致で拒否)・same-origin CSRF は BFF (isCodexSpawnPath) が強制・bff
+  //   anchored allow-list 通過。**approve/interrupt/diff/allowlist は session-scoped のまま** (daemon 宛 route は
+  //   本 spawn と policy のみ・INV-REALTIME-RELAY-SCOPE 維持)。**二段封じ込め第一段**: cwd を project-scope で
+  //   lexical gate (第二段は sidecar が解決済 git root を resolveScope と再照合)。認可/検証拒否は throw でなく
+  //   **値ベース** (SEC-R3-3)・prompt/cwd は relay の transient で at-rest に残さない (NO-RAW・契約点6)。
+  app.post<{
+    Params: { daemonId: string };
+    Body: { prompt?: unknown; cwd?: unknown };
+  }>("/realtime/daemons/:daemonId/codex/spawn", async (req, reply) => {
+    const daemonId = req.params.daemonId;
+    if (!isDaemonId(daemonId)) return reply.code(400).send({ error: "invalid daemon id" });
+    return handleCodexSpawn(
+      (params) => opts.sidecarRegistry.requestCodexSpawnByDaemon(daemonId, params),
+      req.body ?? {},
+      reply,
+      policyResolveScope,
+    );
+  });
+
   // 段階1 (ADR 019ead14 D1): 横断 Approval Inbox の集約 pull。
   //   connected(接続在席)かつ pending_approvals 非空の全 session の承認待ちを 1 応答へ集約する。
   //   REALTIME_TOKEN gate (上の onRequest) 背後。session_state.pending_approvals(sidecar redaction
@@ -485,19 +513,30 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
   });
 
   // 段階1 (ADR 019ead7a D1): Live Wall の横断フィード集約 pull。
-  //   connected(接続在席=isLive)な全 live session の **直近 N events** を 1 応答へ横断集約する。
-  //   REALTIME_TOKEN gate (上の onRequest) 背後。データ源は既存 events の allow-list 投影
-  //   (ReplayEventDTO) を再利用するため **新 redaction 面ゼロ**(backend は再 redaction しない)。
-  //   presence は listSnapshot の connected で絞り (切断/履歴は出さない)、横断 session 数は
-  //   MAX_WALL_SESSIONS、per-session 行数は per_session(既定/上限あり)で有界化する(back-pressure)。
+  //   connected(接続在席=isLive) **または** external adapter の直近 active(recency proxy)な session の
+  //   **直近 N events** を 1 応答へ横断集約する。REALTIME_TOKEN gate (上の onRequest) 背後。データ源は
+  //   既存 events の allow-list 投影 (ReplayEventDTO) を再利用するため **新 redaction 面ゼロ**(backend は
+  //   再 redaction しない)。
+  //   ADR 019f474e: 表示包含は共有正準述語 `isPresentOrRecentlyActive` で絞る — connected(接続在席)
+  //   **または** external adapter(source==="external"・HTTP POST で WS を張れず connected=false になる)の
+  //   直近 active(last_event_at が WALL_RECENT_MS 内・両側有界)。managed/attach/codex_rollout は connected
+  //   のみ(external-recent の recency proxy は external 限定)。横断 session 数は MAX_WALL_SESSIONS、
+  //   per-session 行数は per_session(既定/上限あり)で有界化する(back-pressure)。
+  //   cwd scope は listSnapshot の cwdScopeClause が本述語より **前** に適用済のため、recency は scope 内の
+  //   list にのみ効く(scope バイパスなし)。
   app.get<{ Querystring: { per_session?: string } }>("/realtime/wall", async (req, reply) => {
     const isLive = (sid: string): boolean => opts.sidecarRegistry.isLive(sid);
     const list = await opts.store.listSnapshot(undefined, isLive);
-    const connected = list.filter((s) => s.connected).slice(0, MAX_WALL_SESSIONS);
-    const ids = connected.map((s) => s.session_id);
+    const nowMs = Date.now();
+    // displayed = now-connected の **上位集合**(connected ∪ external-recent)。変数名は「connected のみ」
+    // を偽らないよう displayed とする(ADR 019f474e・TDA-1)。
+    const displayed = list
+      .filter((s) => isPresentOrRecentlyActive(s, nowMs))
+      .slice(0, MAX_WALL_SESSIONS);
+    const ids = displayed.map((s) => s.session_id);
     const perSession = normalizeWallPerSession(req.query.per_session);
     const eventsBySession = await opts.replayStore.recentEventsForSessions(ids, perSession);
-    const lanes = connected.map((session) => ({
+    const lanes = displayed.map((session) => ({
       session,
       events: eventsBySession.get(session.session_id) ?? [],
     }));
@@ -1017,6 +1056,47 @@ async function handlePolicyResolve(
  */
 function isDaemonId(v: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v);
+}
+
+/** ADR 019f4206 A段: codex spawn relay の宛先解決後の中継関数型 (route と registry の結合を薄く保つ)。 */
+type CodexSpawnRelayFn = (params: {
+  prompt: string;
+  cwd: string;
+  resolveScope?: readonly string[];
+}) => Promise<CodexSpawnRelayResult>;
+
+/**
+ * ADR 019f4206 A段: Codex Managed spawn 要求を検証・封じ込め第一段・relay する。
+ *  - prompt/cwd 検証は event-model 正準 `parseCodexSpawnRequest` を共有 (sidecar handler と同一 shape 検証・
+ *    security-gate-reuse-canonical-parser)。不正 → 400 (原文非依存の固定リテラル・prompt/cwd 非 echo)。
+ *  - **二段封じ込め第一段** (SEC-1・resolve と同一): 入力 cwd を project-scope で lexical gate。scope 外 → 403。
+ *    第二段 (解決済 git root の再照合) は sidecar が resolveScope で行う。
+ *  - relay 結果を HTTP へ写像 (transient=timeout/disconnect → 503・daemon-report error → 409・成功は ok+optional
+ *    session_id)。**NO-RAW**: 応答に prompt/cwd を含めない (error は closed enum code・session_id は resolve 済のみ)。
+ */
+async function handleCodexSpawn(
+  relay: CodexSpawnRelayFn,
+  body: { prompt?: unknown; cwd?: unknown },
+  reply: FastifyReply,
+  resolveScope: readonly string[],
+): Promise<unknown> {
+  const params = parseCodexSpawnRequest(body);
+  if (params === undefined) {
+    return reply.code(400).send({ error: "invalid spawn request" });
+  }
+  // 封じ込め第一段: 入力 cwd の lexical gate (symlink/ancestor は sidecar 第二段が解決済 root で再照合)。
+  if (!isPathWithinProjectScope(params.cwd, resolveScope)) {
+    return reply.code(403).send({ error: "cwd outside project scope" });
+  }
+  const res = await relay({ prompt: params.prompt, cwd: params.cwd, resolveScope });
+  if (!res.ok) {
+    // transient (timeout/disconnect/send-fail) → 503。それ以外 (daemon-report deny / 未登録) → 409。
+    return reply.code(res.transient === true ? 503 : 409).send({ error: res.error });
+  }
+  return reply.send({
+    ok: true,
+    ...(res.session_id !== undefined ? { session_id: res.session_id } : {}),
+  });
 }
 
 /**

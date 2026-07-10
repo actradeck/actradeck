@@ -20,6 +20,7 @@ const REAL_PG_TESTS = [
   "test/inv-audit-report-route.test.ts",
   "test/inv-demo-state-reap.test.ts",
   "test/inv-detail-pull.test.ts",
+  "test/inv-gemini-observability-ingest.test.ts",
   "test/inv-inbox.test.ts",
   "test/inv-ingest-store.test.ts",
   "test/inv-ingestion-server.test.ts",

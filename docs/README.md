@@ -15,8 +15,9 @@ Where to go depending on what you need:
 Quick orientation:
 
 - **What ActraDeck is**: a local, vendor-neutral cockpit for coding agents (Claude Code,
-  Codex) — live session wall, approval inbox, secret redaction before anything is stored,
-  and cross-vendor audit/replay. The product overview lives in the repo-root
+  Codex) — live session wall, cross-vendor secret redaction before anything is stored and
+  audit/replay, plus a selective approval inbox (Claude Code today, Codex in Managed Mode;
+  external adapters are observe-only). The product overview lives in the repo-root
   [README](../README.md).
 - **Extending ActraDeck**: third-party tools can use the public ingestion contract and
   the example adapter under [`examples/ingest-adapter/`](./examples/ingest-adapter/).

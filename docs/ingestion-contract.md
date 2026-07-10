@@ -269,3 +269,16 @@ test `INV-OPENCODE-ADAPTER-*` (`packages/event-model/test/inv-opencode-adapter.t
 by REAL captured fixtures. See the `README.md` in that directory for the mapping table, the
 local run steps, and the **honest disclosure that the backend floor is the only redaction
 defense**.
+
+`docs/examples/gemini-adapter/` is the **second external adapter for a real product (Gemini CLI)**.
+Unlike the opencode plugin, it is a Gemini **hook `command`** — a **short-lived process started once
+per event** — that maps Gemini's lifecycle hooks into NormalizedEvent (`session.started` /
+`turn.started` / `run_shell_command` becomes `command.started` · `command.completed` · other tools
+become `tool.started` · `tool.completed` / `turn.completed(idle)` / `session.ended`) (`provider=gemini`
+/ `source=external` / observe-only · never-deny: stdout is always `{}`). Gemini has a **real terminal
+signal** (`SessionEnd`), so `session.ended` is emitted legitimately (only from `SessionEnd`, never
+fabricated). It comes with a contract test `INV-GEMINI-ADAPTER-*`
+(`packages/event-model/test/inv-gemini-adapter.test.ts`) and a backend lifecycle test
+(`apps/backend/test/inv-gemini-lifecycle.test.ts`), both driven by a REAL capture from Gemini CLI
+0.42.0. See §1-3 of the `README.md` in that directory for the mapping table, the canonical hook
+config, and the same **honest disclosure that the backend floor is the only redaction defense**.

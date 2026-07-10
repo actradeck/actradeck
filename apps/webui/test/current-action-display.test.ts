@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  captureProvenance,
   currentActionSnapshot,
   currentActionView,
   deriveSessionFacts,
@@ -216,6 +217,24 @@ describe("INV-DETAIL-CAPTURE-BADGE (純ロジック): non-managed capture proven
     expect(normalizeCaptureMode(undefined)).toBe("managed");
     expect(normalizeCaptureMode("xxx")).toBe("managed");
   });
+
+  // ADR 019f47c2: source=external を「managed」と誤表示しない (単一出所 captureProvenance)。
+  describe("captureProvenance (source-aware・ADR 019f47c2)", () => {
+    it("source=external は capture_mode に依らず external (managed 誤表示を断つ)", () => {
+      expect(captureProvenance(undefined, "external")).toBe("external");
+      expect(captureProvenance("managed", "external")).toBe("external");
+      // capture_mode enum に external 値は無いが、source=external が優先される。
+      expect(captureProvenance("attach", "external")).toBe("external");
+    });
+
+    it("source が external 以外/欠落なら既存 capture_mode 正規化に委ねる (managed/attach/codex_rollout 不変)", () => {
+      expect(captureProvenance("managed", "hook")).toBe("managed");
+      expect(captureProvenance(undefined, undefined)).toBe("managed");
+      expect(captureProvenance(undefined, "app_server")).toBe("managed");
+      expect(captureProvenance("attach", "hook")).toBe("attach");
+      expect(captureProvenance("codex_rollout", "rollout")).toBe("codex_rollout");
+    });
+  });
 });
 
 describe("deriveSessionFacts: timeline events から right ペイン facts を導出", () => {
@@ -247,6 +266,22 @@ describe("deriveSessionFacts: timeline events から right ペイン facts を�
     expect(facts.changedPathCount).toBe(0);
     expect(facts.hadCommandFailure).toBe(false);
     expect(facts.captureMode).toBe("managed");
+  });
+
+  // ADR 019f47c2: source=external (gemini/opencode 等の第三者 adapter) は capture_mode 欠落でも
+  //   managed と誤表示せず external を facts に載せる (SessionDetail risk fact が誤導しない)。
+  it("source=external の session は captureMode=external (managed 誤表示しない)", () => {
+    const facts = deriveSessionFacts({ capture_mode: undefined, source: "external" }, []);
+    expect(facts.captureMode).toBe("external");
+  });
+
+  it("source=hook/欠落は既存どおり capture_mode 由来 (managed/attach 不変)", () => {
+    expect(deriveSessionFacts({ capture_mode: undefined, source: "hook" }, []).captureMode).toBe(
+      "managed",
+    );
+    expect(deriveSessionFacts({ capture_mode: "attach", source: "hook" }, []).captureMode).toBe(
+      "attach",
+    );
   });
 
   // QA-1 carryover (task 019ea4d6-b847): highestRisk は「観測された最高 risk」であり、

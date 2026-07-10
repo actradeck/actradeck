@@ -21,6 +21,9 @@ import {
   countRedactionMarkersByKindDeep,
   countRedactionMarkersDeep,
   KNOWN_REDACTION_KINDS,
+  MAX_REDACT_INPUT,
+  MAX_VALUE_LEN,
+  PRE_REDACT_SLICE,
   redactDeep,
   redactDeepWithCount,
   REDACTION_MARKER_KIND_RE,
@@ -426,6 +429,22 @@ describe("INV-REDACTION: redactString ReDoS performance (再#SEC-1)", () => {
       input: `${"user:" + "a".repeat(200) + "@nohost "}`.repeat(300),
       budgetMs: 500,
     },
+    // SEC-2: 多数の **未終端** `-----BEGIN ... PRIVATE KEY-----` header。private-key ルールの
+    //   terminator-absent fallback が per-BEGIN 再走査で O(n^2) にならないこと (branch2 が残り全体を
+    //   1 回で consume し lastIndex を末尾へ進める) を pin する。unbounded lazy を per-rule に戻すと超過。
+    {
+      name: "repeated unterminated BEGIN PRIVATE KEY x2000 (~460KB)",
+      input: `${"-----BEGIN RSA PRIVATE KEY-----\n" + "A1b2C3d4".repeat(25) + "\n"}`.repeat(2000),
+      budgetMs: 1500,
+    },
+    // SEC-1: 多数の **未終端** `eyJ...\.eyJ...` (2 個目の `.`/signature 欠落) header。jwt ルールの
+    //   fallback branch2 が per-anchor 再走査で O(n^2) にならないこと (branch2 が残りを 1 回で consume
+    //   し lastIndex を末尾へ進める) を pin する。無界リテラルへ戻すと超過。
+    {
+      name: "repeated straddle-ish eyJ.eyJ (no 2nd dot) x3000 (~200KB)",
+      input: `${"eyJ" + "A1b2C3d4" + ".eyJ" + "B".repeat(50) + " "}`.repeat(3000),
+      budgetMs: 1500,
+    },
   ];
 
   for (const { name, input, budgetMs } of cases) {
@@ -483,6 +502,12 @@ describe("INV-REDACTION: redactString ReDoS performance (再#SEC-1)", () => {
       build: (n) => randBase64(n),
       n: 64 * 1024,
     },
+    {
+      // SEC-1: jwt fallback (branch2) が payload 長 n に対し線形 (2 個目の `.` 無しで head→末尾 consume)。
+      name: "jwt straddle fallback eyJ.eyJ<payload n> (branch2 consume)",
+      build: (n) => "eyJ" + genB64Url(20) + ".eyJ" + genB64Url(n),
+      n: 64 * 1024,
+    },
   ];
 
   // bestMeasure は describe 冒頭で定義済 (両ブロック単一 basis)。scaling は ratio 精度のため
@@ -513,6 +538,237 @@ describe("INV-REDACTION: redactString ReDoS performance (再#SEC-1)", () => {
       REDOS_TEST_TIMEOUT_MS,
     );
   }
+});
+
+// --- straddle 系テスト共通ヘルパ (TDA-1: PEM/JWT describe 間の逐語重複を module scope へ集約) ------
+// NOTE (TDA-1): backend の apps/backend/test/inv-gemini-observability-ingest.test.ts も同型の
+//   genB64/padTo を持つが、cross-package の相対 test import は脆く smell ゆえ **意図的複製**
+//   (ReDoS 計測基盤 §「ReDoS scaling 共通基盤」と同じ documented duplication・decision 019f2d4f)。
+//   編集時は両コピーを同期する。
+const B64_STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+// base64url charset (JWT の [A-Za-z0-9_-]: `+/` を `-_` に置換)。JWT ルールは `+/` を含まないため
+//   JWT fixture は必ず本 charset で生成する (B64_STD だと `+/` でセグメントが途切れる)。
+const B64_URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+// 決定的な擬似 base64 文字列 (合成 dummy・実鍵ではない・fragment 検索可)。
+const genChars = (n: number, alphabet: string): string => {
+  let out = "";
+  for (let i = 0; i < n; i++) out += alphabet[(i * 2654435761) % alphabet.length];
+  return out;
+};
+const genB64 = (n: number): string => genChars(n, B64_STD);
+const genB64Url = (n: number): string => genChars(n, B64_URL);
+// 単一空白 filler をちょうど n 字で作り末尾を空白にする (後続 token に語境界を与える)。
+const padTo = (n: number, filler = "lo "): string => {
+  let s = "";
+  while (s.length < n) s += filler;
+  s = s.slice(0, n);
+  if (s[s.length - 1] !== " ") s = s.slice(0, n - 1) + " ";
+  return s;
+};
+// redacted に残存する body の最長 raw run 長 (≥minLen)。
+// QA-1: 旧実装は step=1 の各 offset で `redacted.includes()` を呼び、回帰時 (run 残存) に
+//   「run 長 × body 長」の二重ループ + O(|redacted|) 部分文字列探索で O(n²)〜O(n³) となり
+//   >120s CPU ハング (vitest testTimeout 発火不能 → CI worker hang) を招いた。
+//   redacted の全 minLen-gram を Set 化 (構築 O(|redacted|)) して O(1) survival 判定にし、body を
+//   前進スキップで走査する (全体 O(|redacted|+|body|)・線形)。step=1 相当の完全感度を保ち、幅 20 字級の
+//   partial leak も取りこぼさない (step を粗くすると小 run を見落とすため感度を落とさず線形化する)。
+//   意味論: body の各 minLen-gram が redacted のどこかに現れる連続 run の最長長。断片が全く残らなければ 0。
+//   分散した gram が偶々「連続」を成す理論上の false-positive は leak 検出側に厳しく倒れるだけで安全側。
+const longestSurvivingRun = (redacted: string, body: string, minLen = 8): number => {
+  if (body.length < minLen) return 0;
+  const grams = new Set<string>();
+  for (let j = 0; j + minLen <= redacted.length; j++) grams.add(redacted.slice(j, j + minLen));
+  let longest = 0;
+  let i = 0;
+  while (i + minLen <= body.length) {
+    if (!grams.has(body.slice(i, i + minLen))) {
+      i++;
+      continue;
+    }
+    let end = i + minLen; // exclusive
+    while (end < body.length && grams.has(body.slice(end - minLen + 1, end + 1))) end++;
+    if (end - i > longest) longest = end - i;
+    i = end - minLen + 1; // 測定済み run の末尾側へ前進 (前進保証 → 線形)
+  }
+  return longest;
+};
+// straddle geometry を定数から導出 (TDA-2: magic offset 258000/14000 を廃止)。
+//   secret の開始を MAX_REDACT_INPUT の手前 (先行 slice の display 窓内・anchor 検出可) へ置き、
+//   body/payload を PRE_REDACT_SLICE を跨ぐ長さにして terminator (PEM `-----END-----`) /
+//   2 個目の `.` (JWT) を window 外へ落とす。
+const STRADDLE_SECRET_START = MAX_REDACT_INPUT - MAX_VALUE_LEN; // 258048 (< MAX_REDACT_INPUT)
+const STRADDLE_BODY_LEN = PRE_REDACT_SLICE - STRADDLE_SECRET_START + MAX_VALUE_LEN; // terminator > PRE_REDACT_SLICE
+
+/**
+ * INV-REDACTION-PEM-STRADDLE (SEC-2・ADR 019f482a / task 019f482c-0904):
+ *   MAX_REDACT_INPUT / PRE_REDACT_SLICE 境界を跨ぐ PEM private-key が redaction 後に raw fragment
+ *   (≥8 字連続の鍵素材) を残さないことを反証する (redactString 単体・choke 前の床実装)。
+ *
+ * 欠陥 (旧実装): private-key ルールは literal `-----END ... PRIVATE KEY-----` terminator 依存だった。
+ *   redaction 前の先行 slice (PRE_REDACT_SLICE) が terminator を window 外へ切り落とすと lazy match が
+ *   全体失敗し、露出した base64 本体が下記 2 形で raw 残存した:
+ *     - **単一行本体** (連続 run > MAX_VALUE_LEN): 露出本体が high-entropy {40,MAX_VALUE_LEN} の
+ *       trailing lookahead を満たせず masking されない → 大きな raw run が残存 (実 PG 実証・SEC 監査
+ *       abf34765 で raw 616 字)。
+ *     - **複数行折返し** (64 字 wrap): 完全行は high-entropy が masking するが、pre-redact 境界の
+ *       sub-40 partial 行が MAX_REDACT_INPUT 表示窓内に落ちると raw 残存 (empirically 20 字 leak)。
+ *
+ * 修正 (approach b): private-key ルールが terminator 欠落時に **head → window 末尾を greedy マスク**
+ *   する fallback を単一ルールに内包 (bounded `{0,PRE_REDACT_SLICE}`)。両形とも raw fragment 0。
+ *   mutation 反証: fallback を外し unbounded literal-terminator ルールへ戻すと本 describe が RED。
+ */
+describe("INV-REDACTION-PEM-STRADDLE: 境界跨ぎ PEM private-key の straddle leak (SEC-2)", () => {
+  // genB64 / padTo / longestSurvivingRun / STRADDLE_* は module scope の共通ヘルパを使う (TDA-1/TDA-2)。
+
+  it("single-line body PEM (BEGIN<MAX_REDACT_INPUT, END>PRE_REDACT_SLICE) が raw 0", () => {
+    // BEGIN を MAX_REDACT_INPUT 手前 (STRADDLE_SECRET_START) に置き、本体を大きく取って END を
+    //   PRE_REDACT_SLICE 超へ。旧実装は表示窓に露出する連続 run (>4KB) を high-entropy が masking できず
+    //   ~4112 字 raw 残存。
+    const header = "-----BEGIN RSA PRIVATE KEY----- ";
+    const body = genB64(STRADDLE_BODY_LEN);
+    const input = padTo(STRADDLE_SECRET_START) + header + body + " -----END RSA PRIVATE KEY-----";
+    // 前提: END が pre-redact window の外に落ちる (straddle 成立)。
+    expect(input.indexOf("-----END")).toBeGreaterThan(PRE_REDACT_SLICE);
+    expect(input.indexOf("-----BEGIN")).toBeLessThan(MAX_REDACT_INPUT);
+
+    const out = redactString(input);
+    expect(
+      longestSurvivingRun(out, body),
+      `single-line PEM body raw run が残存: ${out.slice(-60)}`,
+    ).toBe(0);
+    expect(out).toContain("[REDACTED:private-key]");
+  });
+
+  it("multi-line wrapped PEM (64 字 wrap・sub-40 partial が表示窓内) が raw 0", () => {
+    // 完全行は high-entropy が masking するため、旧実装の残存は pre-redact 境界の sub-40 partial 行。
+    //   BEGIN を早め (bodyStart~250036) に置き、その partial が MAX_REDACT_INPUT 窓内に落ちる幾何で
+    //   旧実装は 20 字 raw を残した。partial 長 = (PRE_REDACT_SLICE - bodyStart) % 65 を 20 に固定。
+    const header = "-----BEGIN RSA PRIVATE KEY-----\n";
+    let bodyStart = 250000;
+    while ((PRE_REDACT_SLICE - bodyStart) % 65 !== 20) bodyStart++;
+    const fillerLen = bodyStart - header.length;
+    const bodyRaw = genB64(25000);
+    let wrapped = "";
+    for (let i = 0; i < bodyRaw.length; i += 64) wrapped += bodyRaw.slice(i, i + 64) + "\n";
+    const input = padTo(fillerLen) + header + wrapped + "-----END RSA PRIVATE KEY-----";
+    expect(input.indexOf("-----END")).toBeGreaterThan(PRE_REDACT_SLICE);
+    expect(bodyStart).toBeLessThan(MAX_REDACT_INPUT);
+
+    const out = redactString(input);
+    expect(longestSurvivingRun(out, bodyRaw), `multi-line PEM body raw run が残存`).toBe(0);
+    expect(out).toContain("[REDACTED:private-key]");
+  });
+
+  it("複数の PEM kind (EC / OPENSSH / ENCRYPTED / plain) の straddle も raw 0", () => {
+    for (const variant of ["", "EC ", "OPENSSH ", "ENCRYPTED "]) {
+      const header = `-----BEGIN ${variant}PRIVATE KEY----- `;
+      const body = genB64(STRADDLE_BODY_LEN);
+      const input =
+        padTo(STRADDLE_SECRET_START) + header + body + ` -----END ${variant}PRIVATE KEY-----`;
+      const out = redactString(input);
+      expect(longestSurvivingRun(out, body), `${variant || "plain"} PEM body raw run が残存`).toBe(
+        0,
+      );
+      expect(out).toContain("[REDACTED:private-key]");
+    }
+  });
+
+  it("terminator あり完全 PEM は従来どおり最小マスク + 後続テキスト温存 (over-redaction 回避)", () => {
+    const input =
+      "before -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAabc123def456\n-----END RSA PRIVATE KEY----- after";
+    const out = redactString(input);
+    expect(out).toBe("before [REDACTED:private-key] after");
+  });
+
+  it("terminator-less BEGIN (branch2) は後続テキストごと consume する (over-redaction = safe 方向の意図・TDA-3)", () => {
+    // positive pin (redactor-straddle TDA-3): terminator (`-----END ... PRIVATE KEY-----`) が入力の
+    //   どこにも無い場合、branch2 は head → window 末尾まで greedy にマスクする。鍵素材直後の無関係な
+    //   後続テキストも巻き込んで 1 マーカーへ潰すのは **意図** (under-redaction 絶対回避 > over-redaction・
+    //   straddle 幾何に限らない branch2 の一般挙動)。redaction を弱める方向の変更はこのテストが検出する。
+    const body = genB64(64);
+    const input = `before -----BEGIN RSA PRIVATE KEY----- ${body} trailing shell output after key`;
+    const out = redactString(input);
+    expect(out).toBe("before [REDACTED:private-key]");
+    // magnitude 信号は持たない (SEC-2 accepted): span の大小によらず redaction_count=1。
+    expect(countRedactionMarkers(out)).toBe(1);
+    // 小さな未終端 block (10B 級) でも同じく 1 マーカー (span 長の観測信号なし・意図的 accept)。
+    const tiny = redactString("x -----BEGIN EC PRIVATE KEY----- 0123456789");
+    expect(tiny).toBe("x [REDACTED:private-key]");
+    expect(countRedactionMarkers(tiny)).toBe(1);
+  });
+});
+
+/**
+ * INV-REDACTION-JWT-STRADDLE (SEC-1・task 019f4c0d / decision 019f4c09):
+ *   MAX_REDACT_INPUT / PRE_REDACT_SLICE 境界を跨ぐ長尺 JWT (header.payload.signature) が redaction 後に
+ *   raw payload 断片 (≥8 字連続の base64url run) を残さないことを反証する (redactString 単体・choke 前の床)。
+ *
+ * 欠陥 (旧実装): jwt ルールは無界 `{8,}` セグメント + 必須 literal `.` delimiter 依存だった
+ *   (`\beyJ...{8,}\.eyJ...{8,}\.[..]{8,}\b`)。長尺 payload の JWT では 2 個目の `.` + signature が
+ *   redaction 前の先行 slice (PRE_REDACT_SLICE) の外へ落ち、3-segment match が全体失敗 → 露出した raw
+ *   payload (base64url 連続 run > MAX_VALUE_LEN) が high-entropy {40,MAX_VALUE_LEN} の trailing lookahead
+ *   も満たせず **at-rest 残存**した (private-key single-line と同型・実 PG で raw ~4117 字)。
+ *
+ * 修正 (approach b・private-key と同型): `eyJ...\.eyJ` を JWT 確定 anchor とし、完全 3-segment 構造が
+ *   window 内に matchable でなければ head→window 末尾を bounded greedy (`{0,PRE_REDACT_SLICE}`) で
+ *   マスクする fallback を jwt ルールに内包。raw fragment 0。
+ * mutation 反証: jwt pattern を旧無界リテラル `/\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g`
+ *   へ戻すと本 describe が RED (single-line straddle で payloadBody の raw run = STRADDLE_BODY_LEN 相当が残存)。
+ *   実測 (perl mutation・redactor.ts jwt を旧版へ差替え): NEW raw 0 / OLD raw 16384。
+ */
+describe("INV-REDACTION-JWT-STRADDLE: 境界跨ぎ JWT の straddle leak (SEC-1)", () => {
+  it("長尺 payload の JWT (jwt-start<MAX_REDACT_INPUT, 2nd dot>PRE_REDACT_SLICE) が raw payload 0", () => {
+    // header は display 窓内、payload は PRE_REDACT_SLICE を跨ぎ 2 個目の `.` + signature が window 外へ。
+    const header = "eyJ" + genB64Url(30) + ".";
+    const payloadBody = genB64Url(STRADDLE_BODY_LEN);
+    const input = padTo(STRADDLE_SECRET_START) + header + "eyJ" + payloadBody + "." + genB64Url(40);
+    // 前提: JWT start は display 窓内、2 個目の `.` は pre-redact 窓外 (straddle 成立)。
+    const jwtStart = input.indexOf("eyJ");
+    const secondDot = input.indexOf(".", jwtStart + header.length + 3);
+    expect(jwtStart).toBeLessThan(MAX_REDACT_INPUT);
+    expect(secondDot).toBeGreaterThan(PRE_REDACT_SLICE);
+
+    const out = redactString(input);
+    expect(
+      longestSurvivingRun(out, payloadBody),
+      `JWT payload raw run が残存: ${out.slice(-60)}`,
+    ).toBe(0);
+    expect(out).toContain("[REDACTED:jwt]");
+  });
+
+  it("別 straddle 位置 (secret start を早める) でも raw payload 0", () => {
+    // secret start を早めて payload の window 内可視部分を増やしても raw 0 (別 straddle 幾何・
+    //   MAX_REDACT_INPUT 付近ではなく PRE_REDACT_SLICE 近傍で 2 個目の `.` が落ちる)。
+    const start = MAX_REDACT_INPUT - 3 * MAX_VALUE_LEN;
+    const header = "eyJ" + genB64Url(20) + ".";
+    const payloadBody = genB64Url(PRE_REDACT_SLICE - start + MAX_VALUE_LEN);
+    const input = padTo(start) + header + "eyJ" + payloadBody + "." + genB64Url(40);
+    const secondDot = input.indexOf(".", input.indexOf("eyJ") + header.length + 3);
+    expect(secondDot).toBeGreaterThan(PRE_REDACT_SLICE);
+
+    const out = redactString(input);
+    expect(longestSurvivingRun(out, payloadBody), `JWT payload raw run が残存`).toBe(0);
+    expect(out).toContain("[REDACTED:jwt]");
+  });
+
+  it("完全構造が window 内 (in-window だが payload>MAX_VALUE_LEN) の JWT も raw 0", () => {
+    // straddle しない (全体が pre-redact 窓内) が payload が MAX_VALUE_LEN を超える JWT。branch1 は
+    //   bounded {8,MAX_VALUE_LEN} で payload の `.` を捕まえられず fallback (branch2) が JWT 全体を飲む。
+    const header = "eyJ" + genB64Url(20) + ".";
+    const payloadBody = genB64Url(MAX_VALUE_LEN * 2); // > MAX_VALUE_LEN, 窓内
+    const input = "prefix " + header + "eyJ" + payloadBody + "." + genB64Url(40) + " suffix";
+    const out = redactString(input);
+    expect(longestSurvivingRun(out, payloadBody), `in-window 長尺 JWT payload 残存`).toBe(0);
+    expect(out).toContain("[REDACTED:jwt]");
+  });
+
+  it("通常サイズの完全 JWT は最小マスク + 後続テキスト温存 (over-redaction 回避)", () => {
+    // 合成 dummy JWT (実トークンではない・base64url 3-segment)。
+    const input =
+      "before eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N after";
+    const out = redactString(input);
+    expect(out).toBe("before [REDACTED:jwt] after");
+  });
 });
 
 describe("INV-REDACTION: redactDeep (再帰)", () => {

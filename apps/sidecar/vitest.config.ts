@@ -79,6 +79,14 @@ export default defineConfig({
         //   90.19/87.5/100/97.87 の下 3-5pt (per-file-coverage-floor-below-worst-not-best・funcs は
         //   100 観測の小ファイルゆえ 95・erosion tripwire であって target ではない)。
         "src/file-lock.ts": { statements: 86, branches: 83, functions: 95, lines: 93 },
+        // QA-3 / TDA-7 (ADR 019f4206 A段・裁定 019f4244 unblock): codex-spawn-manager.ts は cockpit-relayed
+        //   Codex spawn の cap / cwd 二段封じ込め / 値ベース deny / lifecycle を担う security-adjacent 一次表面。
+        //   per-file floor が無いと deny/封じ込め分岐の被覆が silent に erode しうる。coverage は fake-seam
+        //   ロジックで完全決定論 (4/4 run・SKIP=1/no-SKIP 両 regime で同値 stmts 89.09 / br 84.37 / fn 87.5 /
+        //   lines 88.23・分散 0)。floor は WORST 実測の 3〜5pt 下に固定 (erosion tripwire であって target でない・
+        //   per-file-coverage-floor-below-worst-not-best)。fn は少関数ゆえ coarse (1 関数脱落で ~12pt 降下)
+        //   だが margin 内で実 erosion を捕捉する。
+        "src/codex-spawn-manager.ts": { statements: 85, branches: 80, functions: 82, lines: 84 },
       },
     },
   },

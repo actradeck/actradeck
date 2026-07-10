@@ -96,6 +96,90 @@ describe("list reducer", () => {
     ).toEqual(["a", "b"]); // 履歴含む全件。
   });
 
+  // --- INV: external adapter の recency proxy (ADR 019f474e) ---
+  // external(source==="external")は WS を張れず connected=false になるため、直近 active を
+  // presence の代理として既定表示に含める。managed/attach(非 external)の !connected は不変で除外。
+  describe("external recency proxy (ADR 019f474e)", () => {
+    const NOW = Date.parse("2026-07-09T00:10:00.000Z");
+    const isoAgo = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+
+    it("toDisplayList 既定: external-recent を出す / stale-external を出さない / managed-disconnect を出さない", () => {
+      const s = applySnapshotList([
+        mk("ext-recent", { source: "external", connected: false, last_event_at: isoAgo(30_000) }),
+        mk("ext-stale", { source: "external", connected: false, last_event_at: isoAgo(300_000) }),
+        mk("managed-disc", { source: "hooks", connected: false, last_event_at: isoAgo(1_000) }),
+        mk("connected", { source: "hooks", connected: true, last_event_at: isoAgo(1_000) }),
+      ]);
+      const ids = new Set(toDisplayList(s, { nowMs: NOW }).map((x) => x.session_id));
+      expect(ids.has("ext-recent")).toBe(true); // external-recent は presence 代理で出す。
+      expect(ids.has("ext-stale")).toBe(false); // 閾値超過の external は出さない。
+      expect(ids.has("managed-disc")).toBe(false); // 非 external の !connected は不変で除外。
+      expect(ids.has("connected")).toBe(true); // 接続在席は当然出す。
+    });
+
+    it("toDisplayList 既定: terminal external (session.ended→completed) は recent でも出さない (ADR 019f4c19 wall-ended-badge)", () => {
+      // 実機バグ (2026-07-10 gemini): session.ended→completed の external が last_event_at 直近ゆえ
+      // 既定一覧に緑 ✓LIVE で残った。terminal は「動いているもの」でない → 既定から落とす。
+      const s = applySnapshotList([
+        mk("ext-ended", {
+          source: "external",
+          connected: false,
+          state: "completed",
+          last_event_at: isoAgo(30_000), // 窓内だが terminal
+        }),
+        mk("ext-active", {
+          source: "external",
+          connected: false,
+          state: "running.command_executing",
+          last_event_at: isoAgo(30_000), // 窓内 ∧ 非 terminal → 出る (非退行)
+        }),
+      ]);
+      const ids = new Set(toDisplayList(s, { nowMs: NOW }).map((x) => x.session_id));
+      expect(ids.has("ext-ended")).toBe(false); // terminal external は既定一覧から落ちる。
+      expect(ids.has("ext-active")).toBe(true); // 活動中 external は従来通り出る。
+      // showHistory=true では履歴として残る (session 一覧/replay 到達性)。
+      const hist = new Set(
+        toDisplayList(s, { showHistory: true, nowMs: NOW }).map((x) => x.session_id),
+      );
+      expect(hist.has("ext-ended")).toBe(true);
+    });
+
+    it("toDisplayList showHistory=true は全件表示 (external の recency に関わらず不変)", () => {
+      const s = applySnapshotList([
+        mk("ext-stale", { source: "external", connected: false, last_event_at: isoAgo(300_000) }),
+        mk("managed-disc", { source: "hooks", connected: false, last_event_at: isoAgo(1_000) }),
+      ]);
+      const ids = toDisplayList(s, { showHistory: true, nowMs: NOW })
+        .map((x) => x.session_id)
+        .sort();
+      expect(ids).toEqual(["ext-stale", "managed-disc"]); // 履歴含む全件。
+    });
+
+    it("purgeStale は external-recent を消さない (recency proxy 免除・purge 窓を WALL_RECENT_MS 未満に絞っても)", () => {
+      // 免除を falsifiable にするため maxIdleMs(15s) < WALL_RECENT_MS(120s) の窓で検証する:
+      //  - ext-within: age 60s は maxIdleMs 超過ゆえ免除が無ければ purge されるが、WALL_RECENT_MS 内
+      //    (isPresentOrRecentlyActive=true)なので免除で残る (表示中の external を消さない)。
+      //  - ext-beyond: age 200s は WALL_RECENT_MS も超過 → 免除対象外で通常 purge。
+      const s = applySnapshotList([
+        mk("ext-within", {
+          source: "external",
+          connected: false,
+          liveness_state: "idle",
+          last_event_at: isoAgo(60_000), // 60s: maxIdleMs 超・WALL_RECENT_MS 内
+        }),
+        mk("ext-beyond", {
+          source: "external",
+          connected: false,
+          liveness_state: "idle",
+          last_event_at: isoAgo(200_000), // 200s: WALL_RECENT_MS も超過
+        }),
+      ]);
+      const purged = purgeStale(s, { nowMs: NOW, maxIdleMs: 15_000 });
+      expect(purged.items.has("ext-within")).toBe(true); // 表示中の external は purge 窓を絞っても残す。
+      expect(purged.items.has("ext-beyond")).toBe(false); // WALL_RECENT_MS 超過の external は通常 purge。
+    });
+  });
+
   it("display sort: needs_attention first, then newest last_event_at", () => {
     const s = applySnapshotList([
       mk("calm-old", { last_event_at: "2026-06-04T00:00:00.000Z" }),

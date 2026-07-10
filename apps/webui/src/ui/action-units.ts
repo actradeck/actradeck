@@ -130,6 +130,11 @@ function pickTarget(e: ReplayEventDTO): {
   if (e.command) return { target: e.command, targetKind: "command" };
   if (e.path) return { target: e.path, targetKind: "path" };
   if (e.tool_name) return { target: e.tool_name, targetKind: "tool" };
+  // subject fallback (ADR 019f47c2): command/path/tool_name を持たない turn.started/completed は
+  //   backend 導出の subject (依頼/応答の有界要約・redacted allowlist 由来) を対象に出す。これが
+  //   無いと会話 (ツール非使用) の turn 行が「(対象なし)」になり KPI「何をしているか」を失う。
+  //   command 系は上で拾うため subject に落ちない (subject の出所自体が command 等ゆえ二重表示なし)。
+  if (e.subject) return { target: e.subject, targetKind: undefined };
   return { target: undefined, targetKind: undefined };
 }
 

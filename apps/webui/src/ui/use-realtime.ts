@@ -40,6 +40,12 @@ export interface UseRealtimeOptions {
    * 純粋に観測エッジを渡すだけで、リスト state 自体には影響しない。
    */
   readonly onListDelta?: (prev: SessionListItem | undefined, curr: SessionListItem) => void;
+  /**
+   * 表示包含窓 (recency proxy) の判定基準時刻 (epoch ms・ADR 019f474e)。external adapter の
+   * 「直近 active」を毎秒再評価するため呼び元 (CockpitBoard) の既存 1s tick を供給する
+   * (新規タイマを増やさない)。省略時は Date.now()(SSR/テストは注入)。
+   */
+  readonly nowMs?: number;
 }
 
 export interface UseRealtimeResult {
@@ -228,10 +234,15 @@ export function useRealtime(opts: UseRealtimeOptions): UseRealtimeResult {
     persistShowHistory(v);
   }, []);
 
+  // ADR 019f474e: nowMs を渡し external adapter の直近 active を表示に含める (recency proxy)。
+  // 既定は Date.now()(呼び元が省略した場合)。CockpitBoard は 1s tick を供給し毎秒再評価する。
+  const nowMs = opts.nowMs;
   const sessions = useMemo(
-    () => toDisplayList(listState, { showHistory }),
-    [listState, showHistory],
+    () => toDisplayList(listState, { showHistory, ...(nowMs !== undefined ? { nowMs } : {}) }),
+    [listState, showHistory, nowMs],
   );
+  // connectedCount は **真の presence 件数のまま** (ADR 019f474e: external-recent を connected と
+  // 数えない=正直)。既定トグルで見えている件数とは別概念 (external-recent は connectedCount に含めない)。
   const connectedCount = useMemo(() => {
     let n = 0;
     for (const s of listState.items.values()) if (s.connected !== false) n++;

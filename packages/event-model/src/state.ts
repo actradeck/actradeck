@@ -130,6 +130,19 @@ export function isTerminalState(state: State): boolean {
 }
 
 /**
+ * `isTerminalState` の **string 緩包含版** (State 型 narrow 不要・T1 正典 TERMINAL_STATES 帰着)。
+ *
+ * DTO / DB 由来の state は `string | undefined` (SessionListItem.state / detail.state 等) で届き、
+ * `State` へ narrow せずに terminal 判定したい消費面 (presence recency proxy / webui interrupt 可否)
+ * がここを共有する。手書きの `new Set(["completed","failed","interrupted"])` 列挙コピーを各層に
+ * 置かないための単一出所 (consolidation-invariant-sweep-all-copies / wall-ended-badge TDA-1)。
+ * 未知値 / 未提供 (undefined) は非 terminal = false。
+ */
+export function isTerminalStateValue(state: string | undefined): boolean {
+  return typeof state === "string" && (TERMINAL_STATES as readonly string[]).includes(state);
+}
+
+/**
  * from → to が許可遷移か判定する (T1 遷移表に基づく)。
  *
  * - 同一状態への遷移 (from === to) は冪等な再観測 (例: 連続する model_streaming) として

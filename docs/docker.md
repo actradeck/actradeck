@@ -1,12 +1,14 @@
-# Running ActraDeck in Docker (one-command cockpit)
+# Running ActraDeck in Docker (build-first)
 
 > ADR [`0013`](./adr/0013-release-signing-and-distribution.md) Phase 2. Status:
 > infrastructure + local build/run verified; the signed GHCR image is **published on
 > demand** (the release workflow's image job is off by default — see
 > [Publishing](#publishing-the-signed-image-maintainers)).
 
-The Docker image gets you a running **cockpit** with one command and no external
-database. It is the fastest way to _look at_ ActraDeck; it is **not** the whole product.
+The Docker image runs the **cockpit** with no external database. Because no image is
+published to GHCR yet, you build it locally first (`docker build`), then run that image —
+see [Quick start](#quick-start-cockpit-only). It is the fastest way to _look at_ ActraDeck;
+it is **not** the whole product.
 Read [What runs where](#what-runs-where-the-honest-support-matrix) before you rely on it.
 
 ## What runs where (the honest support matrix)
@@ -35,6 +37,19 @@ quickstart's cockpit stays empty until you run an agent.
 
 ## Quick start (cockpit only)
 
+> **The GHCR image is not published yet** (the image job is opt-in and off by default — see
+> [Publishing](#publishing-the-signed-image-maintainers)), so `docker pull` from
+> `ghcr.io/actradeck/actradeck:latest` does not work today. Until then, build the image
+> locally from the repo (the same Dockerfile the release workflow signs) and run that:
+>
+> ```bash
+> docker build -t actradeck .
+> docker run --rm -p 127.0.0.1:55400:55400 -v actradeck_pgdata:/data actradeck
+> ```
+>
+> The rest of this page uses `ghcr.io/actradeck/actradeck:latest` as the image reference;
+> substitute your locally built `actradeck` tag until an image is published.
+
 ```bash
 docker run --rm \
   -p 127.0.0.1:55400:55400 \
@@ -48,9 +63,9 @@ docker run --rm \
 - `-v actradeck_pgdata:/data` persists the embedded database across container restarts.
   Omit it for a throwaway run (data is discarded when the container is removed).
 
-No build step, no external Postgres, no secrets to set — the entrypoint generates an
-ephemeral `INGEST_TOKEN` / `REALTIME_TOKEN` at boot (never printed, never baked into the
-image). To pin your own, pass them explicitly (see [Configuration](#configuration)).
+Once the image is built, running it needs no external Postgres and no secrets to set —
+the entrypoint generates an ephemeral `INGEST_TOKEN` / `REALTIME_TOKEN` at boot (never
+printed, never baked into the image). To pin your own, pass them explicitly (see [Configuration](#configuration)).
 
 ### Run the 30-second safety demo (no host wiring)
 

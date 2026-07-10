@@ -31,6 +31,8 @@ function makeRow(over: {
   reason?: string | null;
   error?: string | null;
   tool_name?: string | null;
+  prompt_summary?: string | null;
+  response_summary?: string | null;
 }): Parameters<typeof rowToReplayEvent>[0] {
   return {
     event_id: "ev-1",
@@ -51,6 +53,8 @@ function makeRow(over: {
     query: over.query ?? null,
     reason: over.reason ?? null,
     error: over.error ?? null,
+    prompt_summary: over.prompt_summary ?? null,
+    response_summary: over.response_summary ?? null,
     risk_level: null,
     decision: null,
     auto_allowed: null,
@@ -122,6 +126,15 @@ describe("INV-REPLAY-SUBJECT: replay DTO subject is derived from redacted allowl
     }
   });
 
+  it("turn.started → prompt_summary / turn.completed → response_summary 列 (ADR 019f47c2)", () => {
+    expect(subjectFor({ event_type: "turn.started", prompt_summary: "依頼: run tests" })).toBe(
+      "依頼: run tests",
+    );
+    expect(subjectFor({ event_type: "turn.completed", response_summary: "応答: 完了" })).toBe(
+      "応答: 完了",
+    );
+  });
+
   it("subject の出所は redacted 構造列のみ・summary (日本語焼付け) は決して使わない", () => {
     // summary に対象らしき日本語があっても subject は構造列からしか引かない。
     const dto = rowToReplayEvent(
@@ -148,6 +161,39 @@ describe("QA-3: kindOf('error') override is pinned (error stays an independent k
   it("error 以外の kind は eventTypeToActionKind の写像そのまま", () => {
     expect(rowToReplayEvent(makeRow({ event_type: "command.started" })).kind).toBe("command");
     expect(rowToReplayEvent(makeRow({ event_type: "mcp.call.started" })).kind).toBe("mcp");
+  });
+});
+
+describe("turn DTO summary/display_text bound (gemini-obs SEC-3=TDA-3, DB-free)", () => {
+  // gemini adapter は uncapped (≤512KiB) 送出ゆえ turn.started/completed の at-rest summary は
+  // redacted だが有界でない。DTO 搬送 (summary / display_text) は projection 正典 boundTurnSummary
+  // (200+…) で post-floor 有界化される (unbounded 値を webui へ運ばない・防御的 bound)。
+  it("turn.started の unbounded summary は DTO summary/display_text で 200+… へ有界化される", () => {
+    const long = "依頼: " + "x".repeat(1000);
+    const dto = rowToReplayEvent(makeRow({ event_type: "turn.started", summary: long }));
+    expect(dto.summary!.length).toBe(201); // 200 + ellipsis
+    expect(dto.summary!.endsWith("…")).toBe(true);
+    expect(dto.summary!.startsWith("依頼: ")).toBe(true);
+    expect(dto.display_text.length).toBe(201); // display_text は summary fallback → 同じ bound 値
+  });
+
+  it("turn.completed も同様に有界化・cap 以下の turn summary は不変", () => {
+    const long = "応答: " + "y".repeat(1000);
+    const dtoLong = rowToReplayEvent(makeRow({ event_type: "turn.completed", summary: long }));
+    expect(dtoLong.summary!.length).toBe(201);
+    const short = "応答: done";
+    const dtoShort = rowToReplayEvent(makeRow({ event_type: "turn.completed", summary: short }));
+    expect(dtoShort.summary).toBe(short);
+    expect(dtoShort.display_text).toBe(short);
+  });
+
+  it("非 turn event の summary は据え置き (既存挙動不変・bound は turn 経路限定)", () => {
+    const long = "コマンド実行: " + "z".repeat(1000);
+    const dto = rowToReplayEvent(
+      makeRow({ event_type: "command.started", summary: long, command: "npm test" }),
+    );
+    expect(dto.summary).toBe(long);
+    expect(dto.display_text).toBe(long);
   });
 });
 

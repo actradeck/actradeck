@@ -13,6 +13,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { LiveWall, WallLaneRow, WallRuler } from "../src/ui/LiveWall.js";
+import { FixedLocaleProvider } from "../src/ui/LocaleProvider.js";
 import { parseWallResponse } from "../src/ui/use-wall-feed.js";
 
 import type { LivenessState, ReplayEventDTO, WallLane } from "../src/realtime/contract.js";
@@ -551,5 +552,65 @@ describe("INV-WALL-INLINE-APPROVAL (配線・ソース走査)", () => {
 
   it("カードは単一出所 ApprovalCard を import する (独自承認カードの再発明禁止)", () => {
     expect(liveWallSrc).toMatch(/import \{ ApprovalCard \} from "\.\/ApprovalCard"/);
+  });
+});
+
+// ── ADR 019f41ec-c549: capture_mode の一覧レベル正直表示 (Wall レーン・非 managed のみバッジ) ──
+// SessionList 行と同一意味論・同一単一出所 CaptureModeBadge。managed/欠落=バッジ無し=既定。
+// observe-only とは呼ばない。存在/不在の両方向 + 両 locale を固定する。
+function laneWithCapture(captureMode: string | undefined): WallLane {
+  const base = lane("live", false);
+  return {
+    ...base,
+    session: { ...base.session, capture_mode: captureMode } as WallLane["session"],
+  };
+}
+
+describe("WallLaneRow capture_mode バッジ (レーンレベル正直表示)", () => {
+  it("attach レーンはバッジを出す (warn tone + data-capture-mode)", () => {
+    const html = renderToStaticMarkup(
+      <WallLaneRow lane={laneWithCapture("attach")} nowMs={NOW} windowMs={120_000} />,
+    );
+    expect(html).toContain('data-testid="wall-lane-capture-mode"');
+    expect(html).toContain('data-capture-mode="attach"');
+    expect(html).toContain("ad-tag--warn");
+    expect(html).toContain("外部起動");
+    expect(html).not.toContain("observe-only");
+  });
+
+  it("codex_rollout レーンはバッジを出す (muted tone)", () => {
+    const html = renderToStaticMarkup(
+      <WallLaneRow lane={laneWithCapture("codex_rollout")} nowMs={NOW} windowMs={120_000} />,
+    );
+    expect(html).toContain('data-testid="wall-lane-capture-mode"');
+    expect(html).toContain('data-capture-mode="codex_rollout"');
+    expect(html).toContain("ad-tag--muted");
+    expect(html).toContain("外部起動");
+  });
+
+  it("managed レーンはバッジを出さない (既定・断定表示しない)", () => {
+    const html = renderToStaticMarkup(
+      <WallLaneRow lane={laneWithCapture("managed")} nowMs={NOW} windowMs={120_000} />,
+    );
+    expect(html).not.toContain('data-testid="wall-lane-capture-mode"');
+  });
+
+  it("capture_mode 欠落 (legacy/unknown) レーンはバッジを出さない (Managed と断定しない)", () => {
+    const html = renderToStaticMarkup(
+      <WallLaneRow lane={laneWithCapture(undefined)} nowMs={NOW} windowMs={120_000} />,
+    );
+    expect(html).not.toContain('data-testid="wall-lane-capture-mode"');
+    expect(html).not.toContain("外部起動");
+  });
+
+  it("en カタログでもバッジ文言を描画する (locale parity)", () => {
+    const html = renderToStaticMarkup(
+      <FixedLocaleProvider locale="en">
+        <WallLaneRow lane={laneWithCapture("attach")} nowMs={NOW} windowMs={120_000} />
+      </FixedLocaleProvider>,
+    );
+    expect(html).toContain('data-testid="wall-lane-capture-mode"');
+    expect(html).toContain("External launch");
+    expect(html).not.toContain("外部起動");
   });
 });

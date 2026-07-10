@@ -47,6 +47,7 @@ if (!INGEST_TOKEN) {
 
 // --- UUIDv7 採番 (event_id 必須・依存ゼロ実装) ------------------------------
 // ActraDeck の event_id は UUIDv7 のみ受理 (crypto.randomUUID は v4 で reject される)。
+// 相互参照: UUIDv7 自前実装はリポジトリ内 4 箇所 (opencode / gemini / 本 ingest adapter + packages/event-model/src/id.ts・T1 正典)。
 function uuidv7() {
   const ms = Date.now();
   const b = randomBytes(16);

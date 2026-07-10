@@ -142,6 +142,81 @@ describe("effectiveLivenessState: 表示時の鮮度補正 (凍結 live を now 
     }
   });
 
+  // --- ADR 019f474e: external adapter の recency proxy は !connected でも offline に倒さない ---
+  describe("external-recent (source=external) は offline に倒さず鮮度で live/idle を出す", () => {
+    it("external-recent + 鮮度窓内(≤60s) の live は live を維持 (connected でなくても)", () => {
+      expect(
+        effectiveLivenessState(
+          listItem({
+            source: "external",
+            connected: false,
+            liveness_state: "live",
+            last_event_at: isoAgo(10_000),
+          }),
+          NOW,
+        ),
+      ).toBe("live");
+    });
+
+    it("external-recent + 鮮度切れ(>60s だが WALL_RECENT_MS 120s 内) の live は idle へ降格 (offline でない)", () => {
+      const state = effectiveLivenessState(
+        listItem({
+          source: "external",
+          connected: false,
+          liveness_state: "live",
+          last_event_at: isoAgo(90_000), // 90s: LIVE_FRESH_MS 超・WALL_RECENT_MS 内
+        }),
+        NOW,
+      );
+      expect(state).toBe("idle");
+      expect(state).not.toBe("offline"); // 表示に出している external を offline と矛盾させない。
+    });
+
+    it("external だが WALL_RECENT_MS 超過 (stale) は従来通り offline", () => {
+      expect(
+        effectiveLivenessState(
+          listItem({
+            source: "external",
+            connected: false,
+            liveness_state: "live",
+            last_event_at: isoAgo(5 * 60_000), // 5m 超過
+          }),
+          NOW,
+        ),
+      ).toBe("offline");
+    });
+
+    it("external だが last_event_at 欠落は offline (証拠なしに live 化しない)", () => {
+      expect(
+        effectiveLivenessState(
+          listItem({
+            source: "external",
+            connected: false,
+            liveness_state: "live",
+            last_event_at: undefined,
+          }),
+          NOW,
+        ),
+      ).toBe("offline");
+    });
+
+    it("非 external の !connected は recency に関わらず offline 不変 (managed/attach)", () => {
+      for (const source of ["hooks", "app_server", "rollout", "sdk"]) {
+        expect(
+          effectiveLivenessState(
+            listItem({
+              source,
+              connected: false,
+              liveness_state: "live",
+              last_event_at: isoAgo(1_000), // 直近でも非 external は救わない
+            }),
+            NOW,
+          ),
+        ).toBe("offline");
+      }
+    });
+  });
+
   it("回帰: 履歴(切断)の凍結 live は badge で LIVE を出さず OFFLINE になる", () => {
     const hist = listItem({
       liveness_state: "live",

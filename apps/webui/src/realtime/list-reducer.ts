@@ -11,6 +11,8 @@
  * 表示順は決定論的に: needs_attention を最優先で上 (介入要否が 1 行で分かる KPI)、
  * 次いで last_event_at 新しい順。表示コンポーネントはこの順序付き配列を描くだけ。
  */
+import { isPresentOrRecentlyActive } from "@actradeck/event-model";
+
 import type { SessionListItem } from "./contract";
 
 export interface ListState {
@@ -58,8 +60,14 @@ export function purgeStale(state: ListState, opts: PurgeOptions = {}): ListState
   let changed = false;
   const items = new Map<string, SessionListItem>();
   for (const [id, s] of state.items) {
-    if (s.connected === true || s.liveness_state === "live") {
-      items.set(id, s); // 接続在席 or live は消さない。
+    // ADR 019f474e: connected / live に加え、external adapter の直近 active(recency proxy)も
+    // purge 免除に含める(表示されている external を容量管理で消さない・共有正準述語)。
+    // coupling (QA-1/TDA-3・削除禁止): この免除は **display ⊆ ¬purge**(表示中 item を purge しない)を
+    // 保つ防御ガード。既定窓では DEFAULT_PURGE_IDLE_MS(600s) > WALL_RECENT_MS(120s) ゆえ recency 免除は
+    // 冗長だが、purge 窓を maxIdleMs < WALL_RECENT_MS へ狭めた瞬間に「表示中の external item を purge して
+    // flicker」バグを防ぐため load-bearing になる(窓順序前提が変わると顕在化)。
+    if (s.connected === true || s.liveness_state === "live" || isPresentOrRecentlyActive(s, now)) {
+      items.set(id, s); // 接続在席 or live or external-recent は消さない。
       continue;
     }
     if (s.last_event_at === undefined) {
@@ -83,11 +91,18 @@ export interface DisplayOptions {
    * true = 全件(履歴含む)。トグルで切替え、絞りは client 側(server 契約不変・即時)。
    */
   readonly showHistory?: boolean;
+  /**
+   * 表示包含窓 (recency proxy) の判定基準時刻 (epoch ms)。ADR 019f474e:
+   * external adapter の直近 active 判定に使う。既定 Date.now()。呼び元 (use-realtime) は
+   * 既存 1s tick 相当の now を渡し毎秒再評価する (WALL_RECENT_MS 経過で自動的に history 側へ)。
+   */
+  readonly nowMs?: number;
 }
 
 /**
  * 表示用に決定論ソートした配列を返す (display 層が描くだけにする)。
- * 既定は connected=true のみ(presence membership フィルタ)。showHistory=true で全件。
+ * 既定は connected=true か external-recent(ADR 019f474e recency proxy・共有正準述語)。
+ * showHistory=true で全件。
  * 優先順位: needs_attention(true 上) → last_event_at(新しい上, 欠損は最下) → session_id(安定).
  */
 export function toDisplayList(
@@ -95,9 +110,13 @@ export function toDisplayList(
   opts: DisplayOptions = {},
 ): readonly SessionListItem[] {
   const showHistory = opts.showHistory ?? false;
-  // 既定: 接続在席のみ。connected !== false で「欠落(不明)→表示寄り」も拾う(parse 正規化後は
-  // 常に boolean だが防御的に)。showHistory=true なら全件。
-  const arr = [...state.items.values()].filter((s) => showHistory || s.connected !== false);
+  const nowMs = opts.nowMs ?? Date.now();
+  // 既定: 接続在席、または external adapter の直近 active(presence を構造的に持てない external を
+  // recency 代理で包含)。managed/attach/codex_rollout の !connected は従来通り除外。
+  // showHistory=true なら全件(この分岐は不変)。
+  const arr = [...state.items.values()].filter(
+    (s) => showHistory || isPresentOrRecentlyActive(s, nowMs),
+  );
   arr.sort((a, b) => {
     if (a.needs_attention !== b.needs_attention) return a.needs_attention ? -1 : 1;
     const ta = a.last_event_at ? Date.parse(a.last_event_at) : Number.NEGATIVE_INFINITY;

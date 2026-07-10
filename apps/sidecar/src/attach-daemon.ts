@@ -18,11 +18,14 @@
  */
 import { randomBytes } from "node:crypto";
 
+import { parseCodexSpawnRequest, type CodexSpawnResult } from "@actradeck/event-model";
+
 import { computeAgentVisibilityWire } from "./agent-visibility.js";
 import { AttachSessionRegistry } from "./attach-session-registry.js";
 import { ApprovalBridge } from "./approval-bridge.js";
-import { buildApprovalPersistConfig } from "./approval-persist-config.js";
+import { buildApprovalPersistConfig, makeRepoScopeResolver } from "./approval-persist-config.js";
 import { buildBridgePolicyOptions } from "./approval-policy-store.js";
+import { CodexSpawnManager } from "./codex-spawn-manager.js";
 import { buildAllowlistResponse } from "./allowlist-relay.js";
 import { buildPolicyResponse } from "./policy-relay.js";
 import { generateRedactedDiff } from "./diff-provider.js";
@@ -48,6 +51,16 @@ export interface AttachDaemonOptions {
   readonly onOutOfOrder?: (obs: OutOfOrderObservation) => void;
   /** interrupt 要求の観測フック (no-kill を可視化, INV-ATTACH-NO-KILL)。 */
   readonly onInterruptIgnored?: (sessionId: string | undefined) => void;
+  /**
+   * ADR 019f4206 A段: cockpit からの Codex Managed spawn を許可するか (契約点2)。既定は
+   * `ACTRADECK_ENABLE_CODEX_SPAWN==="1"` (out-of-box OFF)。false のとき spawn_capable を広告せず、
+   * 受信しても値ベース spawn_disabled deny (attach daemon の観測専念を壊さない)。
+   */
+  readonly enableCodexSpawn?: boolean;
+  /** ADR 019f4206: 同時 managed codex 数の cap (既定 ACTRADECK_CODEX_SPAWN_MAX or DEFAULT_CODEX_SPAWN_MAX)。 */
+  readonly codexSpawnMax?: number;
+  /** spawn 要求の観測フック (診断のみ・NO-RAW: 成否 boolean + closed enum code のみ・prompt/cwd 非含)。 */
+  readonly onSpawnHandled?: (ok: boolean, code?: string) => void;
   /** L2(b) (decision 019f0e5d): 承認 disk-write 失敗の operator 可視化フック (件数のみ・NO-RAW)。 */
   readonly onPersistFailure?: (count: number) => void;
   /**
@@ -70,11 +83,14 @@ export class AttachDaemon {
   readonly approvalBridge: ApprovalBridge;
   readonly hookReceiver: HookReceiver;
   readonly registry: AttachSessionRegistry;
+  /** ADR 019f4206 A段: cockpit-relayed Codex Managed spawn の in-process manager (契約点1)。 */
+  readonly spawnManager: CodexSpawnManager;
   /** literal token-mode で settings に配線する hook 認証トークン (nonce, 再起動で rotation)。 */
   private readonly hookToken: string;
   /** inbound 制御チャネルトークン (approval は honor、interrupt は no-kill)。 */
   private readonly controlToken: string;
   private readonly onInterruptIgnored: ((sessionId: string | undefined) => void) | undefined;
+  private readonly onSpawnHandled: ((ok: boolean, code?: string) => void) | undefined;
   private started = false;
 
   constructor(opts: AttachDaemonOptions) {
@@ -84,6 +100,10 @@ export class AttachDaemon {
         : generateHookToken();
     this.controlToken = randomBytes(32).toString("base64url");
     this.onInterruptIgnored = opts.onInterruptIgnored;
+    this.onSpawnHandled = opts.onSpawnHandled;
+    // ADR 019f4206 契約点2: codex spawn は既定 OFF (out-of-box 安全)。env opt-in か明示 option でのみ有効。
+    const enableCodexSpawn =
+      opts.enableCodexSpawn ?? process.env.ACTRADECK_ENABLE_CODEX_SPAWN === "1";
     this.store = new EventStore(opts.dbPath);
 
     this.wsClient = new WsClient({
@@ -93,8 +113,13 @@ export class AttachDaemon {
       // ADR 019f1582 follow-up: attach daemon は policyRequest を処理する (下記 wsClient.on("policyRequest"))
       // ゆえ policy 対応を広告し、backend の connectedDaemons に含めて daemon-addressed policy 設定を受ける。
       policyCapable: true,
-      // hello.session_ids = 観測中の全 attach canonical (ADR D1: 複数 id 可)。
-      sessionIdsProvider: () => this.registry.sessionIds(),
+      // ADR 019f4206 契約点2: spawn 有効時のみ spawn_capable を広告 (既定 OFF = 非広告・out-of-box 安全)。
+      spawnCapable: enableCodexSpawn,
+      // hello.session_ids = 観測中の全 attach canonical + spawn した managed codex の canonical (ADR D1: 複数可)。
+      sessionIdsProvider: () => [
+        ...this.registry.sessionIds(),
+        ...this.spawnManager.activeSessionIds(),
+      ],
       // ADR 019f1972 §2b: agent 観測可能性を hello に相乗り (machine-global・fresh per send・fail-safe)。
       agentVisibilityProvider: () => computeAgentVisibilityWire(),
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
@@ -141,6 +166,17 @@ export class AttachDaemon {
               ? { reaperIntervalMs: opts.reaperIntervalMs }
               : {}),
           });
+
+    // ADR 019f4206 A段 (契約点1): cockpit-relayed Codex Managed spawn の in-process manager。sink / approvalBridge
+    // は attach daemon と同一実体を共有し (承認 relay + redaction 経路を再利用)、cwd 封じ込めは per-repo policy
+    // resolve と同じ canonical makeRepoScopeResolver + isPathWithinScope を共有する (契約点3・手書きコピー禁止)。
+    this.spawnManager = new CodexSpawnManager({
+      sink: this.sink,
+      approvalBridge: this.approvalBridge,
+      resolveRepoScope: makeRepoScopeResolver(),
+      enabled: enableCodexSpawn,
+      ...(opts.codexSpawnMax !== undefined ? { spawnMax: opts.codexSpawnMax } : {}),
+    });
 
     this.hookReceiver = new HookReceiver({
       sink: this.sink,
@@ -232,6 +268,57 @@ export class AttachDaemon {
         // この .catch が非同期版の最終 net (構造 backstop 等価) — daemon は落とさない (deny-safe・観測も諦める)。
       });
     });
+
+    // ADR 019f4206 A段: Codex Managed spawn 要求。WsClient が controlToken 検証済みのもののみ emit する
+    // (無認証 peer は handleInbound で構造遮断・INV-SPAWN-DENY-VALUE-BASED)。処理は CodexSpawnManager の
+    // **値ベース** deny (throw 禁止・SEC-R3-3)。NO-RAW: 応答は closed enum code のみで prompt/cwd を echo しない。
+    this.wsClient.on("spawnRequest", (msg) => {
+      void (async () => {
+        try {
+          const res = await this.handleSpawnRequest(msg);
+          this.onSpawnHandled?.(res.ok, res.ok ? undefined : res.error);
+          if (typeof msg.request_id === "string" && msg.request_id.length > 0) {
+            this.wsClient.respondCodexSpawn({
+              type: "codex.spawn.response",
+              request_id: msg.request_id,
+              ok: res.ok,
+              ...(res.ok && res.session_id !== undefined ? { session_id: res.session_id } : {}),
+              ...(res.ok ? {} : { error: res.error }),
+            });
+          }
+        } catch {
+          // graceful error: 想定外 throw でも closed enum の spawn_failed で応答し backend の timeout を避ける。
+          if (typeof msg.request_id === "string" && msg.request_id.length > 0) {
+            this.wsClient.respondCodexSpawn({
+              type: "codex.spawn.response",
+              request_id: msg.request_id,
+              ok: false,
+              error: "spawn_failed",
+            });
+          }
+        }
+      })().catch(() => {
+        // 非同期版の最終 net (policyRequest と同型)。respondCodexSpawn の throw も daemon を落とさない (deny-safe)。
+      });
+    });
+  }
+
+  /**
+   * ADR 019f4206 A段: spawn 要求を検証射影 → CodexSpawnManager へ委譲する (値ベース)。prompt/cwd は
+   * event-model 正準 `parseCodexSpawnRequest` で検証射影し (余剰 field を構造的に落とす・NO-RAW by construction)、
+   * 不正なら値ベース `invalid_request` deny (throw しない)。resolve_scope は封じ込め第二段の再照合 scope。
+   */
+  private async handleSpawnRequest(msg: {
+    prompt?: string;
+    cwd?: string;
+    resolve_scope?: readonly string[];
+  }): Promise<CodexSpawnResult> {
+    const params = parseCodexSpawnRequest({ prompt: msg.prompt, cwd: msg.cwd });
+    if (params === undefined) return { ok: false, error: "invalid_request" };
+    const scope = Array.isArray(msg.resolve_scope)
+      ? msg.resolve_scope.filter((s): s is string => typeof s === "string")
+      : [];
+    return this.spawnManager.handleSpawn({ ...params, resolveScope: scope });
   }
 
   /**
@@ -313,9 +400,10 @@ export class AttachDaemon {
     return this.hookReceiver.endpoint;
   }
 
-  /** graceful shutdown: registry 停止 → 未送信 flush → close。 */
+  /** graceful shutdown: registry 停止 → spawn した managed codex を dispose → 未送信 flush → close。 */
   async shutdown(): Promise<void> {
     await this.registry.dispose();
+    this.spawnManager.dispose();
     this.approvalBridge.drain();
     await this.hookReceiver.close();
     this.wsClient.notifyAppended();
