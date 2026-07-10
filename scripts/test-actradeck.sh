@@ -42,6 +42,8 @@ assert_exit 1 "未知の top-level verb は exit 1" -- bash "$AC" bogus
 assert_exit 1 "print-unit に未知サービスは exit 1" -- bash "$AC" print-unit bogus
 assert_exit 1 "logs に未知サービスは exit 1" -- bash "$AC" logs bogus
 assert_exit 0 "doctor は exit 0" -- bash "$AC" doctor
+assert_contains "[doctor] node version:" "doctor は Node version を表示" -- bash "$AC" doctor
+assert_contains "[doctor] pnpm:" "doctor は pnpm version または remediation を表示" -- bash "$AC" doctor
 
 # 3. unit 生成: ExecStart / WorkingDirectory / hardening / webui の NODE_ENV。
 assert_contains "WorkingDirectory=" "backend unit に WorkingDirectory" -- bash "$AC" print-unit backend
