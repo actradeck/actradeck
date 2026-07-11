@@ -11,6 +11,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-11
+
 ### Added
 
 - **One-command Docker image (cockpit stack).** A signed container image publishes the
@@ -26,6 +28,45 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   attestation** of the image digest — a different trust root from the product's own
   audit-export signature, never reused. Verify with `cosign verify` +
   `gh attestation verify` (commands in `docs/docker.md`).
+- **External adapters via the public ingestion contract.** Two dependency-zero,
+  observe-only example adapters ship: an **opencode** plugin and a **Gemini CLI** hook
+  adapter (`docs/examples/`). Any tool can map its events to `provider=<slug>` /
+  `source=external` and `POST /ingest`; the backend ingress redaction floor applies to
+  them like any other event. External adapters carry no client-side redaction — the
+  backend floor is the only redaction defense (disclosed in each adapter's README).
+- **External-adapter sessions on the Live Wall.** `source=external` sessions surface on
+  the wall/board via a recency proxy; terminal (ended) sessions are excluded from the
+  live indicator so a completed run no longer shows as “LIVE”.
+- **Managed Codex spawn from the cockpit** (opt-in, default off). Launch an in-process
+  Managed Codex session over the attach daemon's control channel, with cwd containment
+  and the same approval supervision as any Managed session (ADR 019f4206).
+- **Public-mirror PR import flow.** `scripts/import-oss-pr.sh` imports a community pull
+  request into the canonical repo with your authorship preserved (`git am`), recording
+  you in `CONTRIBUTORS.md`; CONTRIBUTING documents how the one-way mirror keeps
+  contributions from being lost.
+
+### Changed
+
+- **Headline claims scoped to what is actually enforced.** README, docs, and the
+  landing page now present cross-vendor secret redaction and audit as unconditional,
+  with **selective** approval governance — relayed to the cockpit for Claude Code over
+  Attach and for Codex in Managed Mode; external adapters are observe-only. This matches
+  the vendor/mode support matrix (no over-claiming).
+- **Shipped docs are English-canonical with Japanese companions** (`*.ja.md`).
+- **`capture_mode` is shown at the session-list level** for an honest per-session view
+  of how each agent is being observed.
+
+### Security
+
+- **Redaction floor: two straddle-leak classes bounded.** Secrets that straddled the
+  redaction window could previously leave a raw prefix at rest below a rule's minimum
+  match length. Both the PEM private-key class (SEC-2) and the JWT class (SEC-1) are now
+  bounded, pinned by falsifiable real-PostgreSQL invariants (redact-before-truncate).
+
+### Fixed
+
+- Closed CodeQL true-positives (prototype-pollution, ReDoS) and a dead store; eliminated
+  polynomial ReDoS in the ingestion-contract doc extractors.
 
 ## [0.3.0] - 2026-07-05
 
@@ -96,5 +137,6 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/actradeck/actradeck/releases/tag/v0.4.0
 [0.3.0]: https://github.com/actradeck/actradeck/releases/tag/v0.3.0
