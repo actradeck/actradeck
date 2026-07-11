@@ -242,16 +242,24 @@ def is_guard(s):
 # what counts as a buildx publish (the mutator used to keep a private copy — TDA-R1). Recognized forms:
 #   `--push`                       (the canonical multi-arch manifest-list push), OR
 #   `--output type=registry`       (equivalent — writes the manifest list straight to the registry),
-#   `--output=type=registry`, `-o type=registry`, or an `--output …,push=true`.
-# Adding forms here only ever makes MORE steps count as a push == fail-closed (a mixed publish step
-# can't hide from coverage). Exotic publishers (skopeo/crane) are still unrecognized here; they fall
-# through to "no push step" -> a spurious RED, never a silent pass (a tracked sweep item).
+#   `--output=type=registry`, `-o type=registry`, `-o=type=registry`, the pflag-FUSED short form
+#   `-otype=registry` (SEC-R3-1), or an `--output …,push=true`.
+# HONEST SCOPE: "recognizes MORE publish steps == fail-closed" holds only within the spellings enumerated
+# here — a publish step written in a form this predicate does NOT match (an exotic publisher like
+# skopeo/crane, or an `--output` variant not covered) is unrecognized and falls through to "no push
+# step" -> a spurious RED, never a silent pass (a tracked sweep item). So it is NOT an unconditional
+# "no mixed publish step can hide"; a step whose publish flag IS one of these spellings can't hide.
 def buildx_publishes(run):
     if "docker buildx build" not in run:
         return False
     if "--push" in run:
         return True
-    return re.search(r'(?:--output=?|(?:^|\s)-o[=\s])[^\n]*?(?:type=registry|push=true)', run) is not None
+    # SEC-R3-1: `-o` is a pflag short option, so `-otype=registry` (value FUSED with no separator) is a
+    # legitimate spelling of `-o type=registry`. The old `-o[=\s]` required a separator and under-matched
+    # the fused form. Cover: `--output[=]<…>`, `-o[=\s]<…>` (space/`=`-separated), and `-o<fused>` (\S*?).
+    return re.search(
+        r'(?:--output=?[^\n]*?|(?:^|\s)-o[=\s][^\n]*?|(?:^|\s)-o\S*?)'
+        r'(?:type=registry|push=true)', run) is not None
 def is_push(s):
     # A step PUSHES the image if it is a build-push-action with push:true, a plain `docker push`,
     # OR (multi-arch) a `docker buildx build …` that publishes to a registry (buildx_publishes:
@@ -497,6 +505,22 @@ elif op == "extra_output_registry":    # (j) SEC-R2: a SECOND buildx that publis
     steps.append({"name": "Publish extra arch via output",
                   "run": 'docker buildx build --platform linux/s390x '
                          '--cache-from "type=local,src=/tmp/adcache-s390x" --output type=registry -t img:x .'})
+elif op == "nested_platform_shc":       # (k) QA-R3-1: --platform buried in a nested `sh -c "…"` quote -> shlex single-tokens
+    # Wrap the buildx publish inside `sh -c "…"`. shlex collapses the whole inner command into ONE
+    # quoted token, so _flag_values('--platform') surfaces nothing — yet the arch (s390x) rides along
+    # UNSCANNED. Pre-fix this hit the "no --platform = native single arch" skip (fail-OPEN = gate PASSES,
+    # DEAD GATE). Post-fix the raw-substring backstop FAILS CLOSED (the `--platform` substring is present).
+    s = first(is_pub)
+    s["run"] = ('set -euo pipefail\n'
+                'sh -c "docker buildx build --platform linux/amd64,linux/arm64,linux/s390x '
+                '--push -t img:x ."\n')
+elif op == "extra_output_registry_fused":  # (l) SEC-R3-1: a SECOND buildx publishing via the FUSED short flag -otype=registry
+    # Pre-fix buildx_publishes' `-o[=\s]` under-matched `-otype=registry`, so this step was NOT seen as
+    # a push (fail-OPEN = its unscanned s390x hid = gate PASSES). Post-fix it is recognized -> covered
+    # -> unscanned arch REJECT.
+    steps.append({"name": "Publish extra arch via fused -o",
+                  "run": 'docker buildx build --platform linux/s390x '
+                         '--cache-from "type=local,src=/tmp/adcache-s390x" -otype=registry -t img:x .'})
 else:
     sys.stderr.write(f"unknown op {op}\n"); sys.exit(2)
 job["steps"] = steps
@@ -740,14 +764,28 @@ LIT_PLATFORM = re.compile(r'^linux/[A-Za-z0-9._-]+(?:,linux/[A-Za-z0-9._-]+)*$')
 scanned_all = "\n".join(scanned_bodies)
 for pi in push_idxs:
     prun_raw = str(steps[pi].get("run", ""))
-    # SEC-R2: gate on the SHARED buildx-publish predicate, so a step that publishes via
-    # `--output type=registry` (not just `--push`) is covered too — a mixed publish step can't hide.
+    # SEC-R2 / SEC-R3-1: gate on the SHARED buildx-publish predicate, so a step that publishes via
+    # `--output type=registry` / the fused `-otype=registry` (not just `--push`) is covered too — a
+    # publish step whose flag is one of the recognized spellings can't hide (see buildx_publishes for
+    # the honest scope: an unrecognized publisher spelling falls through fail-closed, not silently).
     if not sp.buildx_publishes(prun_raw):
         continue  # docker push (retag) / build-push-action — single-arch legacy, coverage N/A
     plat_vals = _flag_values(prun_raw, "--platform")
     if plat_vals is None:
         print(f"push step (index {pi}) run could not be tokenized (unbalanced quotes?) — cannot verify per-arch coverage; FAIL CLOSED"); sys.exit(1)
     if not plat_vals:
+        # QA-R3-1 (fail-closed backstop): _flag_values could surface NO --platform token, yet the raw
+        # run text DOES contain the `--platform` substring. That means the flag is present but shlex
+        # could not place it at a token position — e.g. a NESTED-QUOTE wrapper `sh -c "docker buildx
+        # build --platform …,linux/s390x --push …"` collapses the whole inner command into ONE quoted
+        # token, so per-arch coverage is unverifiable. Treat as unresolvable and FAIL CLOSED (symmetric
+        # with the `plat_vals is None` unbalanced-quote path), rather than falling into the "no
+        # --platform = native single host arch" skip below (which would be fail-OPEN — an unscanned arch
+        # could ride the wrapper). HONEST SCOPE: this over-rejects a publish step that merely MENTIONS
+        # `--platform` in an echo/comment while carrying no real flag — the safe side (a spurious RED,
+        # never a silent pass), consistent with the file's fail-closed convention.
+        if "--platform" in prun_raw:
+            print(f"push step (index {pi}) has a `--platform` substring but shlex surfaced no --platform token (nested-quote wrapper like `sh -c \"…--platform…\"`?) — cannot verify per-arch coverage; FAIL CLOSED"); sys.exit(1)
         continue  # buildx publish with no --platform = native single host arch (legacy-equivalent)
     arches = []
     for v in plat_vals:
@@ -762,6 +800,22 @@ for pi in push_idxs:
         if not _whole_token(a, scanned_all):
             print(f"push step (index {pi}) publishes linux/{a} but no pre-push scan references it as a whole token (unscanned arch)"); sys.exit(1)
     cache_vals = " ".join(_flag_values(prun_raw, "--cache-from") or [])
+    # N2 (considered, NOT tightened — decision 019f50ec follow-up): `_whole_token` treats `-`/`/` as
+    # word boundaries, so a DECOY cache dir whose name merely CONTAINS the arch (e.g.
+    # `src=/tmp/adcache-arm64-fake`, which does not hold the real arm64 cache) satisfies this parity
+    # check. Tightening to require the arch as the TRAILING path segment of the `src=`/`dest=` value
+    # (basename endswith `-<arch>`) would reject that decoy — but it was deliberately NOT implemented:
+    #   (1) the decoy needs an adversarial/careless WORKFLOW AUTHOR (single-operator, maintainer-owned)
+    #       who fakes a cache name while dropping the real one — outside this SECONDARY wiring check's
+    #       threat model (the AUTHORITATIVE gate is the real per-arch image FS scan, which runs on the
+    #       actually-built images before push and a fake `--cache-from` does not bypass);
+    #   (2) a trailing-segment heuristic over-rejects LEGITIMATE cache backends the release may adopt —
+    #       `type=gha,scope=<arch>`, `type=registry,ref=img:cache-<arch>`, nested paths, trailing
+    #       slashes — turning a benign backend swap into a spurious RED (the file's "NO OVER-REJECT:
+    #       fail-closed must stay precise" principle). A brittle heuristic RED-flagging a legit refactor
+    #       is a worse failure mode than a contrived author-only decoy.
+    # Net: parity stays a whole-token "the arch is referenced by a cache-from" hint; the real scan is the
+    # enforcement. Revisit if a non-author trust boundary (multi-operator / remote push authoring) opens.
     for a in arches:
         if not _whole_token(a, cache_vals):
             print(f"push step (index {pi}) publishes linux/{a} but has no --cache-from referencing it (adcache-{a}) — pushed layers would be an unscanned rebuild"); sys.exit(1)
@@ -1767,8 +1821,10 @@ PY
   #   comment_arm64_cachefrom (h) SEC-R1: comment-OUT the arm64 --cache-from -> not a live flag token
   #   echo_spoof_cachefrom    (i) SEC-R1: arm64 --cache-from removed but named inside an echo STRING
   #   extra_output_registry   (j) SEC-R2: a SECOND buildx publishing via --output type=registry (no --push)
+  #   nested_platform_shc     (k) QA-R3-1: --platform buried in a nested `sh -c "…"` quote (shlex single-tokens)
+  #   extra_output_registry_fused (l) SEC-R3-1: a SECOND buildx publishing via the FUSED short flag -otype=registry
   push_red_ok=1; push_n=0
-  for op in plat_env plat_continuation scan_echo_only plat_substring extra_push_s390x drop_all_cachefrom drop_one_cachefrom comment_arm64_cachefrom echo_spoof_cachefrom extra_output_registry; do
+  for op in plat_env plat_continuation scan_echo_only plat_substring extra_push_s390x drop_all_cachefrom drop_one_cachefrom comment_arm64_cachefrom echo_spoof_cachefrom extra_output_registry nested_platform_shc extra_output_registry_fused; do
     push_n=$((push_n + 1))
     mutate_push "$op" "$REL_YML" "$WORK/rel.push.$op.yml"; mrc=$?
     if ! mutation_applied "$WORK/rel.push.$op.yml" "$mrc"; then
@@ -1778,7 +1834,7 @@ PY
       ng "INV-DOCKER-SCAN-BEFORE-PUSH: DEAD GATE — push-face bypass '$op' still passed"; push_red_ok=0
     fi
   done
-  [ "$push_red_ok" = 1 ] && ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS on all $push_n push-face bypasses (non-literal/continuation --platform, echo-only scan, substring arch, extra unscanned --push/--output, dropped/commented/echo-spoofed cache-from), each mutation verified applied (falsifiable)"
+  [ "$push_red_ok" = 1 ] && ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS on all $push_n push-face bypasses (non-literal/continuation/nested-quote --platform, echo-only scan, substring arch, extra unscanned --push/--output/fused-\`-o\`, dropped/commented/echo-spoofed cache-from), each mutation verified applied (falsifiable)"
 fi
 
 # ============================================================================
