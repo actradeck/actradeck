@@ -27,10 +27,10 @@ on:
   push:
     tags:
       - "v*"
-  # Manual opt-in path for the GHCR Docker image job ONLY (see the `docker` job's `if:`).
-  # Dispatch this against an existing `vX.Y.Z` tag to build+sign+push the image. The
-  # verify/release jobs are guarded to `push` events, so a dispatch never re-cuts a
-  # Release — it only exercises the (USER-GATED) docker job.
+  # Manual opt-in path for the USER-GATED publish jobs (`docker` and `npm`) ONLY — see each
+  # job's `if:`. Dispatch this against an existing `vX.Y.Z` tag to build+sign+push the GHCR
+  # image and/or publish the npm bootstrap CLI. The verify/release jobs are guarded to `push`
+  # events, so a dispatch never re-cuts a Release — it only exercises the opt-in publish jobs.
   workflow_dispatch:
 
 # Least-privilege by default: the whole workflow only READS the repo. The release job
@@ -431,3 +431,162 @@ jobs:
           subject-name: ${{ steps.img.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  # --- npm: publish the bootstrap CLI via Trusted Publishing (OIDC) (USER-GATED) ---
+  # ADR 0013 Phase 3 (decision 019f5131). Publishes ONLY packages/cli (the sole publishable
+  # package; every other workspace stays private:true). Same TWO-LAYER gate as the docker job:
+  #   (1) this job `if:` — pinned to CANONICAL_NPM_IF by INV-NPM-PUBLISH-GATED (closed-enum,
+  #       tag-guarded, exact AST match), and
+  #   (2) a runtime publish guard step that fails closed RIGHT BEFORE `npm publish` unless the
+  #       ref is a tag AND (workflow_dispatch OR vars.ENABLE_NPM_PUBLISH == 'true') truly holds.
+  # OFF BY DEFAULT: a plain tag push does NOT publish to npm. It is independent of verify/release
+  # (no `needs:`), so it never affects the signed GitHub Release.
+  #
+  # Trusted Publishing (npm OIDC, GA 2025-07): NO long-lived npm token. The job mints a
+  # short-lived OIDC token (id-token: write, job-scoped) that npm (>= 11.5.1) exchanges for a
+  # publish credential, and generates provenance automatically. Because a PRIVATE repo does not
+  # produce provenance, this workflow MUST run inside the PUBLIC mirror (actradeck/actradeck) —
+  # a structural requirement, not a policy. The npmjs.com Trusted Publisher config
+  # (org/repo/workflow filename/environment) is USER-GATED (set once by the maintainer).
+  npm:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_NPM_PUBLISH == 'true')
+    permissions:
+      contents: read
+      id-token: write # OIDC token exchange for npm Trusted Publishing (no npm token stored)
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 10.28.2
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22.16.0"
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+
+      # Lockstep + tag agreement (same posture as verify's assert, extended to the CLI package).
+      # A workflow_dispatch reaches THIS job WITHOUT verify's push-gated tag↔version check, so we
+      # re-assert here: the pushed tag MUST equal v<root version> AND the CLI's own version MUST
+      # equal root (lockstep), or a mislabeled package could be published.
+      - name: Assert tag == root == cli package version
+        run: |
+          set -euo pipefail
+          root_ver="$(jq -r '.version' package.json)"
+          cli_ver="$(jq -r '.version' packages/cli/package.json)"
+          expected="v${root_ver}"
+          if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' != root version '${expected}' — run scripts/version.sh ${root_ver} to stamp+tag in lockstep" >&2
+            exit 1
+          fi
+          if [ "${cli_ver}" != "${root_ver}" ]; then
+            echo "::error::packages/cli version '${cli_ver}' != root version '${root_ver}' (lockstep broken)" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} == root == cli version ${root_ver}"
+
+      # tsc only needs the typescript devDep; --ignore-scripts avoids the native addon builds
+      # (better-sqlite3 / node-pty) that the CLI does not use.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build the CLI (dist/)
+        run: pnpm --filter ./packages/cli run build
+
+      # npm >= 11.5.1 is required for Trusted Publishing (OIDC). setup-node's Node 22 ships an
+      # older npm, so pin an exact npm that satisfies the floor (Dependabot/manual bumps this).
+      - name: Pin npm >= 11.5.1 (Trusted Publishing floor)
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.5.1
+          npm --version
+
+      # DEFENSE IN DEPTH (mirrors the release job's tarball re-scan): the mirror tree is already
+      # sanitized, but re-verify the PUBLISHED SET here. Fails closed if (a) `npm pack` would ship
+      # anything outside the allowlist {package.json, README.md, LICENSE, dist/**}, or (b) any
+      # forbidden internal file / maintainer-coupling literal is inside the packed content. The
+      # AUTHORITATIVE contract is INV-NPM-PACK-ALLOWLIST in scripts/test-release-prep.sh; this is
+      # the publish-time backstop.
+      - name: npm pack content gate (allowlist + leak scan)
+        working-directory: packages/cli
+        run: |
+          set -euo pipefail
+          dest="$(mktemp -d)"
+          npm pack --pack-destination "$dest" >/dev/null
+          tgz="$(find "$dest" -name '*.tgz' -print -quit)"
+          [ -n "$tgz" ] || { echo "::error::npm pack produced no tarball" >&2; exit 1; }
+
+          echo "== (a) every packed path is on the allowlist =="
+          # `npm pack` prefixes every entry with `package/`. Strip it, then assert each remaining
+          # path is package.json | README.md | LICENSE | dist/**. Capture-then-grep (NOT
+          # `tar | grep`) to dodge the pipefail x SIGPIPE inversion on a match.
+          listing="$(tar tzf "$tgz" | sed 's#^package/##' | grep -v '^$' || true)"
+          bad="$(printf '%s\n' "$listing" | grep -vE '^(package\.json|README\.md|LICENSE|dist/.+)$' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::npm pack would ship files outside the allowlist:" >&2
+            printf '%s\n' "$bad" >&2
+            exit 1
+          fi
+          # Forbid .tsbuildinfo: a tsc build-cache file that bakes ABSOLUTE filesystem paths into
+          # the tarball (kept out of dist via tsBuildInfoFile; blocked here as a structural backstop).
+          tsb="$(printf '%s\n' "$listing" | grep -E '(^|/)\.tsbuildinfo$' || true)"
+          if [ -n "$tsb" ]; then
+            echo "::error::npm pack would ship a .tsbuildinfo (absolute-path leak vector): $tsb" >&2
+            exit 1
+          fi
+          # Forbid *.map (SEC-1): source/declaration maps embed source-tree paths and are useless
+          # to a CLI consumer; disabled at the tsc level (sourceMap/declarationMap:false) and
+          # blocked here so a tsconfig flip re-emitting them can't ship silently.
+          maps="$(printf '%s\n' "$listing" | grep -E '\.map$' || true)"
+          if [ -n "$maps" ]; then
+            echo "::error::npm pack would ship sourcemap(s) (path-embed vector): $maps" >&2
+            exit 1
+          fi
+          # Required members must be present (a pack that dropped dist/ or LICENSE is also wrong).
+          for req in package.json README.md LICENSE; do
+            printf '%s\n' "$listing" | grep -qxF "$req" || { echo "::error::npm pack is missing $req" >&2; exit 1; }
+          done
+          printf '%s\n' "$listing" | grep -qE '^dist/index\.js$' || { echo "::error::npm pack is missing dist/index.js (the bin)" >&2; exit 1; }
+          echo "ok: packed set == {package.json, README.md, LICENSE, dist/**}"
+
+          echo "== (b) forbidden internal files absent from packed content (fail-closed) =="
+          x="$(mktemp -d)"; tar xzf "$tgz" -C "$x"
+          # Same posture as the release job's tarball re-scan: assert no forbidden INTERNAL file
+          # is present. A generic maintainer-coupling literal scan is intentionally NOT inlined
+          # here (it would embed the private path/handle into this shipped workflow); that scan is
+          # the AUTHORITATIVE prepare-oss Phase-4 gate that runs BEFORE the mirror is cut, so the
+          # tree this job packs is already coupling-clean by construction.
+          hits="$(cd "$x" && find . \( -name '.env' -o -name '.mcp.json' -o -name 'CLAUDE.md' -o -name 'AGENTS.md' -o -name 'plan.md' -o -name '.claude' \) -print 2>/dev/null || true)"
+          [ -z "$hits" ] || { echo "::error::forbidden internal file inside the npm package: $hits" >&2; exit 1; }
+          echo "ok: packed content carries no forbidden internal file"
+          rm -rf "$dest" "$x"
+
+      # AUTHORITATIVE publish gate (mirrors the docker job's runtime guard): a step that runs
+      # RIGHT BEFORE `npm publish` and fails closed unless the tag∧opt-in conditions truly hold.
+      # Even if this job's `if:` were weakened, publishing is blocked here. GITHUB_REF /
+      # GITHUB_EVENT_NAME are Actions built-ins; ENABLE_NPM_PUBLISH enters via env (injection-safe),
+      # never interpolated into the script body.
+      - name: Verify npm publish is authorized (runtime publish guard)
+        env:
+          ENABLE_NPM_PUBLISH: ${{ vars.ENABLE_NPM_PUBLISH }}
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF:-}" in
+            refs/tags/*) : ;;
+            *) echo "::error::publish guard: ref '${GITHUB_REF:-}' is not a tag — refusing to publish" >&2; exit 1 ;;
+          esac
+          if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] || [ "${ENABLE_NPM_PUBLISH:-}" = "true" ]; then
+            echo "npm publish authorized (event=${GITHUB_EVENT_NAME:-}, ENABLE_NPM_PUBLISH set: $([ "${ENABLE_NPM_PUBLISH:-}" = "true" ] && echo yes || echo no))"
+          else
+            echo "::error::publish guard: not workflow_dispatch and ENABLE_NPM_PUBLISH != 'true' — refusing to publish" >&2
+            exit 1
+          fi
+
+      # Trusted Publishing: no NODE_AUTH_TOKEN, no .npmrc secret. npm (>= 11.5.1) exchanges the
+      # OIDC token (id-token: write) for a publish credential and attaches provenance. --access
+      # public publishes the unscoped `actradeck` package publicly; publishConfig also pins both.
+      - name: Publish to npm (Trusted Publishing, OIDC — no token)
+        working-directory: packages/cli
+        run: npm publish --provenance --access public

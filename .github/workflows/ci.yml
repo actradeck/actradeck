@@ -226,6 +226,15 @@ jobs:
       - name: Test (webui coverage gate)
         run: pnpm --filter @actradeck/webui run test:coverage
 
+      # R1 QA-1 (npm bootstrap CLI・ADR 019f5131 Phase 3): packages/cli の per-file/global
+      #   coverage floor (vitest.config.ts) を CI で実効化する。plain `vitest run` は閾値を
+      #   見ないため dormant。特に checksum.ts (digest 検証・security core) の erosion tripwire
+      #   を発火させる。PATH フィルタ (`./packages/cli`) を使う — CLI の unscoped 名 `actradeck`
+      #   は root と衝突するため、名前衝突耐性のある path 指定にする (webui build gate 等と同 idiom)。
+      #   この step は公開ミラー CI (ci.yml は shipped) でも走る。
+      - name: Test (cli coverage gate)
+        run: pnpm --filter ./packages/cli run test:coverage
+
       # Adaptive Clarity (ADR 019ea263): webui は @actradeck/design-tokens の dist/tokens.css を
       #   layout.tsx で import する。dist は gitignore のため、webui build/smoke の前にトークンを
       #   生成する (DTCG .tokens.json → CSS custom properties + INV-A11Y-CONTRAST はビルド前に test 済)。

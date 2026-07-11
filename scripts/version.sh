@@ -24,8 +24,11 @@ set -euo pipefail
 
 # TDA-3 sync point: the canonical default is OSS_DEFAULT_REPO in scripts/lib/oss-patterns.sh.
 # version.sh SHIPS to the public mirror where that lib is NOT present, so it cannot source it;
-# the literal "actradeck/actradeck" is duplicated here as a last-resort fallback. If the
-# canonical default changes, update BOTH oss-patterns.sh AND this literal (or set the env).
+# the literal "actradeck/actradeck" is duplicated here as a last-resort fallback. The npm
+# bootstrap CLI carries a THIRD copy: DEFAULT_REPO in packages/cli/src/lib/repo.ts (it is a
+# dependency-free published package and cannot source shell libs either). If the canonical
+# default changes, update ALL THREE (oss-patterns.sh, this literal, repo.ts) — or set the env.
+# scripts/test-release-prep.sh asserts repo.ts's literal == OSS_DEFAULT_REPO to catch drift.
 RELEASE_REPO="${ACTRADECK_RELEASE_REPO:-${OSS_DEFAULT_REPO:-actradeck/actradeck}}"
 
 say()  { printf '\033[0;34m[version]\033[0m %s\n' "$*"; }

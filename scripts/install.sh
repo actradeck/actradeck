@@ -151,11 +151,18 @@ sha256_of() {
 # verify_sha256 <file> <expected_hex> — 0 iff <file>'s digest equals <expected_hex>.
 # FAIL-CLOSED: a missing file, an empty expected digest, or no sha256 tool all return
 # non-zero (never a false OK). This is the digest-check unit the tamper test exercises.
+# NORMALIZATION CONTRACT (QA-R2-1): a sha256 hex digest is case-insensitive, so BOTH sides are
+# lowercased before the compare — the CLI (checksum.ts) already does `expected.toLowerCase()`;
+# this mirrors it so an UPPERCASE checksums.txt is accepted identically. This is not a weakening:
+# a genuinely DIFFERENT digest still differs after lowercasing and is still rejected.
 verify_sha256() {
   _f="$1"; _expected="$2"
   [ -f "$_f" ]        || { warn "verify: file not found: $_f"; return 2; }
   [ -n "$_expected" ] || { warn "verify: no expected digest (fail-closed)"; return 2; }
   _actual="$(sha256_of "$_f" 2>/dev/null)" || { warn "verify: no sha256 tool available"; return 3; }
+  # Case-fold both sides (hex is case-insensitive); sha256_of already emits lowercase.
+  _actual="$(printf '%s' "$_actual" | tr 'A-F' 'a-f')"
+  _expected="$(printf '%s' "$_expected" | tr 'A-F' 'a-f')"
   if [ "$_actual" = "$_expected" ]; then
     return 0
   fi
@@ -166,10 +173,15 @@ verify_sha256() {
 # expected_digest_for <checksums_file> <asset_name> — print the sha256 recorded for
 # <asset_name> in a `sha256sum`-format checksums file. Non-zero (empty) if not found,
 # so the caller fails closed on a missing/altered checksums.txt.
+# NORMALIZATION CONTRACT (QA-R2-1): mirror checksum.ts's tolerant parse so the two never diverge —
+#   (a) STRIP CR (`gsub(/\r/,"")`): a CRLF checksums.txt would otherwise leave `name\r` != `name`
+#       so the asset is "not found" (the CLI's per-line `.trim()` already drops the \r);
+#   (b) LOWERCASE the digest (`tolower`): hex is case-insensitive and the CLI returns the
+#       lowercased digest, so an uppercase file yields the SAME value on both sides.
 expected_digest_for() {
   _cs="$1"; _name="$2"
   [ -f "$_cs" ] || return 2
-  awk -v n="$_name" '{ f=$2; sub(/^\*/,"",f); if (f==n) { print $1; found=1 } } END { exit(found?0:1) }' "$_cs"
+  awk -v n="$_name" '{ gsub(/\r/,""); f=$2; sub(/^\*/,"",f); if (f==n) { print tolower($1); found=1 } } END { exit(found?0:1) }' "$_cs"
 }
 
 # verify_and_fetch_release <dest_dir> — fetch the Release assets for ACTRADECK_REF,

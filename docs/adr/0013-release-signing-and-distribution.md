@@ -1,7 +1,8 @@
 # ADR 0013: Release signing & distribution — signed GitHub Releases, SBOM, provenance
 
-- Status: Accepted (Phase 1: infrastructure + dry-run verification; not yet published)
-- Source: decision `019f2bc1`
+- Status: Accepted (Phase 1 signed Release + Phase 2 GHCR image implemented; Phase 3 npm
+  bootstrap CLI implemented + verified locally, first publish pending — v0.5)
+- Source: decisions `019f2bc1` (Phases 1–2), `019f5131` (Phase 3 npm)
 
 ## Context
 
@@ -45,9 +46,13 @@ Constraints that shape the design:
     (manifest-list) digest**. `INV-DOCKER-SCAN-BEFORE-PUSH` is extended to per-arch coverage +
     `--cache-from` parity. First multi-arch push fires on the next opted-in release; the current
     `v0.4.0` image is `amd64`-only.
-- **Phase 3 (deferred):** npm publish of the attach CLI via Trusted Publishing (OIDC),
-  contingent on resolving the dependency-closure / native-addon story. Homebrew:
-  deferred indefinitely.
+- **Phase 3 (infrastructure built, publish pending — decision `019f5131`):** a **thin
+  bootstrap CLI** `actradeck` published to npm via **Trusted Publishing (OIDC)**. The earlier
+  blocker (publishing the _attach_ CLI meant publishing its workspace dependency closure +
+  native addons) is dissolved by **not bundling anything**: the npm package is a dependency-free
+  bootstrapper that _verifies-and-fetches_ the signed Release, it does not contain the product.
+  See [§Phase 3 — npm bootstrap CLI](#phase-3--npm-bootstrap-cli). Homebrew: deferred
+  indefinitely.
 
 ### D2 — Versioning
 
@@ -183,11 +188,57 @@ Missing attestation or a digest mismatch is a non-zero abort **before** anything
 executed. With `ACTRADECK_VERIFY` unset the installer keeps its existing clone
 behavior byte-for-byte.
 
-### D7 — Not npm-publishable in Phase 1
+### D7 — Not npm-publishable in Phase 1 (one exception in Phase 3)
 
-Every `package.json` keeps `private: true`, so an accidental `npm publish` is a no-op.
-The NO-LEAK invariant is pinned to the **git-archive tarball** (the real shipped
-artifact), not to `npm pack`.
+In Phase 1 every `package.json` keeps `private: true`, so an accidental `npm publish` is a
+no-op, and the NO-LEAK invariant is pinned to the **git-archive tarball** (the real shipped
+artifact), not to `npm pack`. **Phase 3 adds exactly one exception:** `packages/cli` is
+publishable (see below); every _other_ workspace stays `private: true`, and the CLI gets its
+own `npm pack`-based NO-LEAK invariant.
+
+### Phase 3 — npm bootstrap CLI
+
+A single new package, **`packages/cli`** (npm name **`actradeck`**, unscoped), is the sole
+publishable unit. It is a **thin bootstrapper**, not the product:
+
+- **Zero runtime dependencies** (Node ≥ 20 built-ins only: `fetch` / `crypto` /
+  `child_process` / `fs`). **No lifecycle scripts** — no `preinstall` / `install` /
+  `postinstall` / `prepare` / `prepack` — so `npm install` / `npx` changes nothing on the
+  user's machine (a structural block against the postinstall supply-chain class, e.g.
+  Shai-Hulud). Only the explicit `actradeck install` fetches anything.
+- **Four commands.** `doctor` (offline machine diagnosis), `install` (resolve the latest
+  signed Release — or `--version vX.Y.Z` — download the tarball, verify its **sha256
+  checksum** _and_ **build provenance** via `gh attestation verify`, then extract and hand off
+  to `scripts/quickstart`; `--dry-run` stops after verification), `up` (print the Docker
+  cockpit command — it does not run it), `version` (self + latest-stable comparison,
+  offline-safe). `install` verification is **fail-closed** with no silent skip; the only
+  weakening is the explicit `--skip-provenance` (checksum stays mandatory).
+- **`files` allowlist** limits the package to `dist` + `README.md` + `LICENSE`. The
+  `tsBuildInfoFile` lives **outside** `dist` (a `.tsbuildinfo` bakes absolute filesystem paths
+  and must never ship); `INV-NPM-PACK-ALLOWLIST` forbids it structurally.
+
+**Publish path.** The public mirror's `release.yml` gains an `npm` job (tag-push fired,
+independent of verify/release). It uses the **same two-layer gate as the docker job**: a job
+`if:` pinned to a canonical AST (`INV-NPM-PUBLISH-GATED`) **and** a runtime publish guard step
+that fails closed right before `npm publish` unless the ref is a tag AND
+(`workflow_dispatch` OR `vars.ENABLE_NPM_PUBLISH == 'true'`). The job is **OFF by default**.
+Publishing uses **Trusted Publishing (OIDC)** — `id-token: write` (job-scoped) + npm ≥ 11.5.1,
+**no long-lived npm token**, provenance generated automatically. Because a **private** repo
+produces no provenance, the job MUST run inside the **public mirror** — a structural
+requirement, not policy. Before publishing, the job re-runs a `npm pack` content gate
+(allowlist + forbidden-file scan) as defense in depth.
+
+**Main line (`npx`).** `npx actradeck@latest install`. `npm i -g` is secondary (avoids stale
+global CLIs). **Honesty:** until the first publish (planned **v0.5**), the `npx` line is _not
+live_ — the README says so; the canonical, already-signed path stays the GitHub Release / GHCR
+image / `scripts/install.sh`.
+
+**Invariants** (`scripts/test-release-prep.sh`, all falsifiable): `INV-NPM-PACK-ALLOWLIST`
+(pack == {package.json, README.md, LICENSE, dist/\*\*}, no `.tsbuildinfo`, leak-clean),
+`INV-NPM-NO-LIFECYCLE`, `INV-NPM-PRIVATE-GUARD` (cli publishable, every other workspace
+private), `INV-NPM-VERSION-LOCKSTEP` (cli covered by the single-source version gate + the
+`version.sh` stamp set), `INV-NPM-PUBLISH-GATED` (AST pin + runtime-guard matrix +
+remove/defang/invert), and an isolated-HOME `npm exec` E2E.
 
 ## USER-GATED boundary (honest scope)
 
@@ -196,9 +247,12 @@ generation → tarball; SBOM generation + leak scan; workflow permission/lint ch
 installer's fail-closed digest path exercised against a locally tampered tarball.
 
 **Requires the maintainer, at publish time:** pushing a real tag, creating the GitHub
-Release, the actual attestation firing (needs a public repo + OIDC), and any future
-GHCR / npm publish. Until then this is **infrastructure that is structurally verified,
-with the live signing path pending first publication** — not "already published."
+Release, the actual attestation firing (needs a public repo + OIDC), and any GHCR / npm
+publish. For **npm specifically**: reserving the `actradeck` package name, configuring the
+npmjs.com **Trusted Publisher** (org / repo / workflow filename / environment), and enabling
+`ENABLE_NPM_PUBLISH` (or a manual dispatch) on a tag. Until then this is **infrastructure that
+is structurally verified, with the live signing/publish path pending first publication** — not
+"already published." The first npm publish is planned for **v0.5**.
 
 ## Consumer verification
 
@@ -226,5 +280,10 @@ The owner/name are resolved at run time (`${{ github.repository }}` in the workf
   covers prod deps and carries no raw paths, workflow permissions are least-privilege,
   and the installer rejects a tampered tarball.
 - Phase 2 (GHCR Docker image + cosign) is implemented and USER-GATED; its live signing
-  path fires on first opted-in publish (same posture as Phase 1). Phase 3 (npm) remains
-  deferred with tracked follow-ups; nothing here promises it.
+  path fires on first opted-in publish (same posture as Phase 1).
+- Phase 3 (npm bootstrap CLI via Trusted Publishing) is **implemented and USER-GATED**: the
+  `packages/cli` package, the two-layer-gated `npm` publish job, and the npm-face invariants
+  are built and verified locally (npm pack, isolated-HOME `npm exec`, `install --dry-run`
+  against the real v0.4.0 Release). The live publish fires on the first opted-in tag once the
+  maintainer reserves the name + configures the Trusted Publisher (planned v0.5). The README's
+  `npx` line is labeled not-yet-published until then.
