@@ -11,6 +11,54 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-11
+
+### Added
+
+- **npm bootstrap CLI: `actradeck`.** A thin, dependency-free npm package that
+  bootstraps a verified install: `actradeck install` resolves a signed GitHub Release,
+  verifies the tarball's sha256 **and** its build-provenance attestation before handing
+  off to quickstart (fail-closed; `--dry-run` supported); `doctor` diagnoses your
+  machine; `up` prints the Docker cockpit bring-up command (it never executes Docker
+  for you); `version` reports versions. The package has zero runtime dependencies and
+  no lifecycle scripts, and publishes **only** from the public repository's release
+  workflow via npm **Trusted Publishing** (OIDC — no long-lived tokens), behind a
+  two-layer publish gate plus an `npm pack` content gate (files allowlist + leak scan)
+  that runs before every publish. (ADR 0013 Phase 3)
+- **Multi-arch Docker image (amd64 + arm64).** The GHCR cockpit image is now a
+  manifest list covering `linux/amd64` and `linux/arm64`. Each architecture's
+  filesystem is leak-scanned **before push**, and the cosign signature + SLSA
+  attestation bind to the manifest-list (index) digest.
+- **Silent-drop detection via optional `seq`.** Adapters may stamp events with a
+  per-session `seq` counter; holes in the received set yield a **lower-bound** count
+  of silently dropped events. Optional and additive — adapters that omit `seq` are
+  unaffected, and at-least-once retries do not fabricate gaps. See
+  [`docs/ingestion-contract.md`](docs/ingestion-contract.md) §4.4.
+- **Per-provider audit coverage on the cockpit board.** The board now shows, per
+  provider, how recently events were received and flags reception gaps
+  (warn/critical), so a silently-broken observation pipeline is detected instead of
+  assumed healthy (audit-gap detection Phase 1).
+- **opencode adapter: turn-active heartbeat.** While a turn is in flight the adapter
+  emits a periodic `heartbeat` event, so long tool-quiet turns stay visibly live
+  instead of drifting to stalled (community issue #8).
+
+### Changed
+
+- **`scripts/actradeck doctor` checks Node and pnpm versions** (community PR #10 —
+  thanks @Yurii201811).
+- Verified-install digest checks normalize hex case and CRLF identically in the
+  TypeScript CLI and `scripts/install.sh` (hex-equivalence only; verification is not
+  weakened).
+
+### Security
+
+- **Release supply-chain checkers hardened (fail-closed).** The pre-push per-arch
+  scan-coverage checker now rejects nested-quote wrappers it cannot parse and
+  recognizes the fused `-otype=registry` publish spelling; cache parity is checked at
+  token positions rather than by substring. CI/release actions were bumped with
+  SHA-pins preserved (Dependabot PR #1) and the Docker base image bumped to
+  `node:26.4.0-bookworm-slim` (PR #2).
+
 ## [0.4.0] - 2026-07-11
 
 ### Added
@@ -137,6 +185,7 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/actradeck/actradeck/releases/tag/v0.5.0
 [0.4.0]: https://github.com/actradeck/actradeck/releases/tag/v0.4.0
 [0.3.0]: https://github.com/actradeck/actradeck/releases/tag/v0.3.0
