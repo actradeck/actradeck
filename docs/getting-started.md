@@ -59,7 +59,7 @@ installer first and opt into the verified path:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh -o install.sh
-ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.3.0 sh install.sh
+ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.4.0 sh install.sh
 ```
 
 Running `install.sh` on an existing clone makes a second checkout under

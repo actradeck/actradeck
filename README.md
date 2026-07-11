@@ -136,7 +136,7 @@ verified path (requires the GitHub CLI):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh -o install.sh
-ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.3.0 sh install.sh
+ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.4.0 sh install.sh
 ```
 
 Already cloned, or prefer to do it by hand (needs Node 22.16+ and pnpm — **no Docker**):

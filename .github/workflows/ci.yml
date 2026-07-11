@@ -101,6 +101,16 @@ jobs:
           bash scripts/test-ad-attach.sh
           bash scripts/test-install.sh
           bash scripts/test-install-e2e.sh
+          # Import-flow sanitizer gate (外部評価R2 #2・decision 019f4fc1): import-oss-pr.sh の
+          # untrusted-input 面 (SEC-1 PR-title sanitizer / SEC-2 sensitive-path warn) の
+          # falsifiability テスト。maintainer 専用ツールで .ossfilter によりミラー除外のため、
+          # 公開ミラー CI では存在ガードで graceful skip する (release prep gate と同方式・
+          # メモリ ci-gate-must-self-adapt-to-oss-mirror-excluded-paths)。private では必ず実走。
+          if [ -f scripts/test-import-oss-pr.sh ]; then
+            bash scripts/test-import-oss-pr.sh
+          else
+            echo "test-import-oss-pr.sh absent (public mirror) — private import-flow gate skipped"
+          fi
 
       # Landing drift + idempotency gate (docs-lp QA-1・sweep 019f3d77 / decision 019f3d77).
       #   landing/ja/<slug> と landing/en/index.html は bilingual source から **生成**され commit
