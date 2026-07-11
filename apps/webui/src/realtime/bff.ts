@@ -171,6 +171,10 @@ export function normalizeReplayRequestPath(requestPath: string): string {
     // ADR 019f1972 §2b: first-run readiness。全 open daemon の agent 観測可能性 OR 集約 (GET 固定 path・
     //   segment/query なし)。NO-RAW (boolean + 観測 daemon 数のみ)。anchored・traversal 不可。
     /^\/realtime\/readiness$/.test(parsed.pathname) ||
+    // ADR 019f4cdb Phase 1: 監査欠落の検知 (audit-gap visibility)。per-provider 最終受信 + gap 候補の
+    //   read-only 集約 (GET 固定 path・segment/query なし)。NO-RAW (provider slug + ISO 時刻 + 非負整数 +
+    //   gap ms のみ)。read-only ゆえ mutating gate に載せない。anchored・traversal 不可・緩めない。
+    /^\/realtime\/audit\/coverage$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/list$/.test(parsed.pathname) ||
     /^\/realtime\/daemons\/[^/]+\/approvals\/policy\/set$/.test(parsed.pathname) ||

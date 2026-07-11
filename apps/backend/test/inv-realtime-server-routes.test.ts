@@ -135,6 +135,10 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
           has_more: false,
         }),
         sessionSummary: async () => undefined,
+        providerCoverage: async () => ({
+          generated_at: "1970-01-01T00:00:00.000Z",
+          providers: [],
+        }),
       } as unknown as AuditStore);
     const hub = {
       register: () => ({ subscribe() {}, unsubscribe() {}, remove() {} }),
@@ -293,6 +297,45 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     const body = res.json() as { session_count: number; sessions: unknown[] };
     expect(body.session_count).toBe(0);
     expect(Array.isArray(body.sessions)).toBe(true);
+  });
+
+  // --- 監査欠落の検知 (audit-gap coverage・ADR 019f4cdb) route guards ---------------------------
+  it("audit coverage: missing token → 401 (onRequest Bearer gate が /realtime/audit を被覆)", async () => {
+    await mount({});
+    const res = await app.inject({ method: "GET", url: "/realtime/audit/coverage" });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toMatchObject({ error: "unauthorized" });
+  });
+
+  it("audit coverage: authed → 200 で coverage レポート形状 (fake store)", async () => {
+    await mount({});
+    const res = await app.inject({ method: "GET", url: "/realtime/audit/coverage", headers: auth });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { generated_at: string; providers: unknown[] };
+    expect(typeof body.generated_at).toBe("string");
+    expect(Array.isArray(body.providers)).toBe(true);
+  });
+
+  // SEC-1 と同型: store が throw しても pg/内部エラー詳細を本文へ漏らさない (静的 500)。
+  //   try/catch を外す mutation で Fastify 既定 handler が message/code を echo し赤化する。
+  it("audit coverage: store throws → 500 静的本文 (内部詳細を漏らさない) [SEC-1]", async () => {
+    const SECRET_DETAIL = 'relation "events" does not exist LEAKME-COVDETAIL';
+    const throwing = {
+      rangeReport: async () => ({ sessions: [] }),
+      sessionSummary: async () => undefined,
+      providerCoverage: async () => {
+        const e = new Error(SECRET_DETAIL) as Error & { code?: string };
+        e.code = "42P01";
+        throw e;
+      },
+    } as unknown as AuditStore;
+    await mount({ auditStore: throwing });
+    const res = await app.inject({ method: "GET", url: "/realtime/audit/coverage", headers: auth });
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toMatchObject({ error: "internal error" });
+    expect(res.body).not.toContain("LEAKME-COVDETAIL");
+    expect(res.body).not.toContain("42P01");
+    expect(res.body).not.toContain("does not exist");
   });
 
   // SEC-1: store が throw しても pg/内部エラー詳細を本文へ漏らさない (静的 500)。

@@ -114,7 +114,7 @@ command exit codes, diffs; redaction happens at the backend ingress floor; appro
 | Observe — state, current action, diffs         |             ✅              |              ✅               |
 | Redaction before persist (backend floor)       |             ✅              |              ✅               |
 | Audit log + replay                             |             ✅              |              ✅               |
-| Approval relay — allow / deny from the cockpit |       ⛔ observe-only       |        ⛔ observe-only         |
+| Approval relay — allow / deny from the cockpit |       ⛔ observe-only       |        ⛔ observe-only        |
 
 ## Quickstart
 
@@ -195,26 +195,26 @@ troubleshooting). The precision/limits of Attach Mode are in
 ### Or run the cockpit in Docker
 
 If you'd rather not install Node/pnpm, the **cockpit** (backend + webui + embedded
-database) runs from a single image — no external database. Build it locally from the
-repo (the Dockerfile is the same one the release workflow signs), then run it:
+database) runs from a single image — no external database. A **signed prebuilt image**
+is published to GHCR (since v0.4.0; tags `latest` and `0.4.0`):
 
 ```bash
-docker build -t actradeck .
-docker run --rm -p 127.0.0.1:55400:55400 actradeck
+docker run --rm -p 127.0.0.1:55400:55400 -v actradeck_pgdata:/data \
+  ghcr.io/actradeck/actradeck:latest
 # then open http://localhost:55400
 ```
 
+Every published image is signed with **cosign keyless** and carries a **SLSA build
+provenance attestation** — the verification commands are in
+[`docs/docker.md`](./docs/docker.md). Prefer building from source? `docker build -t
+actradeck .` uses the same Dockerfile the release workflow signs.
+
 The container is the **cockpit stack only**. The sidecar that observes your agents
-watches the *host's* Claude Code / Codex processes, so it can't run inside a container —
+watches the _host's_ Claude Code / Codex processes, so it can't run inside a container —
 you run it on the host and point it at the container's ingestion port over loopback. The
 honest support matrix, the exact `docker run` flags, verifying the image's cosign
 signature, and how to wire a host agent are all in
 [`docs/docker.md`](./docs/docker.md).
-
-> **Prebuilt GHCR image — roadmap, not yet published.** A signed
-> `ghcr.io/actradeck/actradeck:latest` is wired into the release workflow, but the image
-> job is **opt-in and off by default** (ADR 0013 Phase 2), so `docker pull` from GHCR does
-> **not** work yet. Build locally with the command above until an image is published.
 
 ## Architecture
 

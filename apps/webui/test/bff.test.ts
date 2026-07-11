@@ -296,6 +296,27 @@ describe("BFF upstream config", () => {
     );
   });
 
+  // ADR 019f4cdb Phase 1: 監査欠落の検知 (audit-gap coverage・固定 path・segment/query なし)。
+  //   NO-RAW (provider slug + ISO 時刻 + 非負整数 + gap ms のみ)。anchored allowlist で near-miss を塞ぐ。
+  it("allows the audit coverage path and rejects near-miss variants (ADR 019f4cdb)", () => {
+    expect(normalizeReplayRequestPath("/realtime/audit/coverage")).toBe("/realtime/audit/coverage");
+    // 末尾に余計な segment は拒否 (anchored)。
+    expect(() => normalizeReplayRequestPath("/realtime/audit/coverage/secret")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    // 接尾辞でのマッチ漏れ (anchor `$` 欠落の退行) は拒否。
+    expect(() => normalizeReplayRequestPath("/realtime/audit/coverageX")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    // 別 origin への absolute-form / protocol-relative 上書きは拒否 (SSRF ガード維持)。
+    expect(() => normalizeReplayRequestPath("http://evil.invalid/realtime/audit/coverage")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+    expect(() => normalizeReplayRequestPath("//evil.invalid/realtime/audit/coverage")).toThrow(
+      InvalidReplayRequestPathError,
+    );
+  });
+
   it("allows the audit pull paths and rejects near-miss variants (強み(a) 監査ビュー)", () => {
     // 期間集計 (固定 path・query from/to/limit/format は search で保持)。
     expect(normalizeReplayRequestPath("/realtime/audit/sessions")).toBe("/realtime/audit/sessions");

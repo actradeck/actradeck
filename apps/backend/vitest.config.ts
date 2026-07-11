@@ -16,6 +16,7 @@ import { defaultExclude, defineConfig } from "vitest/config";
  */
 const REAL_PG_TESTS = [
   "test/inv-safety-demo-backend-e2e.test.ts",
+  "test/inv-audit-coverage.test.ts",
   "test/inv-audit-packet-route.test.ts",
   "test/inv-audit-report-route.test.ts",
   "test/inv-demo-state-reap.test.ts",

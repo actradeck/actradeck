@@ -543,6 +543,24 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
     return reply.send({ lanes });
   });
 
+  // 監査欠落の検知 (audit-gap visibility・ADR 019f4cdb Phase 1): per-provider の「最終受信サーバ時刻」と
+  //   「監査できていない時間 (gap 候補)」を read-only 集約で返す。REALTIME_TOKEN gate (上の onRequest)
+  //   背後・**method-pure GET** (app.get ゆえ POST 等は route 不一致で拒否)・segment/query なしの固定 path。
+  //   **ingested_at 権威**: gap は events.ingested_at (サーバ受信 clock) の MAX 基準 (adapter timestamp は
+  //   skew で gap を隠すため表示補助のみ)。**非稼働≠gap**: 稼働(非 terminal) session が 0 の provider は
+  //   gap_candidate_ms=null (誤警報しない)。応答は **NO-RAW** (provider slug + ISO 時刻 + 非負整数 +
+  //   gap ms のみ・path/settings/secret/session 内容を載せない)。導出/射影は event-model 正準に閉じる。
+  app.get("/realtime/audit/coverage", async (req, reply) => {
+    try {
+      const report = await opts.auditStore.providerCoverage({ now: new Date() });
+      return reply.send(report);
+    } catch (err) {
+      // SEC-1 と同型: 失敗時に pg/内部エラー詳細をクライアントへ返さない (静的 500・内部はログのみ)。
+      req.log.error({ err }, "audit coverage query failed");
+      return reply.code(500).send({ error: "internal error" });
+    }
+  });
+
   // 強み(a) 監査ビュー (ADR 019ed1f9): 期間/複数セッションのガバナンス監査集約 pull。
   //   REALTIME_TOKEN gate (上の onRequest) 背後。データ源は sessions/session_state/events の
   //   allow-list 投影 (redacted-at-rest) のみで **新 redaction 面ゼロ** (backend は再 redaction しない)。

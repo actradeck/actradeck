@@ -1,12 +1,13 @@
-# Running ActraDeck in Docker (build-first)
+# Running ActraDeck in Docker
 
 > ADR [`0013`](./adr/0013-release-signing-and-distribution.md) Phase 2. Status:
-> infrastructure + local build/run verified; the signed GHCR image is **published on
-> demand** (the release workflow's image job is off by default — see
-> [Publishing](#publishing-the-signed-image-maintainers)).
+> **published** — a signed image is available on GHCR since **v0.4.0**
+> (`ghcr.io/actradeck/actradeck`, tags `latest` and `0.4.0`). Publishing stays
+> user-gated per release — see
+> [Publishing](#publishing-the-signed-image-maintainers).
 
-The Docker image runs the **cockpit** with no external database. Because no image is
-published to GHCR yet, you build it locally first (`docker build`), then run that image —
+The Docker image runs the **cockpit** with no external database. Pull the signed
+prebuilt image from GHCR (or build it locally from the same Dockerfile) and run it —
 see [Quick start](#quick-start-cockpit-only). It is the fastest way to _look at_ ActraDeck;
 it is **not** the whole product.
 Read [What runs where](#what-runs-where-the-honest-support-matrix) before you rely on it.
@@ -37,18 +38,16 @@ quickstart's cockpit stays empty until you run an agent.
 
 ## Quick start (cockpit only)
 
-> **The GHCR image is not published yet** (the image job is opt-in and off by default — see
-> [Publishing](#publishing-the-signed-image-maintainers)), so `docker pull` from
-> `ghcr.io/actradeck/actradeck:latest` does not work today. Until then, build the image
-> locally from the repo (the same Dockerfile the release workflow signs) and run that:
+> Prefer building from source? The published image is built from the repository root
+> `Dockerfile` — the exact same one the release workflow signs — so this is equivalent:
 >
 > ```bash
 > docker build -t actradeck .
 > docker run --rm -p 127.0.0.1:55400:55400 -v actradeck_pgdata:/data actradeck
 > ```
 >
-> The rest of this page uses `ghcr.io/actradeck/actradeck:latest` as the image reference;
-> substitute your locally built `actradeck` tag until an image is published.
+> The rest of this page uses `ghcr.io/actradeck/actradeck:latest` as the image
+> reference; substitute your locally built `actradeck` tag if you build from source.
 
 ```bash
 docker run --rm \
@@ -63,7 +62,7 @@ docker run --rm \
 - `-v actradeck_pgdata:/data` persists the embedded database across container restarts.
   Omit it for a throwaway run (data is discarded when the container is removed).
 
-Once the image is built, running it needs no external Postgres and no secrets to set —
+Once the image is pulled (or built), running it needs no external Postgres and no secrets to set —
 the entrypoint generates an ephemeral `INGEST_TOKEN` / `REALTIME_TOKEN` at boot (never
 printed, never baked into the image). To pin your own, pass them explicitly (see [Configuration](#configuration)).
 
@@ -212,7 +211,8 @@ hardcoded in the workflow (the registry path derives from `${{ github.repository
 
 ## Publishing the signed image (maintainers)
 
-The GHCR publish is **USER-GATED** — a normal tag push does **not** push an image. The
+The GHCR publish is **USER-GATED** — a tag push does **not** push an image unless the
+operator has opted in (the public repo has this opt-in enabled since v0.4.0). The
 `docker` job in [`.github/workflows/release.yml`](../.github/workflows/release.yml) runs
 only when the operator opts in, one of two ways:
 

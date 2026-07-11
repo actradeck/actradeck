@@ -13,7 +13,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -b tsconfig.build.json && tsc -p tsconfig.migrations.json",
+    "build": "tsc -b tsconfig.build.json && node -e \"require('fs').rmSync('dist/migrations',{recursive:true,force:true})\" && tsc -p tsconfig.migrations.json",
     "migrate": "node --env-file-if-exists=../.env --import tsx ./node_modules/node-pg-migrate/bin/node-pg-migrate.js -j ts -m migrations",
     "migrate:up": "node --env-file-if-exists=../.env --import tsx ./node_modules/node-pg-migrate/bin/node-pg-migrate.js -j ts -m migrations up",
     "migrate:down": "node --env-file-if-exists=../.env --import tsx ./node_modules/node-pg-migrate/bin/node-pg-migrate.js -j ts -m migrations down 1",

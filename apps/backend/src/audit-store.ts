@@ -11,13 +11,16 @@
  * 既知 kind 以外を集計・export に載せない)。
  */
 import {
+  buildCoverageReport,
   gateRedactionCountByKind,
   REDACTION_KINDS,
   REDACTION_MARKER_PATTERN,
   REDACTION_MARKER_PREFIX,
   REDACTION_MARKER_SUFFIX,
   redactionMarker,
+  TERMINAL_STATES,
 } from "@actradeck/event-model";
+import type { AuditCoverageReport } from "@actradeck/event-model";
 
 import {
   emptyDecisionTally,
@@ -500,6 +503,83 @@ export class AuditStore {
       // backfill-TDA-5: 同 class 内 helper を介し「集計 gate は helper 1 本」を完全一本化)。
       byKind: gateKindCounts(byKindBySession.get(r.session_id) ?? {}),
     }));
+  }
+
+  /**
+   * 監査欠落の検知 (audit-gap visibility・ADR 019f4cdb Phase 1): per-provider の「最終受信サーバ時刻」と
+   * 「監査できていない時間 (gap 候補)」を集約する read-only 導出。
+   *
+   * ## ingested_at 権威 (ADR §6-5)
+   * 最終受信は **`MAX(events.ingested_at)` (サーバ受信 clock)** から導く。adapter 申告 `timestamp`
+   * (session_state.last_event_at 由来) は clock skew で gap を隠すため gap の権威にしない — `MAX(timestamp)`
+   * は表示補助 (`last_event_timestamp`) としてのみ返す。gap 述語は event-model の正準
+   * `computeProviderCoverage` に閉じ (backend/webui が共有・drift 禁止)。
+   *
+   * ## 非稼働 ≠ gap (ADR §6-6)
+   * per-provider の active_session_count = **非 terminal (稼働中) session 数**を数える。terminal 判定は
+   * `sessions.ended_at IS NOT NULL OR session_state.state ∈ TERMINAL_STATES` (T1 正典 TERMINAL_STATES を
+   * SQL へ再定義せず bind)。稼働 session が 0 の provider は `gap_candidate_ms=null` (誤警報しない)。
+   *
+   * ## NO-RAW (INV-AUDIT-COVERAGE-NO-RAW)
+   * SELECT は **provider slug + 時刻 + 件数のみ** (cwd/path/payload/secret を一切読まない)。行は
+   * `buildCoverageReport` → `projectProviderCoverageRow` で provider を `PROVIDER_SLUG_RE` 再ゲートし
+   * 余剰 field を構造的に落とす (生パス混入 row は drop)。
+   *
+   * events を provider で GROUP BY 集約する (ingested_at と timestamp の MAX を同スキャンで併算)。planner は
+   * これを **seq-scan** で実行する — `(provider, ingested_at)` 索引を足しても MAX(timestamp) の heap 参照が
+   * 必須で index-only にならず、少数 provider の全集約では seq-scan がコスト最小 (EXPLAIN 実測・TDA-1)。監査面の
+   * 低頻度 read-only 集約ゆえ許容し、専用索引は `WHERE provider=X AND ingested_at > since` の範囲フィルタを
+   * 導入する後続スライス (heartbeat/observation_gaps) へ defer する (無益な書込増幅を hot な events 表に課さない)。
+   */
+  async providerCoverage(opts: { readonly now: Date }): Promise<AuditCoverageReport> {
+    const { rows } = await this.pool.query<{
+      provider: string;
+      total_session_count: number;
+      active_session_count: number;
+      max_ingested_ms: number | null;
+      max_ts_ms: number | null;
+    }>(
+      // $1 = TERMINAL_STATES (T1 正典・SQL へ再定義しない)。
+      `WITH sess AS (
+         SELECT s.provider,
+                (s.ended_at IS NOT NULL OR ss.state = ANY($1::text[])) AS terminal
+           FROM sessions s
+           LEFT JOIN session_state ss ON ss.session_id = s.session_id
+       ),
+       prov AS (
+         SELECT provider,
+                count(*)::int AS total_session_count,
+                count(*) FILTER (WHERE NOT COALESCE(terminal, false))::int AS active_session_count
+           FROM sess
+          GROUP BY provider
+       ),
+       ev AS (
+         -- 権威クロック: サーバ受信時刻 ingested_at の provider 別 MAX。timestamp(adapter 申告)は表示補助。
+         SELECT provider,
+                max(extract(epoch from ingested_at) * 1000) AS max_ingested_ms,
+                max(extract(epoch from timestamp) * 1000) AS max_ts_ms
+           FROM events
+          GROUP BY provider
+       )
+       SELECT prov.provider,
+              prov.total_session_count,
+              prov.active_session_count,
+              ev.max_ingested_ms,
+              ev.max_ts_ms
+         FROM prov
+         LEFT JOIN ev ON ev.provider = prov.provider
+        ORDER BY prov.provider`,
+      [TERMINAL_STATES as readonly string[]],
+    );
+    // camelCase 集約入力へ写し、正準 builder (NO-RAW 射影 + gap 述語) へ委譲する。
+    const inputRows = rows.map((r) => ({
+      provider: r.provider,
+      maxIngestedAtMs: r.max_ingested_ms,
+      maxEventTimestampMs: r.max_ts_ms,
+      activeSessionCount: r.active_session_count,
+      totalSessionCount: r.total_session_count,
+    }));
+    return buildCoverageReport(inputRows, opts.now);
   }
 
   /**

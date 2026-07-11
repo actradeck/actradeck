@@ -58,8 +58,10 @@ function migrationBasenames(dir: string, ext: string): string[] {
  *
  * 背景: 埋込は dist/migrations/*.js を読む一方、CLI は migrations/*.ts (db/migrations) を読む。db を rebuild せず
  * backend を起動 (`pnpm --filter backend dev`) すると stale dist で schema drift が silent に起きる。
- * これを起動時に検出する。dist superset (src から消えた古い migration が dist に残る) は許容
- * (append-only 運用ゆえ稀・害なし)。
+ * これを起動時に検出する。dist superset (src から消えた古い migration が dist に残る) 自体は throw しない
+ * (src⊆dist だけを鮮度不変条件とする) が、**migration 削除は append-only 前提を破り、stale orphan .js が
+ * 埋込経路で silent 再実行されうる** (TDA-R1)。これを構造的に封じるため `db build` は tsc-migrations の
+ * 前に `dist/migrations` を prune し、dist を src と 1:1 に保つ (削除は clean 再ビルドで消える)。
  */
 export function assertMigrationsFresh(srcNames: string[], distNames: string[]): void {
   const distSet = new Set(distNames);

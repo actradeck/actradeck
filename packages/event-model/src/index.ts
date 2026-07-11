@@ -94,6 +94,19 @@ export { normalizeScopePath, isPathWithinScope, sanitizeRepoLabel } from "./path
 export { parseAgentVisibilityWire, aggregateAgentReadiness } from "./agent-visibility-wire.js";
 export type { AgentVisibilityWire } from "./agent-visibility-wire.js";
 
+// audit-coverage 導出 (per-provider 最終受信・gap 候補) の T1 single source
+//   (backend SQL 射影 / route / webui parse が共有・ingested_at 権威 + 非稼働≠gap + NO-RAW・ADR 019f4cdb)
+export {
+  projectProviderCoverageRow,
+  computeProviderCoverage,
+  buildCoverageReport,
+} from "./audit-coverage.js";
+export type {
+  ProviderCoverageInput,
+  AuditProviderCoverage,
+  AuditCoverageReport,
+} from "./audit-coverage.js";
+
 // codex spawn wire 検証 + 失敗 enum (T1 single source: backend route/relay + sidecar daemon handler・ADR 019f4206)
 export {
   parseCodexSpawnRequest,
