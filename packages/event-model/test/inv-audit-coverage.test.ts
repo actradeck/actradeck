@@ -99,7 +99,7 @@ describe("projectProviderCoverageRow — (c) NO-RAW by construction", () => {
       maxEventTimestampMs: 2000,
       activeSessionCount: 1,
       totalSessionCount: 2,
-      cwd: "/home/user/secret-project", // 漏れてはならない
+      cwd: "/home/leaky/secret-project", // 漏れてはならない
       leaked_secret: "ghp_realtokenxxxxxxxxxxxxxxxxxxxxxxxxxx", // 漏れてはならない
       payload: { command: "rm -rf /" },
     });
@@ -121,7 +121,7 @@ describe("projectProviderCoverageRow — (c) NO-RAW by construction", () => {
   });
 
   it("非 slug provider (生パス/大文字/長文字列) は row ごと drop する", () => {
-    expect(projectProviderCoverageRow({ provider: "/home/user/leak" })).toBeUndefined();
+    expect(projectProviderCoverageRow({ provider: "/home/leaky/leak" })).toBeUndefined();
     expect(projectProviderCoverageRow({ provider: "Claude Code" })).toBeUndefined();
     expect(projectProviderCoverageRow({ provider: "a".repeat(33) })).toBeUndefined();
     expect(projectProviderCoverageRow({ provider: "" })).toBeUndefined();
@@ -199,14 +199,14 @@ describe("buildCoverageReport — 単一エントリポイント", () => {
           maxEventTimestampMs: GEN_MS,
           activeSessionCount: 1,
           totalSessionCount: 1,
-          cwd: "/home/user/secret",
+          cwd: "/home/leaky/secret",
           token: "ghp_leakmexxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         },
       ],
       new Date(GEN_MS),
     );
     const blob = JSON.stringify(report);
-    expect(blob).not.toContain("/home/user/secret");
+    expect(blob).not.toContain("/home/leaky/secret");
     expect(blob).not.toContain("ghp_leakme");
   });
 
@@ -282,7 +282,7 @@ describe("parseProviderCoverageWire — (d) wire row 受信検証", () => {
   it("余剰 field (生パス/secret 様) を構造的に落とす (NO-RAW)", () => {
     const parsed = parseProviderCoverageWire({
       ...WIRE_ROW,
-      cwd: "/home/user/secret-project", // 漏れてはならない
+      cwd: "/home/leaky/secret-project", // 漏れてはならない
       token: "ghp_realtokenxxxxxxxxxxxxxxxxxxxxxxxxxx", // 漏れてはならない
       payload: { command: "rm -rf /" },
     });
@@ -296,14 +296,14 @@ describe("parseProviderCoverageWire — (d) wire row 受信検証", () => {
       "total_session_count",
     ]);
     const blob = JSON.stringify(parsed);
-    expect(blob).not.toContain("/home/user");
+    expect(blob).not.toContain("/home/leaky");
     expect(blob).not.toContain("ghp_");
     expect(blob).not.toContain("rm -rf");
   });
 
   it("非 slug provider は row ごと undefined (生パス/大文字/長文字列/空)", () => {
     expect(
-      parseProviderCoverageWire({ ...WIRE_ROW, provider: "/home/user/leak" }),
+      parseProviderCoverageWire({ ...WIRE_ROW, provider: "/home/leaky/leak" }),
     ).toBeUndefined();
     expect(parseProviderCoverageWire({ ...WIRE_ROW, provider: "Claude Code" })).toBeUndefined();
     expect(parseProviderCoverageWire({ ...WIRE_ROW, provider: "a".repeat(33) })).toBeUndefined();
@@ -391,11 +391,11 @@ describe("parseAuditCoverageReportWire — (d) wire report 受信検証", () => 
     const blob = JSON.stringify(
       parseAuditCoverageReportWire({
         generated_at: GEN_ISO,
-        providers: [{ ...WIRE_ROW, cwd: "/home/user/secret", token: "ghp_leakmexxxxxxxxxx" }],
+        providers: [{ ...WIRE_ROW, cwd: "/home/leaky/secret", token: "ghp_leakmexxxxxxxxxx" }],
         leaked_top: "/absolute/path/leak", // 余剰 top-level も落ちる
       }),
     );
-    expect(blob).not.toContain("/home/user/secret");
+    expect(blob).not.toContain("/home/leaky/secret");
     expect(blob).not.toContain("ghp_leakme");
     expect(blob).not.toContain("leaked_top");
     expect(blob).not.toContain("/absolute/path/leak");
