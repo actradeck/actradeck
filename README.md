@@ -1,5 +1,11 @@
 # ActraDeck
 
+[![CI](https://github.com/actradeck/actradeck/actions/workflows/ci.yml/badge.svg)](https://github.com/actradeck/actradeck/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/actradeck/actradeck)](https://github.com/actradeck/actradeck/releases/latest)
+[![npm](https://img.shields.io/npm/v/actradeck?logo=npm)](https://www.npmjs.com/package/actradeck)
+[![GHCR](https://img.shields.io/badge/GHCR-multi--arch%20image-2496ED?logo=docker&logoColor=white)](https://github.com/actradeck/actradeck/pkgs/container/actradeck)
+[![License](https://img.shields.io/github/license/actradeck/actradeck)](LICENSE)
+
 **The vendor-neutral control plane for coding agents — cross-vendor secret redaction and audit, with selective approval governance (Claude Code today, Codex in Managed Mode).**
 
 ActraDeck sits beside your coding agents — Claude Code, Codex, and whatever comes
