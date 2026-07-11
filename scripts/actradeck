@@ -551,6 +551,31 @@ do_doctor() {
   local node_bin; node_bin="$(command -v node || echo MISSING)"
   err "[doctor] node: $node_bin"
   [ "$node_bin" = "MISSING" ] && err "[doctor] 警告: node が PATH に無い。起動できません。"
+  local node_version="MISSING"
+  if [ "$node_bin" != "MISSING" ]; then
+    node_version="$("$node_bin" -v 2>/dev/null || echo UNKNOWN)"
+    err "[doctor] node version: $node_version"
+    if ! "$node_bin" -e '
+      const e = (require(process.argv[1]).engines || {}).node || "";
+      const min = ((e.match(/\d+(?:\.\d+){0,2}/) || ["0"])[0]).split(".").map(Number);
+      const cur = process.versions.node.split(".").map(Number);
+      const ge = (a, b) => { for (let i = 0; i < 3; i++) { const x = a[i]||0, y = b[i]||0; if (x > y) return true; if (x < y) return false; } return true; };
+      process.exit(ge(cur, min) ? 0 : 1);
+    ' "$REPO_ROOT/package.json" 2>/dev/null; then
+      local node_required
+      node_required="$("$node_bin" -e 'process.stdout.write((require(process.argv[1]).engines || {}).node || "")' "$REPO_ROOT/package.json" 2>/dev/null || echo '>=22.16.0')"
+      err "[doctor] 警告: Node $node_version は engines.node ($node_required) を満たしません。\`nvm install 22 && nvm use 22\` を実行してください。"
+    fi
+  else
+    err "[doctor] node version: MISSING"
+  fi
+  local pnpm_version="MISSING"
+  if command -v pnpm >/dev/null 2>&1; then
+    pnpm_version="$(pnpm --version 2>/dev/null || echo UNKNOWN)"
+    err "[doctor] pnpm: $pnpm_version"
+  else
+    err "[doctor] pnpm: MISSING — \`npm i -g pnpm\` を実行してください。"
+  fi
   case "$node_bin" in
     *"/.nvm/"*) err "[doctor] 注意: node が nvm パス。更新時は actradeck up を再実行 (203/EXEC 回避)。" ;;
   esac

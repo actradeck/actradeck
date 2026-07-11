@@ -22,12 +22,7 @@
 # ---------------------------------------------------------------------------
 FROM node:22.16.0-bookworm-slim@sha256:048ed02c5fd52e86fda6fbd2f6a76cf0d4492fd6c6fee9e2c463ed5108da0e34 AS builder
 
-ENV CI=true \
-    PNPM_HOME=/pnpm \
-    PATH=/pnpm:$PATH
-
-# pnpm is pinned by package.json's packageManager; corepack activates that exact version.
-RUN corepack enable
+ENV CI=true
 
 WORKDIR /app
 
@@ -35,6 +30,10 @@ WORKDIR /app
 # .git, .env, .claude, oss mirrors etc. are excluded by .dockerignore so no secret or
 # host build artifact enters the image.
 COPY . .
+
+# pnpm is pinned by package.json's packageManager (single source of the version). Node >= 25
+# no longer bundles corepack, so install that exact pnpm globally via npm instead.
+RUN npm install -g "pnpm@$(node -p "require('./package.json').packageManager.split('@')[1]")"
 
 # Install the full workspace WITHOUT running native postinstall builds. The cockpit
 # tiers do not use the sidecar's native addons, so we skip the toolchain entirely.
@@ -59,9 +58,8 @@ ENV NODE_ENV=production \
     ACTRADECK_WEBUI_PORT=55400 \
     ACTRADECK_PGDATA=/data/pgdata
 
-# corepack for the pinned pnpm (not strictly needed at runtime, but keeps `node` tooling
-# consistent and lets `pnpm` work for debugging).
-RUN corepack enable
+# No pnpm in the runtime stage: the entrypoint launches both tiers with `node --import tsx`
+# directly (see scripts/docker-entrypoint.sh), and Node >= 25 no longer bundles corepack.
 
 # Dedicated non-root user. /data (embedded DB volume) and /home are writable by it.
 RUN groupadd --system --gid 10001 actradeck \

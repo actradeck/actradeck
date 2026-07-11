@@ -35,3 +35,10 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "chore(docker)"
+    ignore:
+      # Hold the node base image on the LTS line: major bumps are a manual decision made
+      # when the target line actually reaches LTS (e.g. Node 26 → LTS scheduled 2026-10).
+      # Dependabot proposed 22 → 26 while 26 was still the Current (non-LTS) line — see
+      # public PR #2. Minor / patch / digest bumps within the pinned major keep flowing.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
