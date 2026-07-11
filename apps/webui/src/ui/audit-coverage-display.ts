@@ -61,7 +61,20 @@ export function relativeReceivedAge(
   const recv = Date.parse(lastReceivedIso);
   const gen = Date.parse(generatedAtIso);
   if (!Number.isFinite(recv) || !Number.isFinite(gen)) return null;
-  const s = Math.max(0, Math.round((gen - recv) / 1000));
+  return compactDuration(gen - recv);
+}
+
+/**
+ * ミリ秒差を compact な相対経過 (`"12s"` / `"3m"` / `"2h"`) へ整形する純関数。
+ *  - 負値は 0 へ clamp (未来 skew を負表示しない)。
+ *  - 単位付与 (`ago` / `前`) は i18n に委ねる (language-neutral な数値+単位)。
+ *
+ * staleness バナー (最終成功 fetch からの経過・同一 client 時計差分) と relativeReceivedAge
+ * (server generated_at 基準) の**共通整形**。両者は「参照する時計」だけが異なり整形規則は同一ゆえ
+ * 単一出所化する (ドリフト防止・consolidation-invariant-sweep)。
+ */
+export function compactDuration(deltaMs: number): string {
+  const s = Math.max(0, Math.round(deltaMs / 1000));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.round(s / 60)}m`;
   return `${Math.round(s / 3600)}h`;

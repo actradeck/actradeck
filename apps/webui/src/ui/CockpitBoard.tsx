@@ -129,7 +129,12 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
   // ADR 019f4cdb 後続 UI: board 表示中は per-provider 監査カバレッジ (最終受信 + gap 候補) を pull する。
   // 「欠落を検知できない audit は弱い」— 稼働 provider の受信 gap を可視化する。read-only 集約 endpoint
   // (/realtime/audit/coverage・BFF 経由 Bearer)。connected 数変化で nudge (adapter 増減を早めに反映)。
-  const { coverage: auditCoverage } = useAuditCoverage({
+  const {
+    coverage: auditCoverage,
+    staleForMs: auditCoverageStaleForMs,
+    isStale: auditCoverageStale,
+    unreachable: auditCoverageUnreachable,
+  } = useAuditCoverage({
     enabled: topView === "board",
     refreshKey: connectedCount,
   });
@@ -355,7 +360,14 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
 
           {/* ADR 019f4cdb 後続 UI: board 表示中のみ per-provider 監査カバレッジを compact に出す。
               panel は provider ゼロ / 未取得なら自ら null を返す (架空の枠を作らない)。 */}
-          {topView === "board" ? <AuditCoveragePanel report={auditCoverage} /> : null}
+          {topView === "board" ? (
+            <AuditCoveragePanel
+              report={auditCoverage}
+              staleForMs={auditCoverageStaleForMs}
+              isStale={auditCoverageStale}
+              unreachable={auditCoverageUnreachable}
+            />
+          ) : null}
 
           {topView === "inbox" ? (
             <ApprovalInbox

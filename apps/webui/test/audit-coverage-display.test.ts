@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  compactDuration,
   formatSeqDrop,
   GAP_CRITICAL_MS,
   GAP_WARN_MS,
@@ -73,6 +74,29 @@ describe("relativeReceivedAge — generated_at 基準 (client clock 非依存)",
   it("パース不能な時刻は null (誤った経過を出さない fail-safe)", () => {
     expect(relativeReceivedAge("not-a-date", GEN)).toBeNull();
     expect(relativeReceivedAge("2026-04-02T11:59:48.000Z", "not-a-date")).toBeNull();
+  });
+});
+
+describe("compactDuration — ms 差の compact 整形 (relativeReceivedAge と共通・staleness バナー流用)", () => {
+  it("秒オーダーは Ns (< 60s)", () => {
+    expect(compactDuration(0)).toBe("0s");
+    expect(compactDuration(12_000)).toBe("12s");
+    expect(compactDuration(59_400)).toBe("59s");
+  });
+
+  it("分オーダーは Nm (60s 〜 < 3600s)", () => {
+    expect(compactDuration(60_000)).toBe("1m");
+    expect(compactDuration(180_000)).toBe("3m");
+    expect(compactDuration(3_570_000)).toBe("60m"); // 59.5 分 → 四捨五入
+  });
+
+  it("時オーダーは Nh (>= 3600s)", () => {
+    expect(compactDuration(3_600_000)).toBe("1h");
+    expect(compactDuration(7_200_000)).toBe("2h");
+  });
+
+  it("負値は 0s へ clamp (未来 skew を負表示しない)", () => {
+    expect(compactDuration(-5_000)).toBe("0s");
   });
 });
 

@@ -821,6 +821,38 @@ textarea {
   color: var(--ad-fg-muted);
 }
 
+// staleness 可視化 (誤安心の是正): fetch 失敗を握り潰さず「古い/到達不能」を正直に出す。
+// stale バナー = critical 相当の警告色。data-stale の rows は減光し「これは現在値でない」を視覚化する。
+.ad-coverage__stale-banner {
+  margin: 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--ad-status-danger-fg);
+  border-radius: 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ad-status-danger-fg);
+  background: var(--ad-status-danger-bg);
+}
+
+// stale 時: last-known な行を減光し、バナー (優先信号) との視覚的優先度を付ける。severity 計算は不変。
+.ad-coverage[data-stale="true"] .ad-coverage__rows {
+  opacity: 0.55;
+}
+
+// report 未取得だが連続失敗で到達不能: 警告行のみの縮退 section (critical 相当)。
+.ad-coverage__unreachable {
+  margin: 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--ad-status-danger-fg);
+  border-radius: 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ad-status-danger-fg);
+  background: var(--ad-status-danger-bg);
+}
+
 // ADR 019f4206 A段: Codex Managed spawn フォーム (空状態 readiness パネル内)。
 .ad-spawn {
   display: grid;

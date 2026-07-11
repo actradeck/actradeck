@@ -30,6 +30,15 @@ function render(report: Parameters<typeof AuditCoveragePanel>[0]["report"]): str
   );
 }
 
+/** staleness props 込みで描画する (デフォルト props = fresh; 欠陥注入で fresh 固定にすると下の INV が落ちる)。 */
+function renderWith(props: Parameters<typeof AuditCoveragePanel>[0]): string {
+  return renderToStaticMarkup(
+    <FixedLocaleProvider locale="en">
+      <AuditCoveragePanel {...props} />
+    </FixedLocaleProvider>,
+  );
+}
+
 // endpoint 応答形の raw を正準 parse に通す (webui の実経路と同一)。非 slug row は drop される。
 function report(rows: readonly unknown[]) {
   return parseAuditCoverageReportWire({ generated_at: GEN, providers: rows }) ?? null;
@@ -160,6 +169,70 @@ describe("AuditCoveragePanel — 静的描画", () => {
     expect(html).toContain('data-testid="coverage-row-claude_code"');
     expect(html).not.toContain("/etc/passwd");
     expect(html).not.toContain("passwd");
+  });
+
+  // ── staleness 可視化 (誤安心の是正・「古い正常値」を healthy として凍結表示する欠陥の回帰ガード) ──
+  describe("staleness surfacing", () => {
+    const freshRow = {
+      provider: "codex",
+      last_received_at: "2026-04-02T11:59:48.000Z",
+      last_event_timestamp: "2026-04-02T11:59:48.000Z",
+      active_session_count: 1,
+      total_session_count: 1,
+      gap_candidate_ms: 12_000,
+    };
+
+    it("(a) isStale=true は stale バナー + data-stale を出し rows は保持する (last-known)", () => {
+      const html = renderWith({
+        report: report([freshRow]),
+        staleForMs: 180_000, // 3m
+        isStale: true,
+        unreachable: false,
+      });
+      expect(html).toContain('data-testid="coverage-stale-banner"');
+      expect(html).toContain('role="status"');
+      expect(html).toContain("3m"); // 経過 (compactDuration)
+      expect(html).toContain("the coverage API is unreachable");
+      expect(html).toContain('data-stale="true"');
+      // last-known 行は依然描画する (バナーが優先信号・行 severity は不変)。
+      expect(html).toContain('data-testid="coverage-row-codex"');
+      expect(html).toContain('data-severity="ok"'); // 行の severity 計算は変更しない
+    });
+
+    it("(b) unreachable=true かつ report=null は unreachable 行を描画する (fetch 失敗 = 観測事実)", () => {
+      const html = renderWith({
+        report: null,
+        staleForMs: null,
+        isStale: false,
+        unreachable: true,
+      });
+      expect(html).toContain('data-testid="coverage-unreachable"');
+      expect(html).toContain('role="status"');
+      expect(html).toContain("Audit coverage unreachable");
+      // 通常の行 section は出さない (取得データがない)。
+      expect(html).not.toContain('data-testid="audit-coverage"');
+    });
+
+    it("(b') unreachable=false かつ report=null は従来どおり何も描画しない", () => {
+      expect(
+        renderWith({ report: null, staleForMs: null, isStale: false, unreachable: false }),
+      ).toBe("");
+    });
+
+    it("(c) fresh (isStale=false・unreachable=false) は従来と完全一致 (バナー・unreachable なし)", () => {
+      const rpt = report([freshRow]);
+      const withProps = renderWith({
+        report: rpt,
+        staleForMs: 0,
+        isStale: false,
+        unreachable: false,
+      });
+      // props なし (既存呼び出し) と完全一致 = fresh 時は表示不変。
+      expect(withProps).toBe(render(rpt));
+      expect(withProps).not.toContain("coverage-stale-banner");
+      expect(withProps).not.toContain("coverage-unreachable");
+      expect(withProps).not.toContain('data-stale="true"');
+    });
   });
 
   // ── seq-drop chip (ADR 019f4cdb Phase2・silent-drop 下限検知) ────────────────

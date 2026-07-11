@@ -23,6 +23,7 @@ import type { AuditCoverageReport } from "@actradeck/event-model";
 import { useLocale } from "./LocaleProvider";
 import {
   type GapSeverity,
+  compactDuration,
   formatSeqDrop,
   gapSeverity,
   relativeReceivedAge,
@@ -38,18 +39,66 @@ const STATUS_KEY: Partial<Record<GapSeverity, MessageKey>> = {
 export interface AuditCoveragePanelProps {
   /** 検証済みレポート (未取得 or provider ゼロなら描画しない)。 */
   readonly report: AuditCoverageReport | null;
+  /** 最終成功 fetch からの経過 ms (use-audit-coverage 由来・成功前は null)。 */
+  readonly staleForMs?: number | null;
+  /** 表示中の値が古い (最終成功から STALE 閾値超) = coverage API に到達できていない。 */
+  readonly isStale?: boolean;
+  /** 一度も coverage を取得できていない (連続失敗) = API 到達不能。 */
+  readonly unreachable?: boolean;
 }
 
 /**
- * per-provider 行を compact に描画する。report が null / providers 空なら **何も描画しない**
- * (取得前・無 provider で架空の枠を出さない)。各行: provider slug / 稼働数 / 最終受信の相対経過 /
- * gap 警告バッジ (warn=amber・critical=red・語ラベル併記)。
+ * per-provider 行を compact に描画する。
+ *
+ * staleness の可視化 (誤安心の是正):
+ *  - `report === null && unreachable` → 従来は無描画だったが、**「到達不能」警告行を描画**する
+ *    (fetch 失敗は架空状態でなく観測事実。空 = 正常、と誤読させない)。
+ *  - `report !== null && isStale` → 先頭に **stale バナー** (最終成功からの経過を明示) を出し
+ *    section に `data-stale` を付け rows を CSS で減光する。行の severity 計算は変更しない
+ *    (バナーが優先信号)。
+ *  - fresh (isStale=false・unreachable=false) 時は表示完全不変 (既存挙動を回帰で守る)。
+ *
+ * それ以外で report が null / providers 空なら **何も描画しない** (架空の枠を出さない)。
+ * 各行: provider slug / 稼働数 / 最終受信の相対経過 / gap 警告バッジ (warn=amber・critical=red・語ラベル併記)。
  */
-export function AuditCoveragePanel({ report }: AuditCoveragePanelProps) {
+export function AuditCoveragePanel({
+  report,
+  staleForMs = null,
+  isStale = false,
+  unreachable = false,
+}: AuditCoveragePanelProps) {
   const { t } = useLocale();
-  if (report === null || report.providers.length === 0) return null;
+  if (report === null || report.providers.length === 0) {
+    // 未取得だが連続失敗で到達不能: 観測事実 (fetch 失敗) として警告行だけ描画する。
+    if (report === null && unreachable) {
+      return (
+        <section
+          className="ad-coverage ad-coverage--unreachable"
+          data-testid="coverage-unreachable"
+          aria-label="audit coverage"
+        >
+          <h3 className="ad-coverage__title">{t("audit.coverage.title")}</h3>
+          <p className="ad-coverage__unreachable" role="status">
+            {t("audit.coverage.unreachable")}
+          </p>
+        </section>
+      );
+    }
+    return null;
+  }
+  const staleAge = staleForMs !== null ? compactDuration(staleForMs) : null;
   return (
-    <section className="ad-coverage" data-testid="audit-coverage" aria-label="audit coverage">
+    <section
+      className="ad-coverage"
+      data-testid="audit-coverage"
+      aria-label="audit coverage"
+      data-stale={isStale ? "true" : undefined}
+    >
+      {isStale ? (
+        <p className="ad-coverage__stale-banner" data-testid="coverage-stale-banner" role="status">
+          {t("audit.coverage.staleBanner", { age: staleAge ?? t("common.dash") })}
+        </p>
+      ) : null}
       <h3 className="ad-coverage__title">{t("audit.coverage.title")}</h3>
       <ul className="ad-coverage__rows">
         {report.providers.map((p) => {

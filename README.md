@@ -6,7 +6,7 @@
 [![GHCR](https://img.shields.io/badge/GHCR-multi--arch%20image-2496ED?logo=docker&logoColor=white)](https://github.com/actradeck/actradeck/pkgs/container/actradeck)
 [![License](https://img.shields.io/github/license/actradeck/actradeck)](LICENSE)
 
-**The vendor-neutral control plane for coding agents — cross-vendor secret redaction and audit, with selective approval governance (Claude Code today, Codex in Managed Mode).**
+**The vendor-neutral control plane for coding agents — observe everything, govern selectively. Cross-vendor secret redaction and one audit trail for every agent; approval governance where the mode supports it (Claude Code today, Codex in Managed Mode).**
 
 ActraDeck sits beside your coding agents — Claude Code, Codex, and whatever comes
 next — and gives you **one place to watch what they do, stop secrets before they
@@ -46,13 +46,15 @@ vendor structurally will not build: **neutral governance across competing agents
   _safe_ operations without ever auto-allowing dangerous ones. Relay to the cockpit
   is selective by mode — Claude Code over Attach, Codex in Managed Mode (see the
   [support matrix](#vendor--mode-support)); external adapters are observe-only.
-- **Secrets are redacted before persist or transmit.** A two-layer redactor
-  (INV-REDACTION) masks detected secret keys, tokens, and `.env` contents: the sidecar
-  redacts _before_ an event it collects reaches disk or the network, and backend ingress
-  applies the same unconditional floor to every event — including direct POSTs from
-  external adapters — before it is stored. Per-kind counts are shown in the UI. Detection
-  is best-effort pattern matching (gitleaks-style rules + custom regexes) — a strong safety
-  net, not an absolute guarantee (see [honest limits](./docs/approval-policy.md#honest-limits)).
+- **Secrets are redacted before they are stored — and, for sidecar-observed sessions,
+  before they are transmitted.** A two-layer redactor (INV-REDACTION) masks detected
+  secret keys, tokens, and `.env` contents. Native sessions (Claude Code / Codex observed
+  by the local sidecar) are redacted _before_ an event reaches disk or the network.
+  Events from external adapters travel to the backend as the adapter sent them; the
+  backend ingress floor redacts them unconditionally _before persistence_ (not before
+  that first hop). Per-kind counts are shown in the UI. Detection is best-effort pattern
+  matching (gitleaks-style rules + custom regexes) — a strong safety net, not an absolute
+  guarantee (see [honest limits](./docs/approval-policy.md#honest-limits)).
 - **Audit & replay.** Every session can be replayed after the fact for review,
   incident analysis, or compliance. Session reports export to HTML/Markdown with an
   embedded integrity manifest (SHA-256 hash chain). Enable `ACTRADECK_AUDIT_SIGNING_KEY`
@@ -230,9 +232,9 @@ provenance attestation** — the verification commands are in
 [`docs/docker.md`](./docs/docker.md). Prefer building from source? `docker build -t
 actradeck .` uses the same Dockerfile the release workflow signs.
 
-The `0.4.0` / `latest` image on GHCR today is `linux/amd64` only; from the **next**
-release it is a multi-arch `linux/amd64` + `linux/arm64` manifest list (native Apple
-Silicon) — see [`docs/docker.md`](./docs/docker.md) for the exact posture.
+Since `0.5.0` the image (including `latest`) is a multi-arch `linux/amd64` +
+`linux/arm64` manifest list (native Apple Silicon); only the older `0.4.0` tag is
+`linux/amd64`-only — see [`docs/docker.md`](./docs/docker.md) for the exact posture.
 
 The container is the **cockpit stack only**. The sidecar that observes your agents
 watches the _host's_ Claude Code / Codex processes, so it can't run inside a container —

@@ -2,15 +2,14 @@
 
 > ADR [`0013`](./adr/0013-release-signing-and-distribution.md) Phase 2. Status:
 > **published** — a signed image is available on GHCR since **v0.4.0**
-> (`ghcr.io/actradeck/actradeck`, tags `latest` and `0.4.0`). Publishing stays
+> (`ghcr.io/actradeck/actradeck`, versioned tags plus `latest`). Publishing stays
 > user-gated per release — see
 > [Publishing](#publishing-the-signed-image-maintainers).
 >
-> **Architecture:** the currently published **v0.4.0** image is **`linux/amd64` only**
-> (Apple Silicon / arm64 hosts run it under emulation). Starting from the **next**
-> opted-in release, the image is a **multi-arch manifest list** covering both
-> **`linux/amd64`** and **`linux/arm64`**, so arm64 hosts pull a native image — see
-> [Honest limits](#honest-limits).
+> **Architecture:** since **v0.5.0** the published image is a **multi-arch manifest
+> list** covering **`linux/amd64`** and **`linux/arm64`**, so arm64 (Apple Silicon)
+> hosts pull a native image. The older `0.4.0` tag remains `linux/amd64` only (earlier
+> images are not rebuilt retroactively) — see [Honest limits](#honest-limits).
 
 The Docker image runs the **cockpit** with no external database. Pull the signed
 prebuilt image from GHCR (or build it locally from the same Dockerfile) and run it —
@@ -295,18 +294,17 @@ same _authoritative-vs-secondary_ shape as the leak face above:
 
 ## Honest limits
 
-- The signed GHCR image and its cosign signature **fire for the first time on the first
-  opted-in tag/dispatch** — until then this is structurally verified infrastructure, not
-  a published artifact (same posture as the Phase 1 release signing).
-- **Multi-arch is next-release, not retroactive.** The **`0.4.0` / `latest` images on GHCR
-  today are `linux/amd64` only** — arm64 (Apple Silicon) hosts run them under emulation.
-  The `linux/amd64` + `linux/arm64` **manifest list first fires on the next opted-in
-  release/dispatch** (the release workflow builds and scans each arch, then pushes one
-  index). Until that release cuts, multi-arch is structurally verified infrastructure, not
-  a published artifact. When it does fire, `docker pull` on either architecture resolves the
-  right image automatically, and the cosign signature + SLSA provenance are on the
-  **manifest-list (index) digest**, so `cosign verify` / `gh attestation verify` against the
-  tag or the index digest work identically regardless of which arch you pull.
+- The signed GHCR image and its cosign signature have been **live since v0.4.0**. Each
+  opted-in release publishes a freshly leak-scanned, signed image; publishing stays
+  user-gated per release, so a release that does not opt in publishes no image.
+- **Multi-arch shipped in v0.5.0 and is not retroactive.** Tags `0.5.0` and later
+  (including `latest`) are `linux/amd64` + `linux/arm64` **manifest lists** — the release
+  workflow builds and scans each arch, then pushes one index. `docker pull` on either
+  architecture resolves the right image automatically, and the cosign signature + SLSA
+  provenance are on the **manifest-list (index) digest**, so `cosign verify` /
+  `gh attestation verify` against the tag or the index digest work identically regardless
+  of which arch you pull. The older **`0.4.0` tag stays `linux/amd64` only** — arm64
+  (Apple Silicon) hosts run it under emulation.
 - The image carries `tsx` and the TypeScript sources because the product runs its
   entrypoints through `tsx` in production (as the native `scripts/actradeck` supervisor
   does); it is not a slimmed, precompiled single binary. Size optimization is a follow-up.
