@@ -5,6 +5,12 @@
 > (`ghcr.io/actradeck/actradeck`, tags `latest` and `0.4.0`). Publishing stays
 > user-gated per release — see
 > [Publishing](#publishing-the-signed-image-maintainers).
+>
+> **Architecture:** the currently published **v0.4.0** image is **`linux/amd64` only**
+> (Apple Silicon / arm64 hosts run it under emulation). Starting from the **next**
+> opted-in release, the image is a **multi-arch manifest list** covering both
+> **`linux/amd64`** and **`linux/arm64`**, so arm64 hosts pull a native image — see
+> [Honest limits](#honest-limits).
 
 The Docker image runs the **cockpit** with no external database. Pull the signed
 prebuilt image from GHCR (or build it locally from the same Dockerfile) and run it —
@@ -221,28 +227,54 @@ only when the operator opts in, one of two ways:
 - **manually dispatch** the `Release` workflow against an existing `vX.Y.Z` tag (the
   verify/release jobs are guarded to `push` events, so a dispatch only runs the image job).
 
-The job builds from the root `Dockerfile`, **scans the built image's filesystem for leaks
-before it is pushed**, then pushes `:<version>` + `:latest`, signs the digest with cosign
-keyless, and attests SLSA build provenance to the registry. It needs `packages: write` +
-`id-token: write` + `attestations: write` (job-scoped only; the workflow stays
-`contents: read` at the top level).
+The job builds from the root `Dockerfile` for **both `linux/amd64` and `linux/arm64`**. The
+`amd64` half builds natively on the runner; the **`arm64` half is built under QEMU user-mode
+emulation** (`docker/setup-qemu-action`, which registers the `tonistiigi/binfmt` image) — so the
+emulator sits inside the build trust path for the arm64 image (accepted, single-operator/CI trust
+boundary; the authoritative FS scan still inspects the emulated arm64 image before it can be
+pushed). Residual: the binfmt installer image (`tonistiigi/binfmt`) is pulled by tag, not
+digest-pinned — pinning it is a tracked follow-up. It builds **each architecture locally first**
+(`--load`, no push), **scans every per-arch image's filesystem for leaks before anything is
+pushed**, and only then re-assembles the two architectures into a single **multi-arch manifest
+list** and pushes `:<version>` + `:latest`. The multi-arch push re-uses the per-arch **build
+cache** the local `--load` builds wrote (`--cache-from` per arch), so the pushed layers are the
+scanned ones re-played from cache rather than a fresh rebuild — on a cache miss buildx would
+rebuild, but the leak-relevant `/app` tree is a deterministic allowlist `COPY` (leak-equivalent),
+and strict byte-identity is not relied upon; instead `INV-DOCKER-SCAN-BEFORE-PUSH` checks, by
+flag **token position** (not a raw substring), that the push carries a `--cache-from` for each
+scanned arch — a commented-out or echo-string `--cache-from` does not satisfy it. It then signs
+the **manifest-list (index) digest** with
+cosign keyless and attests SLSA build provenance of that index digest to the registry. It needs
+`packages: write` + `id-token: write` + `attestations: write` (job-scoped only; the workflow
+stays `contents: read` at the top level).
 
 ### How the image is kept leak-free (authoritative vs. secondary gates)
 
 The **authoritative** leak gate is the real **image-filesystem scan**
 ([`scripts/lib/scan-image-fs.sh`](../scripts/lib/scan-image-fs.sh)): it exports the built
 image and fails closed on any forbidden internal file or secret/coupling literal in the
-app layers. It runs in **two** places — in `release.yml` **before every GHCR push**, and in
-`ci.yml`'s `docker-image-scan` job on **any change to image content** (`apps/**`,
-`packages/**`, `db/**`, root `package.json`, the Dockerfile). Because it inspects the actual
-built image, it catches a real leak regardless of how the workflow YAML is shaped.
+app layers. It runs in **two** places, with different arch coverage:
+
+- **`release.yml`, before every GHCR push** — runs **once per published architecture** (each
+  `--load`ed per-arch image, `amd64` and `arm64`, is scanned before the manifest list is pushed).
+  This is the arch-complete gate: `arm64` content is authoritatively scanned here.
+- **`ci.yml`'s `docker-image-scan` job**, on **any change to image content** (`apps/**`,
+  `packages/**`, `db/**`, root `package.json`, the Dockerfile) — builds and scans the **native
+  `amd64`** image only (no emulation in the fast pre-merge path). Because the leak-relevant `/app`
+  tree is produced by the same architecture-independent allowlist `COPY`, the `amd64` pre-merge
+  scan catches source-level leaks on every content change; the `arm64`-specific authoritative scan
+  is the release-time per-arch scan above.
+
+Because it inspects the actual built image, it catches a real leak regardless of how the
+workflow YAML is shaped.
 
 The invariant checks in [`scripts/test-release-prep.sh`](../scripts/test-release-prep.sh)
 (`INV-DOCKER-SCAN-BEFORE-PUSH`, `INV-DOCKERFILE-RUNTIME-ALLOWLIST`) are **secondary**: they only
 assert that the workflows _wire the real scan in correctly_ (present, before the push, not
-disabled or no-op) and that the Dockerfile does not broad-copy the whole tree. A gap in one of
-those config-checkers cannot ship a leak on its own — any change to baked-in content re-fires the
-authoritative scan in CI.
+disabled or no-op — and, for the multi-arch image, that **every published architecture is
+scanned first**, so a new `--platform` entry can't ship unscanned) and that the Dockerfile
+does not broad-copy the whole tree. A gap in one of those config-checkers cannot ship a leak
+on its own — any change to baked-in content re-fires the authoritative scan in CI.
 
 ### How publishing is gated (the parallel structure for the publish face)
 
@@ -266,6 +298,15 @@ same _authoritative-vs-secondary_ shape as the leak face above:
 - The signed GHCR image and its cosign signature **fire for the first time on the first
   opted-in tag/dispatch** — until then this is structurally verified infrastructure, not
   a published artifact (same posture as the Phase 1 release signing).
+- **Multi-arch is next-release, not retroactive.** The **`0.4.0` / `latest` images on GHCR
+  today are `linux/amd64` only** — arm64 (Apple Silicon) hosts run them under emulation.
+  The `linux/amd64` + `linux/arm64` **manifest list first fires on the next opted-in
+  release/dispatch** (the release workflow builds and scans each arch, then pushes one
+  index). Until that release cuts, multi-arch is structurally verified infrastructure, not
+  a published artifact. When it does fire, `docker pull` on either architecture resolves the
+  right image automatically, and the cosign signature + SLSA provenance are on the
+  **manifest-list (index) digest**, so `cosign verify` / `gh attestation verify` against the
+  tag or the index digest work identically regardless of which arch you pull.
 - The image carries `tsx` and the TypeScript sources because the product runs its
   entrypoints through `tsx` in production (as the native `scripts/actradeck` supervisor
   does); it is not a slimmed, precompiled single binary. Size optimization is a follow-up.

@@ -209,6 +209,10 @@ provenance attestation** — the verification commands are in
 [`docs/docker.md`](./docs/docker.md). Prefer building from source? `docker build -t
 actradeck .` uses the same Dockerfile the release workflow signs.
 
+The `0.4.0` / `latest` image on GHCR today is `linux/amd64` only; from the **next**
+release it is a multi-arch `linux/amd64` + `linux/arm64` manifest list (native Apple
+Silicon) — see [`docs/docker.md`](./docs/docker.md) for the exact posture.
+
 The container is the **cockpit stack only**. The sidecar that observes your agents
 watches the _host's_ Claude Code / Codex processes, so it can't run inside a container —
 you run it on the host and point it at the container's ingestion port over loopback. The

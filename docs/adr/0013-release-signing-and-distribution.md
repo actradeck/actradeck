@@ -38,6 +38,13 @@ Constraints that shape the design:
   one-command bring-up). The image job is **USER-GATED** (off by default) and builds →
   leak-scans the image filesystem → pushes; the live GHCR push + signature fire on the
   first opted-in tag/dispatch. See [`docs/docker.md`](../docker.md).
+  - **Multi-arch extension (decision `019f509d`, 2026-07):** the image is a
+    `linux/amd64` + `linux/arm64` **manifest list**. The job builds and leak-scans **each arch**
+    (`--load`, per-arch) before the push, then re-plays those layers into one manifest list via
+    `buildx --push --cache-from`; the **cosign signature + SLSA attestation bind the index
+    (manifest-list) digest**. `INV-DOCKER-SCAN-BEFORE-PUSH` is extended to per-arch coverage +
+    `--cache-from` parity. First multi-arch push fires on the next opted-in release; the current
+    `v0.4.0` image is `amd64`-only.
 - **Phase 3 (deferred):** npm publish of the attach CLI via Trusted Publishing (OIDC),
   contingent on resolving the dependency-closure / native-addon story. Homebrew:
   deferred indefinitely.

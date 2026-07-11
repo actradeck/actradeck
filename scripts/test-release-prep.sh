@@ -224,16 +224,38 @@ SP_DIR="$WORK"; export SP_DIR
 cat > "$WORK/step_predicates.py" <<'PYEOF'
 # Canonical docker-job step predicates. Imported by the guard checker, the scan checker, and
 # the step mutator so their classification + neutralization rules can never drift apart.
+import re
 def name(s): return str(s.get("name", ""))
 def is_scan(s):
     n = name(s).lower(); return "scan" in n and "leak" in n
 def is_guard(s):
     n = name(s).lower(); return "publish" in n and "guard" in n
+# SINGLE SOURCE (SEC-R2 / QA-R2): a `docker buildx build …` invocation that PUBLISHES to a registry.
+# Both the scan checker (per-arch coverage) and the push mutator import this, so they cannot drift on
+# what counts as a buildx publish (the mutator used to keep a private copy — TDA-R1). Recognized forms:
+#   `--push`                       (the canonical multi-arch manifest-list push), OR
+#   `--output type=registry`       (equivalent — writes the manifest list straight to the registry),
+#   `--output=type=registry`, `-o type=registry`, or an `--output …,push=true`.
+# Adding forms here only ever makes MORE steps count as a push == fail-closed (a mixed publish step
+# can't hide from coverage). Exotic publishers (skopeo/crane) are still unrecognized here; they fall
+# through to "no push step" -> a spurious RED, never a silent pass (a tracked sweep item).
+def buildx_publishes(run):
+    if "docker buildx build" not in run:
+        return False
+    if "--push" in run:
+        return True
+    return re.search(r'(?:--output=?|(?:^|\s)-o[=\s])[^\n]*?(?:type=registry|push=true)', run) is not None
 def is_push(s):
+    # A step PUSHES the image if it is a build-push-action with push:true, a plain `docker push`,
+    # OR (multi-arch) a `docker buildx build …` that publishes to a registry (buildx_publishes:
+    # `--push` or an `--output type=registry` / `push=true`) — the last forms emit the manifest
+    # list directly and did not exist in the single-arch layout (arm64 expansion).
     w = s.get("with") or {}
+    run = str(s.get("run", ""))
     return (str(s.get("uses", "")).startswith("docker/build-push-action")
             and str(w.get("push", "")).lower() in ("true", "1", "yes")) \
-        or "docker push" in str(s.get("run", ""))
+        or "docker push" in run \
+        or buildx_publishes(run)
 def enabled(s):
     # A step is DISABLED (not guaranteed to run) unless its `if:` is ABSENT or a plain truthy
     # CONSTANT. `if: false` / `if: ${{ false }}` -> disabled. A dynamic/unusual `if:` — incl.
@@ -365,6 +387,65 @@ PYEOF
 mutate_scan()  { python3 "$MUTATE_STEP_PY" "$1" "$2" "$3"; }
 mutate_guard() { python3 "$MUTATE_STEP_PY" "$1" "$2" "$3"; }
 
+# --- multi-arch push mutator (arm64 / SEC-1 + QA-1/2/3/4 + SEC-R1/R2 RED probes) --------
+# Apply a named mutation to the docker job's buildx publish step (or the per-arch scan step) so each
+# unblock-fix path can be asserted to make docker_scan_before_push FAIL. The buildx-publish step is
+# located via the SHARED step_predicates.buildx_publishes (no private copy — TDA-R1/QA-R2), so the
+# mutator and the checker agree on what counts as a publish. is_scan is likewise shared.
+MUTATE_PUSH_PY="$WORK/mutate_push.py"
+cat > "$MUTATE_PUSH_PY" <<'PYEOF'
+import sys, os, re, yaml
+sys.path.insert(0, os.environ["SP_DIR"]); import step_predicates as sp
+op, inp, out = sys.argv[1], sys.argv[2], sys.argv[3]
+d = yaml.safe_load(open(inp))
+job = (d.get("jobs") or {}).get("docker") or {}
+steps = job.get("steps") or []
+def is_pub(s):
+    return sp.buildx_publishes(str(s.get("run", "")))
+def first(pred):
+    return next((s for s in steps if pred(s)), None)
+if op == "plat_env":            # (a) --platform env indirection -> non-literal -> fail-closed
+    s = first(is_pub); s["run"] = re.sub(r'--platform[ =]+\S+', '--platform ${{ env.PLATFORMS }}', s["run"], count=1)
+elif op == "plat_continuation": # (b) split the --platform list across a line-continuation, arm side unscanned
+    s = first(is_pub); s["run"] = re.sub(r'--platform[ =]+\S+', '--platform linux/amd64,\\\nlinux/s390x', s["run"], count=1)
+elif op == "scan_echo_only":    # (c) scan amd64 for real; arm64 only inside an echo STRING
+    s = first(sp.is_scan)
+    s["run"] = ('set -euo pipefail\n. scripts/lib/scan-image-fs.sh\n'
+                'for arch in amd64; do scan_image_fs "img:${arch}"; done\n'
+                'echo "arm64 was considered here only in this string"\n')
+elif op == "plat_substring":    # (d) push linux/arm; scan has arm64 -> substring must NOT cover
+    s = first(is_pub); s["run"] = s["run"].replace("linux/arm64", "linux/arm")
+elif op == "extra_push_s390x":  # (e) a SECOND buildx --push publishing an unscanned arch
+    steps.append({"name": "Push extra arch",
+                  "run": 'docker buildx build --platform linux/s390x '
+                         '--cache-from "type=local,src=/tmp/adcache-s390x" --push -t img:x .'})
+elif op == "drop_all_cachefrom":   # (f) remove EVERY --cache-from -> unscanned rebuild
+    s = first(is_pub); s["run"] = "\n".join(l for l in s["run"].splitlines() if "--cache-from" not in l)
+elif op == "drop_one_cachefrom":   # (g) remove only the arm64 --cache-from
+    s = first(is_pub); kept = []; dropped = False
+    for l in s["run"].splitlines():
+        if not dropped and "--cache-from" in l and "arm64" in l: dropped = True; continue
+        kept.append(l)
+    s["run"] = "\n".join(kept)
+elif op == "comment_arm64_cachefrom":  # (h) SEC-R1: comment-OUT the arm64 --cache-from line (not delete)
+    s = first(is_pub); s["run"] = "\n".join(('# ' + l if ("--cache-from" in l and "arm64" in l) else l)
+                                            for l in s["run"].splitlines())
+elif op == "echo_spoof_cachefrom":     # (i) SEC-R1: drop the real arm64 flag, mention adcache-arm64 in an echo STRING
+    s = first(is_pub)
+    kept = [l for l in s["run"].splitlines() if not ("--cache-from" in l and "arm64" in l)]
+    kept.insert(1, '          echo "prev: --cache-from type=local,src=/tmp/adcache-arm64"')
+    s["run"] = "\n".join(kept)
+elif op == "extra_output_registry":    # (j) SEC-R2: a SECOND buildx that publishes via --output type=registry (no --push)
+    steps.append({"name": "Publish extra arch via output",
+                  "run": 'docker buildx build --platform linux/s390x '
+                         '--cache-from "type=local,src=/tmp/adcache-s390x" --output type=registry -t img:x .'})
+else:
+    sys.stderr.write(f"unknown op {op}\n"); sys.exit(2)
+job["steps"] = steps
+yaml.safe_dump(d, open(out, "w"))
+PYEOF
+mutate_push() { python3 "$MUTATE_PUSH_PY" "$1" "$2" "$3"; }
+
 # ============================================================================
 # Checkers under test (pure; operate on a given tree/file)
 # ============================================================================
@@ -470,14 +551,31 @@ PY
 #   (iii) the run body, AFTER stripping comments + quoted-string contents, still contains an
 #         EXECUTABLE call to the canonical scan — `scan_image_fs` (scripts/lib/scan-image-fs.sh,
 #         R3-L1) OR the inline pair `docker export` + `exit 1`.
-# The push step is a `docker push` (R2-L3 retag-and-push) or a build-push-action with push:true;
-# a re-building push (build-push-action push:true) is rejected (scanned image != pushed image).
+# The push step is a `docker push` (R2-L3 retag-and-push), a `docker buildx build … --push`
+# (multi-arch manifest-list push — arm64 expansion), or a build-push-action with push:true; a
+# re-building build-push-action push:true is rejected (scanned image != pushed image).
+# MULTI-ARCH EXPANSION (arm64 / decision 019f4fc1): the buildx `--push` re-assembles the manifest
+# list FROM THE PER-ARCH BUILD CACHE the `--load` builds wrote, so the pushed per-arch layers come
+# from the SAME cache that was scanned. Because one push now publishes MANY platforms, the checker
+# hardens across EVERY push step (not just the first):
+#   - ALL scan steps (not just the first) must be enabled / non-continue-on-error / executable.
+#   - SEC-1 (fail-closed): a buildx publish whose --platform is NOT a literal `linux/<arch>[,…]` list
+#     (env indirection `${{ … }}` / `${VAR}` / an unsupported variant) is REJECTED, because coverage
+#     is unverifiable — silently skipping was fail-OPEN.
+#   - QA-2/3: every pushed arch must appear as a WHOLE TOKEN in a valid scan's EXECUTABLE body
+#     (strings + comments stripped; `linux/arm` is not covered by a scan's `arm64` substring).
+#   - QA-1 + SEC-R1: each pushed arch must be referenced by a `--cache-from` (adcache-<arch>) on the
+#     push step, so the pushed layers are the scanned ones and not an unscanned fresh rebuild. Both
+#     --platform and --cache-from are read by shlex TOKEN POSITION (_flag_values), so a `#`-commented
+#     flag or a flag name buried inside an `echo "…"` string does NOT count (raw substring did — the
+#     comment/echo spoof SEC-R1). SEC-R2: the publish step is detected via the shared
+#     step_predicates.buildx_publishes, so an `--output type=registry` publish is covered like `--push`.
 # NOTE: this is only the SECONDARY (wiring) check. The AUTHORITATIVE leak gate is the real image
 # FS scan (scripts/lib/scan-image-fs.sh, run in release.yml before push AND in ci.yml's
 # docker-image-scan job on every image-content change).
 docker_scan_before_push() {
   python3 - "$1" <<'PY'
-import sys, os, re, yaml
+import sys, os, re, shlex, yaml
 sys.path.insert(0, os.environ["SP_DIR"]); import step_predicates as sp
 d = yaml.safe_load(open(sys.argv[1]))
 job = (d.get("jobs") or {}).get("docker")
@@ -495,29 +593,111 @@ def strip_run(run):
         line = re.sub(r'#.*$', '', line)
         out.append(line)
     return "\n".join(out)
-scan_i = next((i for i, s in enumerate(steps) if sp.is_scan(s)), None)
-push_i = next((i for i, s in enumerate(steps) if sp.is_push(s)), None)
-if push_i is None:
-    print("no push step (docker push / build-push-action push:true) in docker job"); sys.exit(1)
-if scan_i is None:
+scan_idxs = [i for i, s in enumerate(steps) if sp.is_scan(s)]
+push_idxs = [i for i, s in enumerate(steps) if sp.is_push(s)]
+if not push_idxs:
+    print("no push step (docker push / docker buildx build --push / build-push-action push:true) in docker job"); sys.exit(1)
+push_i = push_idxs[0]
+if not scan_idxs:
     print("no image leak-scan step found in docker job"); sys.exit(1)
-if scan_i >= push_i:
-    print(f"scan step (index {scan_i}) is not BEFORE push step (index {push_i})"); sys.exit(1)
-scan = steps[scan_i]
-if not sp.enabled(scan):
-    print(f"scan step is disabled by `if: {scan.get('if')}`"); sys.exit(1)
-if sp.cont_on_err(scan):
-    print("scan step has `continue-on-error: true` — a leak `exit 1` would not fail the job"); sys.exit(1)
-run = strip_run(str(scan.get("run", "")))
-via_lib = "scan_image_fs" in run
-via_inline = ("docker export" in run) and ("exit 1" in run)
-if not (via_lib or via_inline):
-    print("scan step `run:` has no EXECUTABLE scan call (scan_image_fs, or docker export + exit 1) after comment/string strip"); sys.exit(1)
+# EVERY leak-scan step must sit BEFORE the (first) push, be enabled, not swallow its exit, and carry
+# an EXECUTABLE scan call. The single-arch layout had ONE scan step; the multi-arch layout may split
+# per platform — ALL of them must hold, so a neutralized *second* scan can't slip an unscanned arch
+# past a still-valid *first* scan. Collect the STRIPPED bodies (quoted strings + comments removed,
+# via strip_run) of the valid scans for the coverage check below — QA-2: an arch mentioned only in
+# an `echo "…arm64…"` string or a comment does NOT count as scanned.
+scanned_bodies = []
+for si in scan_idxs:
+    scan = steps[si]
+    if si >= push_i:
+        print(f"scan step (index {si}) is not BEFORE push step (index {push_i})"); sys.exit(1)
+    if not sp.enabled(scan):
+        print(f"scan step is disabled by `if: {scan.get('if')}`"); sys.exit(1)
+    if sp.cont_on_err(scan):
+        print("scan step has `continue-on-error: true` — a leak `exit 1` would not fail the job"); sys.exit(1)
+    body = strip_run(str(scan.get("run", "")))
+    via_lib = "scan_image_fs" in body
+    via_inline = ("docker export" in body) and ("exit 1" in body)
+    if not (via_lib or via_inline):
+        print("scan step `run:` has no EXECUTABLE scan call (scan_image_fs, or docker export + exit 1) after comment/string strip"); sys.exit(1)
+    scanned_bodies.append(body)
 rebuild = [sp.name(s) for s in steps
            if str(s.get("uses", "")).startswith("docker/build-push-action")
            and str((s.get("with") or {}).get("push", "")).lower() in ("true", "1", "yes")]
 if rebuild:
     print("push re-builds the image (build-push-action push:true) — scanned image != pushed image:", rebuild); sys.exit(1)
+
+# ---- MULTI-ARCH per-push COVERAGE + CACHE PARITY (arm64 expansion; SEC-1 / QA-1 / QA-2/3/4) ----
+# For EVERY push step (QA-4), and specifically the buildx `--push` form (multi-arch manifest list):
+#   (SEC-1 fail-closed) the --platform value MUST be a literal `linux/<arch>[,linux/<arch>…]` list.
+#     If --platform is present but non-literal (env indirection `${{ … }}` / `${VAR}`, or a value we
+#     cannot resolve to literal even after joining shell line-continuations) we CANNOT verify per-arch
+#     coverage, so we FAIL CLOSED — mirroring enabled()/cont_on_err(). Silently skipping (the old
+#     fail-OPEN) let `--platform ${{ env.PLATFORMS }}` ship an unscanned arch.
+#   (QA-2/3) every pushed arch must appear as a WHOLE TOKEN in a valid scan step's EXECUTABLE body
+#     (strings + comments already stripped) — `linux/arm` must NOT be covered by the substring of a
+#     scan's `arm64`, and an arch named only in a string/comment does not count.
+#   (QA-1) the buildx `--push` re-assembles the image FROM the per-arch build cache; require a
+#     `--cache-from` referencing EACH arch (adcache-<arch>) so the pushed layers come from the SAME
+#     cache that was scanned. A missing cache-from (all arches, or a single arch) = an unscanned
+#     fresh rebuild -> REJECT (the build-push-action rebuild-reject above has no reach here).
+# Legitimate SKIP: a plain `docker push` retag, or a build-push-action (rejected above). A buildx
+# publish with NO --platform is also skipped here (it builds a single host-arch image — NOT a retag
+# of a scanned image; tying that fresh single-arch build to a pre-push scan is a tracked sweep item,
+# SEC-R3). The release.yml push always carries an explicit multi-arch --platform, so it never skips.
+def _join_cont(run):
+    # shell line-continuation removes the backslash+newline with NO inserted space (faithful join),
+    # so a value split across `linux/amd64,\<newline>linux/s390x` rejoins to `linux/amd64,linux/s390x`
+    # (a legitimately continuation-split list is accepted, not falsely rejected).
+    return re.sub(r'\\\n', '', run)
+def _flag_values(run, flag):
+    # SEC-R1: extract a flag's values by TOKEN POSITION, not a raw regex. shlex tokenizes the shell
+    # command (after joining line-continuations) with comments=True, so (a) a `#`-commented flag is
+    # dropped, (b) a flag name appearing INSIDE an `echo "…--cache-from…"` string is a quoted argument
+    # token, never at a flag position, and (c) the real quoted value `"type=local,src=/tmp/adcache-amd64"`
+    # survives as ONE token (a naive strip_run would delete it and falsely REJECT the real workflow).
+    try:
+        toks = shlex.split(_join_cont(run), comments=True, posix=True)
+    except ValueError:
+        return None  # unbalanced quotes etc. — caller treats as unverifiable (fail-closed)
+    out = []
+    for i, t in enumerate(toks):
+        if t == flag and i + 1 < len(toks):
+            out.append(toks[i + 1])
+        elif t.startswith(flag + "="):
+            out.append(t[len(flag) + 1:])
+    return out
+def _whole_token(tok, hay):
+    return re.search(r'(?<![A-Za-z0-9_])' + re.escape(tok) + r'(?![A-Za-z0-9_])', hay) is not None
+LIT_PLATFORM = re.compile(r'^linux/[A-Za-z0-9._-]+(?:,linux/[A-Za-z0-9._-]+)*$')
+scanned_all = "\n".join(scanned_bodies)
+for pi in push_idxs:
+    prun_raw = str(steps[pi].get("run", ""))
+    # SEC-R2: gate on the SHARED buildx-publish predicate, so a step that publishes via
+    # `--output type=registry` (not just `--push`) is covered too — a mixed publish step can't hide.
+    if not sp.buildx_publishes(prun_raw):
+        continue  # docker push (retag) / build-push-action — single-arch legacy, coverage N/A
+    plat_vals = _flag_values(prun_raw, "--platform")
+    if plat_vals is None:
+        print(f"push step (index {pi}) run could not be tokenized (unbalanced quotes?) — cannot verify per-arch coverage; FAIL CLOSED"); sys.exit(1)
+    if not plat_vals:
+        continue  # buildx publish with no --platform = native single host arch (legacy-equivalent)
+    arches = []
+    for v in plat_vals:
+        vv = v.strip().strip('"').strip("'")
+        if not LIT_PLATFORM.match(vv):
+            hint = ("shell/Actions indirection (${{…}} / ${VAR})" if ("$" in vv or "{" in vv or "`" in vv)
+                    else "an unsupported platform form (e.g. a linux/arm/v7 variant)")
+            print(f"push step (index {pi}) has a non-literal --platform ('{v}') — {hint}; this checker cannot resolve it to a literal linux/<arch>[,linux/<arch>] list, so it FAILS CLOSED"); sys.exit(1)
+        arches += [p.split("/")[-1] for p in vv.split(",")]
+    arches = [a for a in arches if a]
+    for a in arches:
+        if not _whole_token(a, scanned_all):
+            print(f"push step (index {pi}) publishes linux/{a} but no pre-push scan references it as a whole token (unscanned arch)"); sys.exit(1)
+    cache_vals = " ".join(_flag_values(prun_raw, "--cache-from") or [])
+    for a in arches:
+        if not _whole_token(a, cache_vals):
+            print(f"push step (index {pi}) publishes linux/{a} but has no --cache-from referencing it (adcache-{a}) — pushed layers would be an unscanned rebuild"); sys.exit(1)
 sys.exit(0)
 PY
 }
@@ -1015,6 +1195,18 @@ else
   #   coe          : `continue-on-error: true` (leak exit 1 ignored)
   #   comment      : load-bearing token only in a comment
   #   echo         : load-bearing token only inside an echo string
+  # QA-R2 / TDA-R1 harness self-check: a mutation probe is only meaningful if the mutation ACTUALLY
+  # applied. If a mutator can't find its target (e.g. the push step drifted to a form it no longer
+  # matches) it may no-op or crash, leaving a file that either doesn't exist or equals the untouched
+  # baseline — and docker_scan_before_push would then "correctly fail" for the WRONG reason (a vacuous
+  # green). Compare each mutated file against a yaml-roundtrip baseline of REL_YML (a no-op compares
+  # EQUAL) and require: mutator exit 0 + output exists + differs from baseline. Symmetric with the
+  # actions probe's `assert src2 != src`.
+  BASELINE="$WORK/rel.baseline.yml"
+  python3 -c 'import sys,yaml; yaml.safe_dump(yaml.safe_load(open(sys.argv[1])), open(sys.argv[2],"w"))' "$REL_YML" "$BASELINE"
+  mutation_applied() { # $1=mutated file  $2=mutator rc  -> 0 iff genuinely applied (rc0 + exists + ≠baseline)
+    [ "$2" -eq 0 ] && [ -f "$1" ] && ! cmp -s "$1" "$BASELINE"
+  }
   scan_red_ok=1
   for m in \
     "remove:removing the scan step" \
@@ -1027,12 +1219,15 @@ else
     "comment:the scan token only in a comment" \
     "echo:the scan token only inside an echo string"; do
     op="${m%%:*}"; desc="${m#*:}"
-    mutate_scan "$op" "$REL_YML" "$WORK/rel.scan.$op.yml"
+    mutate_scan "$op" "$REL_YML" "$WORK/rel.scan.$op.yml"; mrc=$?
+    if ! mutation_applied "$WORK/rel.scan.$op.yml" "$mrc"; then
+      ng "INV-DOCKER-SCAN-BEFORE-PUSH: HARNESS — scan mutation '$op' did not apply (rc=$mrc / missing / ==baseline)"; scan_red_ok=0; continue
+    fi
     if docker_scan_before_push "$WORK/rel.scan.$op.yml" >/dev/null 2>&1; then
       ng "INV-DOCKER-SCAN-BEFORE-PUSH: DEAD GATE — $desc still passed"; scan_red_ok=0
     fi
   done
-  [ "$scan_red_ok" = 1 ] && ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS on all 9 no-op/bypass forms incl continue-on-error \${{ true }} / \${{ expr }} (R6-M1 fail-closed) (falsifiable)"
+  [ "$scan_red_ok" = 1 ] && ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS on all 9 no-op/bypass forms incl continue-on-error \${{ true }} / \${{ expr }} (R6-M1 fail-closed), each mutation verified applied (falsifiable)"
   # NO OVER-REJECT (R6-M1): a provably-safe `continue-on-error: false` must NOT be rejected.
   mutate_scan coe_false "$REL_YML" "$WORK/rel.scan.coe_false.yml"
   if docker_scan_before_push "$WORK/rel.scan.coe_false.yml" >/dev/null 2>&1; then
@@ -1057,6 +1252,51 @@ PY
   else
     ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS when the push re-builds the image (falsifiable)"
   fi
+  # RED (arm64 multi-arch coverage): inject a THIRD platform into the push's --platform list
+  # WITHOUT adding a scan for it. The manifest list would then publish linux/s390x unscanned ->
+  # the per-arch coverage clause must FAIL (every pushed arch must be scanned first). This is the
+  # multi-arch expansion of the invariant: scanning only the first arch no longer suffices.
+  python3 - "$REL_YML" "$WORK/rel.unscanned_arch.yml" <<'PY'
+import sys, os, re, yaml
+sys.path.insert(0, os.environ["SP_DIR"]); import step_predicates as sp
+d = yaml.safe_load(open(sys.argv[1]))
+steps = ((d.get("jobs") or {}).get("docker") or {}).get("steps") or []
+for s in steps:
+    if sp.is_push(s) and "run" in s:
+        s["run"] = re.sub(r'(--platform[ =]+linux/[A-Za-z0-9._-]+(?:,linux/[A-Za-z0-9._-]+)*)',
+                          r'\1,linux/s390x', s["run"], count=1)
+yaml.safe_dump(d, open(sys.argv[2], "w"))
+PY
+  if docker_scan_before_push "$WORK/rel.unscanned_arch.yml" >/dev/null 2>&1; then
+    ng "INV-DOCKER-SCAN-BEFORE-PUSH: DEAD GATE — pushing an unscanned platform (linux/s390x) still passed"
+  else
+    ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS when the push publishes a platform no pre-push scan covers (falsifiable)"
+  fi
+  # RED (arm64 unblock — SEC-1 fail-closed + QA-1/2/3/4 + SEC-R1/R2): ten push-face bypass forms the
+  # remediation must FAIL on. Each mutation makes docker_scan_before_push exit non-zero (and each is
+  # verified to have genuinely applied via mutation_applied — QA-R2):
+  #   plat_env           (a) --platform via ${{ env.… }} indirection -> non-literal -> fail-closed REJECT
+  #   plat_continuation  (b) --platform list split across a `\`-newline with the arm side unscanned
+  #   scan_echo_only     (c) scan only amd64; arm64 mentioned solely inside an echo STRING (strip -> gone)
+  #   plat_substring     (d) push linux/arm while a scan has arm64 -> substring must NOT falsely cover
+  #   extra_push_s390x   (e) a SECOND buildx --push publishing an arch no scan covers (all-push-steps)
+  #   drop_all_cachefrom (f) remove every --cache-from -> pushed layers are an unscanned rebuild
+  #   drop_one_cachefrom (g) remove only the arm64 --cache-from -> that arch is an unscanned rebuild
+  #   comment_arm64_cachefrom (h) SEC-R1: comment-OUT the arm64 --cache-from -> not a live flag token
+  #   echo_spoof_cachefrom    (i) SEC-R1: arm64 --cache-from removed but named inside an echo STRING
+  #   extra_output_registry   (j) SEC-R2: a SECOND buildx publishing via --output type=registry (no --push)
+  push_red_ok=1; push_n=0
+  for op in plat_env plat_continuation scan_echo_only plat_substring extra_push_s390x drop_all_cachefrom drop_one_cachefrom comment_arm64_cachefrom echo_spoof_cachefrom extra_output_registry; do
+    push_n=$((push_n + 1))
+    mutate_push "$op" "$REL_YML" "$WORK/rel.push.$op.yml"; mrc=$?
+    if ! mutation_applied "$WORK/rel.push.$op.yml" "$mrc"; then
+      ng "INV-DOCKER-SCAN-BEFORE-PUSH: HARNESS — push mutation '$op' did not apply (rc=$mrc / missing / ==baseline)"; push_red_ok=0; continue
+    fi
+    if docker_scan_before_push "$WORK/rel.push.$op.yml" >/dev/null 2>&1; then
+      ng "INV-DOCKER-SCAN-BEFORE-PUSH: DEAD GATE — push-face bypass '$op' still passed"; push_red_ok=0
+    fi
+  done
+  [ "$push_red_ok" = 1 ] && ok "INV-DOCKER-SCAN-BEFORE-PUSH: gate FAILS on all $push_n push-face bypasses (non-literal/continuation --platform, echo-only scan, substring arch, extra unscanned --push/--output, dropped/commented/echo-spoofed cache-from), each mutation verified applied (falsifiable)"
 fi
 
 # ============================================================================
