@@ -134,6 +134,39 @@ authoritative · callID overlap) / text · step-start · step-finish parts / `ca
 - **Per-session monotonic timestamp floor**: even with resends, reordering, or a time-source
   rollback, the issued timestamps of the same session are kept non-decreasing.
 
+### Heartbeat while a turn is running (issue #8)
+
+While a turn is in flight the adapter emits a periodic **`heartbeat` event**
+(`payload: {process_alive: true}`) so the cockpit's liveness synthesis has a process-alive signal
+and does **not** misjudge an actively-running turn as stalled/idle.
+
+- **Only while a turn is running**: the heartbeat starts on `turn.started` and stops on
+  `turn.completed` / `error` (and, because opencode has no session-termination signal, on the
+  `session.idle → turn.completed(idle)` that ends the turn). When no turn is active, nothing is
+  emitted.
+- **Interval = 20s**: comfortably under the cockpit's `GAP_WARN_MS` (60s — the threshold at which a
+  running provider with zero receipts is flagged as "audit is blind"). The 3× margin means that
+  even with a single fail-open drop / retry delay, at least one heartbeat lands inside the 60s
+  window.
+- **fail-open / no leak**: a heartbeat carries only `process_alive: true` (no raw text). Emission
+  failures never disrupt opencode. The timer is `unref`'d (it does not keep the opencode process
+  alive) and is cleared deterministically when the turn stops; concurrent/overlapping turns share a
+  **single** timer (it is never doubled).
+- **It never asserts death**: the adapter emits `process_alive: true` only — it **never** emits
+  `process_alive: false`. Combined with never fabricating `session.ended` (§4), stop is still not
+  asserted; the heartbeat only supplies positive liveness, never a termination claim.
+- This event is **timer-driven**, so it never appears in the mapping table above (it is not a
+  mapping of any opencode input).
+- **It only feeds the process/event lanes of liveness synthesis, not the model-delta lane**: a
+  heartbeat proves the process is alive and events are arriving, but it does **not** advance the
+  model-progress signal. So a genuine stall where the model produces zero delta is still surfaced —
+  the heartbeat cannot mask it.
+- **Why gemini's adapter has no equivalent**: the gemini example adapter runs as short-lived
+  per-event hook invocations (no long-running process to host a timer), so it cannot structurally
+  hold a turn-active heartbeat and instead relies on gemini's real `SessionEnd` termination signal.
+  This is a deliberate line: opencode has no session-termination signal (hence a heartbeat), gemini
+  has one (hence no heartbeat).
+
 ---
 
 ## 4. Honest disclosure of the security posture (ADR D4)
@@ -161,7 +194,10 @@ authoritative · callID overlap) / text · step-start · step-finish parts / `ca
 - **Observation limit (QA-7)**: because opencode **has no session-termination signal**, the
   adapter **never emits `session.ended` at all** (§3's `session.idle` → `turn.completed(idle)`).
   The cockpit's "is it done" judgment is carried by the settling signal of `turn.completed(idle)`
-  plus liveness synthesis (process/event/stdout heartbeat), and stop is not asserted.
+  plus liveness synthesis (process/event/stdout heartbeat), and stop is not asserted. The
+  turn-active heartbeat (§3) supplies **only** `process_alive: true` and **never**
+  `process_alive: false`, so it strengthens positive liveness during a running turn without ever
+  asserting death.
 - The trust boundary is **inside single-operator / loopback / `INGEST_TOKEN`**. If you change to
   an operation that uses it across this boundary (a different machine · a shared network), add
   client-side redaction separately.

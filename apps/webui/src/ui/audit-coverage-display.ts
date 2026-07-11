@@ -15,6 +15,9 @@
  * gap 警告閾値 (ms・**単一定義**)。
  *
  * - `GAP_WARN_MS = 60_000` (60s): 稼働 provider が 60s 受信ゼロ = 監査がその時間 blind ＝注意喚起 (amber)。
+ *   （back-reference: opencode example adapter の `HEARTBEAT_INTERVAL_MS`(20s) がこの値を下回る前提に
+ *   依存する — docs/examples/opencode-adapter/adapter.js。20s⊂60s の結合は import せず docs/コメントの
+ *   双方向 mirror で保つ・dep 逆流回避。この値を変えるなら adapter の 20s 前提を再確認すること。）
  * - `GAP_CRITICAL_MS = 300_000` (5 分): 一過性の gap (再接続/バックオフ/短い idle) では説明しにくい
  *   継続的無受信。実 ingestion outage (adapter 停止 / drop) を疑うべき水準 (red)。
  *

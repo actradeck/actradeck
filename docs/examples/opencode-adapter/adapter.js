@@ -28,7 +28,7 @@
  * (opencode に session 終端イベントは存在しないため session.ended を捏造しない・ADR D2/D8)。
  */
 
-/* global process, setTimeout, clearTimeout, AbortController */
+/* global process, setTimeout, clearTimeout, setInterval, clearInterval, AbortController */
 // ↑ Node / Bun のランタイム global (依存ゼロ・import しない)。`.js` 化で eslint 対象に入るため
 //   ファイルローカルに宣言する (globalThis.crypto / globalThis.fetch は globalThis 経由で参照)。
 
@@ -37,6 +37,16 @@ const RING_CAP = 1000; // 有界リングバッファ (最古 drop)
 const MAX_RETRY = 3; // POST 失敗時の再送上限 (同一 event_id で at-least-once)
 const FETCH_TIMEOUT_MS = 5000; // fetch のハングを防ぐ上限
 const FLUSH_MAX_BATCH = 200; // 1 POST あたりの最大イベント数
+
+// ── turn 稼働中 heartbeat 間隔 (issue #8 / ADR 019f4cdb slice③) ───────────────
+// turn 実行中のみ周期発行する heartbeat(process_alive:true) の間隔 (ms)。
+// **20s** に固定する根拠: cockpit の liveness 監査は稼働 provider が `GAP_WARN_MS=60_000` (60s)
+// 受信ゼロを「監査が blind ＝注意喚起 (amber)」の閾値とする
+// (apps/webui/src/ui/audit-coverage-display.ts:26)。20s は 60s を **確実に下回る 3 倍マージン**で、
+// 単発の drop / retry 遅延 (fail-open) や tick の位相ズレがあっても 60s 窓内に最低 1 発が着地する。
+// この 20s⊂60s の結合は webui `GAP_WARN_MS` の **意図的 mirror** — import で機械強制せず (dep 逆流回避)、
+// 変更時は audit-coverage-display.ts:26 の back-reference と同期すること (双方向 docs/コメント mirror)。
+const HEARTBEAT_INTERVAL_MS = 20_000;
 
 // ── UUIDv7 自前実装 (event_id 必須・依存ゼロ) ────────────────────────────────
 // ActraDeck の event_id は UUIDv7 のみ受理 (crypto.randomUUID は v4 で reject される)。
@@ -108,6 +118,21 @@ function makeEvent(state, { sessionId, eventType, sourceMs, extra }) {
     timestamp: stampTs(state, sessionId, sourceMs),
     ...extra,
   };
+}
+
+/**
+ * turn 稼働中 heartbeat の NormalizedEvent を組み立てる (issue #8 / ADR 019f4cdb slice③)。
+ * `event_type:"heartbeat"` / `payload:{kind:"heartbeat", process_alive:true}` の単一出所。
+ * state を **省略**する (契約: heartbeat 等の状態を持たないイベントは state 省略可・event.ts:109)。
+ * factory の onTick と heartbeat テストが同じこの関数を通す (event 形状の drift 防止)。
+ */
+function makeHeartbeatEvent(state, sessionId) {
+  return makeEvent(state, {
+    sessionId,
+    eventType: "heartbeat",
+    sourceMs: undefined, // now() 基準・session floor で monotonic に持ち上げる。
+    extra: { payload: { kind: "heartbeat", process_alive: true } },
+  });
 }
 
 // ── session.error の源流最小化 (ADR D2/D4・INV-OPENCODE-ADAPTER-ERROR-MINIMIZED) ──
@@ -514,6 +539,85 @@ function createDelivery(config, opts = {}) {
   };
 }
 
+// ── turn 稼働中 heartbeat スケジューラ (issue #8 / ADR 019f4cdb slice③) ────────
+// turn 実行中のみ周期 heartbeat(process_alive:true) を発行し、cockpit の liveness 合成へ
+// **process 生存シグナル**を供給する (稼働中の turn を stalled/idle と誤断定させない)。
+// heartbeat は **timer 駆動** で mapEvent/mapCaptureLine の写像経路には一切載らない
+//   (写像 histogram = 既知 10 種は不変・fixture 駆動テストにも現れない・純 additive)。
+//
+// fail-open / リーク防止 / 二重化防止 の 3 規律:
+//   - fail-open: tick 内の onTick は try/catch で握り潰す (heartbeat 発行失敗で opencode を壊さない)。
+//   - リーク防止: timer は **unref** し opencode プロセスの exit を妨げない。turn 停止で **確実に clear**。
+//   - 二重化防止: active 集合が空→非空の遷移でのみ **単一** timer を張る (handle!==null なら再張しない)。
+//     多重 turn / 割込みで turn.started が重なっても timer は 1 本 (各 session が 1 heartbeat/tick)。
+//
+// ライフサイクル (observe が発行済み NormalizedEvent 列から導出する):
+//   turn.started              → 当該 session を active へ (開始)
+//   turn.completed / error    → 当該 session を active から外す (turn 終了 / エラーで停止)
+//   ※ opencode に session 終端イベントは無く adapter は session.ended を捏造しない (ADR D8) ため、
+//     「セッション終了」は session.idle→turn.completed 経由で停止に落ちる。プロセス exit は unref が担う。
+//
+// opts.setTimer/clearTimer/onTick/intervalMs はテスト注入用 (既定 setInterval/clearInterval)。
+function createHeartbeat(opts = {}) {
+  const intervalMs = Number.isFinite(opts.intervalMs) ? opts.intervalMs : HEARTBEAT_INTERVAL_MS;
+  const setTimer =
+    typeof opts.setTimer === "function" ? opts.setTimer : (fn, ms) => setInterval(fn, ms);
+  const clearTimer =
+    typeof opts.clearTimer === "function" ? opts.clearTimer : (h) => clearInterval(h);
+  const onTick = typeof opts.onTick === "function" ? opts.onTick : () => {};
+  const active = new Set(); // heartbeat を出す session_id 集合 (turn 稼働中のみ非空)。
+  let handle = null; // 単一 timer ハンドル (null = 停止中)。
+
+  function tick() {
+    // active の snapshot を回す (onTick が active を書き換えても走査を壊さない)。
+    for (const sessionId of [...active]) {
+      try {
+        onTick(sessionId);
+      } catch {
+        /* fail-open: heartbeat 発行失敗は opencode を壊さない (timer は生かす) */
+      }
+    }
+  }
+  function ensureTimer() {
+    if (handle === null && active.size > 0) {
+      handle = setTimer(tick, intervalMs);
+      // リーク防止: heartbeat timer は opencode プロセスの exit を妨げない。
+      if (handle && typeof handle.unref === "function") handle.unref();
+    }
+  }
+  function maybeStop() {
+    if (handle !== null && active.size === 0) {
+      clearTimer(handle); // turn 全停止で timer を確実に clear (リーク防止)。
+      handle = null;
+    }
+  }
+  function start(sessionId) {
+    if (typeof sessionId !== "string" || sessionId.length === 0) return;
+    active.add(sessionId);
+    ensureTimer(); // 空→非空でのみ張る (二重化防止)。
+  }
+  function stop(sessionId) {
+    active.delete(sessionId);
+    maybeStop();
+  }
+  // 発行済み NormalizedEvent 列を観測し turn ライフサイクルを heartbeat の on/off へ写す。
+  // command.completed/tool.completed 等は {turn.started,turn.completed,error} に含まれず inert。
+  function observe(events) {
+    for (const ev of events) {
+      const t = ev && ev.event_type;
+      if (t === "turn.started") start(String(ev.session_id));
+      else if (t === "turn.completed" || t === "error") stop(String(ev.session_id));
+    }
+  }
+  return {
+    start,
+    stop,
+    observe,
+    activeCount: () => active.size,
+    running: () => handle !== null,
+  };
+}
+
 /**
  * opencode plugin factory (**default 単独 export**)。
  * 契約: `async ({ project, client, $, directory, worktree }) => ({ event, "tool.execute.before", "tool.execute.after" })`。
@@ -525,7 +629,8 @@ function createDelivery(config, opts = {}) {
  * する (実測: 数値 `export const RING_CAP` があるとファイルごと捨てられ、hook が一切登録されない)。
  * よって本 plugin は **default 関数ただ 1 つだけを export** し、pure helpers/定数 (uuidv7 /
  * createAdapterState / mapEvent / mapToolBefore / mapToolAfter / mapCaptureLine / resolveConfig /
- * createDelivery / createDiagnostics / safeMap / RING_CAP / MAX_RETRY) は **この default 関数のプロパティ**として付与する
+ * createDelivery / createDiagnostics / safeMap / createHeartbeat / makeHeartbeatEvent /
+ * RING_CAP / MAX_RETRY / HEARTBEAT_INTERVAL_MS) は **この default 関数のプロパティ**として付与する
  * (末尾)。named export は使わない (ローダが factory として誤呼出し + 非関数で poison するため)。
  * 公式 docs の named-export 例と実挙動は乖離しており、実挙動が勝つ (T1 > T3・README §8)。
  * INV-OPENCODE-ADAPTER-LOADER-SAFE が「namespace は default 単独・かつ関数」を回帰固定する。
@@ -541,19 +646,33 @@ export default async function ActraDeckOpencodeAdapter() {
   const emit = (events) => {
     for (const ev of events) delivery.enqueue(ev);
   };
+  // turn 稼働中 heartbeat (issue #8)。tick で active な各 session へ heartbeat(process_alive:true) を
+  // enqueue する。emit は throw-free ゆえ onTick も throw-free (createHeartbeat の try/catch は保険)。
+  const heartbeat = createHeartbeat({
+    onTick: (sessionId) => {
+      emit([makeHeartbeatEvent(state, sessionId)]);
+    },
+  });
   return {
     // フックは enqueue のみ (配送を await しない = opencode をブロックしない fail-open)。
     // 写像は safeMap で包み、throw を diag へ計上して空配列に縮退する (fail-open 維持 + 可観測)。
     // enqueue は throw-free (SEC-1: writeDebug が診断 write の throw を握るため noteDrop→enqueue は
     // 決して throw しない)。ゆえに emit も throw-free で opencode を壊さない (fail-open 契約)。
+    // 各フック後に heartbeat.observe(発行済みイベント) で turn ライフサイクルを heartbeat の on/off へ反映。
     event: async ({ event }) => {
-      emit(safeMap("event", () => mapEvent(event, state), diag));
+      const evs = safeMap("event", () => mapEvent(event, state), diag);
+      emit(evs);
+      heartbeat.observe(evs); // turn.started で開始 / turn.completed・error で停止。
     },
     "tool.execute.before": async (input, output) => {
-      emit(safeMap("tool.before", () => mapToolBefore(input, output, state), diag));
+      const evs = safeMap("tool.before", () => mapToolBefore(input, output, state), diag);
+      emit(evs);
+      heartbeat.observe(evs); // command/tool.started は inert (lifecycle 非該当)。
     },
     "tool.execute.after": async (input, output) => {
-      emit(safeMap("tool.after", () => mapToolAfter(input, output, state), diag));
+      const evs = safeMap("tool.after", () => mapToolAfter(input, output, state), diag);
+      emit(evs);
+      heartbeat.observe(evs); // command/tool.completed は inert (turn.completed とは別)。
     },
   };
 }
@@ -573,5 +692,8 @@ ActraDeckOpencodeAdapter.resolveConfig = resolveConfig;
 ActraDeckOpencodeAdapter.createDelivery = createDelivery;
 ActraDeckOpencodeAdapter.createDiagnostics = createDiagnostics; // TDA-4b (fail-open 可観測性)
 ActraDeckOpencodeAdapter.safeMap = safeMap; // TDA-4b (写像 throw の計上ラッパ)
+ActraDeckOpencodeAdapter.createHeartbeat = createHeartbeat; // issue #8 (turn 稼働中 heartbeat スケジューラ)
+ActraDeckOpencodeAdapter.makeHeartbeatEvent = makeHeartbeatEvent; // issue #8 (heartbeat event 単一出所)
 ActraDeckOpencodeAdapter.RING_CAP = RING_CAP;
 ActraDeckOpencodeAdapter.MAX_RETRY = MAX_RETRY;
+ActraDeckOpencodeAdapter.HEARTBEAT_INTERVAL_MS = HEARTBEAT_INTERVAL_MS; // issue #8 (20s < GAP_WARN_MS 60s)

@@ -81,8 +81,23 @@ type AdapterFactory = ((ctx?: unknown) => Promise<Record<string, unknown>>) & {
     fn: () => Record<string, unknown>[],
     diag: Diagnostics,
   ) => Record<string, unknown>[];
+  // issue #8: turn 稼働中 heartbeat (ADR 019f4cdb slice③)。
+  makeHeartbeatEvent: (state: unknown, sessionId: string) => Record<string, unknown>;
+  createHeartbeat: (opts?: {
+    intervalMs?: number;
+    setTimer?: (fn: () => void, ms: number) => { unref?: () => void } | number;
+    clearTimer?: (h: unknown) => void;
+    onTick?: (sessionId: string) => void;
+  }) => {
+    start: (sessionId: string) => void;
+    stop: (sessionId: string) => void;
+    observe: (events: Record<string, unknown>[]) => void;
+    activeCount: () => number;
+    running: () => boolean;
+  };
   RING_CAP: number;
   MAX_RETRY: number;
+  HEARTBEAT_INTERVAL_MS: number;
 };
 
 type Diagnostics = {
@@ -665,6 +680,200 @@ describe("INV-OPENCODE-ADAPTER-*: opencode plugin adapter (ADR 019f3c3b D8 / R1 
       }).not.toThrow();
       // 診断 write が失敗しても drop 計数は保たれる (best-effort write・カウンタは先に更新)。
       expect(d.dropped()).toBe(2);
+    });
+  });
+
+  // ── issue #8: turn 稼働中 heartbeat (ADR 019f4cdb slice③) ─────────────────
+  // turn 実行中のみ周期 heartbeat(process_alive:true) を発行する。event 形状 (makeHeartbeatEvent) と
+  // スケジューリング (createHeartbeat・turn.started で開始 / turn.completed・error で停止・単一 timer・
+  // unref・fail-open) を fixture 駆動 + 注入 timer で決定的に検証する。heartbeat は timer 駆動ゆえ
+  // mapCaptureLine の写像 histogram (既知 10 種) には現れない (QA-3 は不変・純 additive)。
+  const MAIN_SESSION = "ses_0c3d3fa12ffeJaaqMOZunsK58h";
+
+  describe("issue #8: turn 稼働中 heartbeat", () => {
+    it("HEARTBEAT_INTERVAL_MS は 20s で cockpit GAP_WARN_MS(60s) を確実に下回る", () => {
+      expect(adapter.HEARTBEAT_INTERVAL_MS).toBe(20_000);
+      // 60_000 は webui GAP_WARN_MS の **意図的 mirror** — import で機械強制せず (dep 逆流回避)、
+      // 変更時は apps/webui/src/ui/audit-coverage-display.ts:26 と同期すること (双方向 mirror)。
+      expect(adapter.HEARTBEAT_INTERVAL_MS).toBeLessThan(60_000);
+    });
+
+    it("makeHeartbeatEvent が heartbeat/process_alive:true の正規化イベントを産む (contract+payload 通過・state 省略)", () => {
+      const state = adapter.createAdapterState();
+      const hb = adapter.makeHeartbeatEvent(state, "ses_hb_probe");
+      expect(hb.event_type).toBe("heartbeat");
+      expect(hb.provider).toBe("opencode");
+      expect(hb.source).toBe("external");
+      expect(hb.session_id).toBe("ses_hb_probe");
+      expect(isUuidV7(String(hb.event_id))).toBe(true);
+      // 契約: heartbeat 等の状態を持たないイベントは state 省略可 (event.ts:109)。
+      expect(hb.state).toBeUndefined();
+      const payload = hb.payload as Record<string, unknown>;
+      expect(payload.kind).toBe("heartbeat");
+      expect(payload.process_alive).toBe(true);
+      // QA-1: exact-key pin (tool/error payload の precedent と対称)。動的 field 混入を falsifiable に。
+      expect(Object.keys(payload).sort()).toEqual(["kind", "process_alive"]);
+      expect(EventPayload.safeParse(payload).success).toBe(true);
+      const res = safeParseEvent(hb);
+      if (!res.success) throw new Error(`heartbeat failed parseEvent: ${res.error.message}`);
+      // 3 次元規則 (provider=opencode / source=external / event_type=heartbeat) を満たす。
+      expect(isKnownProvider(String(hb.provider))).toBe(false);
+      expect(ALL_EVENT_TYPES).toContain(hb.event_type);
+    });
+
+    it("fixture 駆動: turn 開始→heartbeat N 発→turn 終了→heartbeat 停止 (注入 timer・単一・unref)", () => {
+      // 注入 timer: tick 関数を捕捉し fake handle(unref 記録) を返す。手動で tick を撃つ (決定的)。
+      let capturedTick: (() => void) | null = null;
+      let setCount = 0;
+      let clearCount = 0;
+      let unrefCount = 0;
+      const emitted: Record<string, unknown>[] = [];
+      const emitState = adapter.createAdapterState();
+      const hbm = adapter.createHeartbeat({
+        setTimer: (fn) => {
+          capturedTick = fn;
+          setCount += 1;
+          return {
+            unref: () => {
+              unrefCount += 1;
+            },
+          };
+        },
+        clearTimer: () => {
+          clearCount += 1;
+          capturedTick = null; // clear 後は tick が発火しないことを模す。
+        },
+        onTick: (sessionId) => {
+          emitted.push(adapter.makeHeartbeatEvent(emitState, sessionId));
+        },
+      });
+
+      // 初期: 停止中 (turn 稼働中でないので heartbeat は出ない)。
+      expect(hbm.running()).toBe(false);
+      expect(hbm.activeCount()).toBe(0);
+
+      // REAL fixture を capture 順に写像し MAIN_SESSION の turn ライフサイクルを取り出す。
+      const mapState = adapter.createAdapterState();
+      const mainEvents: Record<string, unknown>[] = [];
+      for (const line of loadFixture()) {
+        for (const ev of adapter.mapCaptureLine(line, mapState)) {
+          if (ev.session_id === MAIN_SESSION) mainEvents.push(ev);
+        }
+      }
+      const turnStarted = mainEvents.find((e) => e.event_type === "turn.started");
+      const turnCompleted = mainEvents.find((e) => e.event_type === "turn.completed");
+      expect(turnStarted, "fixture に MAIN の turn.started がある").toBeTruthy();
+      expect(turnCompleted, "fixture に MAIN の turn.completed がある").toBeTruthy();
+
+      // turn.started を観測 → 単一 timer 起動・unref・active 1。
+      hbm.observe([turnStarted!]);
+      expect(hbm.running()).toBe(true);
+      expect(hbm.activeCount()).toBe(1);
+      expect(setCount).toBe(1);
+      expect(unrefCount).toBe(1);
+      expect(capturedTick).toBeTypeOf("function");
+
+      // turn 稼働中: tick を N 発撃つ → MAIN へ heartbeat N 発 (全て契約通過)。
+      const N = 3;
+      for (let i = 0; i < N; i++) capturedTick!();
+      expect(emitted.length).toBe(N);
+      for (const hb of emitted) {
+        expect(hb.event_type).toBe("heartbeat");
+        expect(hb.session_id).toBe(MAIN_SESSION);
+        expect((hb.payload as Record<string, unknown>).process_alive).toBe(true);
+        expect(safeParseEvent(hb).success).toBe(true);
+      }
+
+      // 割込みで turn.started が重なっても timer は再張されない (二重化防止)。
+      hbm.observe([turnStarted!]);
+      expect(setCount).toBe(1);
+      expect(hbm.activeCount()).toBe(1);
+
+      // turn.completed を観測 → 停止・timer clear・active 0。
+      hbm.observe([turnCompleted!]);
+      expect(hbm.running()).toBe(false);
+      expect(hbm.activeCount()).toBe(0);
+      expect(clearCount).toBe(1);
+
+      // 停止後: これ以上 heartbeat は増えない (active 空)。
+      const before = emitted.length;
+      hbm.observe([turnCompleted!]); // 冪等 (既に stop 済み)
+      expect(emitted.length).toBe(before);
+      expect(hbm.running()).toBe(false);
+    });
+
+    it("error 観測で heartbeat が停止する (turn 終了/セッション終了/エラーで停止)", () => {
+      let clearCount = 0;
+      const hbm = adapter.createHeartbeat({
+        setTimer: () => ({ unref() {} }),
+        clearTimer: () => {
+          clearCount += 1;
+        },
+        onTick: () => {},
+      });
+      hbm.start("ses_err");
+      expect(hbm.running()).toBe(true);
+      hbm.observe([{ event_type: "error", session_id: "ses_err" }]);
+      expect(hbm.running()).toBe(false);
+      expect(clearCount).toBe(1);
+    });
+
+    it("多重 session turn: timer は単一・tick で各 active session へ 1 発ずつ・片方完了で他方継続", () => {
+      let captured: (() => void) | null = null;
+      let setCount = 0;
+      const ticks: string[] = [];
+      const hbm = adapter.createHeartbeat({
+        setTimer: (fn) => {
+          captured = fn;
+          setCount += 1;
+          return { unref() {} };
+        },
+        clearTimer: () => {
+          captured = null;
+        },
+        onTick: (sid) => ticks.push(sid),
+      });
+      hbm.observe([
+        { event_type: "turn.started", session_id: "ses_A" },
+        { event_type: "turn.started", session_id: "ses_B" },
+      ]);
+      expect(setCount).toBe(1); // 単一 timer (二重化防止)
+      expect(hbm.activeCount()).toBe(2);
+      captured!();
+      expect(ticks.slice().sort()).toEqual(["ses_A", "ses_B"]);
+      // A だけ完了 → B は継続 (timer 生存)。
+      hbm.observe([{ event_type: "turn.completed", session_id: "ses_A" }]);
+      expect(hbm.running()).toBe(true);
+      expect(hbm.activeCount()).toBe(1);
+      ticks.length = 0;
+      captured!();
+      expect(ticks).toEqual(["ses_B"]);
+    });
+
+    it("fail-open: onTick が throw しても tick は throw しない (opencode を壊さない)", () => {
+      let captured: (() => void) | null = null;
+      const hbm = adapter.createHeartbeat({
+        setTimer: (fn) => {
+          captured = fn;
+          return { unref() {} };
+        },
+        clearTimer: () => {},
+        onTick: () => {
+          throw new Error("emit boom (閉じた delivery を模す)");
+        },
+      });
+      hbm.start("ses_x");
+      expect(captured).toBeTypeOf("function");
+      // tick 内 try/catch が onTick の throw を握る → timer callback は throw しない (fail-open)。
+      expect(() => captured!()).not.toThrow();
+    });
+
+    it("heartbeat は写像 histogram を汚さない (mapCaptureLine は heartbeat を産まない・QA-3 不変)", () => {
+      const produced = new Set(
+        mapAll(adapter.createAdapterState()).map((e) => String(e.event_type)),
+      );
+      // heartbeat は timer 駆動で写像経路に載らないため、fixture 写像には決して現れない。
+      expect(produced.has("heartbeat")).toBe(false);
     });
   });
 

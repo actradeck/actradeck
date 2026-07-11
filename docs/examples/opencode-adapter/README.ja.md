@@ -98,18 +98,18 @@ export ACTRADECK_INGEST_URL=http://127.0.0.1:55410   # 省略時この既定値
 opencode の観測面 (plugin フック) → ActraDeck `NormalizedEvent`。写像ロジックの単一出所は
 `adapter.js` の pure 関数 (`mapEvent` / `mapToolBefore` / `mapToolAfter`) です。
 
-| opencode 入力                                | → NormalizedEvent (`event_type` / `state`)                | 備考 |
-| -------------------------------------------- | --------------------------------------------------------- | ---- |
-| `session.created`                            | `session.started` / `starting`                            | `cwd = info.directory` |
-| `message.updated` role=user (初回)           | `turn.started` / `running.model_wait`                     | `turn_id = messageID`・再発火は無視 |
-| `message.part.delta` (field=text)            | `agent.message.delta` / `running.model_streaming`         | 各 delta は独立イベント。配送は**投入順に batch 配列化**（下記・per-messageID 統合はしない） |
-| `tool.execute.before` (bash)                 | `command.started` / `running.command_executing`           | `request_id = tu:<callID>` |
-| `tool.execute.after` (bash)                  | `command.completed` / `running.model_wait`                | `exit_code = metadata.exit`・**非 0 も completed**・**stdout は非搭載**（源流最小化・§4） |
-| `tool.execute.before` (bash 以外)            | `tool.started` / `running.tool_preparing`                 | read/edit/write/grep/glob/webfetch 等。**tool 引数 (`args`) を最小化せず転送**（§4・QA-5） |
-| `tool.execute.after` (bash 以外)             | `tool.completed` / `running.model_wait`                   | **tool 出力は非搭載**（源流最小化・§4） |
-| `session.diff`                               | `diff.updated`                                            | **counts のみ**・生 diff は送らない |
-| `session.error`                              | `error`                                                  | payload は `{kind, message, retryable}` のみ (`kind = "error"`・下記 §5) |
-| `session.idle`                               | `turn.completed` / `idle`                                 | **session.ended を捏造しない** (ADR D8) |
+| opencode 入力                      | → NormalizedEvent (`event_type` / `state`)        | 備考                                                                                         |
+| ---------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `session.created`                  | `session.started` / `starting`                    | `cwd = info.directory`                                                                       |
+| `message.updated` role=user (初回) | `turn.started` / `running.model_wait`             | `turn_id = messageID`・再発火は無視                                                          |
+| `message.part.delta` (field=text)  | `agent.message.delta` / `running.model_streaming` | 各 delta は独立イベント。配送は**投入順に batch 配列化**（下記・per-messageID 統合はしない） |
+| `tool.execute.before` (bash)       | `command.started` / `running.command_executing`   | `request_id = tu:<callID>`                                                                   |
+| `tool.execute.after` (bash)        | `command.completed` / `running.model_wait`        | `exit_code = metadata.exit`・**非 0 も completed**・**stdout は非搭載**（源流最小化・§4）    |
+| `tool.execute.before` (bash 以外)  | `tool.started` / `running.tool_preparing`         | read/edit/write/grep/glob/webfetch 等。**tool 引数 (`args`) を最小化せず転送**（§4・QA-5）   |
+| `tool.execute.after` (bash 以外)   | `tool.completed` / `running.model_wait`           | **tool 出力は非搭載**（源流最小化・§4）                                                      |
+| `session.diff`                     | `diff.updated`                                    | **counts のみ**・生 diff は送らない                                                          |
+| `session.error`                    | `error`                                           | payload は `{kind, message, retryable}` のみ (`kind = "error"`・下記 §5)                     |
+| `session.idle`                     | `turn.completed` / `idle`                         | **session.ended を捏造しない** (ADR D8)                                                      |
 
 **意図的 drop** (写像しない): `session.status` / `session.updated` / `message.updated` role=assistant
 (metrics harvest) / `message.part.updated` の tool 部分 (hook が authoritative・callID 重複) /
@@ -123,6 +123,33 @@ text・step-start・step-finish part / `catalog.updated` / `integration.updated`
 - **at-least-once + 冪等**: 再送は同一 `event_id` (UUIDv7) を使い、backend が二重挿入を吸収します。
 - **session 毎 monotonic timestamp floor**: 再送・並び替え・時刻源の巻き戻りがあっても、同一
   session の発行 timestamp を非減少に保ちます。
+
+### turn 稼働中の heartbeat (issue #8)
+
+turn 実行中は adapter が周期的に **`heartbeat` イベント** (`payload: {process_alive: true}`) を
+発行し、cockpit の liveness 合成に process 生存シグナルを供給します。これにより **稼働中の turn を
+stalled/idle と誤断定しません**。
+
+- **turn 稼働中のみ**: heartbeat は `turn.started` で開始し `turn.completed` / `error` で停止します
+  (opencode は session 終端シグナルを持たないため、turn を終える `session.idle → turn.completed(idle)`
+  でも停止します)。turn が無い間は一切発行しません。
+- **間隔 = 20s**: cockpit の `GAP_WARN_MS` (60s = 稼働 provider が受信ゼロで「監査が blind」と注意喚起
+  される閾値) を **確実に下回る** 3 倍マージンです。単発の fail-open drop / retry 遅延があっても
+  60s 窓内に最低 1 発が着地します。
+- **fail-open / 非漏洩**: heartbeat は `process_alive: true` のみを載せます (生テキストなし)。発行失敗が
+  opencode を妨げることはありません。timer は `unref` され (opencode プロセスの exit を妨げない)、turn 停止で
+  確実に clear されます。並行/割込みの turn が重なっても timer は **単一** です (二重化しません)。
+- **死活を断定しません**: adapter は `process_alive: true` **のみ**を発行し、`process_alive: false` は
+  **一切発行しません**。`session.ended` を捏造しない (§4) のと合わせ、停止は依然として断定されません。
+  heartbeat は正の liveness を供給するのみで、終端の主張はしません。
+- 本イベントは **timer 駆動** ゆえ、上の写像表には現れません (どの opencode 入力の写像でもありません)。
+- **liveness 合成の process/event lane にのみ寄与し、model-delta lane は不変です**: heartbeat は
+  プロセス生存とイベント到着を示すだけで、model 進捗シグナルは進めません。したがって model が delta を
+  ゼロしか出さない真の stall は依然として surface します (heartbeat が覆い隠すことはできません)。
+- **gemini adapter が同等物を持たない理由**: gemini example adapter は短命な per-event hook 呼び出しとして
+  動作し (timer を宿す長寿命プロセスが無い) ため、turn-active heartbeat を構造的に持てず、代わりに gemini の
+  実 `SessionEnd` 終端信号に依拠します。これは意図的な線引きです (opencode は session 終端信号を持たない→
+  heartbeat / gemini は持つ→heartbeat 不要)。
 
 ---
 
@@ -146,7 +173,9 @@ text・step-start・step-finish part / `catalog.updated` / `integration.updated`
 - **観測の限界 (QA-7)**: opencode は **session 終端シグナルを持たない**ため adapter は `session.ended`
   を **一切発行しません** (§3 の `session.idle` → `turn.completed(idle)`)。cockpit の「終わったか」判断は
   `turn.completed(idle)` の settling 信号 + liveness 合成 (process/event/stdout heartbeat) が担い、
-  停止は断定されません。
+  停止は断定されません。turn 稼働中の heartbeat (§3) は **`process_alive: true` のみ**を供給し
+  **`process_alive: false` は一切発行しない**ため、稼働中の turn の正の liveness を強めるだけで、
+  死活を断定することはありません。
 - 信頼境界は **single-operator / loopback / `INGEST_TOKEN` の内側**です。この境界を越えて
   (別マシン・共有ネットワーク) 使う運用へ変えるなら、client 側 redaction を別途足してください。
 
