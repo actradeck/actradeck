@@ -136,14 +136,22 @@ verified path (requires the GitHub CLI):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh -o install.sh
-ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.4.0 sh install.sh
+ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.5.1 sh install.sh
 ```
 
-> **Coming in v0.5 — a bootstrap CLI on npm.** A thin, dependency-free `actradeck` package
-> (no install hooks; `npm install` changes nothing) will do the same verify-and-fetch as the
-> script above via `npx actradeck@latest install`, plus `actradeck doctor` / `up` / `version`.
-> It is **not published yet** — until v0.5, use the `curl | sh` installer or the manual clone
-> above. See [ADR 0013 §Phase 3](docs/adr/0013-release-signing-and-distribution.md#phase-3--npm-bootstrap-cli).
+Or bootstrap via npm — a thin, dependency-free [`actradeck`](https://www.npmjs.com/package/actradeck)
+package (no install hooks; `npm install` changes nothing; published with provenance via
+npm Trusted Publishing from this repository's release workflow):
+
+```bash
+npx actradeck@latest doctor     # diagnose prerequisites (git / Node / pnpm / docker)
+npx actradeck@latest install    # verify-and-fetch the latest signed release, then hand off to quickstart
+```
+
+> `install` is the same fail-closed verified path as above (sha256 + provenance; needs the
+> GitHub CLI) and supports `--dry-run`. `actradeck up` prints the Docker cockpit command;
+> `actradeck version` compares your CLI against the latest release. See
+> [ADR 0013 §Phase 3](docs/adr/0013-release-signing-and-distribution.md#phase-3--npm-bootstrap-cli).
 
 Already cloned, or prefer to do it by hand (needs Node 22.16+ and pnpm — **no Docker**):
 
@@ -202,7 +210,8 @@ troubleshooting). The precision/limits of Attach Mode are in
 
 If you'd rather not install Node/pnpm, the **cockpit** (backend + webui + embedded
 database) runs from a single image — no external database. A **signed prebuilt image**
-is published to GHCR (since v0.4.0; tags `latest` and `0.4.0`):
+is published to GHCR (since v0.4.0, multi-arch `linux/amd64` + `linux/arm64` since
+v0.5.0; tags `latest` and `0.5.1`):
 
 ```bash
 docker run --rm -p 127.0.0.1:55400:55400 -v actradeck_pgdata:/data \
