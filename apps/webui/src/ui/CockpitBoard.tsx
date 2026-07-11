@@ -21,9 +21,11 @@ import { useLocale } from "./LocaleProvider";
 import { NotificationToggle } from "./NotificationToggle";
 import { useNotifications } from "./use-notifications";
 import { SessionDetailView } from "./SessionDetail";
+import { AuditCoveragePanel } from "./AuditCoveragePanel";
 import { SessionList } from "./SessionList";
 import { SessionReplayView } from "./SessionReplay";
 import { ThemeToggle } from "./ThemeToggle";
+import { useAuditCoverage } from "./use-audit-coverage";
 import { useDaemons } from "./use-daemons";
 import { useReadiness } from "./use-readiness";
 import { useSafetyDemo } from "./use-safety-demo";
@@ -122,6 +124,13 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
   // daemonIds.length を count フォールバックに使う (どちらか取れた方で connected gate を満たす)。
   const { readiness: agentReadiness } = useReadiness({
     enabled: boardEmpty,
+    refreshKey: connectedCount,
+  });
+  // ADR 019f4cdb 後続 UI: board 表示中は per-provider 監査カバレッジ (最終受信 + gap 候補) を pull する。
+  // 「欠落を検知できない audit は弱い」— 稼働 provider の受信 gap を可視化する。read-only 集約 endpoint
+  // (/realtime/audit/coverage・BFF 経由 Bearer)。connected 数変化で nudge (adapter 増減を早めに反映)。
+  const { coverage: auditCoverage } = useAuditCoverage({
+    enabled: topView === "board",
     refreshKey: connectedCount,
   });
   // ADR 019f22a7 P1: first-run セーフティデモ。空状態 CTA から BFF 経由で使い捨てデモを起動し、返った
@@ -343,6 +352,10 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
               </Button>
             </div>
           </section>
+
+          {/* ADR 019f4cdb 後続 UI: board 表示中のみ per-provider 監査カバレッジを compact に出す。
+              panel は provider ゼロ / 未取得なら自ら null を返す (架空の枠を作らない)。 */}
+          {topView === "board" ? <AuditCoveragePanel report={auditCoverage} /> : null}
 
           {topView === "inbox" ? (
             <ApprovalInbox

@@ -100,6 +100,8 @@ export {
   projectProviderCoverageRow,
   computeProviderCoverage,
   buildCoverageReport,
+  parseProviderCoverageWire,
+  parseAuditCoverageReportWire,
 } from "./audit-coverage.js";
 export type {
   ProviderCoverageInput,

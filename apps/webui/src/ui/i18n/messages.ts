@@ -213,6 +213,17 @@ const ja = {
   "codexSpawn.error.spawn_failed": "Codex の起動に失敗しました。",
   "codexSpawn.error.generic": "起動に失敗しました。",
 
+  // ── Audit coverage パネル (ADR 019f4cdb 後続 UI・per-provider 最終受信 + gap 検知) ─────────
+  // 「監査できていない時間」を可視化する。相対時刻は server の generated_at 基準 (client clock 非依存)。
+  // {provider} は event-model 正準 parse で slug 検証済み・{age} は language-neutral な数値+単位。
+  "audit.coverage.title": "監査カバレッジ",
+  "audit.coverage.sessions": "稼働 {count}",
+  "audit.coverage.age": "{age}前に受信",
+  "audit.coverage.noEvents": "受信なし",
+  // gap severity ラベル (色に依存せず語で段階を区別・a11y)。warn=60s〜 / critical=300s〜。
+  "audit.coverage.status.warn": "遅延",
+  "audit.coverage.status.critical": "停止疑い",
+
   // ── first-run セーフティデモ (ADR 019f22a7 P1・空状態 CTA) ─────────────────────
   // 「止める・残さない・証明できる」を静的✓で断定せず、使い捨て30秒デモで実証する capability として提示する。
   "safetyDemo.title": "この端末で守られています",
@@ -929,6 +940,15 @@ const en: Record<MessageKey, string> = {
   "codexSpawn.error.spawn_cap_reached": "Too many concurrent Managed Codex sessions.",
   "codexSpawn.error.spawn_failed": "Failed to launch Codex.",
   "codexSpawn.error.generic": "Launch failed.",
+
+  // ── Audit coverage panel (ADR 019f4cdb follow-up; per-provider last received + gap detection) ──
+  "audit.coverage.title": "Audit coverage",
+  "audit.coverage.sessions": "{count} active",
+  "audit.coverage.age": "{age} ago",
+  "audit.coverage.noEvents": "no events",
+  "audit.coverage.status.warn": "delayed",
+  // TDA-6: hedged 形 ("stalled?"・既存 liveness 慣行 "STALLED?" と整合)。停止を断定しない。
+  "audit.coverage.status.critical": "stalled?",
 
   // ── first-run safety demo (ADR 019f22a7 P1; empty-state CTA) ──
   "safetyDemo.title": "Protected on this machine",

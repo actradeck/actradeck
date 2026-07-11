@@ -26,6 +26,13 @@ export default defineConfig({
         "src/ui/liveness-display.ts",
         "src/ui/approval-display.ts",
         "src/ui/wall-display.ts",
+        // ADR 019f4cdb 後続 UI: 監査カバレッジの純表示派生 (gap severity 分類 / 相対受信経過)。
+        //   React 非依存の純ロジックゆえ gate 対象 (liveness-display と同カテゴリ)。
+        "src/ui/audit-coverage-display.ts",
+        // QA-1≡TDA-4: 監査カバレッジ pull フックの fail-safe 分岐 (unmount cleanup / !ok・parse=undefined
+        //   の last-known 保持 / enabled トグル) を無検証化させないため gate に含める
+        //   (use-audit-coverage.test.tsx が jsdom+act で駆動)。per-file floor は新設せず global のみ。
+        "src/ui/use-audit-coverage.ts",
         // QA-1: セーフティデモ起動フックの runtime (二度押し抑止 / NO-RAW parse 統合 / error 縮退 /
         //   TDA-2 出現 watchdog) を無検証化させないため gate に含める (safety-demo-hook.test.tsx が駆動)。
         "src/ui/use-safety-demo.ts",

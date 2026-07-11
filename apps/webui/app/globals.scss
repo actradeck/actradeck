@@ -714,6 +714,88 @@ textarea {
   color: var(--ad-status-danger-fg, var(--ad-status-warn-fg));
 }
 
+// ADR 019f4cdb 後続 UI: Audit coverage パネル (board overview 直下・compact な per-provider gap 監視)。
+// 「監査できていない時間」を 1 行で読める密度に保つ。gap severity は色 + 語ラベルの二重符号 (a11y)。
+.ad-coverage {
+  display: grid;
+  gap: 0.375rem;
+  margin: 0 0 0.75rem;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: 0.5rem;
+  background: var(--ad-bg-subtle, transparent);
+}
+
+.ad-coverage__title {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ad-fg-muted);
+}
+
+.ad-coverage__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.ad-coverage__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--ad-fg);
+}
+
+.ad-coverage__provider {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ad-coverage__sessions {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
+.ad-coverage__age {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--ad-fg-muted);
+}
+
+// gap severity: warn(≥60s)=amber / critical(≥300s)=red。ok/idle は既定色 (警告しない)。
+.ad-coverage__row[data-severity="warn"] .ad-coverage__age {
+  color: var(--ad-status-warn-fg);
+  font-weight: 600;
+}
+.ad-coverage__row[data-severity="critical"] .ad-coverage__age {
+  color: var(--ad-status-danger-fg);
+  font-weight: 600;
+}
+
+.ad-coverage__status {
+  flex: 0 0 auto;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+
+  .ad-coverage__row[data-severity="warn"] & {
+    color: var(--ad-status-warn-fg);
+    background: var(--ad-status-warn-bg);
+  }
+  .ad-coverage__row[data-severity="critical"] & {
+    color: var(--ad-status-danger-fg);
+    background: var(--ad-status-danger-bg);
+  }
+}
+
 // ADR 019f4206 A段: Codex Managed spawn フォーム (空状態 readiness パネル内)。
 .ad-spawn {
   display: grid;

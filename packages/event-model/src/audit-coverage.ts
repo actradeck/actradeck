@@ -169,3 +169,78 @@ export function buildCoverageReport(
   providers.sort((a, b) => (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0));
   return { generated_at: generatedAt.toISOString(), providers };
 }
+
+/**
+ * ISO8601 の形 (`toISOString()` 互換: `YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`)。lenient な `Date.parse`
+ * 単独だと "2026" / "next friday" のような非 ISO 文字列も通り、万一の生パス/自由文字列を wire で
+ * surface させうる。形の妥当性まで確認して非 ISO 文字列を **wire 受信境界で落とす** (NO-RAW 補強)。
+ */
+const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** ISO 形かつ実在日時 (JS Date 有効域内) の文字列のみ通す。それ以外は null (無受信と対称・NO-RAW)。 */
+function asIsoOrNull(v: unknown): string | null {
+  if (typeof v !== "string" || !ISO_8601_RE.test(v)) return null;
+  const ms = Date.parse(v);
+  if (!Number.isFinite(ms) || Math.abs(ms) > MAX_JS_DATE_MS) return null;
+  return v;
+}
+
+/**
+ * gap ms を「非負整数 or null」へ強制。null/非数は null (= idle・**誤警報しない**安全側へ縮退)。
+ * 負値 (skew/破損) は 0 へ clamp (buildCoverageReport の未来 skew clamp と対称)。
+ */
+function asNonNegIntOrNull(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.trunc(n));
+}
+
+/**
+ * wire の per-provider row (`AuditProviderCoverage` DTO・endpoint 応答由来・untrusted 扱い) を
+ * **検証射影**する正準パーサ。`projectProviderCoverageRow` (SQL 生行→入力) と対をなす受信側で、
+ * webui parse が共有する (T1 単一出所・security-gate-reuse-canonical-parser)。
+ *
+ *  - provider は `PROVIDER_SLUG_RE` 再ゲート、非 slug は **row ごと undefined** (生パス/secret 様を drop)。
+ *  - 時刻は `asIsoOrNull` で **ISO 形のみ** 通す (非 ISO 文字列を落とす・NO-RAW)。
+ *  - count は非負整数、gap は非負整数 or null へ強制。
+ *  - 既知 field のみ抽出し **余剰 field を構造的に落とす** (NO-RAW by construction)。非 throw。
+ */
+export function parseProviderCoverageWire(raw: unknown): AuditProviderCoverage | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const provider = raw.provider;
+  if (typeof provider !== "string" || !PROVIDER_SLUG_RE.test(provider)) return undefined;
+  return {
+    provider,
+    last_received_at: asIsoOrNull(raw.last_received_at),
+    last_event_timestamp: asIsoOrNull(raw.last_event_timestamp),
+    active_session_count: asNonNegInt(raw.active_session_count),
+    total_session_count: asNonNegInt(raw.total_session_count),
+    gap_candidate_ms: asNonNegIntOrNull(raw.gap_candidate_ms),
+  };
+}
+
+/**
+ * endpoint 応答 (`GET /realtime/audit/coverage`・untrusted 扱い) → `AuditCoverageReport` の
+ * **webui 側 単一エントリポイント**。agent-visibility の `parseAgentVisibilityWire` と同流儀:
+ * 既知 field のみ抽出・余剰 field を構造的に落とし・非妥当 row を drop・**非 throw**。
+ *
+ *  - `generated_at` は gap age の基準時刻ゆえ **必須** (ISO 形でなければ report 全体 undefined =
+ *    「未取得扱い」へ fail-safe。基準を欠いた相対時刻は誤描画になるため描画しない)。
+ *  - `providers` が配列でなければ空配列扱い (report は返すが 0 行)。各 row は `parseProviderCoverageWire`
+ *    に通し drop された非 slug row を除外、provider 昇順に整列 (endpoint と同順・決定的)。
+ */
+export function parseAuditCoverageReportWire(raw: unknown): AuditCoverageReport | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const generated_at = asIsoOrNull(raw.generated_at);
+  if (generated_at === null) return undefined;
+  const rawProviders = Array.isArray(raw.providers) ? raw.providers : [];
+  const providers: AuditProviderCoverage[] = [];
+  for (const row of rawProviders) {
+    const p = parseProviderCoverageWire(row);
+    if (p === undefined) continue;
+    providers.push(p);
+  }
+  providers.sort((a, b) => (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0));
+  return { generated_at, providers };
+}

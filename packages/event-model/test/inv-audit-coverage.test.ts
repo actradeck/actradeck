@@ -13,8 +13,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type AuditProviderCoverage,
   buildCoverageReport,
   computeProviderCoverage,
+  parseAuditCoverageReportWire,
+  parseProviderCoverageWire,
   projectProviderCoverageRow,
   type ProviderCoverageInput,
 } from "../src/index.js";
@@ -249,5 +252,212 @@ describe("buildCoverageReport — 単一エントリポイント", () => {
     }).not.toThrow();
     expect(report.providers[0].last_received_at).toBeNull();
     expect(report.providers[0].gap_candidate_ms).toBeNull();
+  });
+});
+
+/**
+ * (d) wire 受信検証 (webui parse 単一出所): `parseProviderCoverageWire` /
+ * `parseAuditCoverageReportWire` は endpoint 応答 (untrusted 扱い) を検証射影する。
+ * `parseAgentVisibilityWire` (INV-AGENT-VIS-WIRE) と同流儀の敵対 vector を pin する:
+ *  - 余剰 field を構造的に落とす (NO-RAW)。
+ *  - 非 slug provider を row ごと drop (生パス/secret 様を surface させない)。
+ *  - 非 ISO 時刻文字列を落とす・数値汚染を非負整数 / null へ縮退。
+ *  - generated_at 不正は report 全体 undefined (gap 基準を欠く → 未取得扱いへ fail-safe)。
+ */
+const GEN_ISO = new Date(GEN_MS).toISOString();
+const WIRE_ROW: AuditProviderCoverage = {
+  provider: "codex",
+  last_received_at: new Date(GEN_MS - 30 * MIN).toISOString(),
+  last_event_timestamp: new Date(GEN_MS - 30 * MIN).toISOString(),
+  active_session_count: 1,
+  total_session_count: 2,
+  gap_candidate_ms: 30 * MIN,
+};
+
+describe("parseProviderCoverageWire — (d) wire row 受信検証", () => {
+  it("正しい DTO row をそのまま射影する", () => {
+    expect(parseProviderCoverageWire({ ...WIRE_ROW })).toEqual(WIRE_ROW);
+  });
+
+  it("余剰 field (生パス/secret 様) を構造的に落とす (NO-RAW)", () => {
+    const parsed = parseProviderCoverageWire({
+      ...WIRE_ROW,
+      cwd: "/home/user/secret-project", // 漏れてはならない
+      token: "ghp_realtokenxxxxxxxxxxxxxxxxxxxxxxxxxx", // 漏れてはならない
+      payload: { command: "rm -rf /" },
+    });
+    expect(parsed).toEqual(WIRE_ROW);
+    expect(Object.keys(parsed ?? {}).sort()).toEqual([
+      "active_session_count",
+      "gap_candidate_ms",
+      "last_event_timestamp",
+      "last_received_at",
+      "provider",
+      "total_session_count",
+    ]);
+    const blob = JSON.stringify(parsed);
+    expect(blob).not.toContain("/home/user");
+    expect(blob).not.toContain("ghp_");
+    expect(blob).not.toContain("rm -rf");
+  });
+
+  it("非 slug provider は row ごと undefined (生パス/大文字/長文字列/空)", () => {
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, provider: "/home/user/leak" }),
+    ).toBeUndefined();
+    expect(parseProviderCoverageWire({ ...WIRE_ROW, provider: "Claude Code" })).toBeUndefined();
+    expect(parseProviderCoverageWire({ ...WIRE_ROW, provider: "a".repeat(33) })).toBeUndefined();
+    expect(parseProviderCoverageWire({ ...WIRE_ROW, provider: "" })).toBeUndefined();
+    expect(parseProviderCoverageWire(null)).toBeUndefined();
+    expect(parseProviderCoverageWire("codex")).toBeUndefined();
+    expect(parseProviderCoverageWire([WIRE_ROW])).toBeUndefined();
+  });
+
+  it("非 ISO 時刻文字列を null へ落とす (NO-RAW・自由文字列/生パスを surface させない)", () => {
+    const parsed = parseProviderCoverageWire({
+      ...WIRE_ROW,
+      last_received_at: "not-a-timestamp",
+      last_event_timestamp: "/var/log/leak.txt", // ISO でない → 落ちる
+    });
+    expect(parsed?.last_received_at).toBeNull();
+    expect(parsed?.last_event_timestamp).toBeNull();
+    // 実在しない日時 (ISO 形だが 13 月) も落ちる。
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, last_received_at: "2026-13-40T99:99:99Z" })
+        ?.last_received_at,
+    ).toBeNull();
+  });
+
+  it("数値汚染: count は非負整数へ、gap は非負整数 / null へ縮退 (誤警報しない安全側)", () => {
+    const parsed = parseProviderCoverageWire({
+      ...WIRE_ROW,
+      active_session_count: -5,
+      total_session_count: Number.NaN,
+      gap_candidate_ms: "not-a-number",
+    });
+    expect(parsed?.active_session_count).toBe(0);
+    expect(parsed?.total_session_count).toBe(0);
+    expect(parsed?.gap_candidate_ms).toBeNull(); // 非数 gap → idle 扱い (false positive を作らない)
+    // 負 gap は 0 へ clamp (未来 skew 対称)。null は null のまま。
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, gap_candidate_ms: -10 })?.gap_candidate_ms,
+    ).toBe(0);
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, gap_candidate_ms: null })?.gap_candidate_ms,
+    ).toBeNull();
+    // pg numeric 文字列 count も受ける。
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, active_session_count: "3" })?.active_session_count,
+    ).toBe(3);
+  });
+});
+
+describe("parseAuditCoverageReportWire — (d) wire report 受信検証", () => {
+  it("正しい report を射影し provider 昇順へ整列、非 slug row を除外する", () => {
+    const parsed = parseAuditCoverageReportWire({
+      generated_at: GEN_ISO,
+      providers: [
+        { ...WIRE_ROW, provider: "codex" },
+        { ...WIRE_ROW, provider: "/etc/passwd" }, // drop
+        { ...WIRE_ROW, provider: "claude_code" },
+      ],
+    });
+    expect(parsed?.generated_at).toBe(GEN_ISO);
+    expect(parsed?.providers.map((p) => p.provider)).toEqual(["claude_code", "codex"]);
+  });
+
+  it("generated_at 不正 (欠落/非 ISO/非文字列) は report 全体 undefined (未取得扱いへ fail-safe)", () => {
+    expect(parseAuditCoverageReportWire({ providers: [] })).toBeUndefined();
+    expect(
+      parseAuditCoverageReportWire({ generated_at: "yesterday", providers: [] }),
+    ).toBeUndefined();
+    expect(parseAuditCoverageReportWire({ generated_at: 12345, providers: [] })).toBeUndefined();
+    expect(parseAuditCoverageReportWire(null)).toBeUndefined();
+    expect(parseAuditCoverageReportWire("nope")).toBeUndefined();
+    expect(parseAuditCoverageReportWire([])).toBeUndefined();
+  });
+
+  it("providers 欠落/非配列は空配列扱い (report は返すが 0 行)", () => {
+    expect(parseAuditCoverageReportWire({ generated_at: GEN_ISO })).toEqual({
+      generated_at: GEN_ISO,
+      providers: [],
+    });
+    expect(
+      parseAuditCoverageReportWire({ generated_at: GEN_ISO, providers: "not-array" })?.providers,
+    ).toEqual([]);
+  });
+
+  it("report 全体に生パス/secret が現れない (NO-RAW・シリアライズ検査)", () => {
+    const blob = JSON.stringify(
+      parseAuditCoverageReportWire({
+        generated_at: GEN_ISO,
+        providers: [{ ...WIRE_ROW, cwd: "/home/user/secret", token: "ghp_leakmexxxxxxxxxx" }],
+        leaked_top: "/absolute/path/leak", // 余剰 top-level も落ちる
+      }),
+    );
+    expect(blob).not.toContain("/home/user/secret");
+    expect(blob).not.toContain("ghp_leakme");
+    expect(blob).not.toContain("leaked_top");
+    expect(blob).not.toContain("/absolute/path/leak");
+  });
+
+  it("SEC-1: __proto__ 汚染ペイロードで prototype を汚さず許可 6 field のみ出力する", () => {
+    // 生 JSON からの parse (spread でなく実 wire 経路)。__proto__ を持つ row + report。
+    const raw = JSON.parse(
+      '{"generated_at":"2026-04-02T12:00:00.000Z","__proto__":{"polluted":"top"},' +
+        '"providers":[{"provider":"claude_code","last_received_at":"2026-04-02T11:59:48.000Z",' +
+        '"last_event_timestamp":"2026-04-02T11:59:48.000Z","active_session_count":1,' +
+        '"total_session_count":1,"gap_candidate_ms":12000,"__proto__":{"x":1}}]}',
+    );
+    const parsed = parseAuditCoverageReportWire(raw);
+    // (a) Object.prototype は汚染されていない。
+    expect((Object.prototype as Record<string, unknown>).x).toBeUndefined();
+    expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
+    expect(({} as Record<string, unknown>).x).toBeUndefined();
+    // (b) 出力 row は許可 6 field のみ (汚染 key を surface させない)。
+    expect(parsed?.providers).toHaveLength(1);
+    expect(Object.keys(parsed?.providers[0] ?? {}).sort()).toEqual([
+      "active_session_count",
+      "gap_candidate_ms",
+      "last_event_timestamp",
+      "last_received_at",
+      "provider",
+      "total_session_count",
+    ]);
+    // (c) report top-level も generated_at / providers のみ。
+    expect(Object.keys(parsed ?? {}).sort()).toEqual(["generated_at", "providers"]);
+    const blob = JSON.stringify(parsed);
+    expect(blob).not.toContain("polluted");
+  });
+
+  it("TDA-3: producer(buildCoverageReport) ↔ parser round-trip 恒等 (silent drift を pin)", () => {
+    const gen = new Date(GEN_MS);
+    const rows = [
+      {
+        provider: "codex",
+        maxIngestedAtMs: GEN_MS - 10 * MIN,
+        maxEventTimestampMs: GEN_MS - 8 * MIN,
+        activeSessionCount: 2,
+        totalSessionCount: 3,
+      },
+      {
+        provider: "claude_code",
+        maxIngestedAtMs: GEN_MS - 20 * MIN,
+        maxEventTimestampMs: GEN_MS - 20 * MIN,
+        activeSessionCount: 0, // 非稼働 → gap null
+        totalSessionCount: 2,
+      },
+      {
+        provider: "gemini",
+        maxIngestedAtMs: null, // 無受信 → last_received null / gap null
+        maxEventTimestampMs: null,
+        activeSessionCount: 1,
+        totalSessionCount: 1,
+      },
+    ];
+    const produced = buildCoverageReport(rows, gen);
+    // 実 wire を模す JSON round-trip (undefined→欠落 等の JSON 意味論を通す)。
+    const roundTripped = parseAuditCoverageReportWire(JSON.parse(JSON.stringify(produced)));
+    expect(roundTripped).toEqual(produced);
   });
 });
