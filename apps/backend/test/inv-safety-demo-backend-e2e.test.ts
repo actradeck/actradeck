@@ -355,8 +355,16 @@ describe.skipIf(!reachable)(
         timestamp: string | null;
         payload: unknown;
       }>(
+        // 正典 replay 順で読む: `timestamp ASC, event_id ASC` (migration 1780704000000 +
+        //   covering index events_session_id_timestamp_event_id_index が固定する T1 契約)。
+        //   driver は pacingMs=0 で resolved→command.completed→ended を **同一ミリ秒**に emit しうる
+        //   (timestamp は ms 解像度)。ゆえに `ORDER BY timestamp` 単独は等値キーの tie を持ち、SQL は
+        //   等値行間の順序を規定しない → CI 並走/大テーブル regime で tie が非因果順に配送され間欠 fail
+        //   した (「expected 4 to be less than 2」= ended が resolved の前に来る逆転)。event_id は
+        //   UUIDv7 (uuid@11 は同一プロセス内で厳密単調) ゆえ因果 emit 順を忠実に encode し、tiebreak として
+        //   全順序を与える。イベントは正しい因果順で永続済 (runtime バグではなく test の sort key 不足)。
         `SELECT provider, source, session_id, event_type, state, timestamp, payload
-           FROM events WHERE session_id = $1 ORDER BY timestamp ASC`,
+           FROM events WHERE session_id = $1 ORDER BY timestamp ASC, event_id ASC`,
         [autoResult.sessionId],
       );
       expect(rows.length).toBeGreaterThanOrEqual(5); // started/requested/resolved/command.completed/ended
