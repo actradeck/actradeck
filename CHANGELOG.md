@@ -11,6 +11,18 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-11
+
+### Fixed
+
+- **First npm publish passes registry-side provenance validation.** Publishing v0.5.0
+  to npm was rejected (E422): the registry validates that the published
+  `package.json`'s `repository.url` matches the provenance's source repository, and
+  the `actradeck` package declared no `repository` at all. The package now declares
+  `repository` (with the monorepo `directory`) pointing at the public repository, so
+  0.5.1 is the first version that actually lands on npm — v0.5.0 shipped as a GitHub
+  Release + GHCR image only.
+
 ## [0.5.0] - 2026-07-11
 
 ### Added
@@ -185,7 +197,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/actradeck/actradeck/releases/tag/v0.5.1
 [0.5.0]: https://github.com/actradeck/actradeck/releases/tag/v0.5.0
 [0.4.0]: https://github.com/actradeck/actradeck/releases/tag/v0.4.0
 [0.3.0]: https://github.com/actradeck/actradeck/releases/tag/v0.3.0
