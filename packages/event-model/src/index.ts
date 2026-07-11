@@ -109,6 +109,14 @@ export type {
   AuditCoverageReport,
 } from "./audit-coverage.js";
 
+// seq-drop 検知 (client 申告 seq による中間 silent-drop の下限導出 + 密性抑制) の T1 single source
+//   (backend SQL 集約 ↔ TS reference parity / ADR 019f4cdb Phase2・decision 019f502c + 抑制規則)。
+// N-TDA-1: 集約に使うべきは **抑制込み** の `evaluateSeqMissing` のみ。raw な
+//   `computeSeqMissingLowerBound` は public barrel から **意図的に非公開** (module 内部・診断/境界テスト
+//   専用) にし、consumer が抑制前の生下限を誤って集約する footgun (SEC-1 の再導入) を構造的に防ぐ。
+export { evaluateSeqMissing } from "./seq-drop.js";
+export type { SeqMissingEvaluation } from "./seq-drop.js";
+
 // codex spawn wire 検証 + 失敗 enum (T1 single source: backend route/relay + sidecar daemon handler・ADR 019f4206)
 export {
   parseCodexSpawnRequest,

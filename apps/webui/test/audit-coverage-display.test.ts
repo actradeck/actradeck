@@ -5,10 +5,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  formatSeqDrop,
   GAP_CRITICAL_MS,
   GAP_WARN_MS,
   gapSeverity,
   relativeReceivedAge,
+  SEQ_DROP_DISPLAY_CAP,
 } from "../src/ui/audit-coverage-display.js";
 
 describe("gapSeverity — 閾値境界 (amber ≥60s / red ≥300s)", () => {
@@ -71,5 +73,39 @@ describe("relativeReceivedAge — generated_at 基準 (client clock 非依存)",
   it("パース不能な時刻は null (誤った経過を出さない fail-safe)", () => {
     expect(relativeReceivedAge("not-a-date", GEN)).toBeNull();
     expect(relativeReceivedAge("2026-04-02T11:59:48.000Z", "not-a-date")).toBeNull();
+  });
+});
+
+describe("formatSeqDrop — seq-drop chip 整形 (SEC-1 UI cap)", () => {
+  it("null / 0 / 負 は null (chip を出さない・誤警報しない)", () => {
+    expect(formatSeqDrop(null)).toBeNull();
+    expect(formatSeqDrop(0)).toBeNull();
+    expect(formatSeqDrop(-5)).toBeNull();
+  });
+
+  it("1 〜 cap は { count, capped:false }", () => {
+    expect(formatSeqDrop(1)).toEqual({ count: 1, capped: false });
+    expect(formatSeqDrop(42)).toEqual({ count: 42, capped: false });
+    expect(formatSeqDrop(SEQ_DROP_DISPLAY_CAP)).toEqual({
+      count: SEQ_DROP_DISPLAY_CAP,
+      capped: false,
+    });
+  });
+
+  it("cap 超は { count: CAP, capped:true } (桁溢れ表示にしない)", () => {
+    expect(formatSeqDrop(SEQ_DROP_DISPLAY_CAP + 1)).toEqual({
+      count: SEQ_DROP_DISPLAY_CAP,
+      capped: true,
+    });
+    expect(formatSeqDrop(123456)).toEqual({ count: SEQ_DROP_DISPLAY_CAP, capped: true });
+  });
+
+  it("非有限 (NaN/Infinity) は null (fail-safe)", () => {
+    expect(formatSeqDrop(Number.NaN)).toBeNull();
+    expect(formatSeqDrop(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("小数は切り捨てて整数扱い", () => {
+    expect(formatSeqDrop(3.9)).toEqual({ count: 3, capped: false });
   });
 });

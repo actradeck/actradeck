@@ -29,6 +29,8 @@ export interface MakeEventOverrides {
   redaction_count?: number;
   /** redaction マーカーの kind 別件数 (強み(a)③ 可視化の出所)。省略時は未指定 (= 欠落)。 */
   redaction_count_by_kind?: Record<string, number>;
+  /** per-session seq (ADR 019f4cdb Phase2・silent-drop 下限検知)。省略時は未指定 (= 検知対象外)。 */
+  seq?: number;
 }
 
 /**
@@ -55,6 +57,7 @@ export function makeEvent(o: MakeEventOverrides = {}): NormalizedEvent {
   if (o.redaction_count !== undefined) input.redaction_count = o.redaction_count;
   if (o.redaction_count_by_kind !== undefined)
     input.redaction_count_by_kind = o.redaction_count_by_kind;
+  if (o.seq !== undefined) input.seq = o.seq;
   return parseEvent(input);
 }
 

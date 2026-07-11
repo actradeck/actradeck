@@ -120,6 +120,7 @@ fields are as follows.
 | `payload`                                   |      | object                               | A structured record consistent with `event_type` (`{}` when omitted) |
 | `metrics`                                   |      | object                               | `elapsed_ms` / `tokens_in` / `tokens_out` / `cost_usd`, etc. (`{}` when omitted) |
 | `redaction_count` `redaction_count_by_kind` |      | non-negative integer / record        | See §5. **The client's declaration is not trusted; the backend authoritatively re-derives it.** |
+| `seq`                                       |      | non-negative integer                 | Optional per-session drop-detection counter. See §4.4.                                        |
 
 ### 4.1 provider = WHO (open slug)
 
@@ -186,6 +187,42 @@ are rejected):
 `ALL_EVENT_TYPES` in `@actradeck/event-model` — if the enumeration in the doc adds/removes or
 has a typo, it goes RED.)
 
+### 4.4 seq = drop-detection counter (optional)
+
+Because external adapters ingest at-most-once and can **silently drop** events, ActraDeck otherwise has
+no way to notice "the adapter sent an event but the store doesn't have it". If your adapter attaches a
+**per-session `seq`** — a **non-negative integer starting at 0 and incremented by 1 for every event it
+emits within the same `session_id`** — the backend can detect missing events as a **lower bound** from
+the holes in the received seq set:
+
+```
+missing_lower_bound = (max_seq − min_seq + 1) − distinct(seq)
+```
+
+This surfaces in the cockpit's audit-coverage panel per provider (a hedged `≥N dropped?` chip).
+
+- **Optional and additive**: omitting `seq` (existing adapters) is fully backward-compatible — those
+  events are simply **not tracked** for drop detection. Only non-negative integers are accepted.
+- **Duplicates collapse**: re-sending the same `seq` (at-least-once retry) does not fabricate a gap —
+  `distinct(seq)` absorbs it (symmetric with `event_id` idempotency, §3.3).
+- **Density assumption**: `seq` must be a **per-session dense counter**. If it is **not** (e.g. a global
+  counter shared across sessions, or a sparse/random value), the interval balloons and the lower bound
+  becomes a meaningless huge number. The backend therefore **suppresses** the drop signal for any session
+  where more than half the interval is holes (a density-assumption violation), so detection only works
+  when the adapter follows the contiguous-per-session convention.
+- **Honest limitation — it is a *lower* bound**: a **tail drop** (everything after the highest received
+  `seq`) and a **head drop** (before the lowest) are **undetectable in principle** — the interval just
+  shrinks. Only holes **inside** the received `[min, max]` interval are counted, so the true number of
+  lost events may be higher. The backend does **not** re-derive `seq` (unlike redaction counts): ordering
+  information lives only on the client, so `seq` is stored as declared, under the same trust boundary as
+  §2 (single-operator / INGEST_TOKEN). It is a counter only — it carries no raw content.
+- **Suppression is not free — a real massive drop looks like a non-dense counter**: even for a
+  contract-compliant adapter, a genuine drop that loses **more than half** of the received interval is
+  **indistinguishable** from a misused non-dense counter, so it is suppressed too. Such a session then
+  contributes **0** to `seq_missing_lower_bound` and surfaces **only** via `seq_suppressed_session_count`
+  (a diagnostic count), not as a drop number. In other words, suppression trades away detection of very
+  large drops to avoid false huge alarms — watch the suppressed count, not just the lower bound.
+
 ## 5. Ingress redaction floor (redaction before storage)
 
 The redaction choke point has **2 layers**:
@@ -225,6 +262,7 @@ inserted (if a schema change invalidates it, CI goes RED).
   "provider": "my_tool",
   "source": "external",
   "session_id": "my-tool-run-2026-07-04-abc123",
+  "seq": 0,
   "event_type": "command.started",
   "state": "running.command_executing",
   "timestamp": "2026-07-04T12:34:56.789Z",

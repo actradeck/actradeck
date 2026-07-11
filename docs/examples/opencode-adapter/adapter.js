@@ -90,7 +90,21 @@ function createAdapterState(opts = {}) {
     seenTurns: new Set(), // "<session>:<messageID>" turn.started 二重採番の抑止
     startedCalls: new Set(), // "<session>:<callID>" command/tool.started の dedup
     completedCalls: new Set(), // "<session>:<callID>" command/tool.completed の dedup
+    seqCounters: new Map(), // session_id -> 次に採番する seq (0 起点・1 増分・全 emit 連番)
   };
+}
+
+/**
+ * per-session の連続 seq を採番する (ADR 019f4cdb Phase2・silent-drop 下限検知)。
+ * 同一 session_id 内で **0 起点・1 ずつ増分**する連番を返し、backend がこの連番の穴から
+ * 「adapter は送ったが store に無い」中間イベントを下限で検知できるようにする。全 emit
+ * (session.started / turn.* / delta / command / tool / diff / error / heartbeat) が makeEvent 経由で
+ * この 1 本を通るため、seq は **発行順に連続**する (heartbeat も欠番を作らない)。
+ */
+function nextSeq(state, sessionId) {
+  const cur = state.seqCounters.get(sessionId) ?? 0;
+  state.seqCounters.set(sessionId, cur + 1);
+  return cur;
 }
 
 /**
@@ -114,6 +128,10 @@ function makeEvent(state, { sessionId, eventType, sourceMs, extra }) {
     source: "external",
     session_id: sessionId,
     provider_session_id: sessionId,
+    // per-session 連続 seq (silent-drop 下限検知・ADR 019f4cdb Phase2)。全 emit がこの 1 本を通るため
+    // 発行順に連番となり、backend が区間内の穴から欠落を下限で数える。timestamp より先に採番する
+    // 必要はないが、makeEvent 単一出所ゆえ heartbeat 含む全イベントで欠番が出ない。
+    seq: nextSeq(state, sessionId),
     event_type: eventType,
     timestamp: stampTs(state, sessionId, sourceMs),
     ...extra,

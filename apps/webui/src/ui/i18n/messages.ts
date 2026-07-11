@@ -223,6 +223,14 @@ const ja = {
   // gap severity ラベル (色に依存せず語で段階を区別・a11y)。warn=60s〜 / critical=300s〜。
   "audit.coverage.status.warn": "遅延",
   "audit.coverage.status.critical": "停止疑い",
+  // seq-drop 下限 (ADR 019f4cdb Phase2)。hedged ("?"): client 申告 seq の穴＝**下限** (真の欠落はこれ以上)。
+  "audit.coverage.seqDrop": "欠落 ≥{count}?",
+  // 表示上限超 (SEC-1・桁溢れ防止)。`+` で「これ以上」を示す。
+  "audit.coverage.seqDropCapped": "欠落 ≥{count}+?",
+  // seq-suppressed 診断 (SEC-6・muted)。密性違反で欠落信号を抑制した session 数 (severity 非連動)。
+  "audit.coverage.seqSuppressed": "seq 抑制 {count}",
+  "audit.coverage.seqSuppressed.title":
+    "dense でない seq を検出し欠落信号を抑制した session 数 (実大量 drop も抑制されうる)",
 
   // ── first-run セーフティデモ (ADR 019f22a7 P1・空状態 CTA) ─────────────────────
   // 「止める・残さない・証明できる」を静的✓で断定せず、使い捨て30秒デモで実証する capability として提示する。
@@ -949,6 +957,16 @@ const en: Record<MessageKey, string> = {
   "audit.coverage.status.warn": "delayed",
   // TDA-6: hedged 形 ("stalled?"・既存 liveness 慣行 "STALLED?" と整合)。停止を断定しない。
   "audit.coverage.status.critical": "stalled?",
+  // seq-drop lower bound (ADR 019f4cdb Phase2). hedged ("?"): a hole in client-declared seq is a
+  // **lower bound** (true loss may be higher; head/tail drops are undetectable).
+  "audit.coverage.seqDrop": "≥{count} dropped?",
+  // Display cap exceeded (SEC-1・prevents overflow display). "+" conveys "at least this many".
+  "audit.coverage.seqDropCapped": "≥{count}+ dropped?",
+  // seq-suppressed diagnostic (SEC-6・muted). Count of sessions whose drop signal was suppressed as
+  // non-dense (severity-independent).
+  "audit.coverage.seqSuppressed": "{count} seq-suppressed",
+  "audit.coverage.seqSuppressed.title":
+    "Sessions whose drop signal was suppressed as non-dense seq (a genuine massive drop can be suppressed too)",
 
   // ── first-run safety demo (ADR 019f22a7 P1; empty-state CTA) ──
   "safetyDemo.title": "Protected on this machine",

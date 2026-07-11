@@ -133,6 +133,10 @@ authoritative · callID overlap) / text · step-start · step-finish parts / `ca
   absorbs double insertion.
 - **Per-session monotonic timestamp floor**: even with resends, reordering, or a time-source
   rollback, the issued timestamps of the same session are kept non-decreasing.
+- **Per-session `seq`** (drop-detection counter): every emitted event (heartbeat included) carries a
+  per-session `seq` that starts at 0 and increments by 1, so the cockpit can flag a **lower bound** of
+  silently-dropped events (`≥N dropped?`). See §4.4 of the ingestion contract — it is a lower bound
+  only (head/tail drops are undetectable).
 
 ### Heartbeat while a turn is running (issue #8)
 

@@ -131,8 +131,8 @@ export class IngestStore {
       const ins = await client.query(
         `INSERT INTO events
            (id, event_id, provider, source, session_id, thread_id, turn_id, agent_id,
-            event_type, state, timestamp, cwd, summary, payload, metrics)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb)
+            event_type, state, timestamp, cwd, summary, payload, metrics, seq)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16)
          ON CONFLICT (event_id) DO NOTHING`,
         [
           newEventId(), // 内部 PK (時系列ソート可能)。
@@ -150,6 +150,9 @@ export class IngestStore {
           ev.summary ?? null,
           JSON.stringify(ev.payload ?? {}),
           JSON.stringify(ev.metrics ?? {}),
+          // seq-drop 検知 (ADR 019f4cdb Phase2): client 申告 seq を永続。省略時 NULL (検知対象外)。
+          // NormalizedEvent.seq は safe-integer 域の非負整数 (schema 検証済) で pg bigint 列へ載る。
+          ev.seq ?? null,
         ],
       );
 

@@ -161,4 +161,106 @@ describe("AuditCoveragePanel — 静的描画", () => {
     expect(html).not.toContain("/etc/passwd");
     expect(html).not.toContain("passwd");
   });
+
+  // ── seq-drop chip (ADR 019f4cdb Phase2・silent-drop 下限検知) ────────────────
+  describe("seq-drop chip", () => {
+    function rowWithSeq(seqMissing: number | null, suppressed = 0): unknown {
+      return {
+        provider: "opencode",
+        last_received_at: "2026-04-02T11:59:50.000Z",
+        last_event_timestamp: "2026-04-02T11:59:50.000Z",
+        active_session_count: 1,
+        total_session_count: 1,
+        gap_candidate_ms: 10_000,
+        seq_missing_lower_bound: seqMissing,
+        seq_tracked_session_count: seqMissing === null ? 0 : 2,
+        seq_suppressed_session_count: suppressed,
+      };
+    }
+
+    it("seq_missing_lower_bound > 0 は hedged chip ('≥N dropped?') を出す", () => {
+      const html = render(report([rowWithSeq(3)]));
+      expect(html).toContain('data-testid="coverage-seqdrop-opencode"');
+      expect(html).toContain("≥3 dropped?"); // hedged (?・下限)
+    });
+
+    it("seq_missing_lower_bound === 0 (穴なし) は chip を出さない", () => {
+      const html = render(report([rowWithSeq(0)]));
+      expect(html).not.toContain('data-testid="coverage-seqdrop-opencode"');
+      expect(html).not.toContain("dropped");
+    });
+
+    it("seq_missing_lower_bound === null (seq-bearing 無し) は chip を出さない", () => {
+      const html = render(report([rowWithSeq(null)]));
+      expect(html).not.toContain('data-testid="coverage-seqdrop-opencode"');
+      expect(html).not.toContain("dropped");
+    });
+
+    it("seq_missing_lower_bound > 表示上限 は capped chip ('≥9999+ dropped?') を出す (SEC-1)", () => {
+      const html = render(report([rowWithSeq(123456)]));
+      expect(html).toContain('data-testid="coverage-seqdrop-opencode"');
+      expect(html).toContain("≥9999+ dropped?"); // cap + hedged
+      expect(html).not.toContain("123456"); // 生の巨大値は出さない
+    });
+
+    it("seq-drop chip は gap severity と独立 (idle gap でも穴があれば出る)", () => {
+      const html = render(
+        report([
+          {
+            provider: "opencode",
+            last_received_at: "2026-04-02T06:00:00.000Z",
+            last_event_timestamp: "2026-04-02T06:00:00.000Z",
+            active_session_count: 0, // 非稼働 → gap null (idle)
+            total_session_count: 1,
+            gap_candidate_ms: null,
+            seq_missing_lower_bound: 5,
+            seq_tracked_session_count: 1,
+          },
+        ]),
+      );
+      // gap は idle (警告バッジなし) だが seq-drop chip は出る (独立信号)。
+      expect(html).toContain('data-severity="idle"');
+      expect(html).not.toContain('data-testid="coverage-status-opencode"');
+      expect(html).toContain('data-testid="coverage-seqdrop-opencode"');
+      expect(html).toContain("≥5 dropped?");
+    });
+  });
+
+  // ── seq-suppressed 診断 (SEC-6・muted・severity 非連動) ──────────────────────
+  describe("seq-suppressed diagnostic", () => {
+    function rowWithSuppressed(suppressed: number, seqMissing: number | null = 0): unknown {
+      return {
+        provider: "opencode",
+        last_received_at: "2026-04-02T11:59:50.000Z",
+        last_event_timestamp: "2026-04-02T11:59:50.000Z",
+        active_session_count: 1,
+        total_session_count: 1,
+        gap_candidate_ms: 10_000,
+        seq_missing_lower_bound: seqMissing,
+        seq_tracked_session_count: 3,
+        seq_suppressed_session_count: suppressed,
+      };
+    }
+
+    it("seq_suppressed_session_count > 0 は muted 診断 ('N seq-suppressed') を出す", () => {
+      const html = render(report([rowWithSuppressed(2)]));
+      expect(html).toContain('data-testid="coverage-seqsuppressed-opencode"');
+      expect(html).toContain("2 seq-suppressed");
+    });
+
+    it("seq_suppressed_session_count === 0 は診断を出さない", () => {
+      const html = render(report([rowWithSuppressed(0)]));
+      expect(html).not.toContain('data-testid="coverage-seqsuppressed-opencode"');
+      expect(html).not.toContain("seq-suppressed");
+    });
+
+    it("診断は欠落 chip と独立に出る (missing=0 で chip 非表示でも suppressed>0 なら診断あり)", () => {
+      const html = render(report([rowWithSuppressed(3, 0)]));
+      // 欠落 chip は 0 ゆえ非表示。
+      expect(html).not.toContain('data-testid="coverage-seqdrop-opencode"');
+      // 抑制診断は出る (severity 非連動・警告色でない muted 表示)。
+      expect(html).toContain('data-testid="coverage-seqsuppressed-opencode"');
+      expect(html).toContain("3 seq-suppressed");
+    });
+  });
 });

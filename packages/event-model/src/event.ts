@@ -102,6 +102,30 @@ export const NormalizedEvent = z.object({
    * 無しでも通る。欠落 = kind 別件数なし扱い。**projection key には使わない**。
    */
   redaction_count_by_kind: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  /**
+   * per-session ドロップ検知用の任意カウンタ (ADR 019f4cdb Phase2・eval R2 項目5後半)。
+   * adapter が **同一 session_id 内で 0 起点・1 ずつ増分する連続整数**を全 emit に載せると、backend が
+   * 「adapter は送ったが store に無い」中間イベントの silent-drop を**下限**で検知できる
+   * (`missing_lower_bound = (max_seq − min_seq + 1) − distinct(seq)`・seq-drop.ts の正準導出)。
+   *
+   * **任意 field・省略時は検知対象外** (後方互換・seq 無しイベント/既存 adapter は完全に不変)。
+   * 重複 seq は at-least-once 再送の冪等ゆえ distinct で collapse される。**projection key には使わない**
+   * (event_id が唯一の冪等キー・§3.3)。順序情報は client のみが持つため backend は redaction_count の
+   * ように**再導出できず**、client 申告を保存するのみ (信頼境界は §2 と同じ single-operator / INGEST_TOKEN)。
+   *
+   * **「下限」の正直な限界**: 末尾 drop (受信済み max_seq より後) と先頭 drop (min_seq より前) は
+   * 原理的に検知不能 (端が欠けても区間が縮むだけ)。検知できるのは**受信区間内の穴**のみ。
+   * 非負整数のみ (負値・非整数は reject)。
+   *
+   * **密性前提 (SEC-3)**: seq は **per-session の連続(dense)カウンタ**であること前提。global カウンタの
+   * 誤用や sparse/ランダムな seq を載せると下限が無意味な巨大値になるため、backend は per-session で
+   * 密性違反 (区間の過半が穴) を検出したら当該 session の欠落信号を**抑制**する (seq-drop.ts
+   * `evaluateSeqMissing`)。ゆえに検知の有効性は adapter が連番規約を守ることに依存する。
+   * **抑制の代償 (SEC-6)**: 規約準拠 adapter でも受信区間の**過半を失う実ドロップ**は非密カウンタと
+   * 区別できず抑制される (欠落数 0 寄与・`seq_suppressed_session_count` でのみ表面化)。抑制は偽の巨大
+   * 警報回避と引き換えに極端に大きい drop の検知を手放すトレードオフ。
+   */
+  seq: z.number().int().nonnegative().optional(),
   thread_id: z.string().optional(),
   turn_id: z.string().optional(),
   agent_id: z.string().optional(),

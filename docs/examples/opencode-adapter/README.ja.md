@@ -123,6 +123,9 @@ text・step-start・step-finish part / `catalog.updated` / `integration.updated`
 - **at-least-once + 冪等**: 再送は同一 `event_id` (UUIDv7) を使い、backend が二重挿入を吸収します。
 - **session 毎 monotonic timestamp floor**: 再送・並び替え・時刻源の巻き戻りがあっても、同一
   session の発行 timestamp を非減少に保ちます。
+- **session 毎 `seq`** (ドロップ検知カウンタ): 全 emit (heartbeat 含む) が per-session の `seq` を載せます
+  (0 起点・1 増分)。これにより cockpit が silent-drop の **下限** (`欠落 ≥N?`) を出せます。取込契約 §4.4
+  参照 — あくまで下限です (末尾/先頭 drop は検知不能)。
 
 ### turn 稼働中の heartbeat (issue #8)
 

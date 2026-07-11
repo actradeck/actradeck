@@ -9,11 +9,24 @@
  *
  * NO-RAW: provider は slug 検証済み・時刻は generated_at 基準の相対経過 (生 ISO を素出ししない)。
  * gap severity は色 **と語** の二重符号 (a11y)。null gap (非稼働/無受信) は警告しない (誤警報しない)。
+ *
+ * seq-drop chip (ADR 019f4cdb Phase2): client 申告 seq に穴があるとき ("≥N dropped?" と **hedged**) 表示する。
+ * gap severity とは独立の信号で、**「下限」ゆえ真の欠落はこれ以上ありうる** (末尾/先頭 drop は検知不能)。
+ * `seq_missing_lower_bound === null` (seq-bearing 無し) / `0` (穴なし) は表示しない (誤警報しない)。
+ *
+ * seq-suppressed 診断 (SEC-6): `seq_suppressed_session_count > 0` のとき控えめ (muted) に "N seq-suppressed"
+ * を併記する。密性違反 (非密カウンタ or 過半を失う実大量 drop) で欠落信号を抑制した session 数で、
+ * severity には連動しない純診断 (欠落 chip が 0/非表示でも出うる)。0 は非表示。
  */
 import type { AuditCoverageReport } from "@actradeck/event-model";
 
 import { useLocale } from "./LocaleProvider";
-import { type GapSeverity, gapSeverity, relativeReceivedAge } from "./audit-coverage-display";
+import {
+  type GapSeverity,
+  formatSeqDrop,
+  gapSeverity,
+  relativeReceivedAge,
+} from "./audit-coverage-display";
 import type { MessageKey } from "./i18n/messages";
 
 /** warn/critical のみ語ラベルを出す (ok/idle は非警告 = ラベルなし)。 */
@@ -49,6 +62,8 @@ export function AuditCoveragePanel({ report }: AuditCoveragePanelProps) {
               : age !== null
                 ? t("audit.coverage.age", { age })
                 : t("common.dash");
+          // seq-drop chip: null/0 は null (非表示)。cap 超は `≥N+ dropped?` (SEC-1・桁溢れ防止)。
+          const seqDrop = formatSeqDrop(p.seq_missing_lower_bound);
           return (
             <li
               key={p.provider}
@@ -70,6 +85,26 @@ export function AuditCoveragePanel({ report }: AuditCoveragePanelProps) {
                   role="status"
                 >
                   {t(statusKey)}
+                </span>
+              ) : null}
+              {seqDrop !== null ? (
+                <span
+                  className="ad-coverage__seqdrop"
+                  data-testid={`coverage-seqdrop-${p.provider}`}
+                  role="status"
+                >
+                  {t(seqDrop.capped ? "audit.coverage.seqDropCapped" : "audit.coverage.seqDrop", {
+                    count: seqDrop.count,
+                  })}
+                </span>
+              ) : null}
+              {p.seq_suppressed_session_count > 0 ? (
+                <span
+                  className="ad-coverage__seqsuppressed"
+                  data-testid={`coverage-seqsuppressed-${p.provider}`}
+                  title={t("audit.coverage.seqSuppressed.title")}
+                >
+                  {t("audit.coverage.seqSuppressed", { count: p.seq_suppressed_session_count })}
                 </span>
               ) : null}
             </li>

@@ -66,3 +66,24 @@ export function relativeReceivedAge(
   if (s < 3600) return `${Math.round(s / 60)}m`;
   return `${Math.round(s / 3600)}h`;
 }
+
+/**
+ * seq-drop chip の表示上限 (SEC-1・UI cap)。密性抑制で集計は有界だが、表示は防御的に cap し、
+ * 万一の巨大値でも桁溢れ表示にしない (`≥9999+ dropped?`)。
+ */
+export const SEQ_DROP_DISPLAY_CAP = 9999;
+
+/**
+ * `seq_missing_lower_bound` を chip 表示用に整形する純関数。
+ *  - null (seq-bearing 無し / 信号不能) or 0 以下 (穴なし) → **null** (chip を出さない・誤警報しない)。
+ *  - `> SEQ_DROP_DISPLAY_CAP` → `{ count: CAP, capped: true }` (i18n が `≥N+ dropped?` を出す)。
+ *  - それ以外 → `{ count, capped: false }` (i18n が `≥N dropped?` を出す)。
+ * 数値のみを返し (原文非依存)、hedged 文言の付与は i18n に委ねる。
+ */
+export function formatSeqDrop(missing: number | null): { count: number; capped: boolean } | null {
+  if (missing === null || !Number.isFinite(missing) || missing <= 0) return null;
+  const m = Math.trunc(missing);
+  return m > SEQ_DROP_DISPLAY_CAP
+    ? { count: SEQ_DROP_DISPLAY_CAP, capped: true }
+    : { count: m, capped: false };
+}

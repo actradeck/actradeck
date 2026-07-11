@@ -520,10 +520,20 @@ export class AuditStore {
    * `sessions.ended_at IS NOT NULL OR session_state.state ∈ TERMINAL_STATES` (T1 正典 TERMINAL_STATES を
    * SQL へ再定義せず bind)。稼働 session が 0 の provider は `gap_candidate_ms=null` (誤警報しない)。
    *
+   * ## seq-drop 下限 (ADR 019f4cdb Phase2)
+   * client 申告 `seq` (per-session 連続カウンタ) を持つ session について provider 別に欠落下限を総和する
+   * (`seqagg` CTE)。`seq` は非負整数カウンタ (原文非依存) ゆえ集計のみで NO-RAW を保つ。seq-bearing
+   * session ゼロの provider は null (検知対象外)。密性前提違反 (区間の過半が穴) の session は **suppress**
+   * (寄与 0・`seq_suppressed_session_count` で可観測) して非密 seq (global カウンタ誤用等) の偽警報 + overflow を
+   * 抑える。この CTE は event-model の正準 `evaluateSeqMissing` (抑制込み) の **鏡写し**で、real-PG parity
+   * テスト (INV-SEQ-DROP-PARITY) が両者の一致を縛る。**鏡写しは schema/CHECK の保証域上でのみ成立する**:
+   * `NormalizedEvent.seq` = 非負 safe-integer + migration の `CHECK (seq IS NULL OR seq >= 0)` により、
+   * SQL の `max/min/count(DISTINCT)` は非負・safe-integer 域の値を扱う (負値混入は CHECK が構造遮断)。
+   *
    * ## NO-RAW (INV-AUDIT-COVERAGE-NO-RAW)
-   * SELECT は **provider slug + 時刻 + 件数のみ** (cwd/path/payload/secret を一切読まない)。行は
-   * `buildCoverageReport` → `projectProviderCoverageRow` で provider を `PROVIDER_SLUG_RE` 再ゲートし
-   * 余剰 field を構造的に落とす (生パス混入 row は drop)。
+   * SELECT は **provider slug + 時刻 + 件数 (seq 集計含む・原文非依存) のみ** (cwd/path/payload/secret を
+   * 一切読まない)。行は `buildCoverageReport` → `projectProviderCoverageRow` で provider を
+   * `PROVIDER_SLUG_RE` 再ゲートし余剰 field を構造的に落とす (生パス混入 row は drop)。
    *
    * events を provider で GROUP BY 集約する (ingested_at と timestamp の MAX を同スキャンで併算)。planner は
    * これを **seq-scan** で実行する — `(provider, ingested_at)` 索引を足しても MAX(timestamp) の heap 参照が
@@ -538,6 +548,9 @@ export class AuditStore {
       active_session_count: number;
       max_ingested_ms: number | null;
       max_ts_ms: number | null;
+      seq_missing_lower_bound: string | number | null;
+      seq_tracked_session_count: number | null;
+      seq_suppressed_session_count: number | null;
     }>(
       // $1 = TERMINAL_STATES (T1 正典・SQL へ再定義しない)。
       `WITH sess AS (
@@ -560,24 +573,63 @@ export class AuditStore {
                 max(extract(epoch from timestamp) * 1000) AS max_ts_ms
            FROM events
           GROUP BY provider
+       ),
+       seqagg AS (
+         -- seq-drop 下限 (ADR 019f4cdb Phase2): per-session の欠落下限を provider へ総和する。
+         -- 正準式 (event-model **evaluateSeqMissing** の鏡写し・密性抑制込み): 各 seq-bearing session につき
+         --   raw_missing = (max(seq) − min(seq) + 1) − count(DISTINCT seq)  = 受信区間内の穴、
+         --   distinct    = count(DISTINCT seq)。
+         --   密性前提違反 (raw_missing > distinct = 区間の過半が穴) の session は **suppress**（寄与 0）し
+         --   信号不能として seq_suppressed_session_count に計上する (SEC-1≡QA-4・非密/global カウンタ暴走を抑制)。
+         --   抑制後 missing ≤ distinct ゆえ SUM ≤ Σdistinct ≤ 総イベント数へ有界化 (bigint overflow の芽を摘む)。
+         -- 重複 seq は count(DISTINCT) が collapse (retry 冪等・二重挿入を欠落と誤認しない)。
+         -- 対象は seq が **schema/CHECK 保証域** (非負・safe-integer) の非 NULL 行のみ (seq 非送出 adapter /
+         --   旧行 NULL は検知対象外)。**「下限」の限界**: 末尾 (max より後) / 先頭 (min より前) の drop は検知不能。
+         -- INV-SEQ-DROP-PARITY が実 PG で evaluateSeqMissing (抑制込み) と本 SQL の一致を縛る。
+         SELECT provider,
+                SUM(CASE WHEN raw_missing > distinct_seq THEN 0 ELSE raw_missing END)::bigint
+                  AS seq_missing_lower_bound,
+                count(*)::int AS seq_tracked_session_count,
+                count(*) FILTER (WHERE raw_missing > distinct_seq)::int
+                  AS seq_suppressed_session_count
+           FROM (
+             SELECT provider,
+                    session_id,
+                    (max(seq) - min(seq) + 1) - count(DISTINCT seq) AS raw_missing,
+                    count(DISTINCT seq) AS distinct_seq
+               FROM events
+              WHERE seq IS NOT NULL
+              GROUP BY provider, session_id
+           ) per_session
+          GROUP BY provider
        )
        SELECT prov.provider,
               prov.total_session_count,
               prov.active_session_count,
               ev.max_ingested_ms,
-              ev.max_ts_ms
+              ev.max_ts_ms,
+              seqagg.seq_missing_lower_bound,
+              seqagg.seq_tracked_session_count,
+              seqagg.seq_suppressed_session_count
          FROM prov
          LEFT JOIN ev ON ev.provider = prov.provider
+         LEFT JOIN seqagg ON seqagg.provider = prov.provider
         ORDER BY prov.provider`,
       [TERMINAL_STATES as readonly string[]],
     );
-    // camelCase 集約入力へ写し、正準 builder (NO-RAW 射影 + gap 述語) へ委譲する。
+    // camelCase 集約入力へ写し、正準 builder (NO-RAW 射影 + gap 述語 + seq-drop 下限 + 密性抑制) へ委譲する。
+    // seq_missing_lower_bound は bigint SUM ゆえ pg から文字列で届く (projectProviderCoverageRow が
+    //   asNonNegSafeIntOrNull で safe-integer or null へ縮退)。seq-bearing session ゼロの provider は
+    //   seqagg 非該当で NULL。
     const inputRows = rows.map((r) => ({
       provider: r.provider,
       maxIngestedAtMs: r.max_ingested_ms,
       maxEventTimestampMs: r.max_ts_ms,
       activeSessionCount: r.active_session_count,
       totalSessionCount: r.total_session_count,
+      seqMissingLowerBoundSum: r.seq_missing_lower_bound,
+      seqTrackedSessionCount: r.seq_tracked_session_count ?? 0,
+      seqSuppressedSessionCount: r.seq_suppressed_session_count ?? 0,
     }));
     return buildCoverageReport(inputRows, opts.now);
   }

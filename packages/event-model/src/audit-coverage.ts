@@ -17,8 +17,9 @@
  *     `active_session_count > 0` かつ受信実績 (last_received) がある場合のみ算出し、それ以外は **null**。
  *
  * ## NO-RAW 契約 (security.md・INV-AUDIT-COVERAGE-NO-RAW)
- * wire/endpoint には **provider slug (公開スラグ) + 時刻 (ISO) + 非負整数 + gap ms (null 可)** のみを
- * 載せる。生 cwd / パス / secret / session 内容 / 生コマンドは決して載せない。
+ * wire/endpoint には **provider slug (公開スラグ) + 時刻 (ISO) + 非負整数 + gap ms (null 可) +
+ * seq-drop 下限 (非負 safe-integer・null 可) + seq 追跡/抑制 session 数**のみを載せる。seq 系は**件数のみ**
+ * (原文非依存) で生 seq 値の列すら載せない。生 cwd / パス / secret / session 内容 / 生コマンドは決して載せない。
  * `projectProviderCoverageRow` は **既知フィールドのみ抽出し余剰 field を構造的に落とす**うえ、provider は
  * `PROVIDER_SLUG_RE` で再ゲートして非 slug 文字列 (万一の生パス混入等) を **row ごと drop** する
  * (NO-RAW by construction — agent-visibility-wire の parse 境界と同じパターン)。
@@ -41,6 +42,17 @@ export interface ProviderCoverageInput {
   readonly activeSessionCount: number;
   /** provider の全 session 数。 */
   readonly totalSessionCount: number;
+  /**
+   * seq-drop 下限の provider 集約 (ADR 019f4cdb Phase2)。当該 provider の **seq-bearing session ごとに
+   * `evaluateSeqMissing().missing` (密性抑制込み) を算出した総和** (backend SQL が同式で集約)。密性違反で
+   * 抑制された session は寄与 0。seq-bearing session が皆無なら **null** (= 検知対象なし)。0 は「区間内に
+   * 穴が無い or 全 session 抑制 (欠落を検知しない)」を意味する。抑制で `≤ Σdistinct ≤ 総イベント数` に有界。
+   */
+  readonly seqMissingLowerBoundSum: number | null;
+  /** seq-bearing なイベントを 1 件以上持つ session 数 (非負整数・seq 追跡の裾野・抑制 session も含む)。 */
+  readonly seqTrackedSessionCount: number;
+  /** 密性前提違反で欠落信号を抑制した session 数 (非負整数・SEC-1≡QA-4 の可観測性)。 */
+  readonly seqSuppressedSessionCount: number;
 }
 
 /** per-provider 監査カバレッジ (NO-RAW・closed shape). */
@@ -60,6 +72,30 @@ export interface AuditProviderCoverage {
    * **非稼働 (active_session_count===0) or 無受信 (last_received なし) は null** (誤警報しない・ADR §6-6)。
    */
   readonly gap_candidate_ms: number | null;
+  /**
+   * client 申告 seq による中間 silent-drop の **下限** (ADR 019f4cdb Phase2)。seq-bearing session ごとの
+   * `evaluateSeqMissing().missing` (密性抑制込み) を provider 全体で総和したもの。**「下限」ゆえ真の欠落数は
+   * これ以上** (末尾/先頭 drop は原理的に検知不能・受信区間内の穴のみ)。密性前提違反の session は抑制され
+   * 寄与しない (`seq_suppressed_session_count` で可観測)。gap severity とは独立の信号。
+   *
+   * **null の意味は producer / parser で非対称 (SEC-7・実挙動)**:
+   *  - **producer** (`computeProviderCoverage`): `seq_tracked_session_count === 0` (seq-bearing 無し =
+   *    検知対象外) のときのみ null。tracked>0 の集計が safe-integer 域外に振れた場合は **0 へ fail-safe**
+   *    (精度落ちの巨大偽値を surface させない・null にはしない)。ゆえに producer 出力の null ⇔ 検知対象外。
+   *  - **parser** (`parseProviderCoverageWire`): wire 値が欠落 / 非数 / safe-integer 域外なら null へ縮退
+   *    (誤警報しない安全側)。よって受信側は「検知対象外」と「不正/域外 wire 値」を共に null で扱う。
+   */
+  readonly seq_missing_lower_bound: number | null;
+  /**
+   * seq-bearing なイベントを持つ session 数 (非負整数)。producer では 0 のとき
+   * `seq_missing_lower_bound` は null (検知対象外)。
+   */
+  readonly seq_tracked_session_count: number;
+  /**
+   * 密性前提違反で欠落信号を抑制した session 数 (非負整数・SEC-1≡QA-4)。>0 は「非密な seq (global
+   * カウンタ誤用等) を検出し偽警報を抑えた」ことを示す診断。`seq_tracked_session_count` の部分集合。
+   */
+  readonly seq_suppressed_session_count: number;
 }
 
 /** per-provider カバレッジ集約レポート (read-only・NO-RAW). */
@@ -97,6 +133,22 @@ function asNonNegInt(v: unknown): number {
   return Math.max(0, Math.trunc(n));
 }
 
+/**
+ * 非負 **safe-integer** or null へ強制 (SEC-1・pg bigint SUM の safe-integer 保全)。
+ * pg の bigint SUM は文字列で届く。`Number()` は 2^53-1 超で精度が落ちるため、`MAX_SAFE_INTEGER` を
+ * 超える値は **精度落ちのまま通さず null** へ縮退させる (信号不能・巨大な偽値を surface させない)。
+ * seq-drop 集約は密性抑制で `≤ Σdistinct ≤ 総イベント数` に有界ゆえこの経路は defense-in-depth。
+ * null/非数は null (idle・誤警報しない安全側)。負値は 0 へ clamp。
+ */
+function asNonNegSafeIntOrNull(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return null;
+  const t = Math.max(0, Math.trunc(n));
+  if (t > Number.MAX_SAFE_INTEGER) return null; // 精度落ちの巨大値を通さない
+  return t;
+}
+
 /** epoch ms → ISO8601。null/非有限/JS Date 域外は null (無受信と対称・TDA-2/SEC-1・defense-in-depth)。 */
 function msToIso(ms: number | null): string | null {
   if (ms === null || !Number.isFinite(ms) || Math.abs(ms) > MAX_JS_DATE_MS) return null;
@@ -118,6 +170,11 @@ export function projectProviderCoverageRow(raw: unknown): ProviderCoverageInput 
     maxEventTimestampMs: asFiniteMsOrNull(raw.maxEventTimestampMs),
     activeSessionCount: asNonNegInt(raw.activeSessionCount),
     totalSessionCount: asNonNegInt(raw.totalSessionCount),
+    // seq-drop 集約 (pg bigint SUM は文字列で届くため Number 経由で受ける)。SEC-1: safe-integer 保全で
+    // 2^53-1 超は精度落ちのまま通さず null (信号不能) へ縮退させる。
+    seqMissingLowerBoundSum: asNonNegSafeIntOrNull(raw.seqMissingLowerBoundSum),
+    seqTrackedSessionCount: asNonNegInt(raw.seqTrackedSessionCount),
+    seqSuppressedSessionCount: asNonNegInt(raw.seqSuppressedSessionCount),
   };
 }
 
@@ -140,6 +197,12 @@ export function computeProviderCoverage(
     active > 0 && lastIngestedMs !== null && Number.isFinite(generatedAtMs)
       ? Math.max(0, Math.trunc(generatedAtMs - lastIngestedMs))
       : null;
+  // seq-drop: seq-bearing session が皆無 (tracked===0) なら null (検知対象なし)。それ以外は下限総和。
+  //   safe-integer 域外 (asNonNegSafeIntOrNull→null) は精度落ちの巨大偽値を通さず 0 へ fail-safe
+  //   (tracked>0 だが sum が null になる自己矛盾入力への安全側縮退と同一経路・偽警報を作らない)。
+  const seqTracked = asNonNegInt(input.seqTrackedSessionCount);
+  const seqMissing =
+    seqTracked > 0 ? (asNonNegSafeIntOrNull(input.seqMissingLowerBoundSum) ?? 0) : null;
   return {
     provider: input.provider,
     last_received_at: msToIso(lastIngestedMs),
@@ -147,6 +210,9 @@ export function computeProviderCoverage(
     active_session_count: active,
     total_session_count: asNonNegInt(input.totalSessionCount),
     gap_candidate_ms: gap,
+    seq_missing_lower_bound: seqMissing,
+    seq_tracked_session_count: seqTracked,
+    seq_suppressed_session_count: asNonNegInt(input.seqSuppressedSessionCount),
   };
 }
 
@@ -217,6 +283,10 @@ export function parseProviderCoverageWire(raw: unknown): AuditProviderCoverage |
     active_session_count: asNonNegInt(raw.active_session_count),
     total_session_count: asNonNegInt(raw.total_session_count),
     gap_candidate_ms: asNonNegIntOrNull(raw.gap_candidate_ms),
+    // seq-drop 下限は非負 safe-integer or null (null = seq-bearing 無し / safe-int 域外・誤警報しない安全側)。
+    seq_missing_lower_bound: asNonNegSafeIntOrNull(raw.seq_missing_lower_bound),
+    seq_tracked_session_count: asNonNegInt(raw.seq_tracked_session_count),
+    seq_suppressed_session_count: asNonNegInt(raw.seq_suppressed_session_count),
   };
 }
 

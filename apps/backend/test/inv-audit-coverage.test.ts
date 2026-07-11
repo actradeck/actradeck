@@ -23,6 +23,7 @@ import { IngestStore } from "../src/ingest-store.js";
 import { AuditStore } from "../src/audit-store.js";
 import { cleanupSessions, dbReachable, makeEvent } from "./helpers.js";
 
+import { evaluateSeqMissing } from "@actradeck/event-model";
 import type { AuditProviderCoverage } from "@actradeck/event-model";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -213,6 +214,9 @@ describe.skipIf(!reachable)("INV-AUDIT-COVERAGE: 監査欠落の検知 (real PG)
       "last_event_timestamp",
       "last_received_at",
       "provider",
+      "seq_missing_lower_bound",
+      "seq_suppressed_session_count",
+      "seq_tracked_session_count",
       "total_session_count",
     ]);
     // レポート全体を直列化して生 cwd / secret が一切現れないことを確認 (余剰 field 到達なし)。
@@ -220,5 +224,161 @@ describe.skipIf(!reachable)("INV-AUDIT-COVERAGE: 監査欠落の検知 (real PG)
     expect(blob).not.toContain(secretCwd);
     expect(blob).not.toContain("covsecret-project");
     expect(blob).not.toContain("ghp_covfaketoken");
+  });
+
+  // ── (e) seq-drop 下限検知 + 密性抑制 (ADR 019f4cdb Phase2・decision 019f502c + 抑制規則) ────
+  //   client 申告 seq を実 ingest 経路で保存し、AuditStore.providerCoverage の provider 別集約が
+  //   欠落を下限で数え、密性違反 session を抑制することを実 PG で pin。
+  //   INV-SEQ-DROP-PARITY: SQL の per-session 寄与は TS 正準 evaluateSeqMissing().missing (抑制込み) と一致。
+
+  /** 実 ingest 経路で 1 session に seq 付きイベント列を投入する (seq は各イベントの top-level field)。 */
+  async function seedSeqSession(provider: string, seqs: number[]): Promise<string> {
+    const sid = newSession(provider);
+    let i = 0;
+    for (const seq of seqs) {
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          provider,
+          event_type: "heartbeat",
+          timestamp: new Date(NOW_MS - (100 - i) * 1000).toISOString(),
+          seq,
+        }),
+      );
+      i += 1;
+    }
+    return sid;
+  }
+
+  it("(e) seq が events テーブルに保存される (bigint 列・at-rest 実測)", async () => {
+    const provider = newProvider("seqstore");
+    const sid = await seedSeqSession(provider, [0, 1, 2]);
+    const { rows } = await pool.query<{ seq: string | null }>(
+      `SELECT seq FROM events WHERE session_id = $1 ORDER BY seq`,
+      [sid],
+    );
+    // bigint は pg から文字列で届く。3 件・0,1,2 が保存されている。
+    expect(rows.map((r) => r.seq)).toEqual(["0", "1", "2"]);
+  });
+
+  it("(e) 連続 seq (穴なし) は seq_missing_lower_bound=0・tracked=1・suppressed=0", async () => {
+    const provider = newProvider("seqok");
+    await seedSeqSession(provider, [0, 1, 2, 3, 4]);
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    expect(c!.seq_missing_lower_bound).toBe(0);
+    expect(c!.seq_tracked_session_count).toBe(1);
+    expect(c!.seq_suppressed_session_count).toBe(0);
+  });
+
+  it("(e) 人工 drop (区間内の穴) を seq_missing_lower_bound>=1 で検出 (parity: evaluateSeqMissing)", async () => {
+    const provider = newProvider("seqhole");
+    // seq=2 を意図的に欠落させる (0,1,_,3,4)。下限 = (4-0+1) - 4 = 1・非抑制 (1 <= distinct 4)。
+    const seqs = [0, 1, 3, 4];
+    await seedSeqSession(provider, seqs);
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    expect(c!.seq_missing_lower_bound).toBeGreaterThanOrEqual(1);
+    // INV-SEQ-DROP-PARITY: SQL の寄与 == TS 正準 evaluateSeqMissing().missing (抑制込み)。
+    expect(c!.seq_missing_lower_bound).toBe(evaluateSeqMissing(seqs).missing);
+    expect(c!.seq_tracked_session_count).toBe(1);
+    expect(c!.seq_suppressed_session_count).toBe(0);
+  });
+
+  it("(e) QA-1: dup+穴 fixture [0,0,3] は missing=2 (DISTINCT が retry を畳む・非抑制)", async () => {
+    const provider = newProvider("seqduphole");
+    // [0,0,3]: 非 DISTINCT 計数だと (3-0+1)-3=1 (誤)、DISTINCT だと (3-0+1)-2=2 (正)。両者非負ゆえ
+    //   clamp に吸収されない = DISTINCT 除去 mutation が本テストで RED になる。raw_missing 2 <= distinct 2
+    //   ゆえ非抑制。
+    const seqs = [0, 0, 3];
+    await seedSeqSession(provider, seqs);
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    expect(c!.seq_missing_lower_bound).toBe(2);
+    expect(evaluateSeqMissing(seqs).missing).toBe(2); // parity: TS 正準も 2
+    expect(c!.seq_suppressed_session_count).toBe(0);
+  });
+
+  it("(e) 複数穴 + 複数 session を provider へ総和 (下限の加法性・parity)", async () => {
+    const provider = newProvider("seqsum");
+    const s1 = [0, 1, 4]; // 穴 2 個 (2,3)・distinct 3 → 非抑制
+    const s2 = [10, 12]; // 穴 1 個 (11)・distinct 2 → 非抑制
+    await seedSeqSession(provider, s1);
+    await seedSeqSession(provider, s2);
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    const expected = evaluateSeqMissing(s1).missing + evaluateSeqMissing(s2).missing;
+    expect(c!.seq_missing_lower_bound).toBe(expected); // 2 + 1 = 3
+    expect(c!.seq_tracked_session_count).toBe(2);
+    expect(c!.seq_suppressed_session_count).toBe(0);
+  });
+
+  it("(e) 重複 seq (retry) は欠落を捏造しない (distinct collapse)", async () => {
+    const provider = newProvider("seqdup");
+    // 同一 seq を二重 ingest しても event_id 冪等 + distinct で欠落 0 のまま。
+    // seedSeqSession は各 seq に別 event_id を採番するため、二重ぶんも別行として保存されるが distinct が畳む。
+    await seedSeqSession(provider, [0, 1, 1, 2, 2]);
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    expect(c!.seq_missing_lower_bound).toBe(0);
+    expect(c!.seq_tracked_session_count).toBe(1);
+  });
+
+  it("(e) SEC-1: global カウンタ模擬 (3-way interleave) は抑制され偽警報が消える", async () => {
+    const provider = newProvider("seqglobal");
+    // global カウンタを 3 session が分け合う模擬: 各 session は every-3rd の seq を見る。
+    //   sA=[0,3,6,9] sB=[1,4,7,10] sC=[2,5,8,11]。各 span=10 distinct=4 raw_missing=6 → 6>4 で抑制。
+    const sA = [0, 3, 6, 9];
+    const sB = [1, 4, 7, 10];
+    const sC = [2, 5, 8, 11];
+    await seedSeqSession(provider, sA);
+    await seedSeqSession(provider, sB);
+    await seedSeqSession(provider, sC);
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    // 全 session 抑制 → 偽の巨大欠落 (6+6+6=18) を出さず 0。TS 正準と一致 (parity)。
+    expect(evaluateSeqMissing(sA).suppressed).toBe(true);
+    expect(c!.seq_missing_lower_bound).toBe(0);
+    expect(c!.seq_tracked_session_count).toBe(3);
+    expect(c!.seq_suppressed_session_count).toBe(3); // 3 session とも抑制 = 可観測
+  });
+
+  it("(e) 密 session と非密 session の混在: 密のみ検知・非密は抑制 (混在集約)", async () => {
+    const provider = newProvider("seqmix");
+    const dense = [0, 1, 3]; // raw_missing=1 distinct=3 → 非抑制・寄与 1
+    const sparse = [0, 100]; // raw_missing=100 distinct=2 → 抑制・寄与 0
+    await seedSeqSession(provider, dense);
+    await seedSeqSession(provider, sparse);
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    expect(evaluateSeqMissing(dense).suppressed).toBe(false);
+    expect(evaluateSeqMissing(sparse).suppressed).toBe(true);
+    expect(c!.seq_missing_lower_bound).toBe(1); // 密 session の 1 のみ (sparse の 100 は抑制)
+    expect(c!.seq_tracked_session_count).toBe(2);
+    expect(c!.seq_suppressed_session_count).toBe(1);
+  });
+
+  it("(e) seq 無し provider は seq_missing_lower_bound=null (検知対象外)・tracked=0・suppressed=0", async () => {
+    const provider = newProvider("seqnull");
+    // seq を一切載せない (既存 adapter 相当)。
+    await seedSession(provider, { adapterTsMs: NOW_MS - 5 * MIN, ingestedAtMs: NOW_MS - 5 * MIN });
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    expect(c!.seq_missing_lower_bound).toBeNull();
+    expect(c!.seq_tracked_session_count).toBe(0);
+    expect(c!.seq_suppressed_session_count).toBe(0);
+  });
+
+  it("(e) CHECK 制約: 負の seq を直接書込しようとすると DB が拒否 (SEC-2≡TDA-2)", async () => {
+    // まず正常 session を作り (FK 親)、その後 events へ負 seq を直接 INSERT して CHECK 違反を確認。
+    const provider = newProvider("seqcheck");
+    const sid = await seedSeqSession(provider, [0, 1, 2]);
+    await expect(
+      pool.query(
+        `INSERT INTO events (id, event_id, provider, source, session_id, event_type, timestamp, seq)
+         VALUES (gen_random_uuid(), $1, $2, 'external', $3, 'heartbeat', now(), -1)`,
+        [`neg_${Math.random().toString(36).slice(2)}`, provider, sid],
+      ),
+    ).rejects.toThrow(/events_seq_nonneg|check constraint/i);
   });
 });

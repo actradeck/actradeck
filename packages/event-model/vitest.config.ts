@@ -31,6 +31,10 @@ export default defineConfig({
         //   worst 100/90/100/100 (branch 90 は extractDocEventTypes の `?? []` fallback が未到達)。
         //   floor は worst の下 3-5pt (per-file-coverage-floor-below-worst-not-best・erosion tripwire)。
         "src/contract-doc.ts": { statements: 95, branches: 85, functions: 90, lines: 95 },
+        // seq-drop.ts (silent-drop 下限導出 + 密性抑制・QA-2) = 小ファイル tripwire。純同期関数で決定的・
+        //   INV-SEQ-DROP が全境界を網羅する worst 100/100/100/100 → floor 95/90/90/95 は worst の下
+        //   (per-file-coverage-floor-below-worst-not-best・erosion tripwire であって target ではない)。
+        "src/seq-drop.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
       },
     },
   },

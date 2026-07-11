@@ -916,4 +916,71 @@ describe("INV-OPENCODE-ADAPTER-*: opencode plugin adapter (ADR 019f3c3b D8 / R1 
       expect(calls[0]!.url).toContain("/ingest");
     });
   });
+
+  // ── INV-OPENCODE-ADAPTER-SEQ (ADR 019f4cdb Phase2・silent-drop 下限検知) ─────
+  // adapter が全 emit に **per-session 0 起点・1 増分の連続 seq** を載せることを pin。
+  // 連番が壊れる (欠番/重複/session 混線) と backend の欠落下限検知が偽陽性/偽陰性になる。
+  describe("INV-OPENCODE-ADAPTER-SEQ", () => {
+    it("fixture の全 emit で per-session seq が 0 起点・連続 (欠番なし)", () => {
+      const events = mapAll(adapter.createAdapterState());
+      const bySession = new Map<string, number[]>();
+      for (const ev of events) {
+        const sid = String(ev.session_id);
+        const arr = bySession.get(sid) ?? [];
+        expect(typeof ev.seq, `event ${String(ev.event_type)} に seq がある`).toBe("number");
+        arr.push(ev.seq as number);
+        bySession.set(sid, arr);
+      }
+      expect(bySession.size).toBeGreaterThan(0);
+      for (const [sid, seqs] of bySession) {
+        // 発行順に 0,1,2,...,n-1 の連番であること。
+        const expected = seqs.map((_, i) => i);
+        expect(seqs, `session ${sid} seq が 0 起点連続でない: ${seqs.join(",")}`).toEqual(expected);
+      }
+    });
+
+    it("heartbeat も seq 連番に含まれる (欠番を作らない・全 emit が makeEvent 単一出所)", () => {
+      const state = adapter.createAdapterState();
+      const collected: number[] = [];
+      // turn.started (mapEvent) → heartbeat (makeHeartbeatEvent) → command.started (mapToolBefore) の混在。
+      for (const ev of adapter.mapEvent(
+        {
+          type: "message.updated",
+          properties: { info: { role: "user", id: "m1", sessionID: "ses_x" } },
+        },
+        state,
+      )) {
+        collected.push(ev.seq as number);
+      }
+      collected.push(adapter.makeHeartbeatEvent(state, "ses_x").seq as number);
+      for (const ev of adapter.mapToolBefore(
+        { sessionID: "ses_x", callID: "c1", tool: "bash" },
+        { args: { command: "echo hi" } },
+        state,
+      )) {
+        collected.push(ev.seq as number);
+      }
+      // 3 イベント (turn.started / heartbeat / command.started) が 0,1,2 の連番。
+      expect(collected).toEqual([0, 1, 2]);
+    });
+
+    it("session 跨ぎで seq カウンタは独立 (それぞれ 0 起点・QA-6 floor 独立性と対称)", () => {
+      const state = adapter.createAdapterState();
+      const hbA0 = adapter.makeHeartbeatEvent(state, "ses_A").seq;
+      const hbB0 = adapter.makeHeartbeatEvent(state, "ses_B").seq;
+      const hbA1 = adapter.makeHeartbeatEvent(state, "ses_A").seq;
+      expect(hbA0).toBe(0);
+      expect(hbB0).toBe(0); // 別 session は独立に 0 起点
+      expect(hbA1).toBe(1); // ses_A は 2 発目で 1
+    });
+
+    it("seq は NormalizedEvent schema を通過する (非負整数・contract 適合)", () => {
+      const events = mapAll(adapter.createAdapterState());
+      for (const ev of events) {
+        const res = safeParseEvent(ev);
+        expect(res.success, `event ${String(ev.event_type)} が schema 適合`).toBe(true);
+        if (res.success) expect(res.data.seq).toBe(ev.seq);
+      }
+    });
+  });
 });

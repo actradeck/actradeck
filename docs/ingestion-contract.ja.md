@@ -109,6 +109,7 @@ Content-Type: application/json
 | `payload`                                   |      | object                               | `event_type` 整合の構造化 record (省略時 `{}`)                          |
 | `metrics`                                   |      | object                               | `elapsed_ms` / `tokens_in` / `tokens_out` / `cost_usd` 等 (省略時 `{}`) |
 | `redaction_count` `redaction_count_by_kind` |      | 非負整数 / record                    | §5 参照。**client 申告は信用されず backend が権威再導出する**           |
+| `seq`                                       |      | 非負整数                             | 任意の per-session ドロップ検知カウンタ。§4.4 参照。                    |
 
 ### 4.1 provider = WHO (slug 開放)
 
@@ -166,6 +167,38 @@ POST してください (未知 type は reject されます):
 (この一覧は `@actradeck/event-model` の `ALL_EVENT_TYPES` と **集合一致**することを契約テスト
 `inv-contract-golden.test.ts` が pin する — doc 側で列挙が増減/typo すると RED になる。)
 
+### 4.4 seq = ドロップ検知カウンタ (任意)
+
+external adapter は at-most-once で取り込み、イベントを **silent に drop** しうるため、ActraDeck は本来
+「adapter は送ったが store に無い」中間イベントを検知できません。adapter が **per-session `seq`** —
+**同一 `session_id` 内で 0 起点・1 ずつ増分する非負整数** — を全 emit に載せると、backend は受信した seq
+集合の穴から欠落を **下限**で検知できます:
+
+```
+missing_lower_bound = (max_seq − min_seq + 1) − distinct(seq)
+```
+
+これは cockpit の監査カバレッジ・パネルに provider 単位で出ます (hedged な `欠落 ≥N?` chip)。
+
+- **任意・additive**: `seq` を省略 (既存 adapter) しても完全に後方互換で、そのイベントは単に **検知対象外**
+  になります。非負整数のみ受理します。
+- **重複は collapse**: 同一 `seq` の再送 (at-least-once retry) は欠落を捏造しません — `distinct(seq)` が
+  吸収します (`event_id` 冪等・§3.3 と対称)。
+- **密性前提**: `seq` は **per-session の連続(dense)カウンタ**である必要があります。そうでない場合
+  (session 跨ぎの global カウンタ誤用や sparse/ランダム値) は区間が膨張し、下限が無意味な巨大値になります。
+  そのため backend は **区間の過半が穴** の session (密性前提違反) の欠落信号を **抑制** します。検知は
+  adapter が「per-session 連番」規約を守るときにのみ有効です。
+- **正直な限界 — これは *下限*です**: **末尾 drop** (受信した最大 `seq` より後ろ) と **先頭 drop** (最小
+  `seq` より前) は **原理的に検知不能** — 区間が縮むだけです。検知できるのは受信区間 `[min, max]` の
+  **内部の穴**だけで、真の欠落数はこれ以上でありえます。backend は `seq` を **再導出しません** (redaction
+  件数と異なり、順序情報は client のみが持つため) — 申告値をそのまま保存し、信頼境界は §2 と同じ
+  (single-operator / INGEST_TOKEN) です。件数のみで生の内容は運びません。
+- **抑制は無償ではない — 実際の大量 drop は非密カウンタと区別できない**: 規約準拠 adapter でも、受信区間の
+  **過半を失う**実ドロップは非密カウンタの誤用と **区別できない**ため同様に抑制されます。その session は
+  `seq_missing_lower_bound` へ **0** しか寄与せず、欠落数としてではなく `seq_suppressed_session_count`
+  (診断カウント) で **のみ** 表面化します。つまり抑制は「偽の巨大警報を避ける」代わりに「極端に大きな
+  drop の検知」を手放すトレードオフです — 下限だけでなく抑制カウントも見てください。
+
 ## 5. Ingress redaction 床 (保存前 redaction)
 
 redaction の choke point は **2 層**あります:
@@ -202,6 +235,7 @@ POST して挿入されることまで検証されています (schema 変更で
   "provider": "my_tool",
   "source": "external",
   "session_id": "my-tool-run-2026-07-04-abc123",
+  "seq": 0,
   "event_type": "command.started",
   "state": "running.command_executing",
   "timestamp": "2026-07-04T12:34:56.789Z",

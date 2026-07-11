@@ -32,6 +32,9 @@ function input(over: Partial<ProviderCoverageInput> = {}): ProviderCoverageInput
     maxEventTimestampMs: GEN_MS - 30 * MIN,
     activeSessionCount: 1,
     totalSessionCount: 1,
+    seqMissingLowerBoundSum: null,
+    seqTrackedSessionCount: 0,
+    seqSuppressedSessionCount: 0,
     ...over,
   };
 }
@@ -109,6 +112,9 @@ describe("projectProviderCoverageRow — (c) NO-RAW by construction", () => {
       maxEventTimestampMs: 2000,
       activeSessionCount: 1,
       totalSessionCount: 2,
+      seqMissingLowerBoundSum: null,
+      seqTrackedSessionCount: 0,
+      seqSuppressedSessionCount: 0,
     });
     // 余剰キーが構造的に存在しない。
     expect(Object.keys(projected ?? {}).sort()).toEqual([
@@ -116,6 +122,9 @@ describe("projectProviderCoverageRow — (c) NO-RAW by construction", () => {
       "maxEventTimestampMs",
       "maxIngestedAtMs",
       "provider",
+      "seqMissingLowerBoundSum",
+      "seqSuppressedSessionCount",
+      "seqTrackedSessionCount",
       "totalSessionCount",
     ]);
   });
@@ -143,6 +152,9 @@ describe("projectProviderCoverageRow — (c) NO-RAW by construction", () => {
       maxEventTimestampMs: null,
       activeSessionCount: 0,
       totalSessionCount: 0,
+      seqMissingLowerBoundSum: null,
+      seqTrackedSessionCount: 0,
+      seqSuppressedSessionCount: 0,
     });
   });
 
@@ -272,6 +284,9 @@ const WIRE_ROW: AuditProviderCoverage = {
   active_session_count: 1,
   total_session_count: 2,
   gap_candidate_ms: 30 * MIN,
+  seq_missing_lower_bound: 2,
+  seq_tracked_session_count: 3,
+  seq_suppressed_session_count: 1,
 };
 
 describe("parseProviderCoverageWire — (d) wire row 受信検証", () => {
@@ -293,6 +308,9 @@ describe("parseProviderCoverageWire — (d) wire row 受信検証", () => {
       "last_event_timestamp",
       "last_received_at",
       "provider",
+      "seq_missing_lower_bound",
+      "seq_suppressed_session_count",
+      "seq_tracked_session_count",
       "total_session_count",
     ]);
     const blob = JSON.stringify(parsed);
@@ -422,6 +440,9 @@ describe("parseAuditCoverageReportWire — (d) wire report 受信検証", () => 
       "last_event_timestamp",
       "last_received_at",
       "provider",
+      "seq_missing_lower_bound",
+      "seq_suppressed_session_count",
+      "seq_tracked_session_count",
       "total_session_count",
     ]);
     // (c) report top-level も generated_at / providers のみ。
@@ -459,5 +480,180 @@ describe("parseAuditCoverageReportWire — (d) wire report 受信検証", () => 
     // 実 wire を模す JSON round-trip (undefined→欠落 等の JSON 意味論を通す)。
     const roundTripped = parseAuditCoverageReportWire(JSON.parse(JSON.stringify(produced)));
     expect(roundTripped).toEqual(produced);
+  });
+});
+
+/**
+ * (e) seq-drop 下限の coverage 統合 (ADR 019f4cdb Phase2・decision 019f502c):
+ *  producer (projectProviderCoverageRow / computeProviderCoverage) と parser (parseProviderCoverageWire)
+ *  が seq_missing_lower_bound (null=seq-bearing 無し) / seq_tracked_session_count を対称に扱うことを pin。
+ *  round-trip 恒等でも seq を運ぶことを確認する。
+ */
+describe("seq-drop coverage 統合 — (e) missing_lower_bound / tracked_session_count", () => {
+  it("seq-bearing 無し (tracked=0) は seq_missing_lower_bound=null (検知対象外)", () => {
+    const c = computeProviderCoverage(
+      input({ seqTrackedSessionCount: 0, seqMissingLowerBoundSum: null }),
+      GEN_MS,
+    );
+    expect(c.seq_missing_lower_bound).toBeNull();
+    expect(c.seq_tracked_session_count).toBe(0);
+  });
+
+  it("tracked>0 かつ穴なし (sum=0) は seq_missing_lower_bound=0 (null と区別・欠落を検知しないの意)", () => {
+    const c = computeProviderCoverage(
+      input({ seqTrackedSessionCount: 2, seqMissingLowerBoundSum: 0 }),
+      GEN_MS,
+    );
+    expect(c.seq_missing_lower_bound).toBe(0);
+    expect(c.seq_tracked_session_count).toBe(2);
+  });
+
+  it("tracked>0 かつ穴あり (sum=5) は下限 5 をそのまま出す", () => {
+    const c = computeProviderCoverage(
+      input({ seqTrackedSessionCount: 3, seqMissingLowerBoundSum: 5 }),
+      GEN_MS,
+    );
+    expect(c.seq_missing_lower_bound).toBe(5);
+    expect(c.seq_tracked_session_count).toBe(3);
+  });
+
+  it("自己矛盾入力 (tracked>0 だが sum=null) は 0 へ fail-safe (null を漏らさない)", () => {
+    const c = computeProviderCoverage(
+      input({ seqTrackedSessionCount: 1, seqMissingLowerBoundSum: null }),
+      GEN_MS,
+    );
+    expect(c.seq_missing_lower_bound).toBe(0);
+  });
+
+  it("projectProviderCoverageRow は pg bigint 文字列 sum / 負値を安全側へ縮退", () => {
+    const p = projectProviderCoverageRow({
+      provider: "codex",
+      maxIngestedAtMs: GEN_MS,
+      maxEventTimestampMs: GEN_MS,
+      activeSessionCount: 1,
+      totalSessionCount: 1,
+      seqMissingLowerBoundSum: "7", // pg bigint SUM は文字列
+      seqTrackedSessionCount: "4",
+    });
+    expect(p?.seqMissingLowerBoundSum).toBe(7);
+    expect(p?.seqTrackedSessionCount).toBe(4);
+    // 負の sum (skew/破損) は 0 へ clamp。
+    const neg = projectProviderCoverageRow({
+      provider: "codex",
+      maxIngestedAtMs: GEN_MS,
+      activeSessionCount: 1,
+      totalSessionCount: 1,
+      seqMissingLowerBoundSum: -3,
+      seqTrackedSessionCount: 1,
+    });
+    expect(neg?.seqMissingLowerBoundSum).toBe(0);
+  });
+
+  it("parseProviderCoverageWire は seq 系を非負整数 / null へ縮退 (誤警報しない安全側)", () => {
+    const parsed = parseProviderCoverageWire({
+      ...WIRE_ROW,
+      seq_missing_lower_bound: "not-a-number",
+      seq_tracked_session_count: -5,
+    });
+    expect(parsed?.seq_missing_lower_bound).toBeNull(); // 非数 → null (idle 扱い)
+    expect(parsed?.seq_tracked_session_count).toBe(0);
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, seq_missing_lower_bound: null })
+        ?.seq_missing_lower_bound,
+    ).toBeNull();
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, seq_missing_lower_bound: -2 })
+        ?.seq_missing_lower_bound,
+    ).toBe(0); // 負は 0 へ clamp
+  });
+
+  it("buildCoverageReport → parse round-trip が seq を恒等に運ぶ (producer↔parser drift 赤化)", () => {
+    const gen = new Date(GEN_MS);
+    const produced = buildCoverageReport(
+      [
+        {
+          provider: "opencode",
+          maxIngestedAtMs: GEN_MS - 5 * MIN,
+          maxEventTimestampMs: GEN_MS - 5 * MIN,
+          activeSessionCount: 1,
+          totalSessionCount: 1,
+          seqMissingLowerBoundSum: 3,
+          seqTrackedSessionCount: 2,
+        },
+        {
+          provider: "aider", // seq-bearing 無し → null
+          maxIngestedAtMs: GEN_MS - 5 * MIN,
+          maxEventTimestampMs: GEN_MS - 5 * MIN,
+          activeSessionCount: 1,
+          totalSessionCount: 1,
+        },
+      ],
+      gen,
+    );
+    // 昇順整列: aider, opencode。
+    const byProvider = Object.fromEntries(produced.providers.map((p) => [p.provider, p]));
+    expect(byProvider.opencode.seq_missing_lower_bound).toBe(3);
+    expect(byProvider.opencode.seq_tracked_session_count).toBe(2);
+    expect(byProvider.aider.seq_missing_lower_bound).toBeNull();
+    expect(byProvider.aider.seq_tracked_session_count).toBe(0);
+    const roundTripped = parseAuditCoverageReportWire(JSON.parse(JSON.stringify(produced)));
+    expect(roundTripped).toEqual(produced);
+  });
+
+  it("suppressed count を producer↔parser で運ぶ (可観測性・round-trip 恒等)", () => {
+    const c = computeProviderCoverage(
+      input({
+        seqTrackedSessionCount: 5,
+        seqMissingLowerBoundSum: 2,
+        seqSuppressedSessionCount: 3,
+      }),
+      GEN_MS,
+    );
+    expect(c.seq_suppressed_session_count).toBe(3);
+    expect(c.seq_missing_lower_bound).toBe(2); // 抑制 session は sum に含まれない (SQL 側で 0 寄与)
+    // wire parse も suppressed を運ぶ。
+    const parsed = parseProviderCoverageWire({ ...WIRE_ROW, seq_suppressed_session_count: 4 });
+    expect(parsed?.seq_suppressed_session_count).toBe(4);
+    // 非数 suppressed は 0 へ縮退。
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, seq_suppressed_session_count: "bad" })
+        ?.seq_suppressed_session_count,
+    ).toBe(0);
+  });
+
+  it("SEC-1 回帰: SUM > MAX_SAFE_INTEGER 経路は精度落ちの巨大値を通さない (cap→0 fail-safe)", () => {
+    // pg bigint SUM が safe-integer を超える文字列で届いても、asNonNegSafeIntOrNull が null へ縮退し
+    //   computeProviderCoverage は 0 へ fail-safe する (9.007e15 のような精度落ち値を surface させない)。
+    const overStr = String(BigInt(Number.MAX_SAFE_INTEGER) + 10n); // "9007199254740997"
+    // projection: 単体では null (信号不能)。
+    const projected = projectProviderCoverageRow({
+      provider: "codex",
+      maxIngestedAtMs: GEN_MS,
+      maxEventTimestampMs: GEN_MS,
+      activeSessionCount: 1,
+      totalSessionCount: 1,
+      seqMissingLowerBoundSum: overStr,
+      seqTrackedSessionCount: 1,
+    });
+    expect(projected?.seqMissingLowerBoundSum).toBeNull(); // safe-integer 域外 → null
+    // compute: tracked>0 + safe-int 域外 sum → 0 (巨大偽値を出さない)。
+    const c = computeProviderCoverage(
+      input({ seqTrackedSessionCount: 1, seqMissingLowerBoundSum: overStr }),
+      GEN_MS,
+    );
+    expect(c.seq_missing_lower_bound).toBe(0);
+    expect(c.seq_missing_lower_bound).not.toBe(Number(overStr)); // 精度落ち値そのものは出ない
+    // wire parser も safe-integer 域外を null へ。
+    expect(
+      parseProviderCoverageWire({ ...WIRE_ROW, seq_missing_lower_bound: overStr })
+        ?.seq_missing_lower_bound,
+    ).toBeNull();
+    // 上限ちょうど (MAX_SAFE_INTEGER) は通す。
+    expect(
+      parseProviderCoverageWire({
+        ...WIRE_ROW,
+        seq_missing_lower_bound: Number.MAX_SAFE_INTEGER,
+      })?.seq_missing_lower_bound,
+    ).toBe(Number.MAX_SAFE_INTEGER);
   });
 });
