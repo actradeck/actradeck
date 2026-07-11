@@ -20,7 +20,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — builder: install the workspace and build shared dist + webui .next
 # ---------------------------------------------------------------------------
-FROM node:22.16.0-bookworm-slim@sha256:048ed02c5fd52e86fda6fbd2f6a76cf0d4492fd6c6fee9e2c463ed5108da0e34 AS builder
+FROM node:22.23.1-bookworm-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf AS builder
 
 ENV CI=true
 
@@ -48,7 +48,7 @@ RUN pnpm run build
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime: non-root, minimal, embedded-DB cockpit
 # ---------------------------------------------------------------------------
-FROM node:22.16.0-bookworm-slim@sha256:048ed02c5fd52e86fda6fbd2f6a76cf0d4492fd6c6fee9e2c463ed5108da0e34 AS runtime
+FROM node:22.23.1-bookworm-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf AS runtime
 
 # NODE_ENV=production: webui serves the prebuilt .next; backend picks the embedded DB
 # path when DATABASE_URL is unset (default here). Secrets are NEVER baked in — the
