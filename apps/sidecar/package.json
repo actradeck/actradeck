@@ -17,7 +17,8 @@
     "start": "node dist/cli.js",
     "e2e:claude": "tsx e2e/run-claude-e2e.mts",
     "e2e:replay": "tsx e2e/run-hook-replay-e2e.mts",
-    "demo:safety": "tsx e2e/run-safety-demo.mts"
+    "demo:safety": "tsx e2e/run-safety-demo.mts",
+    "bench:safety": "tsx e2e/safety-bench/run.mts"
   },
   "dependencies": {
     "@actradeck/event-model": "workspace:*",

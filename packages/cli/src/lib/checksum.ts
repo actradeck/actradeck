@@ -2,14 +2,17 @@ import { createHash } from "node:crypto";
 
 // Digest verification, kept in lockstep with scripts/install.sh's pure helpers
 // (expected_digest_for / verify_sha256). The two are NOT byte-for-byte identical parsers;
-// they converge via a shared NORMALIZATION CONTRACT (QA-R2-1) so the same checksums.txt yields
-// the same result on both sides regardless of cosmetic formatting:
-//   - LOWERCASE the hex digest (a sha256 digest is case-insensitive), and
-//   - tolerate CRLF line endings (strip the trailing \r before matching the asset name).
-// INV-NPM-TS-SHELL-PARITY (scripts/test-release-prep.sh) pins this agreement. This is not a
-// weakening: a genuinely DIFFERENT digest still differs after normalization and is still
-// rejected. FAIL-CLOSED throughout: a missing digest entry, an empty expected value, or a
-// mismatch is never a false OK.
+// they converge via a shared NORMALIZATION CONTRACT (QA-R2-1) on the test-vector domain
+// that INV-NPM-TS-SHELL-PARITY (scripts/test-release-prep.sh) pins — the same checksums.txt
+// yields the same result on both sides regardless of cosmetic formatting:
+//   - LOWERCASE the hex digest (a sha256 digest is case-insensitive),
+//   - tolerate CRLF line endings: strip the TRAILING \r only (`.trim()`) — an interior \r
+//     in a name stays significant and fails closed on both sides (SEC-R3-1),
+//   - require a 64-hex digest field (a malformed line is "not found", never a non-hex value),
+//   - FIRST match wins on duplicate asset names (install.sh mirrors this).
+// This is not a weakening: a genuinely DIFFERENT digest still differs after normalization
+// and is still rejected. FAIL-CLOSED throughout: a missing digest entry, an empty expected
+// value, or a mismatch is never a false OK.
 
 /** Lowercase hex sha256 of the given bytes (Node crypto). */
 export function sha256Hex(bytes: Uint8Array): string {

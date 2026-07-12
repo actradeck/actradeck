@@ -54,7 +54,9 @@ vendor structurally will not build: **neutral governance across competing agents
   backend ingress floor redacts them unconditionally _before persistence_ (not before
   that first hop). Per-kind counts are shown in the UI. Detection is best-effort pattern
   matching (gitleaks-style rules + custom regexes) — a strong safety net, not an absolute
-  guarantee (see [honest limits](./docs/approval-policy.md#honest-limits)).
+  guarantee (see [honest limits](./docs/approval-policy.md#honest-limits)). Measured
+  precision/recall on a synthetic corpus:
+  [redaction & risk-classifier benchmark](./docs/benchmarks/redaction-and-risk-classifier.md).
 - **Audit & replay.** Every session can be replayed after the fact for review,
   incident analysis, or compliance. Session reports export to HTML/Markdown with an
   embedded integrity manifest (SHA-256 hash chain). Enable `ACTRADECK_AUDIT_SIGNING_KEY`

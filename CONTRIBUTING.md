@@ -115,6 +115,9 @@ None of this changes what you do: open a focused PR following the
 [Pull request guidelines](#pull-request-guidelines) above. The import is entirely on the
 maintainers' side.
 
+For the fuller picture — why the mirror is set up this way, how decisions are made, and the
+intended path toward external maintainers — see [`GOVERNANCE.md`](./GOVERNANCE.md).
+
 ## Where to start (good first contributions)
 
 New here? These four areas are **safe, self-contained, and well-scoped for a first

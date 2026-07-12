@@ -173,15 +173,21 @@ verify_sha256() {
 # expected_digest_for <checksums_file> <asset_name> — print the sha256 recorded for
 # <asset_name> in a `sha256sum`-format checksums file. Non-zero (empty) if not found,
 # so the caller fails closed on a missing/altered checksums.txt.
-# NORMALIZATION CONTRACT (QA-R2-1): mirror checksum.ts's tolerant parse so the two never diverge —
-#   (a) STRIP CR (`gsub(/\r/,"")`): a CRLF checksums.txt would otherwise leave `name\r` != `name`
-#       so the asset is "not found" (the CLI's per-line `.trim()` already drops the \r);
+# NORMALIZATION CONTRACT (QA-R2-1): converge with checksum.ts's parse on the shared
+# test-vector domain (INV-NPM-TS-SHELL-PARITY pins the agreement — this is not a
+# byte-for-byte parser guarantee):
+#   (a) STRIP TRAILING CR ONLY (`sub(/\r$/,"")`): a CRLF checksums.txt would otherwise leave
+#       `name\r` != `name`. Trailing-only matches the CLI's per-line `.trim()` — an INTERIOR
+#       \r stays significant on BOTH sides and fails closed (SEC-R3-1), it is not deleted;
 #   (b) LOWERCASE the digest (`tolower`): hex is case-insensitive and the CLI returns the
-#       lowercased digest, so an uppercase file yields the SAME value on both sides.
+#       lowercased digest, so an uppercase file yields the SAME value on both sides;
+#   (c) REQUIRE a 64-hex digest field, FIRST match wins on duplicate names — both mirror
+#       checksum.ts (`^[0-9a-fA-F]{64}` + first regex hit), so a malformed digest line is
+#       "not found" (fail-closed) instead of surfacing a non-hex value.
 expected_digest_for() {
   _cs="$1"; _name="$2"
   [ -f "$_cs" ] || return 2
-  awk -v n="$_name" '{ gsub(/\r/,""); f=$2; sub(/^\*/,"",f); if (f==n) { print tolower($1); found=1 } } END { exit(found?0:1) }' "$_cs"
+  awk -v n="$_name" '!found { sub(/\r$/,""); f=$2; sub(/^\*/,"",f); if (f==n && length($1)==64 && $1 ~ /^[0-9a-fA-F]+$/) { print tolower($1); found=1 } } END { exit(found?0:1) }' "$_cs"
 }
 
 # verify_and_fetch_release <dest_dir> — fetch the Release assets for ACTRADECK_REF,

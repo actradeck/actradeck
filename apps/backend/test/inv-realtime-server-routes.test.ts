@@ -33,6 +33,9 @@ import type { ReplayStore } from "../src/replay-store.js";
 import type { AuditStore } from "../src/audit-store.js";
 import type { RealtimeStore } from "../src/realtime-store.js";
 import { registerRealtimeRoute } from "../src/realtime-server.js";
+import { installErrorScrubbing } from "../src/error-scrub.js";
+import { buildIngestionServer } from "../src/ingestion-server.js";
+import type { Pool } from "pg";
 import { SidecarRegistry, type SidecarLink } from "../src/sidecar-registry.js";
 
 const REALTIME_TOKEN = "test-realtime-token-routes-abcdefghij";
@@ -91,29 +94,32 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     recent?: Map<string, ReplayEventDTO[]>;
     calls?: FakeReplayCalls;
     auditStore?: AuditStore;
+    replayStore?: ReplayStore;
     projectScope?: readonly string[];
   }): Promise<FakeReplayCalls> {
     const calls: FakeReplayCalls = deps.calls ?? { commandOutputArgs: [] };
     const store = {
       listSnapshot: async () => deps.listSnapshot ?? [],
     } as unknown as RealtimeStore;
-    const replayStore = {
-      eventsPage: async () => ({
-        events: [],
-        order: "timestamp_event_id_asc",
-        next_cursor: null,
-      }),
-      commandOutput: async (o: { sessionId: string; eventId?: string; tail: number }) => {
-        calls.commandOutputArgs.push(o);
-        return {
-          output_excerpt: "",
-          anchor_event_id: undefined,
-          truncated: false,
-          not_found: false,
-        };
-      },
-      recentEventsForSessions: async () => deps.recent ?? new Map<string, ReplayEventDTO[]>(),
-    } as unknown as ReplayStore;
+    const replayStore =
+      deps.replayStore ??
+      ({
+        eventsPage: async () => ({
+          events: [],
+          order: "timestamp_event_id_asc",
+          next_cursor: null,
+        }),
+        commandOutput: async (o: { sessionId: string; eventId?: string; tail: number }) => {
+          calls.commandOutputArgs.push(o);
+          return {
+            output_excerpt: "",
+            anchor_event_id: undefined,
+            truncated: false,
+            not_found: false,
+          };
+        },
+        recentEventsForSessions: async () => deps.recent ?? new Map<string, ReplayEventDTO[]>(),
+      } as unknown as ReplayStore);
     const auditStore =
       deps.auditStore ??
       ({
@@ -148,6 +154,10 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     } as unknown as RealtimeHub;
 
     app = Fastify();
+    // 本番 (buildIngestionServer) と同じく route 登録の前にグローバル error scrub を張る。
+    //   これで try/catch の無い route (replay/wall 等) の未処理例外も静的 500 化される
+    //   (INV-500-SCRUB がこの配線に依存)。
+    installErrorScrubbing(app);
     // registerRealtimeRoute は /realtime/ws を websocket route として宣言するため plugin が要る。
     await app.register(fastifyWebsocket);
     registerRealtimeRoute(app, {
@@ -1552,5 +1562,115 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
       payload: { prompt: "p", cwd: "/r" },
     });
     expect(res.statusCode).toBe(409);
+  });
+
+  // ── INV-500-SCRUB: グローバル error handler (installErrorScrubbing) ──────────────────────────
+  //   try/catch を持たない /realtime GET route (replay 系) で handler が例外を投げても、Fastify 既定
+  //   handler の生 pg エラー echo (message + code + stack) を静的 500 へ縮約する。audit route の SEC-1
+  //   と同クラス・severity M (裁定 decision 019ed235)。error scrub を外す mutation (mount の
+  //   installErrorScrubbing を無効化) で Fastify 既定 handler が内部詳細を echo し赤化する。
+  describe("INV-500-SCRUB: 未処理例外は静的 500 (内部詳細を漏らさない)", () => {
+    it("events route: replayStore.eventsPage throws → 500 静的本文 (pg message/code を漏らさない)", async () => {
+      // 実運用の生 pg エラーを模した敵対 message/code (DB 認証失敗 + 存在しない relation)。
+      const PG_MESSAGE = 'password authentication failed for user "actradeck_secret" LEAKME-EVENTS';
+      const throwing = {
+        eventsPage: async () => {
+          const e = new Error(PG_MESSAGE) as Error & { code?: string };
+          e.code = "28P01";
+          throw e;
+        },
+        commandOutput: async () => ({
+          output_excerpt: "",
+          anchor_event_id: undefined,
+          truncated: false,
+          not_found: false,
+        }),
+        recentEventsForSessions: async () => new Map<string, ReplayEventDTO[]>(),
+      } as unknown as ReplayStore;
+      await mount({ replayStore: throwing });
+      const res = await app.inject({
+        method: "GET",
+        url: "/realtime/sessions/sess_x/events",
+        headers: auth,
+      });
+      expect(res.statusCode).toBe(500);
+      expect(res.json()).toEqual({ error: "internal error" });
+      // 注入した pg message / SQLSTATE / user 名は本文へ一切載らない。
+      expect(res.body).not.toContain("LEAKME-EVENTS");
+      expect(res.body).not.toContain("28P01");
+      expect(res.body).not.toContain("actradeck_secret");
+      expect(res.body).not.toContain("password authentication failed");
+    });
+
+    // 4xx 非退行 (client エラー委譲): Fastify 生成の 4xx (malformed JSON) は error scrub が
+    //   既定の安全な扱いへ委譲し、本文・コードを変えない (静的 500 へ縮約しない)。
+    it("4xx 非退行: malformed JSON body → 400 (既定 client エラー本文を維持・500 化しない)", async () => {
+      await mount({});
+      const res = await app.inject({
+        method: "POST",
+        url: "/realtime/sessions/sess_any/approvals/policy/set",
+        headers: { ...auth, "content-type": "application/json" },
+        payload: "{ this is not valid json",
+      });
+      expect(res.statusCode).toBe(400); // client エラーは 400 のまま (5xx へ昇格しない)。
+      const body = res.json() as { statusCode?: number; error?: string; message?: string };
+      expect(body.statusCode).toBe(400);
+      // 静的 500 本文へ縮約されていない (4xx は既定委譲)。
+      expect(body.error).not.toBe("internal error");
+    });
+
+    // 4xx 非退行 (既存 401): token 無しの 401 は onRequest gate の明示 send ゆえ error handler を
+    //   経由しない。error scrub 導入後も応答が変わらないことを 1 ケースで固定する。
+    it("4xx 非退行: token 無し → 401 unauthorized (error scrub 導入後も不変)", async () => {
+      await mount({});
+      const res = await app.inject({ method: "GET", url: "/realtime/sessions/sess_x/events" });
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toMatchObject({ error: "unauthorized" });
+    });
+
+    // QA-1 (裁定 019f5606): 上のケースは mount() がテスト側で installErrorScrubbing を張るため、
+    //   本番組立の呼び出し行 (ingestion-server.ts の installErrorScrubbing) を消しても緑のままだった。
+    //   ここでは **buildIngestionServer をそのまま起動**して本番配線を red-on-removal で pin する —
+    //   呼び出し行を消すと、この 1 本だけが Fastify 既定 handler の生 pg エラー echo で赤化する
+    //   (root-context の error handler は request 時に解決されるため、同一 encapsulation 内では
+    //   登録順に非依存 — 後方への移動は緑のままで正しい挙動・QA 再監査 019f5606 で実測)。
+    //   store は全て opts.pool から内部生成されるため、query が必ず
+    //   throw する毒 Pool を注入すれば try/catch を持たない route の実 handler で例外が起きる。
+    it("本番配線 pin: buildIngestionServer 経路でも未処理例外は静的 500 (red-on-removal)", async () => {
+      const PG_MESSAGE = 'password authentication failed for user "actradeck_secret" LEAKME-PROD';
+      const poisonedQuery = async () => {
+        const e = new Error(PG_MESSAGE) as Error & { code?: string };
+        e.code = "28P01";
+        throw e;
+      };
+      const poisonedPool = {
+        query: poisonedQuery,
+        connect: poisonedQuery,
+        on() {
+          return this;
+        },
+        end: async () => {},
+      } as unknown as Pool;
+      const prod = await buildIngestionServer({
+        pool: poisonedPool,
+        ingestToken: "t-ingest-prod-pin",
+        realtimeToken: REALTIME_TOKEN,
+      });
+      try {
+        const res = await prod.inject({
+          method: "GET",
+          url: "/realtime/sessions/sess_x/events",
+          headers: auth,
+        });
+        expect(res.statusCode).toBe(500);
+        expect(res.json()).toEqual({ error: "internal error" });
+        expect(res.body).not.toContain("LEAKME-PROD");
+        expect(res.body).not.toContain("28P01");
+        expect(res.body).not.toContain("actradeck_secret");
+        expect(res.body).not.toContain("password authentication failed");
+      } finally {
+        await prod.close();
+      }
+    });
   });
 });

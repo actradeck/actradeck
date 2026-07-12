@@ -1643,6 +1643,11 @@ fi
 # PARITY DOMAIN for repo_slug: FULL URLs with a host (install.sh's real input; the shell helper
 # defers shape validation to its caller and does NOT handle bare `owner/name` or scp `host:o/r`,
 # whereas the TS repoSlug validates inline — those inputs are out of the shared domain by design).
+# PARITY DOMAIN for digests: SPACE-FREE asset names (real release assets are actradeck-X.Y.Z.*).
+# A name containing whitespace parses differently by design (awk `$2` = first token vs TS `(.+)` =
+# rest-of-line) — out of the shared domain; both sides stay fail-closed for the real (space-free)
+# query names, and the tarball itself is anchored by attestation before the checksums parse
+# (SEC-1 accepted-risk, 裁定 019f5606).
 if command -v node >/dev/null 2>&1 && command -v pnpm >/dev/null 2>&1 && [ -d "$ROOT/node_modules" ] && [ -f "$ROOT/packages/cli/package.json" ]; then
   if pnpm --filter ./packages/cli run build >/dev/null 2>&1; then
     TSJS="$WORK/ts-eval.mjs"
@@ -1687,6 +1692,19 @@ JS
     # (pre-fix: shell awk saw `name\r` != `name` -> not found -> divergence.)
     CSC="$PARF/checksums.crlf.txt"; printf '%s  actradeck-0.4.0.tar.gz\r\n%s  other.bin\r\n' "$DGT" "0000000000000000000000000000000000000000000000000000000000000000" > "$CSC"
     parity "expected_digest_for(crlf)" "$(inst expected_digest_for "$CSC" actradeck-0.4.0.tar.gz)" "$(tseval expected_digest_for "$CSC" actradeck-0.4.0.tar.gz)"
+    # SEC-R3-1 — an INTERIOR \r must stay significant on BOTH sides (fail-closed together).
+    # (pre-fix: the shell's gsub deleted interior \r so `…gz\rX` matched a query `…gzX` while
+    # the TS `.trim()` kept it -> divergence. trailing-only sub() restores parity.)
+    CSI="$PARF/checksums.interior.txt"; printf '%s  actradeck-0.4.0.tar.gz\rX\n' "$DGT" > "$CSI"
+    parity "expected_digest_for(interior-cr)" "$(inst expected_digest_for "$CSI" actradeck-0.4.0.tar.gzX)" "$(tseval expected_digest_for "$CSI" actradeck-0.4.0.tar.gzX)"
+    # duplicate asset-name lines: FIRST match wins on both sides (checksum.ts returns the
+    # first regex hit; install.sh pins `!found`) — the ambiguous second digest never surfaces.
+    CSD="$PARF/checksums.dup.txt"; printf '%s  actradeck-0.4.0.tar.gz\n1111111111111111111111111111111111111111111111111111111111111111  actradeck-0.4.0.tar.gz\n' "$DGT" > "$CSD"
+    parity "expected_digest_for(dup-first-wins)" "$(inst expected_digest_for "$CSD" actradeck-0.4.0.tar.gz)" "$(tseval expected_digest_for "$CSD" actradeck-0.4.0.tar.gz)"
+    # non-64-hex digest field: malformed lines are "not found" (fail-closed) on both sides —
+    # never returned as a non-hex "digest" (pre-fix: shell printed the raw field -> divergence).
+    CSB="$PARF/checksums.badhex.txt"; printf 'zzzz  actradeck-0.4.0.tar.gz\nshort0abc  actradeck-0.4.0.tar.gz\n' > "$CSB"
+    parity "expected_digest_for(non-64hex)" "$(inst expected_digest_for "$CSB" actradeck-0.4.0.tar.gz)" "$(tseval expected_digest_for "$CSB" actradeck-0.4.0.tar.gz)"
     # repo_slug vectors (full-URL domain) --------------------------------------
     for u in "https://github.com/acme/tool" "https://github.com/acme/tool.git" "https://x:y@github.com/acme/tool"; do
       parity "repo_slug($u)" "$(inst repo_slug "$u")" "$(tseval repo_slug "$u")"

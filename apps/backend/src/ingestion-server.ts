@@ -36,6 +36,7 @@ import Fastify, {
   type FastifyServerOptions,
 } from "fastify";
 
+import { installErrorScrubbing } from "./error-scrub.js";
 import { IngestStore } from "./ingest-store.js";
 import { RealtimeHub } from "./realtime-hub.js";
 import { RealtimeStore } from "./realtime-store.js";
@@ -192,6 +193,11 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
     logger: buildLoggerOption(opts.logger ?? false),
     bodyLimit: maxPayload, // HTTP POST のサイズ上限。
   });
+
+  // SEC (監査 SEC-1 同クラス): route 登録の**前**にグローバル error scrub を張り、以後の全
+  //   route (ingest / realtime / audit) の未処理例外で生 pg エラー (message/code/stack) を
+  //   本文へ echo させない (静的 500)。audit route の自前 try/catch と二重防御。
+  installErrorScrubbing(app);
 
   // @fastify/websocket は routes 前に register する (初期化順序の制約)。
   await app.register(fastifyWebsocket, {
