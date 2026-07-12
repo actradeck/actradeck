@@ -3,7 +3,7 @@
   "specVersion": "1.5",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-07-12T02:26:34Z",
+    "timestamp": "2026-07-12T02:50:30Z",
     "tools": [
       {
         "vendor": "ActraDeck",
@@ -12,9 +12,9 @@
     ],
     "component": {
       "type": "application",
-      "bom-ref": "actradeck@0.5.1",
+      "bom-ref": "actradeck@0.5.2",
       "name": "actradeck",
-      "version": "0.5.1"
+      "version": "0.5.2"
     }
   },
   "components": [

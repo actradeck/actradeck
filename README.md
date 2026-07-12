@@ -144,7 +144,7 @@ verified path (requires the GitHub CLI):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh -o install.sh
-ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.5.1 sh install.sh
+ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.5.2 sh install.sh
 ```
 
 Or bootstrap via npm — a thin, dependency-free [`actradeck`](https://www.npmjs.com/package/actradeck)
@@ -219,7 +219,7 @@ troubleshooting). The precision/limits of Attach Mode are in
 If you'd rather not install Node/pnpm, the **cockpit** (backend + webui + embedded
 database) runs from a single image — no external database. A **signed prebuilt image**
 is published to GHCR (since v0.4.0, multi-arch `linux/amd64` + `linux/arm64` since
-v0.5.0; tags `latest` and `0.5.1`):
+v0.5.0; tags `latest` and `0.5.2`):
 
 ```bash
 docker run --rm -p 127.0.0.1:55400:55400 -v actradeck_pgdata:/data \

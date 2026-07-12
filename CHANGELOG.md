@@ -11,6 +11,50 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-12
+
+### Fixed
+
+- **The audit-coverage panel now surfaces its own outage instead of freezing the last
+  healthy snapshot.** Previously, if the coverage API stopped responding, the board kept
+  rendering the last-known per-provider rows with a frozen "Xs ago" age — the audit-gap
+  detector could not signal a gap in itself. The panel now books time-since-last-success
+  client-side (clock-skew independent), shows a stale banner and dims the rows once data
+  is older than three poll intervals, renders an explicit "unreachable" row when the API
+  never answered, and bounds every pull with a fetch timeout so even a *hanging* backend
+  cannot freeze the signal. Fresh-path rendering is byte-identical to before.
+- **Deflaked `INV-OPENCODE-ADAPTER-ERROR-MINIMIZED` (public CI false red).** The leak
+  scan substring-matched dropped envelope values against runtime-generated fields, so a
+  short numeric like `141` could collide with the hex timestamp of a freshly minted
+  UUIDv7 `event_id`. Generated `event_id`/`timestamp` are now excluded from the negative
+  scan (their formats are structurally enforced by the parser); every derived field is
+  still scanned, pinned by a seeded collision test plus a real-leak injection test.
+- **Deflaked the webui audit-detail replay test** — a heavy dynamic `import("jsdom")`
+  inside the test body counted against the 5s test timeout and could exceed it on a
+  contended CI runner; the import is now static (module-load phase) with an explicit
+  per-test timeout as a backstop. Assertions unchanged.
+
+### Changed
+
+- **Tagline: "observe everything, govern selectively."** README and docs now lead with
+  the honest split — cross-vendor observation, secret redaction, and one audit trail for
+  every agent; approval governance where the mode supports it. The headline redaction
+  claim is scoped per path (sidecar-observed sessions: before transmit and persist;
+  external adapters: at backend ingress before persist — closes issue #16).
+- **Public-mirror docs consistency (issue #5).** Shipped docs no longer link to files
+  that exist only in the private canonical repo (`plan.md`, `CLAUDE.md`,
+  `.claude/rules/`); references were replaced with public equivalents (`docs/adr/`,
+  `CONTRIBUTING.md`) or honest "internal, not shipped" prose. `docs/docker.md` and the
+  README were caught up to the v0.5.x multi-arch reality.
+- **CI failures now name the failing tests.** Both real-DB INV assert steps (backend and
+  db) previously re-ran the suite behind an `&&` chain, so when the suite itself failed
+  no test name reached the log; they now capture the exit code and print each failed
+  test (file + title) before failing with the original code.
+- **Community-PR close comments are standardized.** `scripts/import-oss-pr.sh` now emits
+  a close-comment template covering: imported into the canonical repo with authorship
+  preserved, the public mirror commit, the shipped version, CONTRIBUTORS.md/CHANGELOG
+  credit, and why the PR shows "Closed" instead of "Merged" on a one-way mirror.
+
 ## [0.5.1] - 2026-07-11
 
 ### Fixed
@@ -197,7 +241,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/actradeck/actradeck/releases/tag/v0.5.2
 [0.5.1]: https://github.com/actradeck/actradeck/releases/tag/v0.5.1
 [0.5.0]: https://github.com/actradeck/actradeck/releases/tag/v0.5.0
 [0.4.0]: https://github.com/actradeck/actradeck/releases/tag/v0.4.0
