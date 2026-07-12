@@ -3,7 +3,7 @@
 These ADRs capture the load-bearing decisions behind ActraDeck — the "why" a
 contributor needs before changing the system. They are exported and condensed from
 ActraDeck's internal decision log; each cites its source decision ID(s) where one
-exists, or the relevant code.
+exists, or the maintainers' internal product spec (not shipped in this repo) / the code.
 
 The **source of truth is always the coded contract** — types, schemas, DB
 constraints, and the invariant tests (`INV-*`). When an ADR and the code disagree,

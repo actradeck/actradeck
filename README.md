@@ -260,6 +260,8 @@ path the sidecar redacts events before anything is stored or sent; every event �
 including direct POSTs from external adapters via the public ingestion contract —
 also passes an unconditional redaction floor at backend ingress before it is stored.
 
+- Product spec: maintainers' internal document (not shipped in this repo) — the public architecture decision records below capture the shipped design
+- Development discipline & contribution guide: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 - Public ingestion contract: [`docs/ingestion-contract.md`](./docs/ingestion-contract.md)
 - Architecture decision records: [`docs/adr/`](./docs/adr/)
 - 90-second demo runbook: [`docs/demo-90s.md`](./docs/demo-90s.md)
@@ -278,9 +280,9 @@ ActraDeck is a monorepo (pnpm workspaces): `apps/sidecar`, `apps/backend`,
 CI on every PR. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for setup, the local
 verification gate, PR guidelines, and the security-sensitive areas that need extra
 care; all participants are expected to follow our
-[`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). For deeper context, the ADRs under `docs/adr/`
-describe how the system is meant to
-behave. Issues and pull requests are welcome.
+[`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). For deeper context, the architecture
+decision records under [`docs/adr/`](./docs/adr/) and the guides under [`docs/`](./docs/)
+describe how the system is meant to behave. Issues and pull requests are welcome.
 
 ## License
 

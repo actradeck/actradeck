@@ -250,7 +250,7 @@ node apps/sidecar/dist/cli.js approvals clear                # 全永続承認�
   未ビルドなら `build` を促して停止します。**既存の Attach セッションを後から Managed へ切り替える retrofit は不可**
   （Managed は起動時に App Server 経由で spawn する経路のため）。承認 relay + 予防はこの Managed 起動でのみ有効で、
   素の Codex TUI（Attach 観測）は検知のみです。
-- 完全同期は非保証（hook 駆動。詳細は plan.md §11B / ADR 019ea476 D0）。
+- 完全同期は非保証（hook 駆動。詳細は [`docs/adr/0011-attach-mode.md`](./adr/0011-attach-mode.md)）。
 
 ---
 

@@ -28,7 +28,7 @@
  * 「マシンを出る前に漏れない」とは **謳いません**。tool_input (read_file の file_path 等) と、
  * **依頼/応答の要約** (BeforeAgent.prompt → payload.prompt_summary・AfterAgent.prompt_response →
  * payload.response_summary・summarize で 1 行化) は送られ、backend 床で初めて redact されます
- * (ADR 019f47c2・plan.md「ユーザー依頼 / エージェントの公開メッセージは見せてよい」表示許可対象)。
+ * (ADR 019f47c2・ユーザー依頼 / エージェントの公開メッセージは見せてよい 表示許可対象)。
  * SEC-1 (truncate-before-redact straddle leak): adapter は secret を分割しうる小 cap で raw を切詰めず
  * **sanity 上限のみ** で送り (床が secret 全体を見て redact できる)、**表示用の ≤N 有界化は床の後**
  * (backend projection deriveActionSubject が redacted 値を slice) で行います (§ summarize / SUMMARY_SANITY_CAP)。
@@ -112,7 +112,7 @@ function toolRequestId(toolName, toolInput) {
 
 // ── 依頼/応答の要約 (summarize) ──────────────────────────────────────────────
 // ユーザー依頼 (BeforeAgent.prompt) と エージェント応答 (AfterAgent.prompt_response) を
-// 「改行/連続空白を単一空白へ畳む」1 行化する依存ゼロ純関数 (ADR 019f47c2)。plan.md の表示ポリシー
+// 「改行/連続空白を単一空白へ畳む」1 行化する依存ゼロ純関数 (ADR 019f47c2)。表示ポリシー
 // 「見せてよい: ユーザー依頼 / エージェントの公開メッセージ」に該当し、Claude Code の
 // UserPromptSubmit → `依頼: <summarize(prompt)>` (normalize.ts) と同値意味論を持つ。
 //
@@ -314,8 +314,8 @@ export function mapHookEvent(hook, opts = {}) {
       ];
     }
 
-    // AfterAgent → turn.completed(idle)。応答要約搭載 (ADR 019f47c2・plan.md「エージェントの公開
-    //   メッセージ」表示許可): prompt_response を summarize で有界化し summary「応答: …」+
+    // AfterAgent → turn.completed(idle)。応答要約搭載 (ADR 019f47c2・エージェントの公開
+    //   メッセージ 表示許可): prompt_response を summarize で有界化し summary「応答: …」+
     //   payload.response_summary に載せる。raw 全文は載せない (有界要約のみ)・secret は backend 床で
     //   redaction 済。prompt_response 欠落 (実捕獲では存在) は従来どおり要約なし。
     case "AfterAgent": {

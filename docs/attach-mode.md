@@ -283,8 +283,8 @@ Security assumption: the store is, like `file-lock`, a **single-operator / local
   existing Attach session to Managed is not possible** (because Managed is a path that spawns via
   the App Server at startup). Approval relay + prevention are effective only with this Managed
   startup; the bare Codex TUI (Attach observation) is detection only.
-- Complete synchronization is not guaranteed (hook-driven. Details in plan.md §11B / ADR 019ea476
-  D0).
+- Complete synchronization is not guaranteed (hook-driven. Details in
+  [`docs/adr/0011-attach-mode.md`](./adr/0011-attach-mode.md)).
 
 ---
 

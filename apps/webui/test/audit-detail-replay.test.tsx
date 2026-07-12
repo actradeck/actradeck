@@ -4,6 +4,7 @@
  * AuditDetailModal は onReplay を渡されたときだけ Replay ボタンを出し、押下で当該 session_id を
  * 渡してモーダルを閉じる。CockpitBoard 側がそれを board+Replay へ deep-link する。
  */
+import { JSDOM } from "jsdom";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -40,8 +41,13 @@ describe("AuditDetailModal の Replay 導線 (クリック配線)", () => {
     vi.restoreAllMocks();
   });
 
+  // jsdom は heavy module (実測 import ~290ms・CI 負荷下では倍化しうる)。テスト本体で
+  // `await import("jsdom")` すると testTimeout(5s) 枠内に module compile を抱え、CI runner の
+  // CPU 競合で 5s を超えて flake する (private CI 29160552819 で実観測: local 5/5 green・
+  // 非接触 diff で 5060ms timeout = 環境 timing)。① heavy import を file の import 相へ静的化し
+  // testTimeout 枠外へ出す (本体は render+click+assert ~20ms のみ) + ② 明示 testTimeout を保険に張る。
+  // assert (onReplay(sessionId)/onClose 呼出し検証) は不変 — 配線を壊せば依然 RED。
   it("Replay 押下で onReplay(sessionId) と onClose を呼ぶ", async () => {
-    const { JSDOM } = await import("jsdom");
     const dom = new JSDOM('<!doctype html><div id="root"></div>');
     const reactGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
     const prev = {
@@ -95,5 +101,5 @@ describe("AuditDetailModal の Replay 導線 (クリック配線)", () => {
       reactGlobal.IS_REACT_ACT_ENVIRONMENT = prev.act;
       dom.window.close();
     }
-  });
+  }, 15_000);
 });

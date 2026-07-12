@@ -163,7 +163,8 @@ command cannot be recovered from the 8-hex digest). The command itself is alread
     applied afterwards by the backend projection** (`SUMMARY_SUBJECT_CAP` — a *different* value that
     slices the already-redacted string · bounded-at-storage). This mirrors Claude Code's
     `依頼: <summary>` (UserPromptSubmit) so the cockpit shows *what the session is doing* (the top
-    KPI); display-permitted per plan.md ("user request / agent public message may be shown");
+    KPI); user requests and agent public messages are display-permitted (see
+    [`docs/adr/0012-threat-model-and-local-fs.md`](../../adr/0012-threat-model-and-local-fs.md));
     bounding ≠ redaction.
   - **Not applied (relies on the backend floor)**: non-shell tools (e.g. `read_file`) forward their
     `tool_input` (`file_path`, etc.) **verbatim** into `payload.input`. Secrets there are only

@@ -1,7 +1,7 @@
 # ADR 0004: Liveness from decomposed heartbeats; "stalled" is shown with evidence
 
 - Status: Accepted
-- Source: `plan.md` §5, §17
+- Source: maintainers' internal product spec (not shipped in this repo)
 
 ## Context
 

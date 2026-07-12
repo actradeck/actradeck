@@ -50,7 +50,8 @@ ActraDeck is a pnpm-workspace monorepo:
 - `apps/webui` — Next.js/React cockpit.
 - `packages/*` — shared event model, projection, design tokens.
 
-Architecture and product behavior live in [`README.md`](./README.md)
+Architecture and product behavior live in [`README.md`](./README.md) and the
+architecture decision records under [`docs/adr/`](./docs/adr/).
 
 ## Before you open a pull request
 
@@ -92,7 +93,10 @@ the private canonical with `scripts/import-oss-pr.sh`, which applies your patch 
 in the canonical history — you are not squashed into an anonymous snapshot. From there
 it goes through the same review/CI gate as any change, is merged, and is reflected back
 into this repository on the next mirror sync. Your PR is then closed with a comment that
-references the branch/commit it landed as.
+spells out how it landed: the canonical import (authorship preserved), the mirror commit
+and release version it shipped in, your CONTRIBUTORS.md / CHANGELOG credit, and why GitHub
+shows it as **Closed** rather than Merged (a one-way mirror with synthetic history cannot
+be shown as Merged — Closed here means *imported and shipped*, not rejected).
 
 **Public credit — the honest version.** Because the mirror's git history is synthetic,
 your individual commit SHA will **not** appear in this repository's public git log. What

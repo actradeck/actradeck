@@ -1,7 +1,7 @@
 # ADR 0003: One normalized event model across Claude Code and Codex
 
 - Status: Accepted
-- Source: `plan.md` §1, §4, §6; `packages/event-model`; decision `019ec744`
+- Source: maintainers' internal product spec (not shipped in this repo); `packages/event-model`; decision `019ec744`
 
 ## Context
 

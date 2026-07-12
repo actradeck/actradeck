@@ -1,7 +1,7 @@
 # ADR 0002: Local sidecar, outbound-only; the UI never connects to a CLI
 
 - Status: Accepted
-- Source: `plan.md` §7–§8, §15
+- Source: maintainers' internal product spec (not shipped in this repo)
 
 ## Context
 

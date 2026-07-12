@@ -138,6 +138,36 @@ function collectStrings(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
+/**
+ * INV-OPENCODE-ADAPTER-ERROR-MINIMIZED の leak 負照合 (substring 照合) が走査する
+ * 「値空間」の正典。**実行時生成の top-level フィールド (event_id / timestamp) を除外**する。
+ *
+ * 方針: 根治方針 #1 (走査対象から実行時生成フィールドを除外)。
+ *
+ * 根拠 (この除外が歯を落とさない証明):
+ * - `event_id` は event-model が UUIDv7 で採番し (`src/id.ts`)、`timestamp` は採時した
+ *   ISO8601 で、**いずれも入力封筒 (error.data.responseHeaders/Body/metadata) と無関係**に
+ *   生成される。安全化された出力の `safeParseEvent` は EventId (UUIDv7 厳格) / Iso8601 (厳格)
+ *   で両フィールドの**形式を強制**するため、dropped 封筒値がこれらへ構造的に混入することは
+ *   不能 (leak 経路にならない)。よって除外しても実 leak を見逃さない。
+ * - 一方 UUIDv7 の ms hex prefix は任意時点で短い封筒値 (fixture header `content-length:"141"`)
+ *   と偶然一致し、時刻依存の false positive を生む (公開 CI run 29153342934・~0.2% 時間窓・
+ *   `141 in "019f5141-70d0-73d7-a2e7-49aace22618a"`)。
+ * - derived フィールド (summary / payload / session_id など・**入力由来**) は全走査を維持する。
+ *   実 leak は必ずこれらに落ちるため、substring 照合の歯は保たれる (下の seeded/injection 参照)。
+ *
+ * 除外は top-level のみ (event_id / timestamp はネストしない)。derived の値空間は無縮小。
+ */
+const RUNTIME_GENERATED_TOP_LEVEL_KEYS = new Set(["event_id", "timestamp"]);
+function collectDerivedStrings(event: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(event)) {
+    if (RUNTIME_GENERATED_TOP_LEVEL_KEYS.has(k)) continue;
+    collectStrings(v, out);
+  }
+  return out;
+}
+
 /** 述語が真になるまで macrotask を回して待つ (fire-and-forget な drain の完了検知・QA-R1)。 */
 async function waitFor(pred: () => boolean, budgetMs = 1000): Promise<boolean> {
   const start = Date.now();
@@ -470,10 +500,12 @@ describe("INV-OPENCODE-ADAPTER-*: opencode plugin adapter (ADR 019f3c3b D8 / R1 
       expect(payload.message).toBe(inputMessage);
       expect(out.summary).toBe(errName ? `${errName}: ${inputMessage}` : inputMessage);
 
-      // (b) エスケープ正規化した負照合: 出力を JSON.parse → deep-walk した全 string 値のどれにも
+      // (b) エスケープ正規化した負照合: 出力を JSON.parse → deep-walk した string 値のどれにも
       //     封筒値 (部分文字列含む) が現れない。JSON.stringify の \" エスケープ非対称を回避する。
-      const reparsed = JSON.parse(JSON.stringify(out));
-      const strings = collectStrings(reparsed);
+      //     走査対象は collectDerivedStrings = **実行時生成フィールド (event_id/timestamp) を除外**
+      //     した derived 値空間 (歯の維持証明は helper doc / seeded / injection テスト参照)。
+      const reparsed = JSON.parse(JSON.stringify(out)) as Record<string, unknown>;
+      const strings = collectDerivedStrings(reparsed);
       for (const s of strings) {
         for (const dv of droppedValues) {
           expect(
@@ -486,6 +518,44 @@ describe("INV-OPENCODE-ADAPTER-*: opencode plugin adapter (ADR 019f3c3b D8 / R1 
       expect(JSON.stringify(out).includes("responseHeaders")).toBe(false);
       expect(JSON.stringify(out).includes("responseBody")).toBe(false);
       expect(safeParseEvent(out).success).toBe(true);
+    });
+
+    // seeded 衝突再現 (公開 CI run 29153342934 の flake 根治・時刻運任せでなく決定的)。
+    // 旧照合 (collectStrings(全 event)) は event_id を走査に含むため、UUIDv7 の ms hex prefix に
+    //   短い封筒値 "141" が偶然現れると leak 誤検出で RED になった。新照合 (collectDerivedStrings)
+    //   は event_id/timestamp を除外するため、この偶然衝突は GREEN (誤爆しない)。
+    // falsifiability: 本 assert を旧 collectStrings に差し替えると RED になる (helper 除外が
+    //   効いていることの反証)。同時に derived (summary/payload) が**走査対象に残る**ことを
+    //   下段で明示 assert し、除外が広すぎない (歯の維持) ことを固定する。
+    it("seeded: 実行時生成 event_id/timestamp の hex が短 dropped 値と偶然衝突しても false positive しない", () => {
+      const droppedValues = ["141"]; // fixture の content-length header 値 (短数値) を模す。
+      // event_id の ms hex prefix と timestamp の両方に "141" を意図的に埋め込む。
+      const seededEvent: Record<string, unknown> = {
+        event_id: "019f5141-70d0-73d7-a2e7-49aace22618a", // ms hex "019f5141" に "141"
+        timestamp: "2026-07-08T01:41:00.000Z", // "01:41" に "141"
+        provider: "opencode",
+        source: "adapter",
+        session_id: "ses_seed",
+        event_type: "error",
+        state: "error",
+        summary: "error: boom",
+        payload: { kind: "error", message: "boom", retryable: false },
+      };
+      const strings = collectDerivedStrings(seededEvent);
+      for (const s of strings) {
+        for (const dv of droppedValues) {
+          expect(
+            s.includes(dv),
+            `false positive (実行時生成フィールド起因): ${dv} in ${JSON.stringify(s)}`,
+          ).toBe(false);
+        }
+      }
+      // 歯の維持証跡: derived (summary/payload) は走査対象に**残っている** (除外は event_id/timestamp のみ)。
+      expect(strings).toContain("error: boom");
+      expect(strings).toContain("boom");
+      // 反例: もし derived に短 dropped 値が入れば負照合が検出する (除外が広すぎないことの担保)。
+      const leaked = collectDerivedStrings({ ...seededEvent, summary: "error: 141 boom" });
+      expect(leaked.some((s) => s.includes("141"))).toBe(true);
     });
   });
 

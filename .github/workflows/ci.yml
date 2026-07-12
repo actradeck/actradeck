@@ -168,14 +168,38 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      # 可視化 (fix/test-flake-triage・QA-1・task 019f52d5): backend step (16df715) と同型の
+      #   flake 盲目 — 旧 `vitest ... && node -e ...` は vitest exit≠0 で JSON 解析 node が
+      #   走らず failed テスト名が step ログに出なかった。backend と対称の rc 捕捉形へ揃える:
+      #   rm -f 先行 (stale JSON 回避) → `|| rc=$?` (default shell -e -o pipefail を `||` で抑止)
+      #   → rc≠0 なら failed 名 (file + title) を印字して exit rc、rc=0 は従来の INV-skip/absent
+      #   の歯を維持。vitest は grep へパイプせず一時ファイル経由 (pipefail×SIGPIPE 非該当)。
       - name: Assert real-DB INV actually RAN (not skipped)
-        run: pnpm --filter @actradeck/db exec vitest run --reporter=json --outputFile=/tmp/db-test.json && node -e "const r=require('/tmp/db-test.json'); const names=r.testResults.flatMap(f=>f.assertionResults.map(a=>({n:a.fullName||a.title,s:a.status}))); const inv=names.filter(t=>/INV-EVENT-DB-INTEGRITY/.test(t.n)); if(inv.length===0){console.error('INV-EVENT-DB-INTEGRITY did not appear — test file missing?');process.exit(1);} const skipped=inv.filter(t=>t.s==='skipped'||t.s==='pending'); if(skipped.length){console.error('INV-EVENT-DB-INTEGRITY was SKIPPED in CI (DATABASE_URL not reaching the test):',skipped.map(s=>s.n));process.exit(1);} console.log('INV-EVENT-DB-INTEGRITY ran for real:',inv.length,'assertions, all passed/failed (none skipped).');"
+        run: |
+          rm -f /tmp/db-test.json
+          rc=0
+          pnpm --filter @actradeck/db exec vitest run --reporter=json --outputFile=/tmp/db-test.json || rc=$?
+          RC=$rc node -e "const fs=require('fs');const rc=parseInt(process.env.RC||'0',10);const P='/tmp/db-test.json';let r;try{r=JSON.parse(fs.readFileSync(P,'utf8'));}catch(e){console.error('db JSON report missing/unparseable at',P,'-',e.message,'(vitest rc='+rc+')');process.exit(1);}const all=(r.testResults||[]).flatMap(f=>(f.assertionResults||[]).map(a=>({file:f.name,n:a.fullName||a.title,s:a.status})));if(rc!==0){const failed=all.filter(t=>t.s==='failed');if(failed.length){console.error('db suite FAILED (vitest rc='+rc+') - '+failed.length+' failed test(s):');for(const t of failed){console.error('  x ['+t.file+'] '+t.n);}}else{console.error('db suite FAILED (vitest rc='+rc+') but JSON has no per-test failure (crash/setup error?) - see vitest output above.');}process.exit(rc);}const inv=all.filter(t=>/INV-EVENT-DB-INTEGRITY/.test(t.n));if(inv.length===0){console.error('INV-EVENT-DB-INTEGRITY did not appear - test file missing?');process.exit(1);}const skipped=inv.filter(t=>t.s==='skipped'||t.s==='pending');if(skipped.length){console.error('INV-EVENT-DB-INTEGRITY was SKIPPED in CI (DATABASE_URL not reaching the test):',skipped.map(s=>s.n));process.exit(1);}console.log('INV-EVENT-DB-INTEGRITY ran for real:',inv.length,'assertions, all passed/failed (none skipped).');"
 
       # Phase3 ingestion: backend の実 PG INV (INV-IDEMPOTENCY / INV-EVENT-ORDER / WS server)
       #   が DATABASE_URL 到達時に **実走** する (skip ではなく pass) ことを保証する。
       #   db ガードと同型: skip を silent green にしないため、実走を明示検証する。
+      #
+      #   可視化 (fix/test-flake-triage・task 019f52d5): 旧実装は `vitest ... && node -e ...` の
+      #   `&&` 連鎖だったため、vitest が exit≠0 になると JSON 解析 node が走らず **どのテストが
+      #   落ちたか step ログに一切出なかった** (docs-only diff の単発赤 = flake の名前が取れない)。
+      #   rc を `|| rc=$?` で捕捉し (default shell は -e -o pipefail ゆえ `||` で -e を抑止)、rc に
+      #   関わらず JSON があれば解析、**rc≠0 なら failed テスト名 (file + title) を印字してから
+      #   exit rc** へ再構成する。歯は不変: (a) INV skip → fail (b) vitest 失敗 → fail (rc 温存)
+      #   (c) JSON 欠損/解析不能 → fail-loud。旧 stale JSON の偽 green を避けるため先頭で rm。
+      #   bash-gate-pipefail-sigpipe 回避のため vitest は grep へパイプせず一時ファイル経由。
+      #   4 ケース (green/INV-skip/failed+rc1/JSON 欠損) をローカル実走で検証済み。
       - name: Assert backend real-DB INV actually RAN (not skipped)
-        run: pnpm --filter @actradeck/backend exec vitest run --reporter=json --outputFile=/tmp/backend-test.json && node -e "const r=require('/tmp/backend-test.json'); const names=r.testResults.flatMap(f=>f.assertionResults.map(a=>({n:a.fullName||a.title,s:a.status}))); const inv=names.filter(t=>/INV-IDEMPOTENCY|INV-EVENT-ORDER|INV-EVENT-CONTRACT|INV-LIVENESS-PARITY|Ingestion server WS\+HTTP|INV-GEMINI-OBSERVABILITY|INV-REDACTION-SUMMARY-STRADDLE|INV-REDACTION-PEM-STRADDLE|INV-REDACTION-JWT-STRADDLE/.test(t.n)); if(inv.length===0){console.error('backend real-DB INV did not appear — test file missing?');process.exit(1);} const skipped=inv.filter(t=>t.s==='skipped'||t.s==='pending'); if(skipped.length){console.error('backend real-DB INV was SKIPPED in CI (DATABASE_URL not reaching the test):',skipped.map(s=>s.n));process.exit(1);} console.log('backend real-DB INV ran for real:',inv.length,'assertions, none skipped.');"
+        run: |
+          rm -f /tmp/backend-test.json
+          rc=0
+          pnpm --filter @actradeck/backend exec vitest run --reporter=json --outputFile=/tmp/backend-test.json || rc=$?
+          RC=$rc node -e "const fs=require('fs');const rc=parseInt(process.env.RC||'0',10);const P='/tmp/backend-test.json';let r;try{r=JSON.parse(fs.readFileSync(P,'utf8'));}catch(e){console.error('backend JSON report missing/unparseable at',P,'-',e.message,'(vitest rc='+rc+')');process.exit(1);}const all=(r.testResults||[]).flatMap(f=>(f.assertionResults||[]).map(a=>({file:f.name,n:a.fullName||a.title,s:a.status})));if(rc!==0){const failed=all.filter(t=>t.s==='failed');if(failed.length){console.error('backend suite FAILED (vitest rc='+rc+') - '+failed.length+' failed test(s):');for(const t of failed){console.error('  x ['+t.file+'] '+t.n);}}else{console.error('backend suite FAILED (vitest rc='+rc+') but JSON has no per-test failure (crash/setup error?) - see vitest output above.');}process.exit(rc);}const inv=all.filter(t=>/INV-IDEMPOTENCY|INV-EVENT-ORDER|INV-EVENT-CONTRACT|INV-LIVENESS-PARITY|Ingestion server WS\+HTTP|INV-GEMINI-OBSERVABILITY|INV-REDACTION-SUMMARY-STRADDLE|INV-REDACTION-PEM-STRADDLE|INV-REDACTION-JWT-STRADDLE/.test(t.n));if(inv.length===0){console.error('backend real-DB INV did not appear - test file missing?');process.exit(1);}const skipped=inv.filter(t=>t.s==='skipped'||t.s==='pending');if(skipped.length){console.error('backend real-DB INV was SKIPPED in CI (DATABASE_URL not reaching the test):',skipped.map(s=>s.n));process.exit(1);}console.log('backend real-DB INV ran for real:',inv.length,'assertions, none skipped.');"
 
       # QA-2: backend もカバレッジ閾値ゲート付きで実行 (testing.md 目標。閾値割れで赤)。
       #   network 例外 (index.ts の listen / db.ts の pool 接続) は明示除外。コア

@@ -152,8 +152,9 @@ Gemini の `BeforeTool` / `AfterTool` は `tool_name` + `tool_input` を持ち�
     raw テキスト（sanity 上限内）は `tool_response` と同じく **backend ingress 床** で redact され、**表示用の
     ≤200 有界化は床の後で backend projection**（`SUMMARY_SUBJECT_CAP`・redacted 済 文字列を slice する *別値* ·
     bounded-at-storage）が適用します。これは Claude Code の `依頼: <要約>`（UserPromptSubmit）と同じで、
-    cockpit に *何をしているか*（最重要 KPI）を出すためです。plan.md の表示許可（「ユーザー依頼 / エージェントの
-    公開メッセージは見せてよい」）対象で、有界化 ≠ redaction です。
+    cockpit に *何をしているか*（最重要 KPI）を出すためです。ユーザー依頼 / エージェントの公開メッセージは
+    表示許可対象で（[`docs/adr/0012-threat-model-and-local-fs.md`](../../adr/0012-threat-model-and-local-fs.md) 参照）、
+    有界化 ≠ redaction です。
   - **非適用（backend 床に依存）**: 非 shell tool（例 `read_file`）は `tool_input`（`file_path` 等）を
     `payload.input` へ **verbatim** 転送します。そこの secret は backend 床でのみ redact されます。
 - **error 封筒は無し**（opencode と異なる）: Gemini に `session.error` hook は無いため、本 adapter は
