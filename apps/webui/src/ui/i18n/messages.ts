@@ -242,8 +242,8 @@ const ja = {
     "ActraDeck はこの端末でエージェントを監督します。次の 3 つを、使い捨ての 30 秒デモで実証します。",
   "safetyDemo.cap.blockVerb": "止める",
   "safetyDemo.cap.block": "高リスク操作（rm -rf …/build）を承認前に hold し、Deny で止めます。",
-  "safetyDemo.cap.redactVerb": "残さない",
-  "safetyDemo.cap.redact": "secret を保存前に redact します（種別ごとの件数だけを表示）。",
+  "safetyDemo.cap.redactVerb": "マスクする",
+  "safetyDemo.cap.redact": "検出した secret を保存前に redact します（種別ごとの件数だけを表示）。",
   "safetyDemo.cap.auditVerb": "証明できる",
   "safetyDemo.cap.audit": "command・判断・redaction・diff を Session Replay で証跡化します。",
   "safetyDemo.cta": "30 秒セーフティデモを実行",
@@ -609,11 +609,11 @@ const ja = {
     "このセッションの権限モード (sandbox)。bypassPermissions / acceptEdits は自動許可が広いため注意。",
   "risk.secretDetected": "secret 検出: {count} 件 (redaction 済み)",
   "risk.secretDetected.title":
-    "diff 本文内で秘匿情報が検出され redaction されました。秘匿値そのものは表示しません (件数のみ)。",
+    "diff 本文内で秘匿情報が検出され redaction されました。マスクした値は表示しません (件数のみ)。",
   "risk.secretDetected.session": "このセッションで秘匿を {count} 件検出 (redaction 済み)",
   "risk.secretDetected.session.unknown": "このセッションで秘匿を検出 (redaction 済み)",
   "risk.secretDetected.session.title":
-    "このセッション内で redaction が一度でも秘匿を検出した事実です (session 単位・常時)。件数は検出の濃度で、秘匿値そのものは表示しません。",
+    "このセッション内で redaction が一度でも秘匿を検出した事実です (session 単位・常時)。件数は検出の濃度で、マスクした値は表示しません。",
   "risk.diff.load": "diff 本文を表示",
   "risk.diff.loading": "差分を取得中…",
   "risk.diff.load.title":
@@ -629,7 +629,7 @@ const ja = {
   // 種類別タグの見出し / 合計。件数 + kind ラベル (公開 enum) のみ・原文は出さない。
   "risk.redaction.breakdown": "redaction 内訳",
   "risk.redaction.breakdown.title":
-    "このセッションで redaction された秘匿の種類別件数です (公開 enum + 件数のみ・秘匿値そのものは表示しません)。",
+    "このセッションで redaction された秘匿の種類別件数です (公開 enum + 件数のみ・マスクした値は表示しません)。",
   "risk.redaction.kindCount": "{label} ×{count}",
   "risk.redaction.total": "計 {count} 件",
   // 未知 kind (deploy skew 等で語彙外) は raw 文字列を画面/属性に出さず汎用ラベルへ畳む (SEC defense-in-depth)。
@@ -982,9 +982,9 @@ const en: Record<MessageKey, string> = {
   "safetyDemo.cap.blockVerb": "Stops",
   "safetyDemo.cap.block":
     "Holds high-risk operations (rm -rf …/build) before approval so you can deny and stop them.",
-  "safetyDemo.cap.redactVerb": "Leaves nothing",
+  "safetyDemo.cap.redactVerb": "Redacts",
   "safetyDemo.cap.redact":
-    "Redacts secrets before they are stored (only per-kind counts are shown).",
+    "Redacts detected secrets before they are stored (only per-kind counts are shown).",
   "safetyDemo.cap.auditVerb": "Proves it",
   "safetyDemo.cap.audit":
     "Turns command, decision, redaction and diff into an auditable Session Replay.",
@@ -1344,11 +1344,11 @@ const en: Record<MessageKey, string> = {
     "This session's permission mode (sandbox). bypassPermissions / acceptEdits auto-allow broadly — take care.",
   "risk.secretDetected": "Secrets detected: {count} (redacted)",
   "risk.secretDetected.title":
-    "Secrets were detected in the diff body and redacted. The secret values themselves are not shown (count only).",
+    "Secrets were detected in the diff body and redacted. Masked values are not shown (count only).",
   "risk.secretDetected.session": "Secrets detected in this session: {count} (redacted)",
   "risk.secretDetected.session.unknown": "Secrets detected in this session (redacted)",
   "risk.secretDetected.session.title":
-    "Redaction detected secrets at least once in this session (session-level, always shown). The count is detection density; the secret values themselves are not shown.",
+    "Redaction detected secrets at least once in this session (session-level, always shown). The count is detection density; masked values are not shown.",
   "risk.diff.load": "Show diff body",
   "risk.diff.loading": "Loading diff…",
   "risk.diff.load.title":
@@ -1363,7 +1363,7 @@ const en: Record<MessageKey, string> = {
   // ── Redaction kind breakdown ──
   "risk.redaction.breakdown": "Redaction breakdown",
   "risk.redaction.breakdown.title":
-    "Per-kind counts of secrets redacted in this session (public enum + count only; the secret values themselves are not shown).",
+    "Per-kind counts of secrets redacted in this session (public enum + count only; masked values are not shown).",
   "risk.redaction.kindCount": "{label} ×{count}",
   "risk.redaction.total": "{count} total",
   "risk.redaction.unknownKind": "Other secret",

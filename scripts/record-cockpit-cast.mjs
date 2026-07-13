@@ -76,8 +76,8 @@ const CAPS = {
       s: "Decomposed heartbeats: process / event / stdout / file / model-stream. One fresh beat means it isn't stalled",
     },
     redaction: {
-      t: "Secrets are masked before they're stored or shown",
-      s: "Keys, tokens, .env values are never persisted or displayed — only per-kind detection counts remain",
+      t: "Redaction runs before anything is stored or shown",
+      s: "Detected keys, tokens, .env values are masked — the UI shows per-kind detection counts",
     },
     auditOverview: {
       t: "Audit who allowed or denied what, across sessions",
@@ -118,8 +118,8 @@ const CAPS = {
       s: "プロセス / イベント / stdout / ファイル / モデルストリームの鼓動を分解。fresh が1つでも残れば stalled ではない",
     },
     redaction: {
-      t: "秘匿情報は「保存・表示の前」にマスクする",
-      s: "鍵・トークン・.env の値は保存も表示もしない。UI に残るのは種別ごとの検出件数だけ",
+      t: "秘匿マスクは「保存・表示」の前に走る",
+      s: "検出した鍵・トークン・.env の値は保存前にマスク。UI には種別ごとの検出件数を表示",
     },
     auditOverview: {
       t: "誰が何を allow / deny したかをセッション横断で監査",

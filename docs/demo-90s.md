@@ -10,8 +10,9 @@ What the viewer should walk away believing:
 2. You **approve/deny from one inbox** — relayed for Claude Code over Attach (the
    default). Codex over Attach is **observed** in the same cockpit list (no approval
    cards over Attach); relaying Codex approvals needs **Managed Mode**.
-3. A secret is **redacted before it is ever stored** — you see the masked value and
-   a per-kind count, never the secret.
+3. A detected secret is **redacted before it is stored** — you see the masked value
+   and a per-kind count in place of the secret (detection is best-effort; measured
+   limits are in the [benchmark](benchmarks/redaction-and-risk-classifier.md)).
 4. There is **one audit trail / replay** spanning both agents.
 
 > ⚠️ Use **synthetic secrets only** (the values below are public dummies). Never put
@@ -86,7 +87,7 @@ Synthetic secrets to use on camera (public, non-functional dummies):
   `AWS_ACCESS_KEY_ID=[REDACTED:aws-access-key-id]` and
   `[REDACTED:github-token]`, and that the **per-kind redaction count** badge
   (e.g. `aws-access-key-id ×1 · github-token ×1`) is shown.
-- Say: _"The secret never reached the database — redaction runs before persist."_
+- Say: _"This detected secret never reached the database — redaction runs before persist."_
   (Optionally show the local log / DB has only the masked form.)
 
 ### 1:05–1:25 — One audit trail, replay both

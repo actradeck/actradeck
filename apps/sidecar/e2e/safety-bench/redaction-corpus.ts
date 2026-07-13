@@ -204,6 +204,23 @@ export const POSITIVES: readonly PositiveVector[] = [
     input: "token: 'sq with space inside'",
     secret: "sq with space inside",
   },
+  // --- bounded-capture residual (fragment-survival demonstrator · R4 finding A) ---
+  // A long credential value whose HEAD is masked by the credential-assignment rule (bounded at
+  // MAX_VALUE_LEN = 4096) while the >4096-char TAIL overflows every bounded capture and survives:
+  // the leftover run exceeds the standalone high-entropy rule's {40,4096} bound, so its trailing
+  // lookahead can never anchor (documented redactor residual — see the `high-entropy-secret`
+  // "scope 境界 (SEC-3)" note in packages/redaction/src/redactor.ts). The FULL secret string is
+  // therefore absent from the output (head removed), so the exact full-substring recall metric
+  // counts this vector as DETECTED — yet a multi-thousand-char contiguous fragment of the value
+  // survives, which only the fragment-survival metric catches (see bench.ts FRAGMENT_MIN_LEN).
+  // This is the exact blind spot R4 flagged: partial/straddle survival that a full-match check
+  // reports as "detected". Value is `.repeat()`-built (constructed, not a new literal) so it adds
+  // no new fake-secret string and cannot trip GitHub Push Protection's per-secret unblock.
+  {
+    kind: "credential-assignment",
+    input: `HUGE_SECRET_BLOB=${"xY7bQ2".repeat(1500)}`,
+    secret: "xY7bQ2".repeat(1500),
+  },
   // --- URL credential (user:pass@host) ---
   {
     kind: "url-credential",

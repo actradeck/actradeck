@@ -45,19 +45,24 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   `apps/sidecar/e2e` tree, which the OSS secret scan exempts _by path_ (not by content marker), so
   the strict leak gate over the rest of the tree stays hole-free.
 
-Corpus size: **37 redaction positives** across **29 kind families**, **22 hard negatives**, and
+Corpus size: **38 redaction positives** across **29 kind families**, **22 hard negatives**, and
 **43 classifier command vectors**.
 
 ## Results — redaction
 
-Measured on 2026-07-12 against the T1 canonical redactor (`packages/redaction/src/redactor.ts`).
+Measured on 2026-07-13 against the T1 canonical redactor (`packages/redaction/src/redactor.ts`).
 
-| Metric                                     | Value                                                                  |
-| ------------------------------------------ | ---------------------------------------------------------------------- |
-| Overall recall (secrets caught)            | **100.0%** (37/37, 0 leaks)                                            |
-| Mask precision (masks that hit a secret)   | **97.4%** (37/38 — the 1 extra mask is the safe over-redaction below)  |
-| Benign preservation (hard negatives)       | **95.5%** (21/22 preserved verbatim)                                   |
-| Kind families covered                      | 29                                                                     |
+| Metric                                   | Value                                                                 |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| Overall recall (full secret caught)      | **100.0%** (38/38, 0 full leaks)                                      |
+| Mask precision (masks that hit a secret) | **97.4%** (38/39 — the 1 extra mask is the safe over-redaction below) |
+| Benign preservation (hard negatives)     | **95.5%** (21/22 preserved verbatim)                                  |
+| Fragment survival (partial leaks)        | **1 vector** (a bounded-capture tail — see Fragment survival below)   |
+| Kind families covered                    | 29                                                                    |
+
+"Overall recall" is measured by **full-secret** substring survival — the exact metric a full-match
+check gives. It is deliberately paired with the fragment-survival metric below, which catches
+**partial** leaks that a full-match check reports as "detected."
 
 **Per-kind recall: 100% for every one of the 29 families** — private-key, aws-access-key-id,
 github-token, anthropic-key, openai-key, google-api-key, slack-token, stripe-key, gitlab-token,
@@ -74,6 +79,57 @@ when it appears as a top-level correlation-key field of a structured event (see
 text the same value looks like a high-entropy token and is masked. The failure direction is safe
 (over-redaction, never a leak), so we report it honestly rather than hiding it behind a curated
 100%.
+
+## Fragment survival (partial leaks a full-match check misses)
+
+A leak measured only by **full-secret** substring survival (`output.includes(secret)`) is blind to
+**partial** survival: a redactor can mask the head of a secret while a long tail fragment survives,
+and the full-match check still reports "detected." That is the same danger class as a straddle leak.
+The benchmark therefore also measures **fragment survival**: any contiguous substring of the raw
+secret of length **≥ 8** that survives in the output and is **not** explained by preserved
+non-secret input (see `leakedFragmentSpan` in `bench.ts`).
+
+> **Why "not explained by preserved input" matters.** A naive "any ≥8-char substring of the secret
+> present in the output" over-counts. In this corpus the `discord-webhook` positive embeds the digit
+> run `…0123456789…` inside its secret, while the URL prefix redaction legitimately **preserves**
+> contains the public webhook id `…123456789012345678…`. The token itself is fully masked, yet an
+> 8-char digit run coincides between the secret and the preserved public id. That is **not** a leak.
+> So a fragment counts only if it appears in the output and does **not** appear in the input with the
+> secret removed. This keeps the metric honest in both directions.
+
+**Measured result: 1 fragment leak across the 38 positives** (0 full leaks). The vector is a
+constructed long credential assignment (`HUGE_SECRET_BLOB=<9000-char value>`). The
+`credential-assignment` rule masks the value's head, but its capture is bounded at `MAX_VALUE_LEN`
+(4096) — so a **~4904-character contiguous tail survives**. That leftover run is longer than the
+standalone `high-entropy-secret` rule's `{40,4096}` bound, so its trailing lookahead never anchors
+and it is left unmasked (a documented redactor residual — see the `high-entropy-secret` "scope
+境界 (SEC-3)" note in `redactor.ts`).
+
+> The harness reports the surviving span as a **lower bound** (`leakedSpan = 4902` for this vector,
+> vs. the true 4904-char tail). The `≥ 8` leak _boolean_ is exact; only the reported magnitude can
+> under-report by a few characters for a **periodic** secret, because a masked-head n-gram can equal
+> a surviving-tail n-gram and the contiguity re-check then trims the run back from the end.
+> Under-reporting magnitude is the safe direction (details in `leakedFragmentSpan`).
+
+This vector is exactly what R4 flagged: the **full-substring recall counts it as detected** (the
+full 9000-char secret string is absent from the output because the head is masked), yet a
+multi-thousand-character fragment of the value leaks. Only the fragment-survival metric catches it.
+We report it honestly rather than hiding it behind the 100% full-recall headline.
+
+**Findings, reported not fixed** (this benchmark is measurement-only; production code is untouched):
+
+- **REDACT-F2 (fragment leak, bounded-capture residual).** The long-credential tail above. It is a
+  known, documented ReDoS/over-redaction trade-off in the redactor (`MAX_VALUE_LEN`-bounded captures
+  are linear-time by construction), not an oversight. A related full-leak residual — a **standalone**
+  base64 run longer than 4096 chars with no vendor prefix / credential key / PEM or JWT marker — is
+  **documented only as a source note** (`SEC-3` in `redactor.ts`, lines ~667–672); it is _not_
+  covered by an `INV-REDACTION-*` test (the redaction package's straddle invariants pin the
+  **compensated** marker cases — PEM/JWT bounded-fallback — and standalone runs only up to the ~88-char
+  fixtures, not this >4096 boundary). We do **not** add it to the curated recall corpus (it is an
+  accepted design boundary, not a corpus gap), but the fragment metric would flag it as both a full
+  and a fragment leak if it were present. Closing either residual would require a redactor change
+  (out of scope for a measurement PR); pinning the >4096 standalone residual would need a new
+  production `INV-REDACTION-*` test in the redaction package.
 
 ## Results — risk classifier
 
@@ -138,6 +194,80 @@ Risk-level calibration notes (not safety gaps):
 - `find … -exec rm {} ;` classifies as `medium` rather than `high`; it is still gated
   (`recursive-rm`).
 
+## External corpus cross-evaluation (gitleaks)
+
+The corpus above is authored by the same people who wrote the redactor, so its recall is
+self-correlated (R4 finding B: no independent holdout). To cross-check against an **independent**
+ground truth, `cross-eval.mts` measures our redactor against the secret-detection rules shipped by
+[gitleaks](https://github.com/gitleaks/gitleaks) (MIT licensed) — a widely used, independently
+maintained secret scanner.
+
+**Method.** gitleaks ships its rules as regexes in `config/gitleaks.toml`. The harness fetches that
+single file at a **pinned commit** at run time (gitleaks **v8.30.1**, commit
+`83d9cd684c87d95d656c1458ef04895a7f1cbd8e`), verifies its integrity (git-blob object id
+`256f6479…`, 97 731 bytes, and raw SHA-256 `e163e53b…` — all enforced, fail-loud on mismatch), and —
+for a curated subset of gitleaks rules that map onto our redaction kinds — synthesizes a sample that
+is a **valid instance of the gitleaks rule** (verified against the rule's own regex), then runs it
+through our production `redactString`. The gitleaks file is **fetched, never vendored** into this
+repo, and **no gitleaks secret value is printed** here or committed. The numbers below are from an
+actual live fetch of the pinned file (measured 2026-07-13).
+
+```bash
+pnpm --filter @actradeck/sidecar run bench:cross-eval   # opt-in; network-dependent; NOT run in CI
+```
+
+**Result: we mask 10 of 17 mapped gitleaks rules (58.8%) on their _minimal valid instance_.** Samples
+are synthesized as the shortest legal instance (first alternation branch, minimum repetition), which
+is a deliberately harsh setting — several "misses" are cases where gitleaks' regex accepts a shorter
+or looser string than a real secret, and a **realistic** instance _does_ mask (verified below, with
+the marker kind our redactor emits — never the value).
+
+| gitleaks rule            | our kind          | min-instance result    | triage                                                                                               |
+| ------------------------ | ----------------- | ---------------------- | ---------------------------------------------------------------------------------------------------- |
+| github-pat               | github-token      | ✅ github-token        | —                                                                                                    |
+| github-fine-grained-pat  | github-token      | ✅ github-token        | —                                                                                                    |
+| slack-bot-token          | slack-token       | ✅ slack-token         | —                                                                                                    |
+| slack-webhook-url        | slack-webhook     | ✅ high-entropy-secret | masked via a different kind (gitleaks' new `services/<43–56>` shape, no `T…/B…/` segments)           |
+| npm-access-token         | npm-auth-token    | ✅ high-entropy-secret | masked via the high-entropy fallback rather than the labelled npm rule                               |
+| huggingface-access-token | huggingface-token | ✅ huggingface-token   | —                                                                                                    |
+| databricks-api-token     | databricks-token  | ✅ databricks-token    | —                                                                                                    |
+| doppler-api-token        | doppler-token     | ✅ doppler-token       | —                                                                                                    |
+| flyio-access-token       | flyio-token       | ✅ flyio-token         | —                                                                                                    |
+| openai-api-key           | openai-key        | ✅ openai-key          | —                                                                                                    |
+| aws-access-token         | aws-access-key-id | ❌ missed              | **gap**: first-branch `A3T` prefix; we cover `AKIA/ASIA/AROA/AIDA` but not `A3T/ABIA/ACCA`           |
+| stripe-access-token      | stripe-key        | ❌ missed              | **gap**: gitleaks accepts `{10,99}`; our rule requires `{16,}` — a ≥16-char key masks                |
+| planetscale-password     | planetscale-token | ❌ missed              | **gap**: `pscale_pw_` prefix (we model `pscale_tkn_/oauth_`); a long alnum pw masks via high-entropy |
+| gitlab-pat               | gitlab-token      | ❌ missed              | **artifact**: synth tail ends in `-`; a `glpat-`+20-alnum instance masks as gitlab-token             |
+| sendgrid-api-token       | sendgrid-key      | ❌ missed              | **artifact**: gitleaks' loose `SG.{66}` class; a real `SG.<22>.<43>` key masks as sendgrid-key       |
+| jwt                      | jwt               | ❌ missed              | **artifact**: gitleaks' `ey`+alnum minimal instance; a real `eyJ…` JWT masks as jwt                  |
+| private-key              | private-key       | ❌ missed              | **artifact**: gitleaks permits a missing space after `BEGIN`; a real PEM masks as private-key        |
+
+**Triage (verified with realistic instances against the real redactor):** of the 7 misses, **4 are
+synthesis-minimality/looseness artifacts** — gitlab, sendgrid, jwt, and private-key all mask once the
+sample is a realistic secret rather than gitleaks' loosest legal string. **3 are genuine (narrow)
+coverage gaps** worth noting: the AWS `A3T/ABIA/ACCA` key prefixes, the PlanetScale `pscale_pw_`
+prefix (though a sufficiently long alphanumeric password is still caught by the high-entropy
+fallback), and Stripe keys shorter than 16 characters.
+
+**Fair-conditions disclosure.**
+
+- **Different scope.** gitleaks is an **at-rest git-history scanner**; ActraDeck is a **streaming
+  text redactor**. They overlap on inline token _shapes_ but not on operating model, so this is a
+  shape-recall comparison on a mappable subset, not a like-for-like tool benchmark.
+- **Mappable subset only.** gitleaks ships 170+ rules; the 17 above are the ones whose secret shape
+  maps onto a kind we model. The rest (vendor-specific tokens we do not target) are **out of scope**
+  and are not counted against recall — the claim is deliberately limited to "on the mappable
+  subset, we mask this fraction of gitleaks' shapes."
+- **Minimal-instance harshness.** The synthesized sample is the shortest legal instance, so misses
+  driven by looseness in gitleaks' own regex (private-key without a space, `ey` without the `J`,
+  Stripe below 16 chars) count against the raw number; the triage column separates these from real
+  gaps. Misses are described by **rule name and shape only — never by value**.
+- **Pinned point-in-time.** Numbers are for gitleaks v8.30.1 (of 221 rules parsed, 204 are outside
+  our modelled kinds and 17 are mapped). gitleaks is feature-complete, so its ruleset changes
+  rarely, but a different pin can shift the mapping. The step-by-step re-pin procedure (new SHA → 3
+  checksums → MAPPING diff → re-measure) is documented in the `## Updating the pin` block at the top
+  of `apps/sidecar/e2e/safety-bench/cross-eval.mts`.
+
 ## Honest limitations
 
 - **Synthetic corpus.** These numbers characterize the detectors against curated vectors, not a
@@ -147,10 +277,24 @@ Risk-level calibration notes (not safety gaps):
   present **inline** in the text/command. File-reference exfiltration (`curl --data @.env`,
   `scp .env host:`) carries no inline secret and is out of reach of pattern matching — the same
   limitation gitleaks-style tools share.
-- **Known structural residuals** are documented in the redactor source (e.g. a standalone base64
-  run longer than the bounded capture length, or a JWT signature tail beyond the cap). These are
-  deliberate ReDoS/over-redaction trade-offs, not oversights, and are pinned by `INV-REDACTION-*`
-  tests.
+- **Known structural residuals — now measured, not just asserted.** A standalone base64 run longer
+  than the bounded capture length, a JWT signature tail beyond the cap, or (as the fragment-survival
+  section shows) the >4096-char tail of an over-long credential value can survive redaction. These
+  are deliberate ReDoS/over-redaction trade-offs documented in the redactor source (`SEC-3`), not
+  oversights. **Test coverage is partial, stated precisely:** the redaction package's
+  `INV-REDACTION-*` straddle tests pin the **compensated** cases (the PEM/JWT bounded-fallback
+  markers) and standalone runs only up to the ~88-char fixtures — the **>4096-char standalone
+  residual is documented by the source note only, not test-pinned**. The benchmark now **measures**
+  partial survival directly (fragment-survival metric, finding REDACT-F2) instead of only describing
+  it — this is the upgrade R4 asked for. A full-secret recall of "100%" is scoped to full-substring
+  survival on this corpus; it is not a claim that no fragment can ever leak.
+- **Remainder-aware exclusion can hide a _true_ partial leak (false-negative direction).** The
+  fragment metric ignores a surviving fragment that also appears in the input with the secret
+  removed, to avoid alarming on coincidences with preserved benign text (the `discord-webhook`
+  digit-run example). If a real secret fragment happened to coincide with preserved public text, it
+  would be suppressed. This trades a false-positive risk for a false-negative one; it is the safe
+  direction for a "does over-redaction destroy signal" benchmark, but it is a genuine limit. On the
+  current corpus, zero true leaks are suppressed (every positive was checked by hand).
 - **Canonical-form classifier vectors.** The command corpus uses canonical shapes of each dangerous
   pattern. An obfuscated or interpreter-mediated equivalent (e.g. `perl -e 'unlink glob "*"'` as a
   mass delete) may carry only the `inline-code` category (default-OFF) and miss a named category

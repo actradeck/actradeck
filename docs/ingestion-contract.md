@@ -234,8 +234,10 @@ The redaction choke point has **2 layers**:
 unconditionally applies secret redaction to every event received at `/ingest`, **before**
 `store.ingest` (the PG write) (shared `@actradeck/redaction`). Therefore:
 
-- Even if your adapter accidentally sends an event containing a secret, the raw secret does not
-  land in PG (it is replaced with a `[REDACTED:<kind>]` marker before storage).
+- Even if your adapter accidentally sends an event containing a secret, any span a
+  redaction rule matches is replaced with a `[REDACTED:<kind>]` marker before storage
+  (detection is best-effort — measured limits are in
+  [the benchmark](benchmarks/redaction-and-risk-classifier.md)).
 - `redaction_count` / `redaction_count_by_kind` are **authoritatively re-derived by the backend
   from the actual marker count**. **The count values declared by the client are not trusted and
   are overwritten** (blocking count spoofing). These are only redaction counts (non-negative

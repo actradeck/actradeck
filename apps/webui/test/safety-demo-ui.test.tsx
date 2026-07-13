@@ -54,9 +54,9 @@ describe("SafetyDemoPanel (空状態 CTA)", () => {
     expect(html).toContain('data-testid="safety-demo"');
     expect(html).toContain('data-testid="safety-demo-cta"');
     expect(html).toContain('data-phase="idle"');
-    // capability コピー (止める・残さない・証明できる) を capability として提示 (静的✓は使わない)。
+    // capability コピー (止める・マスクする・証明できる) を capability として提示 (静的✓は使わない)。
     expect(html).toContain("止める");
-    expect(html).toContain("残さない");
+    expect(html).toContain("マスクする");
     expect(html).toContain("証明できる");
     expect(html).not.toContain('data-testid="safety-demo-error"');
   });

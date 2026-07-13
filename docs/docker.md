@@ -82,8 +82,9 @@ before wiring anything, run the built-in demo straight from the empty board:
    - a high-risk `rm -rf …/build` raises an **approval card** and is held (not run);
    - with no response it degrades safe-side to **deny** (never auto-allow) — or you can
      Deny it yourself from the Approval Inbox;
-   - a command carrying dummy credentials is **redacted before it is stored** (the raw
-     secret never reaches Postgres — only per-kind redaction counts do);
+   - a command carrying dummy credentials is **redacted before it is stored** (the
+     detected secret is replaced with a `[REDACTED:<kind>]` marker before the event
+     reaches Postgres; per-kind counts are derived from the markers);
    - the whole run is replayable from the audit trail.
 
 This needs **zero host wiring** — the demo session is driven entirely inside the cockpit

@@ -9,8 +9,8 @@
 **The vendor-neutral control plane for coding agents — observe everything, govern selectively. Cross-vendor secret redaction and one audit trail for every agent; approval governance where the mode supports it (Claude Code today, Codex in Managed Mode).**
 
 ActraDeck sits beside your coding agents — Claude Code, Codex, and whatever comes
-next — and gives you **one place to watch what they do, stop secrets before they
-are stored, and keep an audit trail across vendors**. Approvals relay to the cockpit
+next — and gives you **one place to watch what they do, stop detected secrets
+before they are stored, and keep an audit trail across vendors**. Approvals relay to the cockpit
 for Claude Code out of the box, and for Codex in Managed Mode (see the
 [support matrix](#vendor--mode-support)). It is local-first: a sidecar on your machine
 collects structured events, redacts secrets _before_ anything is persisted, and serves

@@ -41,10 +41,18 @@ const summary = {
       support: k.support,
       detected: k.detected,
       leaked: k.leaked,
+      fragmentLeaked: k.fragmentLeaked,
       recall: Number(k.recall.toFixed(4)),
     })),
     leaks: redaction.leaks,
     falsePositives: redaction.falsePositives,
+    // Fragment-survival (R4 finding A): partial leaks a full-substring check misses. NO-RAW —
+    // records carry only kind + lengths + boolean, never the surviving fragment.
+    fragment: {
+      minLen: redaction.fragmentMinLen,
+      totalFragmentLeaks: redaction.totalFragmentLeaks,
+      leaks: redaction.fragmentLeaks,
+    },
   },
   classifier: {
     corpus: { vectors: classifier.totalVectors },
@@ -92,16 +100,16 @@ lines.push("");
 lines.push("REDACTION — per-kind recall (secret caught / total)");
 lines.push("-".repeat(78));
 lines.push(
-  `${pad("kind", 26)}${padL("support", 9)}${padL("detected", 10)}${padL("leaked", 8)}${padL("recall", 10)}`,
+  `${pad("kind", 26)}${padL("support", 9)}${padL("detected", 10)}${padL("leaked", 8)}${padL("fragLeak", 10)}${padL("recall", 10)}`,
 );
 for (const k of redaction.byKind) {
   lines.push(
-    `${pad(k.kind, 26)}${padL(String(k.support), 9)}${padL(String(k.detected), 10)}${padL(String(k.leaked), 8)}${padL(pct(k.recall), 10)}`,
+    `${pad(k.kind, 26)}${padL(String(k.support), 9)}${padL(String(k.detected), 10)}${padL(String(k.leaked), 8)}${padL(String(k.fragmentLeaked), 10)}${padL(pct(k.recall), 10)}`,
   );
 }
 lines.push("-".repeat(78));
 lines.push(
-  `${pad("OVERALL", 26)}${padL(String(redaction.totalPositives), 9)}${padL(String(redaction.totalDetected), 10)}${padL(String(redaction.totalLeaked), 8)}${padL(pct(redaction.overallRecall), 10)}`,
+  `${pad("OVERALL", 26)}${padL(String(redaction.totalPositives), 9)}${padL(String(redaction.totalDetected), 10)}${padL(String(redaction.totalLeaked), 8)}${padL(String(redaction.totalFragmentLeaks), 10)}${padL(pct(redaction.overallRecall), 10)}`,
 );
 lines.push("");
 lines.push(
@@ -114,8 +122,23 @@ if (redaction.falsePositives.length > 0) {
 }
 if (redaction.leaks.length > 0) {
   lines.push("");
-  lines.push("REDACTION — LEAKS (secret survived — finding):");
+  lines.push("REDACTION — LEAKS (full secret survived — finding):");
   for (const l of redaction.leaks) lines.push(`  LEAK [${l.kind}]: ${l.input}`);
+}
+
+lines.push("");
+lines.push(
+  `REDACTION — fragment survival (contiguous >=${redaction.fragmentMinLen}-char secret substring surviving, not explained by preserved public text): ${redaction.totalFragmentLeaks} vector(s)`,
+);
+if (redaction.fragmentLeaks.length > 0) {
+  lines.push(
+    "  (a full-substring 'detected' can still leak a partial fragment — this is the metric a full-match check misses)",
+  );
+  for (const f of redaction.fragmentLeaks) {
+    lines.push(
+      `  FRAGMENT-LEAK [${f.kind}]: longest surviving run ${f.leakedSpan} of ${f.secretLen} chars (fullLeak=${f.fullLeak})`,
+    );
+  }
 }
 
 lines.push("");

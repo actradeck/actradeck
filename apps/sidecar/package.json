@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "type-check": "tsc -b",
+    "type-check": "tsc -b && tsc -p tsconfig.e2e.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "dev": "tsx watch src/cli.ts",
@@ -18,7 +18,8 @@
     "e2e:claude": "tsx e2e/run-claude-e2e.mts",
     "e2e:replay": "tsx e2e/run-hook-replay-e2e.mts",
     "demo:safety": "tsx e2e/run-safety-demo.mts",
-    "bench:safety": "tsx e2e/safety-bench/run.mts"
+    "bench:safety": "tsx e2e/safety-bench/run.mts",
+    "bench:cross-eval": "tsx e2e/safety-bench/cross-eval.mts"
   },
   "dependencies": {
     "@actradeck/event-model": "workspace:*",

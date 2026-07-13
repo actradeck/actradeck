@@ -1,6 +1,7 @@
 # ADR 0007: Redaction before emit — one choke point; diffs are metrics-only or redacted-pull
 
-- Status: Accepted (amended 2026-07-07 — second floor at backend ingress, see Amendment)
+- Status: Accepted (amended 2026-07-07 — second floor at backend ingress; amended
+  2026-07-13 — detection scope clarified against the benchmark, see Amendments)
 - Source: decision `019ec666`, `019ec558`, `019ec6e6`, `019ec6a0`
 
 ## Context
@@ -42,3 +43,19 @@ and re-derives redaction counts authoritatively, ignoring client-declared
 counts. The consequence above still holds for sidecar-collected data (a sink
 that bypasses the sidecar choke is a security regression); direct-POST adapters
 are covered by the backend floor.
+
+## Amendment (2026-07-13): detection is best-effort — scope of "never stored"
+
+"The values themselves are never stored" (Detection, above) holds at
+**rule-captured-span** semantics: the span a rule captures is replaced by a marker
+and never persisted. The pipeline-order guarantee (redact → parse → persist → send)
+is structural and unchanged, but two best-effort limits bound what that means:
+(a) detection recall is best-effort pattern matching, and (b) a rule's capture is
+**bounded**, so a very long credential value can be counted as detected (marker +
+count emitted for the captured span) while the portion beyond the bounded capture
+survives at rest — the benchmark's fragment-survival measurement documents exactly
+this. Measured limits, including partial fragment survival and cross-eval coverage
+against gitleaks rules, are in
+[`docs/benchmarks/redaction-and-risk-classifier.md`](../benchmarks/redaction-and-risk-classifier.md).
+Public copy must not make value-completeness claims — describe masking as applied
+to detected patterns / masked spans, not as "the (detected) secret never remains".

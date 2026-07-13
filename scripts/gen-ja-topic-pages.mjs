@@ -26,7 +26,7 @@ const TOPICS = [
     slug: "coding-agent-secret-redaction",
     titleJa: "コーディングエージェントの秘匿マスク | ActraDeck",
     descJa:
-      "ActraDeck は鍵、トークン、.env 値などを保存前にマスクし、コックピットと監査証跡には秘匿マーカーと種別ごとの件数だけを残します。",
+      "ActraDeck は検出した鍵、トークン、.env 値などを保存前にマスクし、コックピットと監査証跡には秘匿マーカーと種別ごとの件数を残します。",
   },
   {
     slug: "coding-agent-audit-trail",

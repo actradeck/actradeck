@@ -1,9 +1,12 @@
 # Security Policy
 
 ActraDeck handles agent stdout/stderr, file diffs, approval requests, and events,
-and its core promise is that **secrets are redacted before anything is stored or
-transmitted**. A redaction bypass, an approval-gate bypass, or a secret reaching
-disk/network is treated as an incident, not a normal bug.
+and its core promise is that **the redaction pipeline runs before anything is
+stored or transmitted**. Detection is best-effort pattern matching; measured
+limits are documented in
+[the redaction benchmark](docs/benchmarks/redaction-and-risk-classifier.md).
+A redaction bypass, an approval-gate bypass, or a secret reaching disk/network
+is treated as an incident, not a normal bug.
 
 ## Reporting a vulnerability
 
