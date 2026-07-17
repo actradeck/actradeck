@@ -57,7 +57,7 @@ Measured on 2026-07-13 against the T1 canonical redactor (`packages/redaction/sr
 | Overall recall (full secret caught)      | **100.0%** (38/38, 0 full leaks)                                      |
 | Mask precision (masks that hit a secret) | **97.4%** (38/39 — the 1 extra mask is the safe over-redaction below) |
 | Benign preservation (hard negatives)     | **95.5%** (21/22 preserved verbatim)                                  |
-| Fragment survival (partial leaks)        | **1 vector** (a bounded-capture tail — see Fragment survival below)   |
+| Fragment survival (partial leaks)        | **0 vectors** (tail-hardened — see Fragment survival below)           |
 | Kind families covered                    | 29                                                                    |
 
 "Overall recall" is measured by **full-secret** substring survival — the exact metric a full-match
@@ -97,39 +97,42 @@ non-secret input (see `leakedFragmentSpan` in `bench.ts`).
 > So a fragment counts only if it appears in the output and does **not** appear in the input with the
 > secret removed. This keeps the metric honest in both directions.
 
-**Measured result: 1 fragment leak across the 38 positives** (0 full leaks). The vector is a
-constructed long credential assignment (`HUGE_SECRET_BLOB=<9000-char value>`). The
-`credential-assignment` rule masks the value's head, but its capture is bounded at `MAX_VALUE_LEN`
-(4096) — so a **~4904-character contiguous tail survives**. That leftover run is longer than the
-standalone `high-entropy-secret` rule's `{40,4096}` bound, so its trailing lookahead never anchors
-and it is left unmasked (a documented redactor residual — see the `high-entropy-secret` "scope
-境界 (SEC-3)" note in `redactor.ts`).
+**Measured result: 0 fragment leaks across the 38 positives** (0 full leaks). This is the state
+**after the tail-hardening fix** (`INV-REDACTION-TAIL-SURVIVAL`, task 019f5b5e-f9e9). Before the fix,
+one vector leaked: a constructed long credential assignment (`HUGE_SECRET_BLOB=<9000-char value>`)
+whose head the `credential-assignment` rule masked while its `MAX_VALUE_LEN` (4096)-bounded capture
+left a **~4904-character contiguous tail** raw (the leftover run also exceeded the standalone
+`high-entropy-secret` rule's old `{40,4096}` bound, so nothing re-anchored it). The full-substring
+recall counted that vector as _detected_ (the full 9000-char string was absent because the head was
+masked) — exactly the blind spot R4 flagged, which only the fragment-survival metric caught.
 
-> The harness reports the surviving span as a **lower bound** (`leakedSpan = 4902` for this vector,
-> vs. the true 4904-char tail). The `≥ 8` leak _boolean_ is exact; only the reported magnitude can
-> under-report by a few characters for a **periodic** secret, because a masked-head n-gram can equal
-> a surviving-tail n-gram and the contiguity re-check then trims the run back from the end.
-> Under-reporting magnitude is the safe direction (details in `leakedFragmentSpan`).
+**The fix.** The redactor's arbitrary-length **value** captures (credential-assignment bare/quoted,
+`auth-header-scheme`, `auth-scheme-value`, `npm-auth-token`, `url-credential` pass, and
+`high-entropy-secret`) were unbounded from `{N,MAX_VALUE_LEN}` to a **single-character-class
+unbounded quantifier** (`{1,}` / `{0,}` / `{40,}`). A lone greedy character-class scan has no nested
+or alternating quantifier, so it stays **linear (ReDoS-safe)** — the measured `t(2n)/t(n)` scaling
+ratios for every unbounded matching path are ≈ 2.0 (well under the 3.5 super-linear threshold; pinned
+by `INV-REDACTION-REDOS-SCALING` in the redaction package). Values ≤ `MAX_VALUE_LEN` are byte-for-byte
+identical (the bound was never reached), so recall/precision/negative-preservation are unchanged
+(measured: identical to the pre-fix run). The previously-leaking `HUGE_SECRET_BLOB` vector is now
+masked head-to-tail (surviving span 0) and is **retained as a regression guard**: re-bounding any
+value capture makes the tail reappear and turns `INV-REDACTION-TAIL-SURVIVAL` and the fragment-survival
+metric RED.
 
-This vector is exactly what R4 flagged: the **full-substring recall counts it as detected** (the
-full 9000-char secret string is absent from the output because the head is masked), yet a
-multi-thousand-character fragment of the value leaks. Only the fragment-survival metric catches it.
-We report it honestly rather than hiding it behind the 100% full-recall headline.
+> The fragment metric itself is unchanged and still exercised: `inv-safety-bench-metric.test.ts` pins
+> `leakedFragmentSpan` on synthetic masked/leaked/full-leak/coincidence inputs (so a metric regression
+> — a broadened threshold or a dropped remainder-exclusion — still turns those assertions RED), plus
+> the corpus-level assertion that fragment leaks total 0.
 
-**Findings, reported not fixed** (this benchmark is measurement-only; production code is untouched):
+**Fixed, with pinned tests** (this PR is not measurement-only — it closes the residual in production):
 
-- **REDACT-F2 (fragment leak, bounded-capture residual).** The long-credential tail above. It is a
-  known, documented ReDoS/over-redaction trade-off in the redactor (`MAX_VALUE_LEN`-bounded captures
-  are linear-time by construction), not an oversight. A related full-leak residual — a **standalone**
-  base64 run longer than 4096 chars with no vendor prefix / credential key / PEM or JWT marker — is
-  **documented only as a source note** (`SEC-3` in `redactor.ts`, lines ~667–672); it is _not_
-  covered by an `INV-REDACTION-*` test (the redaction package's straddle invariants pin the
-  **compensated** marker cases — PEM/JWT bounded-fallback — and standalone runs only up to the ~88-char
-  fixtures, not this >4096 boundary). We do **not** add it to the curated recall corpus (it is an
-  accepted design boundary, not a corpus gap), but the fragment metric would flag it as both a full
-  and a fragment leak if it were present. Closing either residual would require a redactor change
-  (out of scope for a measurement PR); pinning the >4096 standalone residual would need a new
-  production `INV-REDACTION-*` test in the redaction package.
+- **REDACT-F2 (fragment leak, bounded-capture residual) — FIXED.** The long-credential tail above and
+  the sibling rules that shared the identical bounded-value shape are all masked head-to-tail. The
+  related full-leak residual — a **standalone** base64 run longer than 4096 chars with no vendor
+  prefix / credential key / PEM or JWT marker — was the old `SEC-3` "scope 境界" source note; it is
+  now closed by the unbounded `high-entropy-secret` `{40,}` and pinned by `INV-REDACTION-TAIL-SURVIVAL`
+  (a new production test in the redaction package). See "Honest limitations" for what genuinely
+  remains (a narrow, KB-scale quoted-value straddle and the PEM/JWT compensated fallbacks).
 
 ## Results — risk classifier
 
@@ -277,17 +280,46 @@ fallback), and Stripe keys shorter than 16 characters.
   present **inline** in the text/command. File-reference exfiltration (`curl --data @.env`,
   `scp .env host:`) carries no inline secret and is out of reach of pattern matching — the same
   limitation gitleaks-style tools share.
-- **Known structural residuals — now measured, not just asserted.** A standalone base64 run longer
-  than the bounded capture length, a JWT signature tail beyond the cap, or (as the fragment-survival
-  section shows) the >4096-char tail of an over-long credential value can survive redaction. These
-  are deliberate ReDoS/over-redaction trade-offs documented in the redactor source (`SEC-3`), not
-  oversights. **Test coverage is partial, stated precisely:** the redaction package's
-  `INV-REDACTION-*` straddle tests pin the **compensated** cases (the PEM/JWT bounded-fallback
-  markers) and standalone runs only up to the ~88-char fixtures — the **>4096-char standalone
-  residual is documented by the source note only, not test-pinned**. The benchmark now **measures**
-  partial survival directly (fragment-survival metric, finding REDACT-F2) instead of only describing
-  it — this is the upgrade R4 asked for. A full-secret recall of "100%" is scoped to full-substring
-  survival on this corpus; it is not a claim that no fragment can ever leak.
+- **Bounded-value tail residuals — now FIXED and test-pinned.** All the arbitrary-length value
+  captures — the over-long credential tail (bare **and** quoted), the sibling rules
+  `auth-header-scheme`, `auth-scheme-value`, `npm-auth-token` (bare **and** quoted), `url-credential`
+  (user **and** pass, both the `scheme://` and bare `user:pass@host` forms), and the standalone
+  `>4096`-char base64 run (the old `SEC-3` "scope 境界" note) — masked only up to `MAX_VALUE_LEN` and
+  left the remainder raw (bare) or full-leaked (quoted / url, closing delimiter beyond the cap). They
+  are now **unbounded** (single-character-class `{N,}`, linear/ReDoS-safe) and pinned by the new
+  production test `INV-REDACTION-TAIL-SURVIVAL`, which falsifies **each capture individually** with
+  backstop-free (≤2-char-class) vectors — reverting any single capture to bounded turns exactly its
+  own case RED (per-rule mutation log in the PR report). A full-secret recall of "100%" plus 0
+  fragment leaks is still scoped to this corpus; it is not a claim that no secret can ever leak.
+- **What genuinely remains (honest residuals).**
+  - **Compensated straddle fallbacks (PEM / JWT).** A PEM private key or a long JWT whose closing
+    terminator (`-----END … PRIVATE KEY-----` / the 2nd `.` + signature) falls outside the ~264 KB
+    pre-redact window is masked by a dedicated bounded-greedy **fallback branch** in those two rules
+    (pinned by `INV-REDACTION-PEM-STRADDLE` / `INV-REDACTION-JWT-STRADDLE`). This is a compensation,
+    not a leak, but it is a distinct mechanism from the general value captures and worth naming.
+  - **Unterminated / newline-split quoted credential values — closed for credential-assignment
+    (SEC-1, landed 2026-07 via full re-audit).** The quoted/bare rules capture `[^"\r\n]` /
+    `[^'\r\n]` / `[^\s"',;]`, so their value stops at a newline or an absent closing quote; a
+    **raw-text** (string-path) credential whose quote is **not closed** (`password="abc123…`) or
+    whose value is **split across newlines** (`password="line1\nline2"`) previously failed all
+    three rules and was **not masked at all** (measured for short ~50-char, multi-line, and
+    low-entropy `<3-char-class` values alike). A **4th `credential-assignment` fallback** now
+    detects keyword + `[:=]` + opening quote and masks via branch1 (cross-newline lazy to the
+    in-window closing quote) / branch2 (unterminated → EOL); `_authToken` covers unterminated
+    quoted npm tokens by keyword overlap. Pinned by `INV-REDACTION-QUOTED-CRED-UNTERMINATED`
+    (falsifiable RED-before). The **object path was already safe** (`isCredentialKey` masks a
+    credential **key**'s whole value regardless of quoting/newlines).
+    - **Disclosed residuals (accepted, strict-improvement, tracked `019f5ca4`).** When there is
+      no reachable closing quote in-window on the credential's own line, branch2 masks only the
+      first line so a low-entropy continuation can survive: (a) truly multi-line unterminated /
+      `>PRE_REDACT_SLICE` newline-split values, or a merge whose following line is **another**
+      unterminated credential; (b) `url-credential` with a missing `@host` (masking to EOL there
+      would break legitimate `host:port/path` — `@` is the only pass/port anchor). Realistic
+      single-line unterminated and in-window newline-split are fully closed; all residuals are
+      pre-existing, single-operator/local-fs bounded, and closed by a keyword-anchor-independent
+      design in the follow-up PR.
+  - The benchmark **measures** partial survival directly (fragment-survival metric) rather than only
+    asserting it — the upgrade R4 asked for — and now reports 0.
 - **Remainder-aware exclusion can hide a _true_ partial leak (false-negative direction).** The
   fragment metric ignores a surviving fragment that also appears in the input with the secret
   removed, to avoid alarming on coincidences with preserved benign text (the `discord-webhook`

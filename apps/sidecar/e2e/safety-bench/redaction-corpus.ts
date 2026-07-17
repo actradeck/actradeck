@@ -204,18 +204,16 @@ export const POSITIVES: readonly PositiveVector[] = [
     input: "token: 'sq with space inside'",
     secret: "sq with space inside",
   },
-  // --- bounded-capture residual (fragment-survival demonstrator · R4 finding A) ---
-  // A long credential value whose HEAD is masked by the credential-assignment rule (bounded at
-  // MAX_VALUE_LEN = 4096) while the >4096-char TAIL overflows every bounded capture and survives:
-  // the leftover run exceeds the standalone high-entropy rule's {40,4096} bound, so its trailing
-  // lookahead can never anchor (documented redactor residual — see the `high-entropy-secret`
-  // "scope 境界 (SEC-3)" note in packages/redaction/src/redactor.ts). The FULL secret string is
-  // therefore absent from the output (head removed), so the exact full-substring recall metric
-  // counts this vector as DETECTED — yet a multi-thousand-char contiguous fragment of the value
-  // survives, which only the fragment-survival metric catches (see bench.ts FRAGMENT_MIN_LEN).
-  // This is the exact blind spot R4 flagged: partial/straddle survival that a full-match check
-  // reports as "detected". Value is `.repeat()`-built (constructed, not a new literal) so it adds
-  // no new fake-secret string and cannot trip GitHub Push Protection's per-secret unblock.
+  // --- long credential value (tail-hardening regression guard · task 019f5b5e-f9e9) ---
+  // A long credential value (9000 chars). Historically its HEAD was masked while the >4096-char TAIL
+  // overflowed the bounded `{N,MAX_VALUE_LEN}` capture and survived raw (the leftover run also exceeded
+  // the standalone high-entropy rule's old {40,4096} bound, so nothing re-anchored it). That was the
+  // one documented fragment-survival vector. INV-REDACTION-TAIL-SURVIVAL unbounded the value captures
+  // (single-charset {N,} — ReDoS-safe), so the value is now masked head-to-tail: full leak = 0 AND
+  // fragment survival = 0. This vector is retained as a REGRESSION GUARD — re-bounding any value
+  // capture makes the tail reappear and turns both the fragment-survival metric and
+  // inv-safety-bench-metric.test.ts RED. Value is `.repeat()`-built (constructed, not a new literal)
+  // so it adds no new fake-secret string and cannot trip GitHub Push Protection's per-secret unblock.
   {
     kind: "credential-assignment",
     input: `HUGE_SECRET_BLOB=${"xY7bQ2".repeat(1500)}`,

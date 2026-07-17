@@ -39,7 +39,6 @@ import { join } from "node:path";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 import { WebSocket } from "ws";
 import { buildIngestionServer } from "@actradeck/backend";
@@ -50,6 +49,10 @@ import { SessionIdentity } from "../src/session-identity.js";
 import { EventSink } from "../src/sink.js";
 import { EventStore } from "../src/store.js";
 import { type ApprovalDecisionMsg, type InterruptMsg, WsClient } from "../src/ws-client.js";
+
+// FastifyInstance 型は backend buildIngestionServer 戻り値から導出する (fastify を sidecar の
+//   devDeps に足さず lockfile churn を避ける・値は import 済みゆえ typeof で参照可)。
+type FastifyInstance = Awaited<ReturnType<typeof buildIngestionServer>>;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 

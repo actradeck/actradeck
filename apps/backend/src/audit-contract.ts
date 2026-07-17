@@ -98,6 +98,8 @@ export interface AuditRangeTotals {
   readonly approvals_by_decision: AuditDecisionTally;
   readonly approval_total: number;
   readonly high_risk_op_count: number;
+  /** 無プロンプト自動許可 (auto_allowed=true) の range 合計。high_risk_op_count と対称 (QA-1)。 */
+  readonly auto_allowed_count: number;
   readonly sessions_with_secret: number;
 }
 
@@ -246,6 +248,7 @@ export function auditReportToCsv(report: AuditRangeReport): string {
     "cancel",
     "approvals_pending",
     "high_risk_op_count",
+    "auto_allowed_count",
   ];
   const lines = [header.join(",")];
   for (const s of report.sessions) {
@@ -270,6 +273,7 @@ export function auditReportToCsv(report: AuditRangeReport): string {
         csvCell(s.approvals.by_decision.cancel),
         csvCell(s.approvals.pending),
         csvCell(s.high_risk_op_count),
+        csvCell(s.auto_allowed_count),
       ].join(","),
     );
   }

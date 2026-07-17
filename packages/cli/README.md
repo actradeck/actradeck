@@ -1,8 +1,9 @@
 # actradeck
 
-> Bootstrap CLI for **ActraDeck** — a local-first control plane for coding agents (Claude
-> Code, Codex, …): observe them, redact secrets before they're stored, gate high-risk actions
-> behind approvals, and keep a tamper-evident audit trail.
+> Bootstrap CLI for **ActraDeck** — a local-first audit cockpit for coding agents (Claude
+> Code, Codex, …): observe them, redact secrets before they're stored, keep a tamper-evident
+> audit trail, and relay approvals where supported (Claude Code in Attach, Codex in Managed
+> Mode).
 
 This package is a **thin, dependency-free bootstrapper**. It does not contain the product —
 the full four-tier stack ships as a **signed GitHub Release** and a **signed GHCR image**.

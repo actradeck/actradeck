@@ -611,6 +611,7 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
               approvals_by_decision: summary.approvals.by_decision,
               approval_total: summary.approvals.total,
               high_risk_op_count: summary.high_risk_op_count,
+              auto_allowed_count: summary.auto_allowed_count,
               sessions_with_secret: summary.secret_detected ? 1 : 0,
             },
             sessions: [summary],

@@ -100,7 +100,7 @@ const CAPS = {
       s: "Step through exactly what happened — for review, incident analysis, and compliance",
     },
     outro: {
-      t: "The vendor-neutral control plane for approvals, secrets & audit",
+      t: "A local-first audit cockpit for coding-agent sessions, secrets & approvals",
       s: "Start with ./scripts/quickstart, then open http://localhost:55400",
     },
   },

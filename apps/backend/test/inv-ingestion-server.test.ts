@@ -101,7 +101,7 @@ describe.skipIf(!reachable)("Ingestion server WS+HTTP (real PG + real WS)", () =
         resolve({ upgraded });
       });
       ws.on("unexpected-response", (_req, res) => {
-        resolve({ code: res.statusCode, upgraded });
+        resolve({ code: res.statusCode!, upgraded });
       });
       ws.on("error", () => resolve({ upgraded }));
     });

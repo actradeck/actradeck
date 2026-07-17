@@ -446,6 +446,17 @@ const ja = {
   "inbox.open.title": "このセッションの詳細を開く",
   "inbox.replay.title": "このセッションを再生する",
 
+  // ── Action Rail（要対応レーン・decision 019f69ef） ───────────────────────
+  "actionRail.aria": "要対応",
+  "actionRail.title": "要対応",
+  "actionRail.clear": "要対応なし — いま人の操作は不要です",
+  "actionRail.signal.open.title": "このセッションの詳細を開く",
+  "actionRail.kind.approval": "承認待ち",
+  "actionRail.kind.stalled": "停止の疑い",
+  "actionRail.kind.auth": "認証待ち",
+  "actionRail.kind.input": "入力待ち",
+  "actionRail.kind.attention": "要対応",
+
   // ── セッション詳細 (SessionDetail) ──────────────────────────────────────
   "detail.empty.loading": "詳細を取得中…",
   "detail.empty.select": "session を選択してください。",
@@ -473,6 +484,7 @@ const ja = {
   "detail.waiting.auth.body": "エージェントが認証を必要としています。",
   "detail.waiting.input.body": "エージェントが入力を待っています。",
   "detail.liveness.caption": "Liveness evidence（heartbeat シグナル別の鮮度）",
+  "detail.liveness.evidenceToggle": "Liveness の根拠（heartbeat 分解）を見る",
   "detail.liveness.col.signal": "signal",
   "detail.liveness.col.seen": "seen",
   "detail.liveness.col.age": "age",
@@ -694,6 +706,10 @@ const ja = {
   "wall.summary": "{count} セッション・直近 {window}の活動",
   "wall.attentionJump": "要対応 {count}",
   "wall.attentionJump.title": "要対応 (承認/入力待ち) のレーンへ順にジャンプ",
+  "wall.group.byProject": "プロジェクトでまとめる",
+  "wall.group.toggle.title":
+    "同一プロジェクト (repo または作業ディレクトリ) のセッションを束ねて表示 (OFF で手動並べ替え)",
+  "wall.group.none": "場所不明",
   "wall.refresh.title": "横断フィードを再取得",
   "wall.legend.label": "バーの色 = アクション種別:",
   "wall.legend.aria": "バー色の凡例",
@@ -1191,6 +1207,17 @@ const en: Record<MessageKey, string> = {
   "inbox.open.title": "Open this session's details",
   "inbox.replay.title": "Replay this session",
 
+  // ── Action Rail (decision 019f69ef) ──
+  "actionRail.aria": "Needs action",
+  "actionRail.title": "Needs action",
+  "actionRail.clear": "All clear — nothing needs you right now",
+  "actionRail.signal.open.title": "Open this session's details",
+  "actionRail.kind.approval": "Approval",
+  "actionRail.kind.stalled": "Stalled?",
+  "actionRail.kind.auth": "Auth",
+  "actionRail.kind.input": "Input",
+  "actionRail.kind.attention": "Attention",
+
   // ── detail ──
   "detail.empty.loading": "Loading details…",
   "detail.empty.select": "Select a session.",
@@ -1218,6 +1245,7 @@ const en: Record<MessageKey, string> = {
   "detail.waiting.auth.body": "The agent needs to authenticate.",
   "detail.waiting.input.body": "The agent is waiting for input.",
   "detail.liveness.caption": "Liveness evidence (freshness per heartbeat signal)",
+  "detail.liveness.evidenceToggle": "Show liveness evidence (heartbeat breakdown)",
   "detail.liveness.col.signal": "signal",
   "detail.liveness.col.seen": "seen",
   "detail.liveness.col.age": "age",
@@ -1424,6 +1452,10 @@ const en: Record<MessageKey, string> = {
   "wall.summary": "{count} sessions · activity over the last {window}",
   "wall.attentionJump": "Needs attention {count}",
   "wall.attentionJump.title": "Jump through lanes needing attention (approval/input wait)",
+  "wall.group.byProject": "Group by project",
+  "wall.group.toggle.title":
+    "Cluster sessions by project (repo or working directory); turn off for manual ordering",
+  "wall.group.none": "Unknown location",
   "wall.refresh.title": "Refetch the cross-session feed",
   "wall.legend.label": "Bar color = action type:",
   "wall.legend.aria": "Bar color legend",

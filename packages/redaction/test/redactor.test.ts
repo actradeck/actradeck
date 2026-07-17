@@ -445,6 +445,42 @@ describe("INV-REDACTION: redactString ReDoS performance (再#SEC-1)", () => {
       input: `${"eyJ" + "A1b2C3d4" + ".eyJ" + "B".repeat(50) + " "}`.repeat(3000),
       budgetMs: 1500,
     },
+    // task 019f5b5e-f9e9: unbounded value 捕捉が実際に 256KB を consume+mask する matching 経路の hard
+    //   teeth。単一 charset 無界 greedy は線形 (数百 ms) で、O(n^2) 退行 (nested 量指定子誤混入) は秒級で赤。
+    {
+      name: "matching bare cred api_key=<alnum 256KB> (consume+mask)",
+      input: `api_key=${randBase64(256 * 1024)}`,
+      budgetMs: 1500,
+    },
+    {
+      name: "matching standalone high-entropy <alnum 256KB> (consume+mask)",
+      input: randBase64(256 * 1024),
+      budgetMs: 1500,
+    },
+    // 多数の未終端 `key="` (閉じ quote 欠落) — unbounded 化した double-quote value が per-start 再走査で
+    //   O(n^2) にならないこと。閉じ quote が無いと double-quote rule は fail し bare rule が head→区切りを
+    //   1 回 consume するのみ (各 value run は空白区切りで有界) ゆえ全体 O(n)。
+    {
+      name: 'repeated key="<alnum 200>[no close] x300 (unbounded dquote fail path)',
+      input: `${'secret="' + "A".repeat(200) + " "}`.repeat(300),
+      budgetMs: 500,
+    },
+    // SEC-1 (fix/sec1-quoted-cred-eol-fallback): **改行区切り**の未終端 `password="` 連打。fallback
+    //   branch1 の改行跨ぎ lazy scan が per-line 再走査で O(n^2) にならないこと (lastIndex 単調前進 +
+    //   branch1 が後続行の quote を消費 → 同一領域を再走査しない) を pin する。単一行 fail path (上) と違い
+    //   改行を跨ぐため別経路。実測 ~257ms/260KB (ratio 2.0)。
+    {
+      name: 'repeated newline-separated unterminated password=" x2400 (~260KB, cross-newline branch1)',
+      input: `${'password="' + "A".repeat(100) + "\n"}`.repeat(2400),
+      budgetMs: 1500,
+    },
+    // SEC-1: 改行分断で末尾に閉じ quote がある matching consume。fallback branch1 が値全体を **改行跨ぎ**で
+    //   飲む経路が値長に対し線形なこと (単一 charset lazy + 単一 quote terminator・入れ子なし)。実測 ~214ms/250KB。
+    {
+      name: 'matching newline-split password="<A*80 \\n x3000>" (~250KB cross-newline consume)',
+      input: `password="${("A".repeat(80) + "\n").repeat(3000)}"`,
+      budgetMs: 1500,
+    },
   ];
 
   for (const { name, input, budgetMs } of cases) {
@@ -506,6 +542,37 @@ describe("INV-REDACTION: redactString ReDoS performance (再#SEC-1)", () => {
       // SEC-1: jwt fallback (branch2) が payload 長 n に対し線形 (2 個目の `.` 無しで head→末尾 consume)。
       name: "jwt straddle fallback eyJ.eyJ<payload n> (branch2 consume)",
       build: (n) => "eyJ" + genB64Url(20) + ".eyJ" + genB64Url(n),
+      n: 64 * 1024,
+    },
+    // --- INV-REDACTION-TAIL-SURVIVAL 修正で unbounded 化した value 捕捉の **matching** 経路が線形か
+    //     (task 019f5b5e-f9e9)。旧テストは非マッチ near-miss のみで、実際に value を consume+mask する
+    //     経路 (単一 charset 無界量指定子) の scaling を検証していなかった。単一 charset の greedy scan +
+    //     区切り (`"` / `@` / lookahead) は nested/alternation 無しゆえ線形 (ReDoS-safe) — これを反証する。
+    {
+      name: "matching bare cred api_key=<alnum n> (unbounded [^\\s\"',;]{1,})",
+      build: (n) => `api_key=${genB64Url(n)}`,
+      n: 64 * 1024,
+    },
+    {
+      name: 'matching quoted cred password="<alnum n>" (unbounded [^"\\r\\n]{0,})',
+      build: (n) => `password="${genB64Url(n)}"`,
+      n: 64 * 1024,
+    },
+    {
+      name: "matching standalone high-entropy <alnum n> (unbounded {40,})",
+      build: (n) => genB64Url(n),
+      n: 64 * 1024,
+    },
+    {
+      name: "matching url-credential postgres://app:<pass n>@host (unbounded pass)",
+      build: (n) => `postgres://app:${genB64Url(n)}@db.internal:5432/x`,
+      n: 64 * 1024,
+    },
+    {
+      // SEC-1 (fix/sec1-quoted-cred-eol-fallback): fallback branch1 の **改行跨ぎ** consume が値長 n に
+      //   対し線形。改行を挟んだ値を末尾 quote まで飲む経路 (単一 charset lazy + `\2` 単一 quote 照合)。
+      name: 'newline-split password="<A*80\\n>*n" cross-newline consume (branch1)',
+      build: (n) => `password="${("A".repeat(80) + "\n").repeat(Math.floor(n / 81))}"`,
       n: 64 * 1024,
     },
   ];

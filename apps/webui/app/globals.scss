@@ -1634,6 +1634,76 @@ textarea {
   color: var(--ad-fg-muted);
 }
 
+/* Action Rail (decision 019f69ef): board 最上段の要対応レーン。承認待ち/stalled?/waiting を
+   優先度順に出し、いま人が対応すべき 1 操作を最上位へ。要対応 0 件は穏やかな All clear。 */
+.ad-action-rail {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--ad-bg-layer-raised);
+  border: 1px solid var(--ad-border-subtle);
+  border-left: 3px solid var(--ad-status-danger-fg); /* 要対応の視覚的優先 */
+}
+
+/* 要対応 0 件のときは危険色でなく穏やかな成功色の枠にする (架空の警告を出さない)。 */
+.ad-action-rail[data-clear="true"] {
+  border-left-color: var(--ad-status-success-fg);
+}
+
+.ad-action-rail__header {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ad-action-rail__clear {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0;
+  color: var(--ad-fg-muted);
+}
+
+.ad-action-rail__clear-icon {
+  color: var(--ad-status-success-fg);
+}
+
+.ad-action-rail__signals {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.ad-action-rail__signal-btn {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  color: var(--ad-fg-primary);
+  text-align: left;
+  background: var(--ad-bg-layer);
+  border: 1px solid var(--ad-border-subtle);
+  cursor: pointer;
+}
+
+.ad-action-rail__signal-btn:hover {
+  border-color: var(--ad-border-strong);
+}
+
+.ad-action-rail__signal-label {
+  font-weight: 600;
+}
+
+.ad-action-rail__signal-go {
+  margin-left: auto;
+  color: var(--ad-fg-muted);
+  font-size: 0.875rem;
+}
+
 /* Live Wall (ADR 019ead7a): 横断ウォーターフォール。共通時間軸のレーン壁。 */
 .ad-wall {
   display: grid;
@@ -1659,6 +1729,31 @@ textarea {
      (canvas/仮想化は ADR D6 で full 再監査になるため段階2 では採らない)。 */
   max-height: 70vh;
   overflow-y: auto;
+}
+
+/* project グルーピング (decision 019f69ef): 同一 project (repo または cwd) のレーンを束ねる。
+   header は sticky で縦スクロール中も project ラベルを見失わせない。 */
+.ad-wall__group {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.ad-wall__group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.375rem 0.5rem;
+  color: var(--ad-fg-muted);
+  background: var(--ad-bg-layer);
+  border-bottom: 1px solid var(--ad-border-subtle);
+}
+
+.ad-wall__group-label {
+  color: var(--ad-fg-primary);
+  font-weight: 600;
 }
 
 .ad-wall__lane {
@@ -1984,6 +2079,23 @@ textarea {
   color: var(--ad-fg-muted);
   font-size: 0.875rem;
   line-height: 1.25rem;
+}
+
+/* liveness evidence の折りたたみ (decision 019f69ef): 根拠分解を drill-down へ格納し既定密度を下げる。
+   INV-STALLED の分解表示は削除せず、"live" 以外のとき既定展開する。 */
+.ad-liveness-details {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.ad-liveness-summary {
+  color: var(--ad-fg-muted);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.ad-liveness-summary:hover {
+  color: var(--ad-fg-primary);
 }
 
 .ad-replay {

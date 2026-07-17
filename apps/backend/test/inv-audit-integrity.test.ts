@@ -329,7 +329,7 @@ describe("INV-AUDIT-INTEGRITY 署名 + fingerprint pin (SEC-2)", () => {
 
   it("旧署名の使い回し (別 root へ貼付) → signature-invalid", () => {
     const other = buildAuditManifest(report([ev({ event_id: "z1" })]));
-    const forged: AuditManifest = { ...other, signature: m.signature };
+    const forged: AuditManifest = { ...other, signature: m.signature! };
     const r = verifyAuditManifest(forged, {
       expectedFingerprint: m.signature!.public_key_fingerprint,
     });

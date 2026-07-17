@@ -111,7 +111,7 @@ describe.skipIf(!reachable)("Realtime /realtime/ws (real PG + real WS)", () => {
         const idx = waiters.findIndex((w) => w.pred(f));
         if (idx >= 0) {
           const [w] = waiters.splice(idx, 1);
-          w.resolve(f);
+          w!.resolve(f);
         }
       });
       ws.on("error", (e) => {
@@ -189,7 +189,7 @@ describe.skipIf(!reachable)("Realtime /realtime/ws (real PG + real WS)", () => {
         const idx = waiters.findIndex((w) => w.pred(f));
         if (idx >= 0) {
           const [w] = waiters.splice(idx, 1);
-          w.resolve(f);
+          w!.resolve(f);
         }
       });
       ws.on("error", (e) => {
@@ -209,7 +209,7 @@ describe.skipIf(!reachable)("Realtime /realtime/ws (real PG + real WS)", () => {
         ws.close();
         resolve({ upgraded });
       });
-      ws.on("unexpected-response", (_r, r) => resolve({ code: r.statusCode, upgraded }));
+      ws.on("unexpected-response", (_r, r) => resolve({ code: r.statusCode!, upgraded }));
       ws.on("error", () => resolve({ upgraded }));
     });
     expect(res.upgraded).toBe(false);
@@ -227,7 +227,7 @@ describe.skipIf(!reachable)("Realtime /realtime/ws (real PG + real WS)", () => {
         ws.close();
         resolve({ upgraded });
       });
-      ws.on("unexpected-response", (_r, r) => resolve({ code: r.statusCode, upgraded }));
+      ws.on("unexpected-response", (_r, r) => resolve({ code: r.statusCode!, upgraded }));
       ws.on("error", () => resolve({ upgraded }));
     });
     expect(res.upgraded).toBe(false);

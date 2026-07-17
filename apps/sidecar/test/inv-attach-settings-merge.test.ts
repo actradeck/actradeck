@@ -71,7 +71,7 @@ describe("INV-ATTACH-SETTINGS-MERGE: 既存ユーザー hooks を保持して ap
     const hooks = after.hooks as Record<string, Array<{ hooks: unknown[] }>>;
 
     // ユーザー hook が温存されている (INV: mutation append→replace でここが赤化)。
-    const allSessionStartHooks = hooks.SessionStart.flatMap((g) => g.hooks);
+    const allSessionStartHooks = hooks.SessionStart!.flatMap((g) => g.hooks);
     expect(allSessionStartHooks).toContainEqual(userHook);
     // ActraDeck マーカー entry が追加されている。
     expect(allSessionStartHooks.some(isActradeckEntry)).toBe(true);
@@ -83,7 +83,7 @@ describe("INV-ATTACH-SETTINGS-MERGE: 既存ユーザー hooks を保持して ap
     const userHook = { type: "command", command: "x" };
     const current = { hooks: { PreToolUse: [{ matcher: "Bash", hooks: [userHook] }] } };
     const { settings } = computeMergedSettings(current, opts());
-    const group = (settings.hooks as Record<string, Array<{ hooks: unknown[] }>>).PreToolUse;
+    const group = (settings.hooks as Record<string, Array<{ hooks: unknown[] }>>).PreToolUse!;
     const flat = group.flatMap((g) => g.hooks);
     expect(flat).toContainEqual(userHook); // ユーザー hook 温存
     expect(flat.filter(isActradeckEntry)).toHaveLength(1); // ActraDeck entry 1 つ
@@ -99,7 +99,7 @@ describe("INV-ATTACH-SETTINGS-MERGE: 既存ユーザー hooks を保持して ap
     // 各 event に ActraDeck entry はちょうど 1 つ。
     const hooks = second.hooks as Record<string, Array<{ hooks: unknown[] }>>;
     for (const ev of ["SessionStart", "PreToolUse"]) {
-      const count = hooks[ev].flatMap((g) => g.hooks).filter(isActradeckEntry).length;
+      const count = hooks[ev]!.flatMap((g) => g.hooks).filter(isActradeckEntry).length;
       expect(count).toBe(1);
     }
   });
@@ -127,7 +127,10 @@ describe("INV-ATTACH-SETTINGS-MERGE: 既存ユーザー hooks を保持して ap
   });
 
   it("env token-mode writes $VAR + allowedEnvVars (no literal token)", () => {
-    mergeAttachHooks(opts({ tokenMode: "env", token: undefined }));
+    // env モードは token を settings に書かない (MergeOptions.token コメント参照)。opts の既定
+    //   token "nonce-abc" を敢えて残し「literal が与えられても env モードは書かない」を強く検証する
+    //   (exactOptionalPropertyTypes 下では optional を undefined 明示できないため省略する)。
+    mergeAttachHooks(opts({ tokenMode: "env" }));
     const after = readJson(settingsPath);
     const raw = JSON.stringify(after);
     // 平文 nonce は書かれない。
@@ -176,9 +179,9 @@ describe("INV-ATTACH-DETACH-REVERSIBLE: マーカー entry のみ除去しユー
     );
     const { settings, removed } = computeDetachedSettings(merged.settings);
     expect(removed).toBe(true);
-    const flat = (settings.hooks as Record<string, Array<{ hooks: unknown[] }>>).PreToolUse.flatMap(
-      (g) => g.hooks,
-    );
+    const flat = (
+      settings.hooks as Record<string, Array<{ hooks: unknown[] }>>
+    ).PreToolUse!.flatMap((g) => g.hooks);
     expect(flat).toContainEqual(userHook); // ユーザー hook 温存
     expect(flat.some(isActradeckEntry)).toBe(false); // ActraDeck entry 除去
   });
@@ -188,9 +191,9 @@ describe("INV-ATTACH-DETACH-REVERSIBLE: マーカー entry のみ除去しユー
     writeFileSync(settingsPath, "{}");
     mergeAttachHooks(opts({ events: ["SessionStart"] }));
     const merged = readJson(settingsPath);
-    const groups = (merged.hooks as Record<string, Array<{ hooks: unknown[] }>>).SessionStart;
+    const groups = (merged.hooks as Record<string, Array<{ hooks: unknown[] }>>).SessionStart!;
     // ActraDeck group に user hook を後付け (同 group 内に混在)。
-    groups[0].hooks.push({ type: "command", command: "user-added" });
+    groups[0]!.hooks.push({ type: "command", command: "user-added" });
     writeFileSync(settingsPath, JSON.stringify(merged));
 
     detachAttachHooks(settingsPath);

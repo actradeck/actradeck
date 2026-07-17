@@ -98,6 +98,7 @@ function report(sessions: readonly AuditSessionSummary[]): AuditRangeReport {
       approvals_by_decision: { allow: 2, allow_for_session: 1, deny: 1, cancel: 0 },
       approval_total: 4,
       high_risk_op_count: 1,
+      auto_allowed_count: 2,
       sessions_with_secret: 1,
     },
     sessions,

@@ -55,6 +55,7 @@ function listItem(o: Partial<SessionListItem> & { session_id: string }): Session
     needs_attention: false,
     liveness_state: "live",
     stalled_suspected: false,
+    connected: true,
     ...o,
   };
 }
@@ -67,6 +68,7 @@ function detail(o: Partial<SessionDetail> & { session_id: string }): SessionDeta
     liveness_reason: "",
     liveness_evaluated_at_ms: 0,
     invalid_transition_count: 0,
+    pending_approvals: [],
     ...o,
   };
 }
@@ -228,7 +230,7 @@ describe("INV-REALTIME-RELAY-AUTH / INV-APPROVAL: UI→Sidecar relay authorizati
       reason: "user approved",
     });
     expect(res.ok).toBe(true);
-    const msg = link.msgs()[0];
+    const msg = link.msgs()[0]!;
     expect(msg.type).toBe("approval");
     expect(msg.request_id).toBe("r1");
     expect(msg.decision).toBe("allow_for_session");
@@ -282,7 +284,7 @@ describe("INV-REALTIME-RELAY-AUTH / INV-APPROVAL: UI→Sidecar relay authorizati
     reg.handleHello(link, { type: "hello", control_token: "ctl-xyz", session_ids: ["s1"] });
     const res = reg.relayInterrupt("s1");
     expect(res.ok).toBe(true);
-    const msg = link.msgs()[0];
+    const msg = link.msgs()[0]!;
     expect(msg.type).toBe("interrupt");
     expect(msg.session_id).toBe("s1");
     expect(msg.token).toBe("ctl-xyz");

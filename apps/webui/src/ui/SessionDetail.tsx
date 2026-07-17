@@ -14,6 +14,8 @@
  * 秘匿情報は描かない: detail は backend が redaction 済 DTO のみを流す契約 (security.md)。
  * Adaptive Clarity: Carbon Button/Tag/InlineNotification/Table を kit（token 駆動）へ置換。
  */
+import { useState } from "react";
+
 import { ActionTimeline } from "./ActionTimeline";
 import { formatCurrentAction } from "./action-units-display";
 import { MANAGED_CODEX_PREFIX } from "./managed-codex";
@@ -503,6 +505,80 @@ function permissionModeTone(mode: string): Tone {
   return "muted";
 }
 
+/**
+ * liveness evidence (heartbeat 別鮮度) の折りたたみ表示 (decision 019f69ef)。
+ *
+ * INV-STALLED の根拠分解 (process/event/stdout/file/model-stream を分けて出し、単一シグナルで停止を
+ * 断定しない差別化の核) は削除せず、既定ビューの密度を下げるために `<details>` へ格納するだけ。
+ * `defaultOpen` は「live 以外 (根拠が有用な状態)」で true。SessionDetailView 側の `key={session_id}`
+ * で session 切替時に既定展開状態が再初期化される (独立コンポーネントゆえ hook 順序は安全)。
+ */
+function LivenessEvidence({
+  detail,
+  defaultOpen,
+}: {
+  readonly detail: SessionDetailDTO;
+  readonly defaultOpen: boolean;
+}) {
+  const { t } = useLocale();
+  const [open, setOpen] = useState(defaultOpen);
+  const rows = heartbeatRows(detail);
+  return (
+    <details
+      className="ad-liveness-details"
+      data-testid="liveness-details"
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary className="ad-liveness-summary" data-testid="liveness-summary">
+        {t("detail.liveness.evidenceToggle")}
+      </summary>
+      <Table
+        data-testid="liveness-evidence"
+        className="ad-liveness-evidence"
+        caption={t("detail.liveness.caption")}
+      >
+        <THead>
+          <Tr>
+            <Th>{t("detail.liveness.col.signal")}</Th>
+            <Th>{t("detail.liveness.col.seen")}</Th>
+            <Th>{t("detail.liveness.col.age")}</Th>
+            <Th>{t("detail.liveness.col.fresh")}</Th>
+            <Th>{t("detail.liveness.col.note")}</Th>
+          </Tr>
+        </THead>
+        <TBody>
+          {rows.map((r) => (
+            <Tr
+              key={r.kind}
+              data-testid={`hb-${r.kind}`}
+              data-observed={r.observed}
+              data-fresh={r.fresh ?? ""}
+            >
+              <Td>{r.kind}</Td>
+              <Td>{r.observed ? t("detail.liveness.seen.yes") : t("common.dash")}</Td>
+              <Td>{ageLabel(r.ageMs)}</Td>
+              <Td>
+                <Tag tone={r.fresh === null ? "muted" : r.fresh ? "success" : "danger"} size="sm">
+                  {r.fresh === null
+                    ? t("common.dash")
+                    : r.fresh
+                      ? t("detail.liveness.fresh")
+                      : t("detail.liveness.stale")}
+                </Tag>
+              </Td>
+              <Td>{r.extra ?? ""}</Td>
+            </Tr>
+          ))}
+        </TBody>
+      </Table>
+      <p className="ad-liveness-reason" data-testid="liveness-reason">
+        {detail.liveness_reason}
+      </p>
+    </details>
+  );
+}
+
 export function SessionDetailView({
   detail,
   loading,
@@ -526,7 +602,6 @@ export function SessionDetailView({
   // 表示時の鮮度補正: 凍結された "live"(履歴/無活動)を now 基準で idle/unknown へ降格する。
   const badge = livenessBadge(effectiveLivenessState(detail, now), detail.stalled_suspected);
   const waiting = waitingKind(detail.state);
-  const rows = heartbeatRows(detail);
   const pending = detail.pending_approvals;
   // interrupt は非 terminal の managed/非 managed どちらにも安全に出せる (sidecar が no-op 担保)。
   const canInterrupt = onInterrupt !== undefined && interruptEnabledForState(detail.state);
@@ -664,49 +739,15 @@ export function SessionDetailView({
         />
       ) : null}
 
-      {/* liveness evidence (heartbeat 別表示) */}
-      <Table
-        data-testid="liveness-evidence"
-        className="ad-liveness-evidence"
-        caption={t("detail.liveness.caption")}
-      >
-        <THead>
-          <Tr>
-            <Th>{t("detail.liveness.col.signal")}</Th>
-            <Th>{t("detail.liveness.col.seen")}</Th>
-            <Th>{t("detail.liveness.col.age")}</Th>
-            <Th>{t("detail.liveness.col.fresh")}</Th>
-            <Th>{t("detail.liveness.col.note")}</Th>
-          </Tr>
-        </THead>
-        <TBody>
-          {rows.map((r) => (
-            <Tr
-              key={r.kind}
-              data-testid={`hb-${r.kind}`}
-              data-observed={r.observed}
-              data-fresh={r.fresh ?? ""}
-            >
-              <Td>{r.kind}</Td>
-              <Td>{r.observed ? t("detail.liveness.seen.yes") : t("common.dash")}</Td>
-              <Td>{ageLabel(r.ageMs)}</Td>
-              <Td>
-                <Tag tone={r.fresh === null ? "muted" : r.fresh ? "success" : "danger"} size="sm">
-                  {r.fresh === null
-                    ? t("common.dash")
-                    : r.fresh
-                      ? t("detail.liveness.fresh")
-                      : t("detail.liveness.stale")}
-                </Tag>
-              </Td>
-              <Td>{r.extra ?? ""}</Td>
-            </Tr>
-          ))}
-        </TBody>
-      </Table>
-      <p className="ad-liveness-reason" data-testid="liveness-reason">
-        {detail.liveness_reason}
-      </p>
+      {/* liveness evidence (heartbeat 別表示) — 既定は折りたたみ、"live" 以外 (stalled?/idle/offline/
+          unknown) のときだけ既定展開する。INV-STALLED の根拠分解 (単一シグナルで停止断定しない差別化の核)
+          は削除せず drill-down として保持する (decision 019f69ef)。key=session_id で session 切替時に
+          既定展開状態を再初期化する。 */}
+      <LivenessEvidence
+        key={detail.session_id}
+        detail={detail}
+        defaultOpen={badge.label !== "LIVE"}
+      />
 
       {/* メタ */}
       <dl className="ad-detail-grid" data-testid="detail-meta">

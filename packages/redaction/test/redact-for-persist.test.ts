@@ -67,4 +67,28 @@ describe("redactEventWithAuthoritativeCounts: 権威 count 付与 + redaction", 
     redactEventWithAuthoritativeCounts(input);
     expect(JSON.stringify(input)).toBe(snap);
   });
+
+  // SEC-1 (fix/sec1-quoted-cred-eol-fallback・INV-REDACTION-QUOTED-CRED-UNTERMINATED): 未終端 /
+  //   改行分断 quoted-credential が string-path 経由で at-rest 境界 (sink/ingress 共有 choke) を素通り
+  //   しないこと。2-class 値 (high-entropy backstop 非発火) で fallback 単独の被覆を pin する。
+  it("未終端 / 改行分断 quoted-credential が persist 境界を素通りしない (SEC-1)", () => {
+    // 2-class (lowercase+digit)・長尺: 生存すれば ≥8 字断片が JSON に現れる。
+    const V = "ab12cd34ef56gh78ij90kl12mn34op56qr78st90uv12wx34".repeat(4);
+    const out = redactEventWithAuthoritativeCounts({
+      event_type: "command.output.delta",
+      payload: {
+        // 未終端 (閉じ quote 無し) と改行分断を同一 payload に載せる。
+        unterminated: `password="${V}`,
+        newline_split: `client_secret="line1\n${V}"`,
+      },
+    }) as Record<string, unknown>;
+    const serialized = JSON.stringify(out);
+    // raw value は at-rest 表現に残らない。
+    expect(serialized, "未終端/改行分断 value が raw 残存").not.toContain(V);
+    // credential-assignment マーカーが付く (count は非ゼロ)。
+    expect(serialized).toContain("[REDACTED:credential-assignment]");
+    expect(typeof out.redaction_count === "number" && (out.redaction_count as number) >= 2).toBe(
+      true,
+    );
+  });
 });

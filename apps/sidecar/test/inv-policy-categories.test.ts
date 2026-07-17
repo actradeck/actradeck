@@ -190,7 +190,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
 
   LITERAL_RULES.forEach((rule, i) => {
     it(`#${i} ${String(rule.re)} → category=${rule.category} / high=${rule.high}`, () => {
-      const s = samples[i];
+      const s = samples[i]!;
       // sample と LITERAL_RULES の index 対応を pin (sample がズレたら検知)。
       expect(rule.re.source, "sample.re が LITERAL_RULES[i] と一致").toBe(s.re.source);
       expect(rule.re.test(s.cmd), "sample は当該ルールにマッチ").toBe(true);

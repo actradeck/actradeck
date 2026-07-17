@@ -6,15 +6,15 @@
 [![GHCR](https://img.shields.io/badge/GHCR-multi--arch%20image-2496ED?logo=docker&logoColor=white)](https://github.com/actradeck/actradeck/pkgs/container/actradeck)
 [![License](https://img.shields.io/github/license/actradeck/actradeck)](LICENSE)
 
-**The vendor-neutral control plane for coding agents — observe everything, govern selectively. Cross-vendor secret redaction and one audit trail for every agent; approval governance where the mode supports it (Claude Code today, Codex in Managed Mode).**
+**A local-first audit cockpit for coding agents — observe across agents, redact secrets before persistence, and keep one replayable audit trail. Approval relay is available for Claude Code in Attach and Codex in Managed Mode.**
 
 ActraDeck sits beside your coding agents — Claude Code, Codex, and whatever comes
 next — and gives you **one place to watch what they do, stop detected secrets
-before they are stored, and keep an audit trail across vendors**. Approvals relay to the cockpit
-for Claude Code out of the box, and for Codex in Managed Mode (see the
-[support matrix](#vendor--mode-support)). It is local-first: a sidecar on your machine
-collects structured events, redacts secrets _before_ anything is persisted, and serves
-a web cockpit you control.
+before they are stored, and keep a replayable audit trail across vendors**. Approvals
+relay to the cockpit where the mode supports it: Claude Code in Attach out of the box,
+and Codex in Managed Mode (see the [support matrix](#vendor--mode-support)). It is
+local-first: a sidecar on your machine collects structured events, redacts secrets
+_before_ anything is persisted, and serves a web cockpit you control.
 
 > Status: **early / active development (pre-1.0).** The pieces below work today; the
 > declarative policy engine and team features are on the roadmap. Expect rough edges

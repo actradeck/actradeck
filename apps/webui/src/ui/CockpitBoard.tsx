@@ -11,7 +11,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isPresentOrRecentlyActive } from "@actradeck/event-model";
 
 import { formatCurrentAction } from "./action-units-display";
+import { shortSessionId } from "./wall-display";
+import { ActionRail } from "./ActionRail";
 import { ApprovalInbox } from "./ApprovalInbox";
+import { useApprovalInbox } from "./use-approval-inbox";
 import { ApprovalPolicyView } from "./ApprovalPolicyView";
 import { AuditView } from "./AuditView";
 import { LiveWall } from "./LiveWall";
@@ -78,6 +81,7 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
     showHistory,
     setShowHistory,
     connectedCount,
+    runningCount,
     totalCount,
   } = useRealtime({
     url,
@@ -220,8 +224,24 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
             .filter((v): v is string => typeof v === "string" && v.length > 0)
             .some((v) => v.toLowerCase().includes(normalizedQuery)),
         );
+  // attentionCount は **あえて** 表示集合(sessions)ベースのまま — 目的が Running/Live と異なる。
+  // Live/Running は「現在の作業状態」を正直に出すため presence 母集合(connected!==false)必須(固着履歴を
+  // 数えない=本 fix の核心)。一方 attention は「いま operator が対応すべき列=Action Rail」と一致させる
+  // のが目的で、Action Rail は sessions(表示集合)上で deriveAttention する(下部レンダ)ため attention も
+  // 同じ表示集合が正しい。共有するのは **母集合(sessions)** であって件数ではない(deriveAttention.total は
+  // pending 承認+signals で attentionCount=needs_attention 件数とは別量)。
+  // 受容する UX 帰結(意図): connected:false かつ needs_attention:true の履歴があると、showHistory ON で
+  // overview 行のうち Needs attention だけ増え Live/Running は不変。母集合非対称は設計(TDA-1・非バグ)。
+  // runningCount は useRealtime が presence 母集合から導出する値を使う(Live と同一述語・トグル非依存)。
+  // 旧: sessions.filter(running.*) は showHistory ON で固着履歴を「Running 94」に膨らませるバグだった。
   const attentionCount = sessions.filter((s) => s.needs_attention).length;
-  const runningCount = sessions.filter((s) => s.state?.startsWith("running.")).length;
+  // board 表示中のみ pending 承認を pull し、Action Rail (要対応レーン) の inline allow/deny に使う。
+  // inbox タブと同一の redacted DTO endpoint (/realtime/approvals・BFF が Bearer 付与)。非表示時は
+  // 保持を破棄する (承認本文をメモリに残さないメモリ衛生・inbox と同方針)。
+  const { approvals: boardApprovals } = useApprovalInbox({
+    enabled: topView === "board",
+    refreshKey: attentionCount,
+  });
   // Live Wall の live nudge (ADR 019ead7a D1): 表示対象 session の last_event_at が進むと
   // 値が変わる refreshKey。delta.list の更新で Wall を軽量再 fetch する (新 frame 型を作らない)。
   // ADR 019f474e: connected だけでなく external adapter の直近 active (recency proxy) も加算対象に
@@ -262,7 +282,7 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
       locale,
     ) ??
     detail?.state ??
-    (selectedId ? selectedId.slice(0, 12) : t("common.dash"));
+    (selectedId ? shortSessionId(selectedId) : t("common.dash"));
 
   return (
     <div className="ad-shell">
@@ -293,7 +313,9 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
             </div>
             <div className="ad-metric">
               <span className="ad-metric__label">{t("overview.running")}</span>
-              <span className="ad-metric__value">{runningCount}</span>
+              <span className="ad-metric__value" data-testid="running-count">
+                {runningCount}
+              </span>
             </div>
             <div className="ad-metric">
               <span className="ad-metric__label">{t("overview.needsAttention")}</span>
@@ -357,6 +379,23 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
               </Button>
             </div>
           </section>
+
+          {/* 要対応レーン (decision 019f69ef): board 最上段に「いま人が対応すべき 1 操作」を優先度順で出す。
+              承認は inline allow/deny、stalled?/waiting は詳細へ deep-link。0 件は穏やかな All clear。 */}
+          {topView === "board" ? (
+            <ActionRail
+              sessions={sessions}
+              approvals={boardApprovals}
+              nowMs={nowMs}
+              lastAck={lastAck}
+              onApprove={approve}
+              onOpenSession={(sessionId) => {
+                select(sessionId);
+                setTopView("board");
+              }}
+              onOpenReplay={openSessionReplay}
+            />
+          ) : null}
 
           {/* ADR 019f4cdb 後続 UI: board 表示中のみ per-provider 監査カバレッジを compact に出す。
               panel は provider ゼロ / 未取得なら自ら null を返す (架空の枠を作らない)。 */}

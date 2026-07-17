@@ -11,7 +11,10 @@
  *   特に「否定先読み × 反復」`((?:(?!q).)+)` や「無界 prefix + alternation」`[..]*(?:kw)` は
  *   catastrophic backtracking (入力長 n に対し O(n^2) 以上) を生む。長さ上限 (MAX_REDACT_INPUT)
  *   は n を縛るだけで n^2 爆発を防がないため、**ガードではなく量指定子の有界化が本対策**。
- * - 値部の最大捕捉長は MAX_VALUE_LEN で頭打ちにする (秘匿対象は十分カバーしつつ線形)。
+ * - 任意長 secret **値**の捕捉は**単一 charset の無界量指定子** (`{1,}` / `{0,}` / `{40,}`) にする。
+ *   単一 charset の無界 greedy は nested/alternation を持たず線形ゆえ ReDoS-safe で、有界上限が
+ *   >上限値の tail を raw 残存させる leak (INV-REDACTION-TAIL-SURVIVAL) を構造的に閉塞する。固定書式
+ *   トークン / キー名 / jwt セグメントは従来どおり `{N,MAX_VALUE_LEN}` / `{N,MAX_KEY_TOKEN}` で有界。
  * - 新ルール追加時も同じ ReDoS 検査を必ず行う (INV-REDACTION 性能テストで担保)。
  *
  * ⚠️ ここは security-engineer の独立レビュー対象。網羅性の穴は監査自己申告へ。
@@ -33,9 +36,31 @@ export const MAX_REDACT_INPUT = 256 * 1024;
  * MAX_REDACT_INPUT 境界を跨ぐ secret も先行 slice では完全に保持され、redaction で
  * 確実にマスクされてから最終 slice される (= 境界跨ぎの未マスク断片を残さない)。
  *
- * ## bounded 捕捉ルール (token 系: github {20,255} / high-entropy {40,MAX_VALUE_LEN} 等):
+ * ## bounded 捕捉ルール (固定書式 vendor token 系: github {20,255} / sendgrid / gitlab {20,64} /
+ *   jwt セグメント {8,MAX_VALUE_LEN} 等):
  *   最大捕捉は概ね MAX_VALUE_LEN。2*MAX_VALUE_LEN の余裕で、境界を跨いでも token 全体が
  *   先行 slice 内に収まり必ずマスクされる (redact→truncate 順・INV-REDACTION-SUMMARY-STRADDLE)。
+ * ## 無界 value 捕捉ルール (INV-REDACTION-TAIL-SURVIVAL・task 019f5b5e-f9e9):
+ *   任意長 secret 値の捕捉を単一 charset の**無界**量指定子 (`{1,}` / `{0,}` / `{40,}`) にした (旧
+ *   {N,MAX_VALUE_LEN} 上限は >MAX_VALUE_LEN の値で tail を raw 残存させる leak だった)。この無界ルール群は
+ *   値末尾の構造で **2 つの部分集合**に分かれ、margin 依存性が異なる:
+ *   (A) **terminator-free 部分集合** (bare credential-assignment / auth-header-scheme / auth-scheme-value /
+ *       AUTH_HEADER_VALUE_RE / high-entropy-secret / **非 quote** の npm-auth-token = `\2` 空):
+ *       値末尾に **必須 literal terminator を持たない** (パターン末尾 / charset 除外区切りで自然停止 /
+ *       末尾 lookahead)。anthropic/openai 無界 token と同型に、値が先行 slice の window 端を跨いでも
+ *       window 末尾まで greedy に consume → マスク → 最終 truncate の順で **self-heal** し、境界跨ぎの
+ *       未マスク断片を残さない。⇒ 下記 PEM/JWT の terminator-straddle leak class には**含めない**。
+ *   (B) **terminator-bearing 部分集合** (**quoted** credential-assignment `"…"` / `'…'` / url-credential の
+ *       pass `…@` / **quoted** npm-auth-token `\2`=`"`): 無界 secret 値 + **必須 literal terminator**
+ *       (`"` / `'` / `@`) を持つ = PEM/JWT と同じ構造カテゴリ (下記 census 第3カテゴリ)。terminator が
+ *       window 外へ落ちると match 全体失敗で raw 露出しうるが、これらの実値 (credential / password / URL
+ *       user:pass) は **sub-KB** ゆえ ~264KB の pre-redact window 外 straddle は実質到達不能で、かつ
+ *       3-class 値なら high-entropy backstop が被覆する。PEM/JWT (KB〜数十 KB body) と違い専用 fallback
+ *       branch を持たない (下記 census 参照)。別軸の string-path leak (**入力側**で terminator が欠落 =
+ *       未終端 quote / 改行分割の低エントロピー quoted 値) は **quoted credential-assignment + quoted
+ *       npm-auth-token については 4 本目 fallback で閉塞済** (SEC-1・fix/sec1-quoted-cred-eol-fallback・
+ *       INV-REDACTION-QUOTED-CRED-UNTERMINATED)。url-credential (`@host` 欠落) のみ安全 anchor 不在ゆえ別
+ *       fix で残置 (下記 census カテゴリ 2 + 各ルール開示コメント参照)。
  * ## private-key (PEM) は本 margin に依存しない (SEC-2・task 019f482c-0904):
  *   PEM は body 長が可変 (数 KiB〜数十 KiB) で terminator (`-----END ... PRIVATE KEY-----`) が
  *   MAX_VALUE_LEN margin を超えて window 外へ落ちうる。旧実装は literal terminator に依存したため、
@@ -48,24 +73,45 @@ export const MAX_REDACT_INPUT = 256 * 1024;
  *   JWT payload (claims) も可変長で 2 個目の `.` delimiter + signature が margin を超えて window 外へ
  *   落ちうる。private-key と同型に、jwt ルールが terminator 欠落時に `eyJ...\.eyJ` anchor 以降を head
  *   →window 末尾まで greedy マスクする fallback を内包し、margin 非依存で raw 露出ゼロを保証する
- *   (REDACTION_RULES の jwt 参照・INV-REDACTION-JWT-STRADDLE)。straddle class は census 上
- *   private-key + jwt の 2 ルールのみ (**secret-bearing な**無界セグメント + 必須 literal terminator を
- *   持つ = 無界部が実入力で KB 級に伸び、terminator が window 外へ落ちると raw secret を露出しうるのは
- *   両者だけ)。
- * ## census 述語の厳密化 (SEC-1 ≡ TDA-CENSUS-1・docs-precision):
- *   sentry-dsn ルール (下記) も構造上は「無界 `*` セグメント (`(?:[A-Za-z0-9-]{1,63}\.)*`) + 必須
- *   literal terminator (`sentry.io`)」を持つが、**non-leaking structural instance** であり straddle
- *   class に含めない: 無界部は非機密 host (subdomain 連鎖)、機密 userinfo (publicKey/secret) は
- *   terminator より手前の bounded 捕捉 (`[0-9a-f]{16,64}`) で、terminator が窓外へ落ちる straddle でも
- *   非 straddle の url-credential ルールが userinfo を被覆する (raw secret は残らない・実 DSN に KB 級
- *   サブドメイン連鎖は非実在)。census を「無界+terminator」だけの機械適用で sentry-dsn へ誤 extension
- *   しないこと (判定軸は **無界セグメント自体が secret を運ぶか**)。
+ *   (REDACTION_RULES の jwt 参照・INV-REDACTION-JWT-STRADDLE)。
+ * ## census (構造カテゴリの厳密な列挙・TDA-1・unbound 化 + quoted-cred fallback 後の更新):
+ *   「**secret-bearing な**無界セグメント + 必須 literal terminator」を持つ構造は 4 カテゴリある:
+ *   1. **専用 fallback を持つ straddle class** (private-key / jwt): 無界 body が実入力で **KB〜数十 KB** に
+ *      伸び、terminator (`-----END-----` / 2 個目の `.`) が pre-redact window 外へ現実的に落ちるため、
+ *      terminator 欠落時に head→window 末尾を greedy マスクする **branch2 fallback** を内包する。
+ *   2. **terminator-bearing だが専用 straddle fallback を持たない sub-KB class** (上記部分集合 B: quoted
+ *      credential-assignment / url-credential pass / quoted npm-auth-token): 無界 secret 値 + 必須
+ *      terminator (`"`/`'`/`@`) を持つが、実値は sub-KB ゆえ **window 外 straddle** は実質到達不能・3-class
+ *      値は high-entropy backstop が被覆する。よって private-key/jwt 型の straddle fallback を持たない。
+ *   4. **入力側 terminator 欠落 (未終端/改行分断) を EOL/close-quote まで拾う fallback class** (quoted
+ *      credential-assignment の 4 本目ルール): カテゴリ 2 の window-外-straddle とは別軸で、**入力そのものに
+ *      閉じ quote が無い / 値が改行で分断される**場合 (`password="…(閉じ無し)` / `password="l1\nl2"`) に
+ *      カテゴリ 2 の quoted 3 ルールが全滅する穴を、branch1 (改行跨ぎ lazy→`\2`・window bound) / branch2
+ *      (未終端→EOL) で閉塞する (REDACTION_RULES の credential-assignment 4 本目・INV-REDACTION-QUOTED-CRED-
+ *      UNTERMINATED)。`_authToken` は keyword 重複ゆえ quoted npm-auth-token の未終端も本 fallback が mop-up。
+ *      **残置**: (a) url-credential (`@host` 欠落) は安全 anchor 不在で本 fallback 非適用、(b) 多行かつ **真に
+ *      未終端** (window 内に閉じ quote 皆無で値が複数行) は branch2 が 1 行目のみマスク=継続行 residual。
+ *      両者とも pre-existing・strict-improvement・keyword-anchor 非依存の別 fix で追跡 (task 019f5ca4)。
+ *   3. **non-leaking structural instance** (sentry-dsn): 無界 `*` セグメント (`(?:[A-Za-z0-9-]{1,63}\.)*`) +
+ *      必須 terminator (`sentry.io`) を持つが、無界部は**非機密 host** (subdomain 連鎖) で機密 userinfo は
+ *      terminator より手前の bounded 捕捉 (`[0-9a-f]{16,64}`)。terminator が窓外でも非 straddle の
+ *      url-credential ルールが userinfo を被覆する (raw secret は残らない・実 DSN に KB 級サブドメイン連鎖は
+ *      非実在)。census を「無界+terminator」だけの機械適用でカテゴリ 1 へ誤 extension しないこと
+ *      (判定軸は **無界セグメント自体が secret を運ぶか + 実値が KB 級に伸びるか**)。
  */
 export const PRE_REDACT_SLICE = MAX_REDACT_INPUT + 2 * 4096;
 
 /**
- * credential 値・キー名トークンの最大捕捉長 (有界量指定子の上限)。
- * 実在の secret はこの範囲に収まる。これにより各ルールが入力長に対し線形になる。
+ * 固定書式トークン・キー名トークン捕捉長の有界量指定子の上限。
+ * 実在の vendor token / env キー名 / jwt セグメントはこの範囲に収まる。
+ *
+ * ## scope (INV-REDACTION-TAIL-SURVIVAL・task 019f5b5e-f9e9 以降):
+ *   本上限は **固定書式ルール** (jwt セグメント {8,MAX_VALUE_LEN}) と **キー名/scheme/host トークン**
+ *   (MAX_KEY_TOKEN 系は別定数) にのみ残す。**任意長 secret 値**の捕捉 (credential-assignment /
+ *   auth-header-scheme / auth-scheme-value / npm-auth-token / url-credential の pass /
+ *   high-entropy-secret) は、上限が >MAX_VALUE_LEN の値で tail を raw 残存させる leak だったため
+ *   **単一 charset の無界量指定子へ緩めた** (PRE_REDACT_SLICE の doc「無界 value 捕捉ルール」節参照)。
+ *   単一 charset の無界 greedy は nested/alternation を持たないため入力長に対し線形 (ReDoS-safe)。
  */
 export const MAX_VALUE_LEN = 4096;
 /** credential キー名 prefix/suffix トークンの最大長 (env 名・複合語を十分カバー)。 */
@@ -460,10 +506,11 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   //     進めるため、多数の `eyJ.eyJ` anchor があっても per-anchor 再走査の n^2 は起きず O(n)。
   //   残差 (accepted): header 自体が window 末尾を跨ぐ場合は anchor が消え header 断片が残るが、header は
   //     公開メタ (alg/typ) で secret でない (秘匿対象の payload claims はさらに外側=完全に window 外)。
-  //     また in-window で signature が MAX_VALUE_LEN(4096) を超える JWT は branch1 成功後に signature の
-  //     tail (>4096 部分) が残り得る (SEC-2'・pre-existing)。signature は非機密の完全性タグで実 JWT の
-  //     sig は ≤512 字・standalone >4096 連続 base64 の tail は high-entropy {40,MAX_VALUE_LEN} の
-  //     設計境界 (SEC-3・high-entropy ルールの scope 境界コメント参照) に subsume する。
+  //     また in-window で signature が MAX_VALUE_LEN(4096) を超える JWT は branch1 (bounded segment) 成功後に
+  //     signature の tail (>4096 部分) が残り得た (SEC-2'・pre-existing)。signature は非機密の完全性タグで
+  //     実 JWT の sig は ≤512 字。この tail は base64url の連続 run ゆえ **無界化された high-entropy {40,}**
+  //     (INV-REDACTION-TAIL-SURVIVAL) が backstop でマスクする (旧 {40,MAX_VALUE_LEN} 設計境界 SEC-3 が
+  //     leak させていた >4096 standalone run は撤廃済・high-entropy ルールの scope 境界コメント参照)。
   //   INV-REDACTION-JWT-STRADDLE (redactor unit + real PG) が raw 0 を回帰固定する。
   {
     kind: "jwt",
@@ -496,12 +543,13 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   // 先に処理する scheme は既にマスク済みなので二重マスクされない (値が [REDACTED:…]
   // になっており、本ルールの scheme 直後 \s+ <値> 形に合致しない)。
   // 対象ヘッダ名: Authorization / Proxy-Authorization / WWW-Authenticate。
-  // ReDoS: ヘッダ名・scheme 語・値部はすべて有界量指定子 ({N,M})。`+`/`*` 裸出現なし。
-  // 値部は否定文字クラス [^\r\n] の有界反復のみ (否定先読み×反復なし)。
+  // ReDoS: ヘッダ名・scheme 語は有界量指定子 ({N,M})。値部は否定文字クラス [^\r\n] の **無界反復**
+  //   (`{1,}`・INV-REDACTION-TAIL-SURVIVAL: >MAX_VALUE_LEN の値で tail を raw 残存させないため無界化)。
+  //   値部はパターン末尾の単一 charset greedy で否定先読み×反復・入れ子なし = 線形 (ReDoS-safe)。
   {
     kind: "auth-header-scheme",
     pattern: new RegExp(
-      `\\b(Proxy-Authorization|WWW-Authenticate|Authorization)(\\s{0,8}:\\s{0,8})([A-Za-z][A-Za-z0-9._-]{0,${MAX_KEY_TOKEN}})\\s{1,8}[^\\r\\n]{1,${MAX_VALUE_LEN}}`,
+      `\\b(Proxy-Authorization|WWW-Authenticate|Authorization)(\\s{0,8}:\\s{0,8})([A-Za-z][A-Za-z0-9._-]{0,${MAX_KEY_TOKEN}})\\s{1,8}[^\\r\\n]{1,}`,
       "gi",
     ),
     mask: (_m, header: string, sep: string, scheme: string) =>
@@ -516,13 +564,14 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   // scheme 語は誤爆を避けるため既知集合に限定 (任意英単語にしない)。Bearer/Basic/Token は
   // 上のルールで既に処理されるため除外し、ここでは残りの scheme を扱う。
   // 先頭 (行頭) アンカーで「値が scheme 語で始まる」形のみ捕捉し (文中の単語誤爆を回避)、
-  // 値部は最初の改行前まで ([^\r\n] 有界反復) に限定する。
-  // ReDoS: scheme は固定 alternation、値部は否定文字クラスの有界反復のみ。`g`+`m` で
-  // 行頭を多行対応。`all rules use global flag` 不変条件のため `g` を付与する。
+  // 値部は最初の改行前まで ([^\r\n] 無界反復 `{1,}`) に限定する。
+  // ReDoS: scheme は固定 alternation、値部は否定文字クラスの **無界反復** (パターン末尾の単一 charset
+  //   greedy・INV-REDACTION-TAIL-SURVIVAL で tail 残存を閉塞・入れ子なし = 線形)。`g`+`m` で
+  //   行頭を多行対応。`all rules use global flag` 不変条件のため `g` を付与する。
   {
     kind: "auth-scheme-value",
     pattern: new RegExp(
-      `^(ApiKey|Api-Key|AWS4-HMAC-SHA256|Negotiate|NTLM|Digest|Hawk|SAS|OAuth|Signature|Mac|Kerberos|GoogleLogin|Splunk)\\s{1,8}[^\\r\\n]{1,${MAX_VALUE_LEN}}`,
+      `^(ApiKey|Api-Key|AWS4-HMAC-SHA256|Negotiate|NTLM|Digest|Hawk|SAS|OAuth|Signature|Mac|Kerberos|GoogleLogin|Splunk)\\s{1,8}[^\\r\\n]{1,}`,
       "gim",
     ),
     mask: (_m, scheme: string) => `${scheme} ${token("auth-scheme-value")}`,
@@ -538,12 +587,15 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   },
 
   // --- npm registry _authToken (//host/:_authToken=...) --------------------
+  // 値 `[^\s"']{6,}` を無界化し tail 残存を閉塞 (INV-REDACTION-TAIL-SURVIVAL)。非 quote 経路 (`\2` 空) は
+  //   terminator-free で self-heal (census カテゴリ A)、quoted 経路 (`\2`=`"`/`'`) は terminator-bearing
+  //   (census カテゴリ 2)。**未終端 quoted** `_authToken="…(閉じ quote 無し)` は `\2` が閉じられず本ルールは
+  //   match 失敗するが、キー名 `_authToken` が credential-keyword (`auth`/`token`) を含むため、直後の
+  //   **credential-assignment EOL/close-quote fallback** (4 本目) が EOL/close-quote まで mop-up する
+  //   (SEC-1・fix/sec1-quoted-cred-eol-fallback で閉塞・INV-REDACTION-QUOTED-CRED-UNTERMINATED)。
   {
     kind: "npm-auth-token",
-    pattern: new RegExp(
-      `(_authToken\\s{0,8}[:=]\\s{0,8})(["']?)([^\\s"']{6,${MAX_VALUE_LEN}})\\2`,
-      "gi",
-    ),
+    pattern: new RegExp(`(_authToken\\s{0,8}[:=]\\s{0,8})(["']?)([^\\s"']{6,})\\2`, "gi"),
     mask: (_m, keyPart: string, quote: string) =>
       `${keyPart}${quote}${token("npm-auth-token")}${quote}`,
   },
@@ -558,17 +610,39 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   //   等を「含む」なら credential とみなす (AWS_SECRET_ACCESS_KEY / DB_PASSWORD /
   //   npm の _authToken のような _ 境界・複合語を取りこぼさない)。
   //
-  // ReDoS (再#SEC-1): prefix/suffix の `*` は `{0,MAX_KEY_TOKEN}` に有界化。値部は
-  //   無界 `+` や「否定先読み×反復」を使わず、**単純否定文字クラス + {1,N} 上限**で線形化。
-  //   クォート付き値はクォート種別ごとに別ルール (\2 後方参照の動的否定先読みを排除)。
-  //   group1=キー名+区切り, group2=値本体 (クォート版は group2=値本体)。
+  // ReDoS (再#SEC-1 / INV-REDACTION-TAIL-SURVIVAL): prefix/suffix の `*` は `{0,MAX_KEY_TOKEN}` に
+  //   有界化。値部は「否定先読み×反復」や入れ子量指定子を使わず、**単一の否定文字クラス + 無界量指定子**
+  //   (bare `[^\s"',;]{1,}` / quoted `[^"\r\n]{0,}` `[^'\r\n]{0,}`) にする。単一 charset の無界 greedy は
+  //   後続に競合構造を持たない (bare = パターン末尾 / quoted = charset が除外する閉じ quote で自然停止)
+  //   ため入力長に対し線形 = ReDoS-safe。**有界 {N,MAX_VALUE_LEN} だと >MAX_VALUE_LEN の値で tail が
+  //   raw 残存 (bare) / 閉じ quote を上限内に見つけられず match 全体失敗で full leak (quoted) した**ため
+  //   無界化した (task 019f5b5e-f9e9・INV-REDACTION-TAIL-SURVIVAL が回帰固定)。≤MAX_VALUE_LEN の値は
+  //   上限に達しないため出力バイト等価。クォート付き値はクォート種別ごとに別ルール (\2 後方参照の動的
+  //   否定先読みを排除)。group1=キー名+区切り, group2=値本体 (クォート版は group2=値本体)。
   //
   // クォート付き値: ダブル / シングルを別々のルールに分割し、
-  //   それぞれ閉じクォートまで (改行を除く) を **有界** [^"\r\n]{0,N} / [^'\r\n]{0,N} で捕捉。
+  //   それぞれ閉じクォートまで (改行を除く) を **無界** [^"\r\n]{0,} / [^'\r\n]{0,} で捕捉
+  //   (charset が閉じクォートを除外するため greedy が自然停止 = 線形)。無界化で **閉じクォートが in-window
+  //   に在る限り任意長の値**をマスクする (>MAX_VALUE_LEN の full leak を閉塞・INV-REDACTION-TAIL-SURVIVAL)。
+  //
+  // 未終端 / 改行分断 quoted-credential の string-path leak (SEC-1・fix/sec1-quoted-cred-eol-fallback):
+  //   上の 3 quoted/bare ルールは値 charset `[^"\r\n]` / `[^'\r\n]` / `[^\s"',;]` が **改行と閉じクォートを
+  //   除外**するため、**閉じクォートが入力に無い (未終端) か、値が改行で分断される**と 3 ルール全てが
+  //   match に失敗し、値が string path (raw text) で **一切マスクされず raw at-rest 残存**した
+  //   (50 字級の短い値・改行分割の複数行値・2-class 低エントロピー値でも発火。window 長・エントロピー
+  //   非依存・旧実測: `password="abc123…(未終端)` / `password="line1\nline2"` が完全非マスク)。
+  //   **credential-KEY の object 経路は元から安全** (isCredentialKey がキー名で値全体を無条件マスク)。
+  //   → 直下の **credential-assignment EOL/close-quote fallback** (4 本目) が string path でもこれを閉塞する
+  //     (INV-REDACTION-QUOTED-CRED-UNTERMINATED)。`_authToken`/`password` 等 credential-keyword を含む
+  //     未終端 quoted は本 fallback が mop-up するため npm-auth-token 経路の同型 leak も併せて閉じる。
+  //   ⚠️ url-credential (`scheme://user:pass@host`) の `@` 欠落 leak は **本 fallback の対象外**:
+  //     `@` は `user:pass` を `host:port/path` (例 `postgres://app:5432/db`) から判別する唯一の anchor で、
+  //     欠落時に EOL までマスクすると正当な DB URL の port/path を誤マスクし観測性を破壊する (安全な
+  //     anchor 不在ゆえ別 fix・url-credential ルールの開示コメント参照)。
   {
     kind: "credential-assignment",
     pattern: new RegExp(
-      `([A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}(?:${CREDENTIAL_KEYWORDS})[A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}["']?\\s{0,8}[:=]\\s{0,8})"([^"\\r\\n]{0,${MAX_VALUE_LEN}})"`,
+      `([A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}(?:${CREDENTIAL_KEYWORDS})[A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}["']?\\s{0,8}[:=]\\s{0,8})"([^"\\r\\n]{0,})"`,
       "gi",
     ),
     mask: (_m, keyPart: string) => `${keyPart}"${token("credential-assignment")}"`,
@@ -576,19 +650,72 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   {
     kind: "credential-assignment",
     pattern: new RegExp(
-      `([A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}(?:${CREDENTIAL_KEYWORDS})[A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}["']?\\s{0,8}[:=]\\s{0,8})'([^'\\r\\n]{0,${MAX_VALUE_LEN}})'`,
+      `([A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}(?:${CREDENTIAL_KEYWORDS})[A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}["']?\\s{0,8}[:=]\\s{0,8})'([^'\\r\\n]{0,})'`,
       "gi",
     ),
     mask: (_m, keyPart: string) => `${keyPart}'${token("credential-assignment")}'`,
   },
-  // 裸の値: 空白/クォート/区切り (,;) 直前まで。下限は 1 (短い値も秘匿)・上限は有界。
+  // 裸の値: 空白/クォート/区切り (,;) 直前まで。下限は 1 (短い値も秘匿)・**上限は無界** `{1,}`
+  //   (INV-REDACTION-TAIL-SURVIVAL: >MAX_VALUE_LEN の tail 残存を閉塞・パターン末尾の単一 charset ゆえ線形)。
   {
     kind: "credential-assignment",
     pattern: new RegExp(
-      `([A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}(?:${CREDENTIAL_KEYWORDS})[A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}["']?\\s{0,8}[:=]\\s{0,8})([^\\s"',;]{1,${MAX_VALUE_LEN}})`,
+      `([A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}(?:${CREDENTIAL_KEYWORDS})[A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}["']?\\s{0,8}[:=]\\s{0,8})([^\\s"',;]{1,})`,
       "gi",
     ),
     mask: (_m, keyPart: string) => `${keyPart}${token("credential-assignment")}`,
+  },
+  // 未終端 / 改行分断 quoted-credential の EOL/close-quote fallback (SEC-1・INV-REDACTION-QUOTED-CRED-UNTERMINATED):
+  //   上の quoted/bare 3 ルールが閉じクォート欠落 (未終端) / 改行分断で match 失敗する穴を string path で塞ぐ。
+  //   credential-keyword + `[:=]` + **開始クォート** を検出し、値部を 2 branch で consume する:
+  //     branch1 `[\s\S]{0,PRE_REDACT_SLICE}?\2`: **改行を跨いで**閉じクォート (開始と同種 = 後方参照 `\2`)
+  //       まで lazy に consume する。改行分断 (`password="line1\nline2"`) の値全体をマスクする (上の単一行
+  //       quoted ルールは `[^"\r\n]` で改行を越えられず line2 が raw 残存していた)。上限は PEM/JWT branch2 と
+  //       同じ **PRE_REDACT_SLICE (= pre-redact window 長)** で、**クレデンシャル自身の行から window 内に
+  //       閉じクォートがある限り**任意長の改行分断値を届いてマスクする。閉じクォートが window より外なら
+  //       branch1 は失敗し branch2 が 1 行目のみマスクする (下記 残差 (b))。
+  //     branch2 `[^\r\n]{0,}`: 閉じクォートが window 内に無い (真の未終端) 場合に **当該行の EOL まで**
+  //       consume する (`password="abc(閉じ無し)` を行末までマスク)。後続行は温存 (`\r\n` 除外で自然停止)。
+  //   マスクは値部のみ `[REDACTED:credential-assignment]` へ。未終端でも開始クォート `\2` を左右に添えて
+  //   マーカーを quote 内へ収める (出力書式を quoted ルールと統一)。
+  //   ## 順序 (TDA-3): 本 fallback は汎用ゆえ通常「特異→汎用」原則では後方だが、sentry-dsn / url-credential
+  //     より**前**に置く。credential-keyword + 開始クォート gate ゆえ URL/DSN と重なるのは **URL 自体が
+  //     credential-keyword'd キーの値** のとき (`db_secret="postgres://…"`) だけで、その値は credential として
+  //     一括マスクするのが正 (kind=credential-assignment 帰属は意図的・leak でなく fail-safe な kind 選択)。
+  //     terminated な素の URL は上の quoted 3 ルールが先処理し本 fallback は非発火。
+  //   ## 冪等性: 単一行の terminated quoted は上の dquote/squote ルールが先に処理して `"[REDACTED:…]"` へ
+  //     潰すため、本 fallback が既マスク値を branch1 で再マッチしても同一 byte を返し (冪等・マーカーに
+  //     quote/改行を含まない)、redaction_count を増やさない。fallback が新規にマスクするのは **未終端
+  //     (branch2)** と **window 内で閉じる改行分断 (branch1 の改行跨ぎ)** のみ。
+  //   ## 開示する残差 (SEC-1/QA-1・SEC 判断対象・全て pre-existing の**厳密改善** = 修正前は全行 leak・
+  //      keyword-anchor 非依存の別 fix で追跡 task 019f5ca4):
+  //     (a) **merge over-redaction (SEC-1)**: 未終端 `password="a` の後続行に**別の quoted 値**が続くと
+  //         branch1 が後続行の `"` を閉じクォートとみなし畳む。後続が **非 credential** (`x="v"`) なら観測性の
+  //         縮退のみ (fail-safe)。だが後続が**別の未終端 credential** (`password="a\napi_key="swordfish99`) の
+  //         場合、後続の低エントロピー値 (`swordfish99`) は畳まれた閉じクォートの外に落ち keyword-anchor 不能で
+  //         **raw 残存しうる** (= leak・下記 (b) と同一クラス)。
+  //     (b) **多行かつ真に未終端 / >window 改行分断 (QA-1)**: window 内 (クレデンシャル自身の行から) に閉じ
+  //         クォート皆無で値が複数行に跨る (`password="l1\n<big>` 閉じ無し / `password="l1\n<big>"` big>window)
+  //         場合、branch1 失敗→branch2 が **1 行目のみ** EOL マスク→2 行目以降の低エントロピー継続行が raw
+  //         残存しうる (`\r`-only 分断も同型)。継続行は credential-keyword を持たず keyword-anchored redactor
+  //         では anchor 不能 (行全体マスクは一般テキストを飲む)。
+  //     realistic な**単一行未終端** / **window 内で閉じる改行分断** は完全閉塞する ((a)(b) は複数行に跨る
+  //     非現実的 shape のみ・single-operator/local-fs 境界内)。現状の partial-closure は
+  //     INV-REDACTION-QUOTED-CRED-UNTERMINATED の tripwire describe が pin し、将来 branch/truncation 順の変更が
+  //     leak を realistic size へ silent 拡大させたら赤化する。
+  //   ## ReDoS (INV-REDACTION-REDOS-*): keyPart は有界。値部は単一 charset の lazy/greedy 無界反復
+  //     (`[\s\S]{0,PRE_REDACT_SLICE}?` / `[^\r\n]{0,}`)・入れ子量指定子/否定先読み反復なし。`\2` は捕捉済み
+  //     1 文字リテラルの照合ゆえ非指数。global replace で match の lastIndex は単調前進し (branch2 は空
+  //     マッチでも keyPart+quote 分前進)、branch1 の改行跨ぎ reach が次の quote を消費するため同一領域の
+  //     再走査は起きず、入力長に対し amortized 線形 (INV-REDACTION-REDOS-SCALING で t(2n)/t(n)≈2 を実測)。
+  {
+    kind: "credential-assignment",
+    pattern: new RegExp(
+      `([A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}(?:${CREDENTIAL_KEYWORDS})[A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}["']?\\s{0,8}[:=]\\s{0,8})(["'])(?:[\\s\\S]{0,${PRE_REDACT_SLICE}}?\\2|[^\\r\\n]{0,})`,
+      "gi",
+    ),
+    mask: (_m, keyPart: string, quote: string) =>
+      `${keyPart}${quote}${token("credential-assignment")}${quote}`,
   },
 
   // --- Sentry DSN userinfo (https://<publicKey>[:<secret>]@<host>/<projectId>) --
@@ -605,28 +732,35 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   },
 
   // --- URL basic-auth: scheme://[user]:pass@host (pass のみマスク) ----------
-  // 再#5c SEC-B: user 部下限を 0 (`{0,N}`) にし、空ユーザ `scheme://:pass@host`
+  // 再#5c SEC-B: user 部下限を 0 (`{0,}`) にし、空ユーザ `scheme://:pass@host`
   //   (redis://:pw@h / amqp://:pw@broker など password-only URL) を捕捉する。
-  // ReDoS: user/pass トークンは有界 `{0,N}`/`{1,N}`。直後に literal `:`/`@` 区切りがあり
-  //   無界 `+` や否定先読み反復を含まないため、`{0,N}` でも空マッチ暴走 (catastrophic
-  //   backtracking) は起きない (単一文字クラスの有界反復 × 固定デリミタ)。
+  // ReDoS (INV-REDACTION-TAIL-SURVIVAL): user/pass トークンは**無界** `{0,}`/`{1,}` (secret pass の
+  //   tail 残存を避ける)。直後に literal `:`/`@` 区切りがあり charset がそれを除外するため単一 charset の
+  //   greedy が自然停止し、否定先読み反復・入れ子なしで空マッチ暴走 (catastrophic backtracking) は
+  //   起きない (単一文字クラスの無界反復 × 固定デリミタ = 線形)。pass は terminator-bearing (`@`・census
+  //   カテゴリ 2: 実 URL 値は sub-KB ゆえ window 外 straddle 実質到達不能)。
+  // ⚠️ pre-existing string-path leak (SEC-1・本 fallback の対象外・別 fix): pass charset `[^\s@/]` は
+  //   空白 (改行含む) と `@` を除外するため、**`@host` が欠落 (未終端) / pass が改行分断される**と match
+  //   失敗し pass は raw 残存しうる。credential-assignment の EOL fallback を **ここへは適用できない**:
+  //   `@` は `user:pass` を `host:port/path` (例 `postgres://app:5432/db`・password 無し) から判別する唯一の
+  //   anchor で、欠落時に EOL までマスクすると正当な DB URL の port/path を誤マスクし観測性を破壊する
+  //   (安全な anchor 不在 = under/over の判別不能ゆえ mask-to-EOL は不可)。恒久修正は別設計 (別 PR full 監査)。
   {
     kind: "url-credential",
-    pattern: new RegExp(
-      `\\b([a-z][a-z0-9+.-]{0,32}:\\/\\/[^\\s:/@]{0,${MAX_VALUE_LEN}}):([^\\s@/]{1,${MAX_VALUE_LEN}})@`,
-      "gi",
-    ),
+    pattern: new RegExp(`\\b([a-z][a-z0-9+.-]{0,32}:\\/\\/[^\\s:/@]{0,}):([^\\s@/]{1,})@`, "gi"),
     mask: (_m, userWithScheme: string) => `${userWithScheme}:${token("url-credential")}@`,
   },
 
   // --- scheme なし bare user:pass@host (上の URL ルールが拾えない形) ---------
   // user:pass@host.tld 形を pass のみマスク。直前が "/" や英数 (= scheme://... の
   // 一部) でない場合に限定し、URL ルールとの二重マスクや誤爆を避ける。
-  // ReDoS: user/pass/host トークンを {1,N} で有界化。
+  // ReDoS (INV-REDACTION-TAIL-SURVIVAL): user/pass トークンは無界 `{1,}` (secret 値の tail 残存を
+  //   避ける)。いずれも直後に literal 区切り (`:` / `@`) があり charset がそれを除外するため単一 charset
+  //   の greedy が自然停止 = 線形。host は書式トークンゆえ {1,253} で有界のまま。
   {
     kind: "url-credential",
     pattern: new RegExp(
-      `(^|[\\s,;=([])([A-Za-z0-9._-]{1,${MAX_VALUE_LEN}}):([^\\s:/@]{1,${MAX_VALUE_LEN}})@([A-Za-z0-9.-]{1,253}\\.[A-Za-z]{2,24})`,
+      `(^|[\\s,;=([])([A-Za-z0-9._-]{1,}):([^\\s:/@]{1,})@([A-Za-z0-9.-]{1,253}\\.[A-Za-z]{2,24})`,
       "g",
     ),
     mask: (_m, pre: string, user: string, _pass: string, host: string) =>
@@ -637,7 +771,11 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   // ラベルなしで現れる長尺 base64 風トークン (AWS secret access key = 40 字、
   // Azure AccountKey = 44/72/88 字 base64 等)。
   // 再#5 SEC-2: 旧実装は長さ 40 ちょうど限定で、44/72/88 字の cloud 接続鍵を取りこぼした。
-  //   下限 40・上限 MAX_VALUE_LEN の **有界** {40,N} に緩め、長尺鍵も捕捉する。
+  //   下限 40 の {40,N} に緩め、長尺鍵も捕捉する。
+  // INV-REDACTION-TAIL-SURVIVAL (task 019f5b5e-f9e9): 上限を撤廃し **{40,}** (無界) にする。旧
+  //   {40,MAX_VALUE_LEN} は >MAX_VALUE_LEN(4096) の連続 run で trailing lookahead が anchor できず
+  //   **run 全体が raw 残存 (full leak)** した (下記 旧 scope 境界 SEC-3 を参照)。単一 charset の無界
+  //   greedy ゆえ線形 (ReDoS-safe)。≤MAX_VALUE_LEN の run はバイト等価。
   // 再#5b (main probe LEAK 1-3): base64 末尾の `=`/`==` パディングを **マッチに含める**。
   //   旧 `(?![A-Za-z0-9+/=])` は本体直後の `=` で否定先読みが失敗しマッチ自体が消え、
   //   `==` で終わる cloud 鍵 (Azure AccountKey / GCP / 一般 base64 鍵の大半) が standalone
@@ -662,20 +800,21 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   //     3+ class) は捕捉。`/` を symbol から外すことで `/usr/Local/...` 風 path も 2 class 維持。
   //   2 段とも通過した場合のみマスク (over-redaction 相殺)。
   // パディング `={0,2}` は維持。`=` は symbol class に数える (urlsafe 鍵の末尾 `=`)。
-  // ReDoS: lookbehind で run 先頭のみ start、{40,N}/{0,2} は有界、貪欲だが backtrack は
-  //   高々 (N-40+2) 歩/run start で線形 (`+`/`*` 裸出現なし)。
-  // scope 境界 (SEC-3・設計境界の開示): {40,MAX_VALUE_LEN} bound により、**単独の >MAX_VALUE_LEN(4096)
-  //   連続 base64 run** (PEM マーカー / vendor prefix / credential キー文脈のいずれも無い) は trailing
-  //   lookahead を満たせず position-independent に leak し得る (straddle 特有でなく window 内でも同じ)。
-  //   これは ReDoS / over-redaction (巨大な正当 base64 = 画像・ファイル埋込を過剰マスクしない) との
-  //   意図的 tradeoff で、branch2 型の補償は PEM/JWT マーカー付きのみ持つ。汎用の長尺 blob マスクは
-  //   別の design decision とする。
+  // ReDoS: lookbehind で run 先頭のみ start、本体 `{40,}` は単一 charset の無界 greedy (nested/
+  //   alternation なし)・`={0,2}` は有界。run は charset 除外の境界 (末尾 lookahead) で自然停止し、
+  //   backtrack は run 末尾の `={0,2}` 分のみ (高々 2 歩/run start) ゆえ入力長に対し線形
+  //   (INV-REDACTION-REDOS-SCALING の matching high-entropy ケースで t(2n)/t(n)≈2.0 実測)。
+  // 旧 scope 境界 (SEC-3・修正済・INV-REDACTION-TAIL-SURVIVAL): 旧 {40,MAX_VALUE_LEN} bound では
+  //   **単独の >MAX_VALUE_LEN(4096) 連続 base64 run** が trailing lookahead を満たせず
+  //   position-independent に **full leak** した (straddle 特有でなく window 内でも同じ)。上限撤廃で
+  //   閉塞した。over-redaction 面 (巨大な正当 base64 = 画像・ファイル埋込を >4096 でマスクしうる) は
+  //   **意図した fail-safe** (under-redaction 絶対回避 > over-redaction・security.md の原則) で、base64
+  //   blob は opaque な非機密 = 監督シグナルを損なわない (bench NEGATIVES に >4096 base64 は非在)。
+  //   なお ≤4096 の 3-class base64 は本ルールが元々マスクしており、旧 bound が exempt していたのは
+  //   >4096 のみ = 旧 exempt は恣意的な leak であって「巨大 blob を守る」設計利得は元来薄かった。
   {
     kind: "high-entropy-secret",
-    pattern: new RegExp(
-      `(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{40,${MAX_VALUE_LEN}}={0,2}(?![A-Za-z0-9+/_-])`,
-      "g",
-    ),
+    pattern: new RegExp(`(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9+/_-])`, "g"),
     mask: (match: string) => {
       // stage-1: path/URL 形は温存 (SEC-C リグレッション防止)。
       if (looksLikePath(match)) return match;
@@ -1118,10 +1257,12 @@ function isCredentialKey(k: string): boolean {
  * 先頭 word (英数記号の有界トークン) を温存し、空白以降の値全体 (改行前まで) をマスク。
  * 値が `<word> <...>` 形でない (空白なし単一トークン等) 場合は redactString に委譲して
  * 既存ルール (Bearer/Basic/credential 等) を効かせる (over-mask しない)。
- * ReDoS: scheme トークン {1,MAX_KEY_TOKEN}・値部 [^\r\n]{1,MAX_VALUE_LEN} はいずれも有界。
+ * ReDoS: scheme トークンは {0,MAX_KEY_TOKEN} で有界、値部は [^\r\n]{1,} の**無界**反復
+ *   (INV-REDACTION-TAIL-SURVIVAL: >MAX_VALUE_LEN 値の tail 残存を避ける)。値部は `$` 直前の単一 charset
+ *   greedy で入れ子なし = 線形。full-match ($ anchor) が長尺値で失敗する場合は redactString へ委譲。
  */
 const AUTH_HEADER_VALUE_RE = new RegExp(
-  `^([A-Za-z][A-Za-z0-9._-]{0,${MAX_KEY_TOKEN}})\\s{1,8}[^\\r\\n]{1,${MAX_VALUE_LEN}}$`,
+  `^([A-Za-z][A-Za-z0-9._-]{0,${MAX_KEY_TOKEN}})\\s{1,8}[^\\r\\n]{1,}$`,
 );
 
 /** 文字列値を auth ヘッダ値として redact する (キー名が auth ヘッダと確定済みの場合)。 */

@@ -310,7 +310,7 @@ export function auditReportToHtml(report: AuditRangeReport): string {
   const header = `<thead><tr>
 <th>session_id</th><th>provider</th><th>agent_id</th><th>repo</th><th>branch</th><th>state</th>
 <th>started_at</th><th>ended_at</th><th>secret?</th><th>redactions</th><th>by_kind</th>
-<th>appr.</th><th>allow</th><th>afs</th><th>deny</th><th>cancel</th><th>pending</th><th>high_risk</th>
+<th>appr.</th><th>allow</th><th>afs</th><th>deny</th><th>cancel</th><th>pending</th><th>high_risk</th><th>auto_allowed</th>
 </tr></thead>`;
   const rows = report.sessions
     .map(
@@ -333,6 +333,7 @@ export function auditReportToHtml(report: AuditRangeReport): string {
 <td>${htmlEscape(s.approvals.by_decision.cancel)}</td>
 <td>${htmlEscape(s.approvals.pending)}</td>
 <td>${htmlEscape(s.high_risk_op_count)}</td>
+<td>${htmlEscape(s.auto_allowed_count)}</td>
 </tr>`,
     )
     .join("\n");
@@ -353,6 +354,7 @@ export function auditReportToHtml(report: AuditRangeReport): string {
       t.approvals_by_decision.allow_for_session,
     )} / ${htmlEscape(t.approvals_by_decision.deny)} / ${htmlEscape(t.approvals_by_decision.cancel)}</td></tr>
 <tr><th>high_risk_op_count</th><td>${htmlEscape(t.high_risk_op_count)}</td></tr>
+<tr><th>auto_allowed_count</th><td>${htmlEscape(t.auto_allowed_count)}</td></tr>
 <tr><th>sessions_with_secret</th><td>${htmlEscape(t.sessions_with_secret)}</td></tr>
 </table>`,
     `<h2>Sessions</h2>`,
@@ -528,12 +530,13 @@ export function auditReportToMarkdown(report: AuditRangeReport): string {
     `| approval_total | ${t.approval_total} |`,
     `| allow / afs / deny / cancel | ${t.approvals_by_decision.allow} / ${t.approvals_by_decision.allow_for_session} / ${t.approvals_by_decision.deny} / ${t.approvals_by_decision.cancel} |`,
     `| high_risk_op_count | ${t.high_risk_op_count} |`,
+    `| auto_allowed_count | ${t.auto_allowed_count} |`,
     `| sessions_with_secret | ${t.sessions_with_secret} |`,
     ``,
     `## Sessions`,
     ``,
-    `| session_id | provider | agent_id | repo | branch | state | started_at | ended_at | secret? | redactions | by_kind | appr. | allow | afs | deny | cancel | pending | high_risk |`,
-    `| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |`,
+    `| session_id | provider | agent_id | repo | branch | state | started_at | ended_at | secret? | redactions | by_kind | appr. | allow | afs | deny | cancel | pending | high_risk | auto_allowed |`,
+    `| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |`,
   );
   for (const s of report.sessions) {
     lines.push(
@@ -543,7 +546,7 @@ export function auditReportToMarkdown(report: AuditRangeReport): string {
         dash(s.ended_at),
       )} | ${s.secret_detected} | ${s.secret_redaction_count} | ${mdCell(
         foldByKind(s.secret_redaction_count_by_kind),
-      )} | ${s.approvals.total} | ${s.approvals.by_decision.allow} | ${s.approvals.by_decision.allow_for_session} | ${s.approvals.by_decision.deny} | ${s.approvals.by_decision.cancel} | ${s.approvals.pending} | ${s.high_risk_op_count} |`,
+      )} | ${s.approvals.total} | ${s.approvals.by_decision.allow} | ${s.approvals.by_decision.allow_for_session} | ${s.approvals.by_decision.deny} | ${s.approvals.by_decision.cancel} | ${s.approvals.pending} | ${s.high_risk_op_count} | ${s.auto_allowed_count} |`,
     );
   }
   lines.push(``);

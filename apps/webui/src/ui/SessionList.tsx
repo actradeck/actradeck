@@ -18,6 +18,7 @@ import {
 } from "./liveness-display";
 import { formatCurrentAction } from "./action-units-display";
 import { MANAGED_CODEX_CMD } from "./managed-codex";
+import { shortSessionId } from "./wall-display";
 import { ManagedCodexSpawnPanel } from "./ManagedCodexSpawnPanel";
 import type { SafetyDemoPhase } from "./use-safety-demo";
 
@@ -83,7 +84,7 @@ export function SessionRow({ item, selected, nowMs, onSelect }: SessionRowProps)
       </Td>
       <Td data-testid="action" className="ad-session-action">
         {currentAction}
-        <div className="ad-session-meta">{item.session_id.slice(0, 12)}</div>
+        <div className="ad-session-meta">{shortSessionId(item.session_id)}</div>
       </Td>
       <Td data-testid="attention">
         {attention ? (

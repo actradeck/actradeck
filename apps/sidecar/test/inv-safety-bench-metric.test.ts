@@ -73,31 +73,37 @@ describe("INV-SAFETY-BENCH-METRIC: fragment-survival (leakedFragmentSpan)", () =
     expect(leakedFragmentSpan(secret, input, output, K)).toBe(0);
   });
 
-  it("real corpus: exactly one vector fragment-leaks (bounded-capture tail), span >= 4902, not a full leak", () => {
+  it("real corpus: 0 fragment leaks after tail-hardening (HUGE_SECRET_BLOB now fully masked)", () => {
+    // INV-REDACTION-TAIL-SURVIVAL (task 019f5b5e-f9e9): the bounded-capture tail was unbounded in the
+    // redactor (single-charset {N,} — ReDoS-safe), so the previously-leaking long credential vector is
+    // now masked head-to-tail. No positive vector leaks a >=8-char fragment. NOTE: HUGE_SECRET_BLOB is
+    // covered by TWO independent unbounded maskers — credential-assignment (its key "HUGE_SECRET_BLOB"
+    // contains "SECRET") AND high-entropy-secret (its value is 3-char-class) — so this only turns RED
+    // when BOTH are re-bounded at once; re-bounding either one alone stays GREEN (the other still masks
+    // the tail). The per-capture falsification of EACH value capture in isolation lives in the
+    // redaction package's INV-REDACTION-TAIL-SURVIVAL (backstop-free vectors); this file only pins the
+    // corpus/metric wiring.
     let fragCount = 0;
-    let bigSpan = 0;
-    let bigFull = true;
     for (const p of POSITIVES) {
       const out = redactString(p.input);
       const span = leakedFragmentSpan(p.secret, p.input, out, K);
-      if (span >= K) {
-        fragCount += 1;
-        expect(p.kind).toBe("credential-assignment");
-        bigSpan = span;
-        bigFull = out.includes(p.secret);
-      }
+      if (span >= K) fragCount += 1;
     }
-    expect(fragCount).toBe(1);
-    expect(bigSpan).toBeGreaterThanOrEqual(4902);
-    // The full-substring recall counts this vector as detected; only fragment survival catches it.
-    expect(bigFull).toBe(false);
+    expect(fragCount).toBe(0);
+
+    // Explicit pin on the previously-leaking demonstrator (the 9000-char credential value): span 0.
+    const huge = POSITIVES.find((p) => p.secret.length === 9000);
+    expect(huge, "HUGE_SECRET_BLOB regression vector present").toBeDefined();
+    const hugeOut = redactString(huge!.input);
+    expect(leakedFragmentSpan(huge!.secret, huge!.input, hugeOut, K)).toBe(0);
+    expect(hugeOut).toContain("[REDACTED:credential-assignment]");
   });
 
-  it("scoreRedaction: 0 full leaks and exactly 1 fragment leak over 38 positives", () => {
+  it("scoreRedaction: 0 full leaks and 0 fragment leaks over 38 positives", () => {
     const r = scoreRedaction();
     expect(r.totalPositives).toBe(38);
     expect(r.totalLeaked).toBe(0);
-    expect(r.totalFragmentLeaks).toBe(1);
+    expect(r.totalFragmentLeaks).toBe(0);
     expect(r.fragmentMinLen).toBe(8);
   });
 });

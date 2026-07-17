@@ -349,6 +349,54 @@ export function shortSessionId(id: string): string {
   return id.slice(0, SHORT_SESSION_ID_LEN);
 }
 
+/** project (repo または cwd) ごとに束ねた lane グループ。 */
+export interface LaneGroup<T> {
+  /** 安定キー (project ラベル・repo/cwd どちらも無ければ "")。 */
+  readonly key: string;
+  /** 表示ラベル: repo → shortenCwd(cwd) → undefined。生 cwd でなく shortenCwd 済 (Wall 既存表示と同形)。 */
+  readonly label: string | undefined;
+  readonly lanes: readonly T[];
+}
+
+/**
+ * lanes を **project** ごとに安定グルーピングする (決定論・純関数・入力順保持)。
+ *
+ * ユーザー指摘「なぜ同じようなレーンが存在するか」= 同一 project の別セッションが均質に見える、への対応
+ * (decision 019f69ef)。project キーは **repo があれば repo、無ければ shortenCwd(cwd)**。実データでは
+ * attach セッションの `repo` は NULL で cwd のみ populated (memory wall-show-working-directory) のため、
+ * repo 単独だと全レーンが 1 群に落ちて無価値化する。cwd は Wall で既に lane 表示済みゆえ header 表示は
+ * NO-RAW 非退行。グループ順は各 project の**初出順**、グループ内は**入力順**を保つ (DnD/保存順を壊さない)。
+ * branch は grouping キーに使わない (同一 repo の別ブランチも同じグループへ束ね、branch はレーン側に出す)。
+ */
+export function groupLanesByProject<
+  T extends { session: { repo?: string | undefined; cwd?: string | undefined } },
+>(lanes: readonly T[]): LaneGroup<T>[] {
+  const order: string[] = [];
+  const byKey = new Map<string, { label: string | undefined; lanes: T[] }>();
+  for (const lane of lanes) {
+    const repo = lane.session.repo;
+    const cwd = lane.session.cwd;
+    const label =
+      repo !== undefined && repo.length > 0
+        ? repo
+        : cwd !== undefined && cwd.length > 0
+          ? (shortenCwd(cwd) ?? undefined)
+          : undefined;
+    const key = label ?? "";
+    let bucket = byKey.get(key);
+    if (bucket === undefined) {
+      bucket = { label, lanes: [] };
+      byKey.set(key, bucket);
+      order.push(key);
+    }
+    bucket.lanes.push(lane);
+  }
+  return order.map((key) => {
+    const bucket = byKey.get(key);
+    return { key, label: bucket?.label, lanes: bucket?.lanes ?? [] };
+  });
+}
+
 /**
  * 永続化したユーザー並び順を、現存セッションへ突き合わせて正規化する (決定論・純関数)。
  *

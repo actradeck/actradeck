@@ -232,7 +232,7 @@ describe("saveApprovalPolicy: 永続側 (Phase 2 / ADR 019f0eca)", () => {
     };
     expect(raw.version).toBe(2);
     expect(raw.default.categories).toEqual(["recursive-rm"]);
-    expect(raw.repos.abc0007.categories).toEqual(["disk-destroy"]);
+    expect(raw.repos.abc0007!.categories).toEqual(["disk-destroy"]);
   });
 
   it("categories は T1 enum (PolicyCategory.options) の安定順で書く (Set 挿入順非依存・diff 安定)", () => {

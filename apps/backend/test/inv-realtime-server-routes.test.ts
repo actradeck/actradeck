@@ -1120,7 +1120,7 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     expect(res.statusCode).toBe(200);
     const body = res.json() as { daemons: Array<{ id: string }> };
     expect(body.daemons).toHaveLength(1);
-    expect(body.daemons[0].id).toMatch(
+    expect(body.daemons[0]!.id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
   });
@@ -1184,7 +1184,7 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
       policy_capable: true, // policy 対応を広告 (connectedDaemons に含める)。
     });
     await mount({});
-    const id = registry.connectedDaemons()[0].id;
+    const id = registry.connectedDaemons()[0]!.id;
     const res = await app.inject({
       method: "GET",
       url: `/realtime/daemons/${id}/approvals/policy`,
@@ -1367,7 +1367,7 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
       policy_capable: true, // policy 対応を広告 (connectedDaemons に含める)。
     });
     await mount({});
-    const id = registry.connectedDaemons()[0].id;
+    const id = registry.connectedDaemons()[0]!.id;
     // policy 以外を daemon-addressed しても route が無い → 404 (auth は通るが routing で no-match)。
     for (const url of [
       `/realtime/daemons/${id}/diff`,
@@ -1458,7 +1458,7 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
   //   route + handleCodexSpawn helper の分岐 (invalid daemonId / invalid body / scope gate / relay
   //   result mapping) を fake link + REAL SidecarRegistry で決定論的に固定する。
   /** send で codex.spawn.request を捕捉し、任意の応答で pending を即解決する auto-respond link。 */
-  function autoRespondLink(reg: SidecarRegistry, respond: (reqId: string) => void) {
+  function autoRespondLink(_reg: SidecarRegistry, respond: (reqId: string) => void) {
     return {
       open: true,
       send(data: string): void {

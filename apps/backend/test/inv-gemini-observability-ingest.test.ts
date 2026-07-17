@@ -18,6 +18,7 @@ import { MAX_REDACT_INPUT, MAX_VALUE_LEN, PRE_REDACT_SLICE } from "@actradeck/re
 import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 
+// @ts-expect-error 例示用 adapter (.mjs) に型宣言なし・実行時のみ利用
 import { mapHookEvent } from "../../../docs/examples/gemini-adapter/adapter.mjs";
 import { buildIngestionServer } from "../src/ingestion-server.js";
 import { ReplayStore } from "../src/replay-store.js";

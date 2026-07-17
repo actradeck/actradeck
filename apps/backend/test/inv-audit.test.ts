@@ -245,6 +245,10 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
     expect(report.totals.approvals_by_decision.deny).toBe(1);
     expect(report.totals.approval_total).toBe(3); // r1 r2 r3
     expect(report.totals.high_risk_op_count).toBe(2); // r1 high + r3 critical
+    // auto_allowed_count は high_risk_op_count と対称に合算される (QA-1)。S1/S2 seed は auto_allowed
+    //   イベントを持たないため 0 (per-session 計数は inv-audit-packet-route で実 seed=1 として検証)。
+    //   誤って別フィールド (high_risk 等) を合算すると非0で赤化する regression guard。
+    expect(report.totals.auto_allowed_count).toBe(0);
     expect(report.totals.sessions_with_secret).toBe(2);
 
     // limit=1 で has_more=true (窓内 2 セッション)。
@@ -300,6 +304,7 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
         approvals_by_decision: s.approvals.by_decision,
         approval_total: s.approvals.total,
         high_risk_op_count: s.high_risk_op_count,
+        auto_allowed_count: s.auto_allowed_count,
         sessions_with_secret: s.secret_detected ? 1 : 0,
       },
       sessions: [s],

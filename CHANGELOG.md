@@ -11,6 +11,18 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Changed
+
+- **Positioning: the headline subject is now "audit cockpit", not "control plane".**
+  README hero, landing hero/meta, the npm package description, and the CLI usage line
+  now lead with _"A local-first audit cockpit for coding agents — observe across
+  agents, redact secrets before persistence, and keep one replayable audit trail"_,
+  with approval relay stated as a scoped sub-sentence (Claude Code in Attach, Codex in
+  Managed Mode). "Control plane" as a headline implied enforcement across all targets,
+  which the default Attach mode does not deliver for Codex (observe-only). The term
+  remains in lower-tier/SEO contexts; see ADR 0001 (Amendment 2026-07-18) for the
+  conditions to restore it.
+
 ## [0.5.2] - 2026-07-12
 
 ### Fixed

@@ -28,12 +28,14 @@ import {
   computeLaneBars,
   DEFAULT_WALL_WINDOW_MS,
   formatElapsed,
+  groupLanesByProject,
   laneCollapsedDefault,
   laneLiveElapsedMs,
   reorderByPointerY,
   rulerDivisionsFor,
   rulerTicks,
   shortenCwd,
+  shortSessionId,
   WALL_WINDOW_PRESETS,
   windowEvents,
 } from "./wall-display";
@@ -211,7 +213,7 @@ export function WallLaneRow({
   const windowed = windowEvents(lane.events, nowMs, windowMs);
   const bars = computeLaneBars(windowed, nowMs);
   const liveElapsedMs = laneLiveElapsedMs(bars, item.liveness_state, item.stalled_suspected);
-  const shortId = item.session_id.slice(0, 12);
+  const shortId = shortSessionId(item.session_id);
   return (
     <section
       data-testid={`wall-lane-${item.session_id}`}
@@ -257,7 +259,7 @@ export function WallLaneRow({
             {item.provider || t("wall.lane.session")}
           </Tag>
           <code className="ad-wall__lane-id" data-testid="wall-lane-id">
-            {item.session_id.slice(0, 12)}
+            {shortSessionId(item.session_id)}
           </code>
           <StatusBadge badge={badge} />
           {item.needs_attention ? (
@@ -499,12 +501,18 @@ export function LiveWall({
   }
   const { orderedLanes, applyOrder, nudge } = useWallLaneOrder(lanes);
   const [windowMs, setWindowMs] = useState<number>(DEFAULT_WALL_WINDOW_MS);
+  // project グルーピング (decision 019f69ef): 既定 ON で同一 project (repo または cwd) の別セッションを
+  // 視覚的に束ねる (ユーザー指摘のレーン混在対策)。OFF は従来の手動並べ替え (DnD) フラット表示へ戻す。
+  // 両モードで collapse / attention-jump / インライン承認は不変。DnD は grouping が組織化を担う ON 時は無効。
+  const [groupByProject, setGroupByProject] = useState<boolean>(true);
   const [drag, setDrag] = useState<WallDragState | null>(null);
   const lanesRef = useRef<HTMLDivElement>(null);
   // drop でコミット済みかを dragend が二重適用しないためのフラグ。
   const committedRef = useRef(false);
   const totalEvents = lanes.reduce((n, l) => n + l.events.length, 0);
   const reorderable = orderedLanes.length > 1;
+  // DnD 並べ替えは grouping OFF のときだけ (ON では project グループが組織化を担う)。
+  const flatReorder = !groupByProject && reorderable;
 
   // ドラッグ中は preview 順で描画 (フロー側のレーンが指を避けてライブに動く)。
   const displayLanes = drag ? applyLaneOrder(lanes, drag.preview) : orderedLanes;
@@ -587,6 +595,46 @@ export function LiveWall({
     committedRef.current = false;
   };
 
+  // インライン承認: lane の session_id へ束縛した決定コールバックと pending を返す (無指定/空なら {})。
+  const laneApprovalProps = (lane: WallLane) => {
+    const pending = pendingBySession.get(lane.session.session_id);
+    if (!onApprove || !pending || pending.length === 0) return {};
+    return {
+      approvals: pending,
+      onApproveDecision: (requestId: string, decision: ApprovalDecision, persist?: boolean) =>
+        onApprove(lane.session.session_id, requestId, decision, undefined, persist),
+      ...(lastAck ? { lastAck } : {}),
+    };
+  };
+
+  // 1 レーンの描画 (フラット/グループ両モードで共有・重複回避)。allowReorder のときだけ DnD/移動 UI。
+  const renderLane = (
+    lane: WallLane,
+    i: number,
+    arr: readonly WallLane[],
+    allowReorder: boolean,
+  ) => (
+    <WallLaneRow
+      key={lane.session.session_id}
+      lane={lane}
+      nowMs={nowMs}
+      windowMs={windowMs}
+      reorderable={allowReorder}
+      isFirst={i === 0}
+      isLast={i === arr.length - 1}
+      dragging={drag?.id === lane.session.session_id}
+      collapsed={collapsedOf(lane)}
+      ticks={ticks}
+      onToggleCollapse={() => toggleCollapse(lane)}
+      onDragStartLane={startDrag}
+      onDragEndLane={cancelDrag}
+      onMoveLane={(delta) => nudge(lane.session.session_id, delta)}
+      {...(onOpenSession ? { onOpenSession } : {})}
+      {...(onOpenReplay ? { onOpenReplay } : {})}
+      {...laneApprovalProps(lane)}
+    />
+  );
+
   return (
     <section data-testid="live-wall" aria-label="live wall" className="ad-wall">
       <div className="ad-panel__header">
@@ -597,6 +645,18 @@ export function LiveWall({
           </span>
         </div>
         <div className="ad-wall__controls">
+          <Button
+            kind="ghost"
+            size="sm"
+            iconStart="dashboard"
+            data-testid="wall-group-toggle"
+            aria-pressed={groupByProject}
+            data-active={groupByProject}
+            onClick={() => setGroupByProject((v) => !v)}
+            title={t("wall.group.toggle.title")}
+          >
+            {t("wall.group.byProject")}
+          </Button>
           {attentionIds.length > 0 ? (
             <Button
               kind="secondary"
@@ -669,9 +729,9 @@ export function LiveWall({
           data-event-count={totalEvents}
           data-dragging={drag ? drag.id : undefined}
           // ネイティブ DnD: 子レーンからバブルした dragover を受け、preview 順を再計算 + ゴーストを追従。
-          onDragOver={reorderable ? dragOver : undefined}
+          onDragOver={flatReorder ? dragOver : undefined}
           onDrop={
-            reorderable
+            flatReorder
               ? (e) => {
                   e.preventDefault();
                   finishDrag();
@@ -680,40 +740,28 @@ export function LiveWall({
           }
         >
           <WallRuler windowMs={windowMs} />
-          {displayLanes.map((lane, i) => (
-            <WallLaneRow
-              key={lane.session.session_id}
-              lane={lane}
-              nowMs={nowMs}
-              windowMs={windowMs}
-              reorderable={reorderable}
-              isFirst={i === 0}
-              isLast={i === displayLanes.length - 1}
-              dragging={drag?.id === lane.session.session_id}
-              collapsed={collapsedOf(lane)}
-              ticks={ticks}
-              onToggleCollapse={() => toggleCollapse(lane)}
-              onDragStartLane={startDrag}
-              onDragEndLane={cancelDrag}
-              onMoveLane={(delta) => nudge(lane.session.session_id, delta)}
-              {...(onOpenSession ? { onOpenSession } : {})}
-              {...(onOpenReplay ? { onOpenReplay } : {})}
-              {...(() => {
-                // インライン承認: lane の session_id へ束縛した決定コールバックと pending を渡す。
-                const pending = pendingBySession.get(lane.session.session_id);
-                if (!onApprove || !pending || pending.length === 0) return {};
-                return {
-                  approvals: pending,
-                  onApproveDecision: (
-                    requestId: string,
-                    decision: ApprovalDecision,
-                    persist?: boolean,
-                  ) => onApprove(lane.session.session_id, requestId, decision, undefined, persist),
-                  ...(lastAck ? { lastAck } : {}),
-                };
-              })()}
-            />
-          ))}
+          {groupByProject
+            ? groupLanesByProject(displayLanes).map((g, gi) => (
+                // testid は index 化し raw cwd/repo を DOM 属性へ出さない (policy 面 cwdKey と同方針)。
+                // ラベル (repo または shortenCwd 済 cwd) は lane で既に表示済みゆえ header 表示は NO-RAW 非退行。
+                <div
+                  key={g.key || `__none-${gi}`}
+                  className="ad-wall__group"
+                  data-testid={`wall-group-${gi}`}
+                >
+                  <div className="ad-wall__group-header">
+                    <Icon name="dashboard" aria-hidden />
+                    <span className="ad-wall__group-label" data-testid="wall-group-label">
+                      {g.label ?? t("wall.group.none")}
+                    </span>
+                    <Tag tone="neutral" size="sm">
+                      {g.lanes.length}
+                    </Tag>
+                  </div>
+                  {g.lanes.map((lane, i, arr) => renderLane(lane, i, arr, false))}
+                </div>
+              ))
+            : displayLanes.map((lane, i) => renderLane(lane, i, displayLanes, flatReorder))}
         </div>
       )}
 

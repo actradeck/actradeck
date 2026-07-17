@@ -143,12 +143,12 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
     const daemons = reg.connectedDaemons();
     expect(daemons).toHaveLength(2);
     // **2 番目** の daemon を addressing する (byDaemon.get→先頭 conn すり替えだと d1 に届き RED)。
-    void reg.requestPolicyByDaemon(daemons[1].id, "get");
+    void reg.requestPolicyByDaemon(daemons[1]!.id, "get");
 
     const d2Reqs = policyReqsOn(d2);
     expect(d2Reqs).toHaveLength(1);
-    expect(d2Reqs[0].op).toBe("get");
-    expect(d2Reqs[0].token).toBe("ctl-d2"); // 宛先 daemon 自身の controlToken。
+    expect(d2Reqs[0]!.op).toBe("get");
+    expect(d2Reqs[0]!.token).toBe("ctl-d2"); // 宛先 daemon 自身の controlToken。
     // 他 daemon (d1) には get が一切届かない (get は fan-out しない・誤中継もしない)。
     expect(policyReqsOn(d1)).toHaveLength(0);
   });
@@ -166,7 +166,9 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
 
     const res = await reg.requestPolicyByDaemon("00000000-0000-0000-0000-000000000000", "get");
     expect(res.ok).toBe(false);
-    expect(res.error).toBe("daemon not registered");
+    if (!res.ok) {
+      expect(res.error).toBe("daemon not registered");
+    }
     expect(policyReqsOn(d1)).toHaveLength(0); // 既存 conn に誤送しない。
   });
 
@@ -180,12 +182,14 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
       session_ids: [],
       policy_capable: true,
     });
-    const id = reg.connectedDaemons()[0].id;
+    const id = reg.connectedDaemons()[0]!.id;
     d1.open = false; // hello 後に切断。
 
     const res = await reg.requestPolicyByDaemon(id, "get");
     expect(res.ok).toBe(false);
-    expect(res.error).toBe("sidecar disconnected");
+    if (!res.ok) {
+      expect(res.error).toBe("sidecar disconnected");
+    }
   });
 
   it("daemon 経路の set は他 daemon へ fan-out する (machine-wide・persist:false)", () => {
@@ -206,7 +210,7 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
       session_ids: [],
       policy_capable: true,
     });
-    const targetId = reg.connectedDaemons()[0].id; // d1 (先頭)。
+    const targetId = reg.connectedDaemons()[0]!.id; // d1 (先頭)。
 
     void reg.requestPolicyByDaemon(targetId, "set", {
       categories: ["disk-destroy"],
@@ -217,16 +221,16 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
     // owner (addressed daemon=d1): 直送 1 通・persist 無し (disk 権威)・自 token。
     const d1Reqs = policyReqsOn(d1);
     expect(d1Reqs).toHaveLength(1);
-    expect(d1Reqs[0].op).toBe("set");
-    expect(d1Reqs[0].token).toBe("ctl-d1");
-    expect("persist" in d1Reqs[0]).toBe(false);
+    expect(d1Reqs[0]!.op).toBe("set");
+    expect(d1Reqs[0]!.token).toBe("ctl-d1");
+    expect("persist" in d1Reqs[0]!).toBe(false);
     // 他 daemon (d2): fan-out コピー・persist:false・自 token (session 経路と同一挙動)。
     const d2Reqs = policyReqsOn(d2);
     expect(d2Reqs).toHaveLength(1);
-    expect(d2Reqs[0].op).toBe("set");
-    expect(d2Reqs[0].token).toBe("ctl-d2");
-    expect(d2Reqs[0].persist).toBe(false);
-    expect(d2Reqs[0].categories).toEqual(["disk-destroy"]);
+    expect(d2Reqs[0]!.op).toBe("set");
+    expect(d2Reqs[0]!.token).toBe("ctl-d2");
+    expect(d2Reqs[0]!.persist).toBe(false);
+    expect(d2Reqs[0]!.categories).toEqual(["disk-destroy"]);
   });
 
   it("daemon 経路の get / resolve は fan-out しない (他 daemon は受信ゼロ・生 path 非拡散)", () => {
@@ -248,7 +252,7 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
         session_ids: [],
         policy_capable: true,
       });
-      const targetId = reg.connectedDaemons()[0].id;
+      const targetId = reg.connectedDaemons()[0]!.id;
 
       void reg.requestPolicyByDaemon(
         targetId,
@@ -277,7 +281,7 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
       session_ids: [],
       policy_capable: true,
     });
-    const oldId = reg.connectedDaemons()[0].id;
+    const oldId = reg.connectedDaemons()[0]!.id;
 
     d1.open = false; // 実 close と同じく link は閉じてから remove される。
     reg.remove(d1);
@@ -289,6 +293,8 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
     //     relayPolicyVia の link.open 検査で "sidecar disconnected" を返す → RED。
     const res = await reg.requestPolicyByDaemon(oldId, "get");
     expect(res.ok).toBe(false);
-    expect(res.error).toBe("daemon not registered");
+    if (!res.ok) {
+      expect(res.error).toBe("daemon not registered");
+    }
   });
 });

@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyListDelta,
   applySnapshotList,
+  presenceCounts,
   purgeStale,
   toDisplayList,
 } from "../src/realtime/list-reducer.js";
@@ -191,5 +192,62 @@ describe("list reducer", () => {
     expect(order[0]).toBe("hot"); // attention wins
     expect(order[1]).toBe("calm-new"); // newer before older
     expect(order[2]).toBe("calm-old");
+  });
+});
+
+/**
+ * INV(headline KPI): Live / Running を **presence 母集合(connected!==false)** の単一述語で数え、
+ * `toDisplayList` の表示集合(showHistory トグルで全件へ膨らむ)から切り離す。終端イベント未達で
+ * running.* に固着した履歴(connected:false)を「現在稼働(Running)」に数えない — 「Running 94」の核心。
+ * mutation で赤: presenceCounts の `if (s.connected === false) continue;` を外すと、固着履歴テストの
+ * running が 1→91 に膨らみ RED。
+ */
+describe("presenceCounts (KPI: Live/Running を presence 母集合で・トグル非依存・固着履歴を除外)", () => {
+  it("Live=connected!==false, Running=その中の running.* を数える", () => {
+    const s = applySnapshotList([
+      mk("live-run", { connected: true, state: "running.model_streaming" }),
+      mk("live-idle", { connected: true, state: "idle" }),
+      mk("live-run2", { connected: true, state: "running.command_executing" }),
+    ]);
+    expect(presenceCounts(s.items.values())).toEqual({ live: 3, running: 2 });
+  });
+
+  it("connected===undefined は在席寄り(LIVE-FOUND-3 寛容性)で Live/Running に数える", () => {
+    const s = applySnapshotList([mk("u", { connected: undefined, state: "running.tool" })]);
+    expect(presenceCounts(s.items.values())).toEqual({ live: 1, running: 1 });
+  });
+
+  it("固着した履歴 running (connected:false, running.model_wait) を Live/Running どちらにも数えない [Running 94 の核心]", () => {
+    const s = applySnapshotList([
+      mk("live", { connected: true, state: "running.model_streaming" }),
+      // 終端イベント未達で running に固着した過去 session を 90 件 (connected:false=非在席)。
+      ...Array.from({ length: 90 }, (_, i) =>
+        mk(`stale-${i}`, { connected: false, state: "running.model_wait" }),
+      ),
+    ]);
+    const c = presenceCounts(s.items.values());
+    // presence は live 1 件のみ。running も 1 (固着履歴 90 は数えない)。旧バグなら running=91 だった。
+    expect(c).toEqual({ live: 1, running: 1 });
+    expect(c.running).not.toBe(91);
+  });
+
+  it("running は必ず live の部分集合 (同一 presence 述語)", () => {
+    const s = applySnapshotList([
+      mk("a", { connected: true, state: "running.tool" }),
+      mk("b", { connected: true, state: "waiting.approval" }),
+      mk("c", { connected: false, state: "running.tool" }), // 履歴 running は除外
+    ]);
+    const c = presenceCounts(s.items.values());
+    expect(c.running).toBeLessThanOrEqual(c.live);
+    expect(c).toEqual({ live: 2, running: 1 });
+  });
+
+  it("稼働中の external-recent (source:external, connected:false, running.*) は Live/Running に数えない (QA-2・意図)", () => {
+    // external adapter は presence を構造的に持てず connected:false。recency proxy で Wall/既定リストには
+    // *稼働中* 表示され得るが、headline Running には数えない (Live も external を数えない=整合)。
+    const s = applySnapshotList([
+      mk("ext", { source: "external", connected: false, state: "running.model_streaming" }),
+    ]);
+    expect(presenceCounts(s.items.values())).toEqual({ live: 0, running: 0 });
   });
 });

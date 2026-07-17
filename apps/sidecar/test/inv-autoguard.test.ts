@@ -149,9 +149,11 @@ describe("INV-AUTOGUARD-NO-RAW: 承認 payload に raw secret が出ず secret_k
       },
     );
 
+    // trigger は上の requestApproval callback (guard 発火時に同期実行) で必ず設定される。
+    //   BARE_TOKEN_COMMAND は guard を発火させるため await 後は非 undefined (exactOptional 下で ! で明示)。
     const events = normalizeHook(preToolUse("Bash", { command: BARE_TOKEN_COMMAND }), {
       approvalRequestId: "s1:apr-test",
-      guardTrigger: trigger,
+      guardTrigger: trigger!,
       guardSecretKinds: kinds,
     });
     expect(events).toHaveLength(1);

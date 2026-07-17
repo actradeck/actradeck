@@ -337,10 +337,10 @@ describe("INV-POLICY-FANOUT multi-daemon fan-out (QA-1/TDA-1)", () => {
     // owner: 直送 1 通のみ・persist フィールド無し (= owner が disk 権威)・自分の token。
     const ownerReqs = policyReqsOn(owner);
     expect(ownerReqs).toHaveLength(1);
-    expect(ownerReqs[0].op).toBe("set");
-    expect(ownerReqs[0].token).toBe("ctl-owner");
-    expect("persist" in ownerReqs[0]).toBe(false);
-    expect(ownerReqs[0].repo_scope).toBe("abc123");
+    expect(ownerReqs[0]!.op).toBe("set");
+    expect(ownerReqs[0]!.token).toBe("ctl-owner");
+    expect("persist" in ownerReqs[0]!).toBe(false);
+    expect(ownerReqs[0]!.repo_scope).toBe("abc123");
 
     // d2 / d3: fan-out コピー 1 通ずつ・各自の token・persist:false・同 payload。
     for (const [link, tok] of [
@@ -349,11 +349,11 @@ describe("INV-POLICY-FANOUT multi-daemon fan-out (QA-1/TDA-1)", () => {
     ] as const) {
       const reqs = policyReqsOn(link);
       expect(reqs).toHaveLength(1);
-      expect(reqs[0].op).toBe("set");
-      expect(reqs[0].token).toBe(tok); // 受信 daemon 自身の controlToken (memory-authoritative)。
-      expect(reqs[0].persist).toBe(false); // TDA-1: 受信側は memory のみ。
-      expect(reqs[0].categories).toEqual(["disk-destroy"]);
-      expect(reqs[0].repo_scope).toBe("abc123");
+      expect(reqs[0]!.op).toBe("set");
+      expect(reqs[0]!.token).toBe(tok); // 受信 daemon 自身の controlToken (memory-authoritative)。
+      expect(reqs[0]!.persist).toBe(false); // TDA-1: 受信側は memory のみ。
+      expect(reqs[0]!.categories).toEqual(["disk-destroy"]);
+      expect(reqs[0]!.repo_scope).toBe("abc123");
     }
   });
 
@@ -362,13 +362,13 @@ describe("INV-POLICY-FANOUT multi-daemon fan-out (QA-1/TDA-1)", () => {
     void reg.requestPolicy("s1", "unset", { repo_scope: "deadbeef" });
 
     expect(policyReqsOn(owner)).toHaveLength(1);
-    expect("persist" in policyReqsOn(owner)[0]).toBe(false);
+    expect("persist" in policyReqsOn(owner)[0]!).toBe(false);
     for (const link of [d2, d3]) {
       const reqs = policyReqsOn(link);
       expect(reqs).toHaveLength(1);
-      expect(reqs[0].op).toBe("unset");
-      expect(reqs[0].persist).toBe(false);
-      expect(reqs[0].repo_scope).toBe("deadbeef");
+      expect(reqs[0]!.op).toBe("unset");
+      expect(reqs[0]!.persist).toBe(false);
+      expect(reqs[0]!.repo_scope).toBe("deadbeef");
     }
   });
 
@@ -391,9 +391,9 @@ describe("INV-POLICY-FANOUT multi-daemon fan-out (QA-1/TDA-1)", () => {
 
     const ownerReqs = policyReqsOn(owner);
     expect(ownerReqs).toHaveLength(1);
-    expect(ownerReqs[0].op).toBe("resolve");
-    expect(ownerReqs[0].path).toBe("/home/me/work/repo");
-    expect(ownerReqs[0].resolve_scope).toEqual(["/home/me/work"]);
+    expect(ownerReqs[0]!.op).toBe("resolve");
+    expect(ownerReqs[0]!.path).toBe("/home/me/work/repo");
+    expect(ownerReqs[0]!.resolve_scope).toEqual(["/home/me/work"]);
 
     // 他 daemon は resolve を一切受信しない → 生 path / scope が他 conn へ漏れない。
     expect(policyReqsOn(d2)).toHaveLength(0);
@@ -422,7 +422,7 @@ describe("INV-POLICY-FANOUT multi-daemon fan-out (QA-1/TDA-1)", () => {
     expect(policyReqsOn(observe)).toHaveLength(0); // controlToken 無しは skip (token を付与できない)。
     const liveReqs = policyReqsOn(live);
     expect(liveReqs).toHaveLength(1); // 生存 + token 受領済みのみ受け取る。
-    expect(liveReqs[0].persist).toBe(false);
-    expect(liveReqs[0].token).toBe("ctl-live");
+    expect(liveReqs[0]!.persist).toBe(false);
+    expect(liveReqs[0]!.token).toBe("ctl-live");
   });
 });

@@ -699,6 +699,7 @@ export class AuditStore {
     const byDecision = emptyDecisionTally();
     let approvalTotal = 0;
     let highRiskOpCount = 0;
+    let autoAllowedCount = 0;
     let sessionsWithSecret = 0;
     for (const meta of pageRows) {
       const approvals = foldApprovals(groupBySession.get(meta.session_id) ?? []);
@@ -713,6 +714,7 @@ export class AuditStore {
       }
       approvalTotal += summary.approvals.total;
       highRiskOpCount += summary.high_risk_op_count;
+      autoAllowedCount += summary.auto_allowed_count;
       if (summary.secret_detected) sessionsWithSecret += 1;
     }
     const totals: AuditRangeTotals = {
@@ -721,6 +723,7 @@ export class AuditStore {
       approvals_by_decision: byDecision,
       approval_total: approvalTotal,
       high_risk_op_count: highRiskOpCount,
+      auto_allowed_count: autoAllowedCount,
       sessions_with_secret: sessionsWithSecret,
     };
 

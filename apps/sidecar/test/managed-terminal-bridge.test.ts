@@ -74,13 +74,12 @@ class FakeStdin implements TerminalInput {
   resumed = 0;
   paused = 0;
   private listeners: Array<(c: Buffer | string) => void> = [];
-  // setRawMode を「存在させるか」制御 (非 TTY パイプは setRawMode を持たない/throw する)。
-  private readonly hasSetRawMode: boolean;
+  // setRawMode を「存在させるか」は constructor 引数 hasSetRawMode で制御する (非 TTY パイプは
+  //   setRawMode を持たない/throw する)。値は setRawMode 定義の有無に反映済みでフィールド保持は不要。
   setRawMode?: (mode: boolean) => void;
 
   constructor(isTTY: boolean, hasSetRawMode = true) {
     this.isTTY = isTTY;
-    this.hasSetRawMode = hasSetRawMode;
     if (hasSetRawMode) {
       this.setRawMode = (mode: boolean): void => {
         this.rawCalls.push(mode);

@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "type-check": "tsc -b && tsc -p tsconfig.e2e.json",
+    "type-check": "tsc -b && tsc -p tsconfig.e2e.json && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "dev": "tsx watch src/cli.ts",

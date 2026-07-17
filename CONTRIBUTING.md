@@ -1,7 +1,7 @@
 # Contributing to ActraDeck
 
-Thanks for your interest in ActraDeck — the vendor-neutral control plane for
-coding-agent approvals, secrets, and audit. This guide covers how to set up the
+Thanks for your interest in ActraDeck — the local-first audit cockpit for
+coding-agent sessions, secrets, and approvals. This guide covers how to set up the
 project, what we expect in a pull request, and the few areas that need extra care.
 
 > **You do not need any of the maintainers' internal tooling to contribute.**

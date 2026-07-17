@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        ActraDeck is early and deliberately scoped: a vendor-neutral control plane for
-        coding-agent **approvals, secrets, and audit**. Proposals that sharpen that
+        ActraDeck is early and deliberately scoped: a local-first audit cockpit for
+        coding-agent **sessions, secrets, and approvals**. Proposals that sharpen that
         wedge are most likely to land. (See [README](https://github.com/actradeck/actradeck/blob/main/README.md).)
   - type: textarea
     id: problem

@@ -26,6 +26,9 @@ export default defineConfig({
         "src/ui/liveness-display.ts",
         "src/ui/approval-display.ts",
         "src/ui/wall-display.ts",
+        // decision 019f69ef: Action Rail の attention 導出 (deriveAttention 優先度/dedup・repoBranchLabel の
+        //   NO-RAW)。要対応サーフェスを司る純ロジックゆえ gate 対象 (liveness-display と同カテゴリ)。
+        "src/ui/action-rail.ts",
         // ADR 019f4cdb 後続 UI: 監査カバレッジの純表示派生 (gap severity 分類 / 相対受信経過)。
         //   React 非依存の純ロジックゆえ gate 対象 (liveness-display と同カテゴリ)。
         "src/ui/audit-coverage-display.ts",

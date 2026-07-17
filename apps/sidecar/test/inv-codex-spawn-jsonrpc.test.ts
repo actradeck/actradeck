@@ -48,10 +48,8 @@ class FakeCodexChild extends EventEmitter implements ChildLike {
     off: (ev: "data", l: (c: Buffer | string) => void) => this.out.off(ev, l),
   };
   readonly stderr = { on: () => {} };
-  override on(event: "exit", l: (code: number | null, s: NodeJS.Signals | null) => void): this;
-  override on(event: string, l: (...a: unknown[]) => void): this {
-    return super.on(event, l);
-  }
+  // on("exit", …) は EventEmitter を継承して ChildLike を満たす (独自 override は不要・
+  //   overload 実装署名が (...a: unknown[]) だと exit overload と非互換=TS2394 になるため置かない)。
   kill(): boolean {
     return true;
   }

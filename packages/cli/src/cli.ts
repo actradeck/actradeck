@@ -4,7 +4,7 @@ import { cmdUp } from "./commands/up.js";
 import { cmdVersion } from "./commands/version.js";
 import { cmdInstall, type InstallOpts } from "./commands/install.js";
 
-const USAGE = `actradeck — bootstrap CLI for ActraDeck (local-first control plane for coding agents)
+const USAGE = `actradeck — bootstrap CLI for ActraDeck (local-first audit cockpit for coding agents)
 
 Usage:
   actradeck <command> [options]

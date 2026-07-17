@@ -10,8 +10,8 @@
  * SEC: 表示は backend が redaction 済みで載せた値のみ (approvalPrimaryText 経由)。生 payload は無い。
  * bypassPermissions セッションは pending を生成しないため自動的に Inbox 対象外 (decision 019eace6)。
  */
-import { ApprovalCard } from "./ApprovalCard";
-import { Button, Icon, InlineAlert, Tag } from "./kit";
+import { ApprovalSessionGroup } from "./ApprovalSessionGroup";
+import { Button, InlineAlert } from "./kit";
 import { useLocale } from "./LocaleProvider";
 import { useApprovalInbox } from "./use-approval-inbox";
 
@@ -94,60 +94,19 @@ export function ApprovalInbox({
       ) : (
         <div className="ad-inbox__groups">
           {approvals.map((group) => (
-            <section
+            <ApprovalSessionGroup
               key={group.session_id}
-              data-testid={`inbox-group-${group.session_id}`}
-              className="ad-inbox__group"
-              aria-label={`approvals for ${group.session_id}`}
-            >
-              <header className="ad-inbox__group-header">
-                <Icon name="warning" className="ad-approval-banner__icon" />
-                <Tag tone="neutral" size="sm" data-testid="inbox-session-provider">
-                  {group.provider || t("inbox.session")}
-                </Tag>
-                <code className="ad-inbox__group-id" data-testid="inbox-session-id">
-                  {group.session_id.slice(0, 12)}
-                </code>
-                {group.cwd ? <span className="ad-session-meta">{group.cwd}</span> : null}
-                {onOpenSession ? (
-                  <Button
-                    kind="ghost"
-                    size="sm"
-                    iconStart="dashboard"
-                    data-testid={`inbox-open-${group.session_id}`}
-                    onClick={() => onOpenSession(group.session_id)}
-                    title={t("inbox.open.title")}
-                  >
-                    {t("common.details")}
-                  </Button>
-                ) : null}
-                {onOpenReplay ? (
-                  <Button
-                    kind="ghost"
-                    size="sm"
-                    iconStart="renew"
-                    data-testid={`inbox-replay-${group.session_id}`}
-                    onClick={() => onOpenReplay(group.session_id)}
-                    title={t("inbox.replay.title")}
-                  >
-                    {t("common.replay")}
-                  </Button>
-                ) : null}
-              </header>
-              <ul className="ad-approval-list" data-testid={`inbox-list-${group.session_id}`}>
-                {group.pending_approvals.map((a) => (
-                  <ApprovalCard
-                    key={a.request_id}
-                    approval={a}
-                    ack={lastAck.get(a.request_id)}
-                    onApprove={(requestId, decision, persist) =>
-                      onApprove(group.session_id, requestId, decision, undefined, persist)
-                    }
-                    nowMs={nowMs}
-                  />
-                ))}
-              </ul>
-            </section>
+              group={group}
+              nowMs={nowMs}
+              lastAck={lastAck}
+              onApprove={(sessionId, requestId, decision, persist) =>
+                onApprove(sessionId, requestId, decision, undefined, persist)
+              }
+              {...(onOpenSession ? { onOpenSession } : {})}
+              {...(onOpenReplay ? { onOpenReplay } : {})}
+              {...(group.cwd ? { secondaryLabel: group.cwd } : {})}
+              idPrefix="inbox"
+            />
           ))}
         </div>
       )}

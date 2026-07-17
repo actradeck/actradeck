@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RealtimeClient, type ConnectionStatus, type SocketFactory } from "../realtime/client";
 import {
   emptyListState,
+  presenceCounts,
   purgeStale,
   toDisplayList,
   type ListState,
@@ -74,8 +75,11 @@ export interface UseRealtimeResult {
   readonly showHistory: boolean;
   /** 履歴トグルの切替(localStorage 永続)。 */
   readonly setShowHistory: (v: boolean) => void;
-  /** 接続在席(connected=true)の session 数(トグル既定で見えている件数)。 */
+  /** 接続在席(connected!==false)の session 数(Live)。表示トグル非依存の presence 母集合。 */
   readonly connectedCount: number;
+  /** presence 母集合(connected!==false)のうち running.* な session 数(Running)。connectedCount と
+   *  同一述語で導出しトグル非依存。固着した履歴(connected=false)を現在稼働に数えない(KPI 019ea2bf)。 */
+  readonly runningCount: number;
   /** 受信済み全 session 数(履歴含む。トグル ON で見える件数)。 */
   readonly totalCount: number;
 }
@@ -241,13 +245,14 @@ export function useRealtime(opts: UseRealtimeOptions): UseRealtimeResult {
     () => toDisplayList(listState, { showHistory, ...(nowMs !== undefined ? { nowMs } : {}) }),
     [listState, showHistory, nowMs],
   );
-  // connectedCount は **真の presence 件数のまま** (ADR 019f474e: external-recent を connected と
-  // 数えない=正直)。既定トグルで見えている件数とは別概念 (external-recent は connectedCount に含めない)。
-  const connectedCount = useMemo(() => {
-    let n = 0;
-    for (const s of listState.items.values()) if (s.connected !== false) n++;
-    return n;
-  }, [listState]);
+  // Live(connectedCount) と Running(runningCount) は **単一 presence 述語** presenceCounts で導出する
+  // (ADR 019f474e: external-recent を connected と数えない=正直 / KPI 019ea2bf: 固着履歴を running に
+  // 数えない)。両者とも listState.items 全体から算出し **表示トグル(showHistory)非依存**。runningCount を
+  // 表示集合 sessions から数えていた旧実装は、トグル ON で固着履歴を「Running 94」に膨らませるバグだった。
+  const { live: connectedCount, running: runningCount } = useMemo(
+    () => presenceCounts(listState.items.values()),
+    [listState],
+  );
   const totalCount = listState.items.size;
 
   return {
@@ -263,6 +268,7 @@ export function useRealtime(opts: UseRealtimeOptions): UseRealtimeResult {
     showHistory,
     setShowHistory,
     connectedCount,
+    runningCount,
     totalCount,
   };
 }

@@ -55,8 +55,8 @@ Synthetic secrets to use on camera (public, non-functional dummies):
 
 ### 0:00–0:12 — One pane, two vendors
 
-- Say the line: _"ActraDeck is the vendor-neutral control plane for coding agents —
-  observe everything, govern selectively."_
+- Say the line: _"ActraDeck is a local-first audit cockpit for coding agents —
+  observe across agents, redact before persistence, replay everything."_
 - In the two terminals, start `claude` and `codex` (both in `/tmp/ad-demo`) and give
   each a small task.
 - Cut to the cockpit: **both sessions appear in the live list** — one tagged Claude

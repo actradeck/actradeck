@@ -28,7 +28,6 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 import { buildIngestionServer } from "@actradeck/backend";
 
@@ -39,6 +38,10 @@ import {
   DEMO_GITHUB_TOKEN,
   type SafetyDemoResult,
 } from "../e2e/run-safety-demo.mjs";
+
+// FastifyInstance 型は backend buildIngestionServer 戻り値から導出する (fastify を sidecar の
+//   devDeps に足さず lockfile churn を避ける・値は import 済みゆえ typeof で参照可)。
+type FastifyInstance = Awaited<ReturnType<typeof buildIngestionServer>>;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 

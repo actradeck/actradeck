@@ -7,6 +7,8 @@
  */
 import { gateRedactionCountByKind } from "@actradeck/event-model";
 
+import { shortSessionId } from "./wall-display";
+
 export type AuditDecision = "allow" | "allow_for_session" | "deny" | "cancel";
 
 export interface AuditApprovalSummary {
@@ -301,7 +303,7 @@ export function projectLabel(s: {
     const base = parts[parts.length - 1];
     if (base !== undefined && base.length > 0) return base;
   }
-  return s.session_id.slice(0, 12);
+  return shortSessionId(s.session_id);
 }
 
 /** kind 別件数を {kind, count} の配列へ (件数降順)。drill-down のクリック対象用に kind を保持。 */

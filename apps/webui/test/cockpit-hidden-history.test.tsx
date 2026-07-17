@@ -57,6 +57,8 @@ const useRealtimeMock = vi.fn(() => ({
   showHistory: false,
   setShowHistory: () => {},
   connectedCount: 1,
+  // presence 母集合(connected!==false)の running.* = CONNECTED のみ (EXTERNAL_RECENT は connected:false)。
+  runningCount: 1,
   totalCount: 2,
 }));
 
@@ -121,5 +123,23 @@ describe("CockpitBoard hidden-history count (ADR 019f474e / TDA-2)", () => {
     expect(html).toContain("履歴 (0)");
     // 過大計上バグ (connectedCount 基準 = 2-1 = 1) の兆候を明示的に排除する。
     expect(html).not.toContain("履歴 (1)");
+  });
+
+  // QA-1: 「Running 94」バグは CockpitBoard の描画配線 (表示集合 sessions の running.* を inline 再計算)
+  // に居た。この描画層の pin が無いと、純ヘルパ presenceCounts は正しくても CockpitBoard が inline 再計算へ
+  // 戻る回帰を無検証で通してしまう。モックは sessions=[CONNECTED, EXTERNAL_RECENT] (両方 running.*=表示集合
+  // 再計算なら 2) だが hook の runningCount=1 (presence 母集合) と **故意に食い違わせ**、描画される Running が
+  // hook 値 (1) であって表示集合再計算 (2) でないことを固定する。inline 再導入すると 2 になり RED。
+  it("Running メトリクスは hook の runningCount(presence) を描画し、表示集合 sessions を再計算しない", () => {
+    const html = renderToStaticMarkup(
+      <ThemeProvider>
+        <FixedLocaleProvider locale="ja">
+          <CockpitBoard wsUrl="ws://localhost/realtime/ws" />
+        </FixedLocaleProvider>
+      </ThemeProvider>,
+    );
+    const running = html.match(/data-testid="running-count"[^>]*>(\d+)</)?.[1];
+    expect(running).toBe("1"); // hook.runningCount (presence)
+    expect(running).not.toBe("2"); // sessions.filter(running.*) の表示集合再計算 (旧バグ)
   });
 });

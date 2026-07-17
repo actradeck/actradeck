@@ -119,7 +119,7 @@ describe("INV-SAFETY-DEMO launcher (state machine)", () => {
     });
     launcher.launch();
     expect(launcher.running).toBe(true);
-    children[0].emitExit(0);
+    children[0]!.emitExit(0);
     expect(launcher.running).toBe(false);
     // 次回は新規 spawn (別 session_id)。
     const again = launcher.launch();
@@ -132,7 +132,7 @@ describe("INV-SAFETY-DEMO launcher (state machine)", () => {
     const launcher = new SafetyDemoLauncher({ ingestToken: "tok", spawner });
     launcher.launch();
     expect(launcher.running).toBe(true);
-    children[0].emitError(new Error("ENOENT"));
+    children[0]!.emitError(new Error("ENOENT"));
     expect(launcher.running).toBe(false);
   });
 
@@ -141,7 +141,7 @@ describe("INV-SAFETY-DEMO launcher (state machine)", () => {
     const launcher = new SafetyDemoLauncher({ ingestToken: "secret-ingest-tok", spawner });
     const res = launcher.launch();
     expect(res.sessionId?.startsWith(SAFETY_DEMO_SESSION_PREFIX)).toBe(true);
-    const env = requests[0].env;
+    const env = requests[0]!.env;
     expect(env.INGEST_TOKEN).toBe("secret-ingest-tok");
     expect(env.ACTRADECK_DEMO_APPROVAL).toBe("hold");
     expect(env.ACTRADECK_DEMO_SESSION_ID).toBe(res.sessionId);
@@ -172,7 +172,7 @@ describe("INV-SAFETY-DEMO launcher (state machine)", () => {
       const { spawner, requests } = recordingSpawner();
       const launcher = new SafetyDemoLauncher({ ingestToken: "secret-ingest-tok", spawner });
       const res = launcher.launch();
-      const env = requests[0].env;
+      const env = requests[0]!.env;
 
       // 機微 env は子へ渡らない (scrub)。
       expect(env.REALTIME_TOKEN).toBeUndefined();
@@ -238,8 +238,8 @@ describe("INV-SAFETY-DEMO launcher (state machine)", () => {
     const launcher = new SafetyDemoLauncher({ ingestToken: "tok", spawner });
     launcher.launch();
     launcher.dispose();
-    expect(children[0].killed).toBe(true);
-    expect(children[0].killSignal).toBe("SIGTERM");
+    expect(children[0]!.killed).toBe(true);
+    expect(children[0]!.killSignal).toBe("SIGTERM");
     expect(launcher.running).toBe(false);
     // 二度目の dispose は no-op (冪等)。
     expect(() => launcher.dispose()).not.toThrow();

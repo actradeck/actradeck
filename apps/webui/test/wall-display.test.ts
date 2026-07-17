@@ -18,6 +18,7 @@ import {
   barOf,
   computeLaneBars,
   formatElapsed,
+  groupLanesByProject,
   laneCollapsedDefault,
   laneLiveElapsedMs,
   moveByOffset,
@@ -638,5 +639,60 @@ describe("attentionLaneIds (表示順保持)", () => {
 
   it("該当なしは空", () => {
     expect(attentionLaneIds([laneOf("a", false)])).toEqual([]);
+  });
+});
+
+describe("groupLanesByProject (project グルーピング・decision 019f69ef)", () => {
+  const laneOf = (id: string, repo?: string, cwd?: string) => ({
+    session: { session_id: id, repo, cwd },
+  });
+
+  it("同一 repo を束ね、グループ順は初出順・グループ内は入力順を保つ", () => {
+    const lanes = [laneOf("a1", "owner/A"), laneOf("b1", "owner/B"), laneOf("a2", "owner/A")];
+    const groups = groupLanesByProject(lanes);
+    expect(groups.map((g) => g.label)).toEqual(["owner/A", "owner/B"]); // 初出順
+    expect(groups[0]?.lanes.map((l) => l.session.session_id)).toEqual(["a1", "a2"]); // 入力順
+    expect(groups[1]?.lanes.map((l) => l.session.session_id)).toEqual(["b1"]);
+  });
+
+  it("repo 欠落は cwd(shortenCwd) をキー/ラベルにする (実データ: attach は repo NULL)", () => {
+    // 同一 cwd の 2 セッションは 1 グループへ。異なる cwd は別グループへ。
+    const lanes = [
+      laneOf("a", undefined, "/home/u/proj-a"),
+      laneOf("b", undefined, "/home/u/proj-b"),
+      laneOf("a2", undefined, "/home/u/proj-a"),
+    ];
+    const groups = groupLanesByProject(lanes);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]?.lanes.map((l) => l.session.session_id)).toEqual(["a", "a2"]);
+    expect(groups[0]?.label).toBe("~/proj-a"); // shortenCwd: /home/<user>/ → ~/
+    expect(groups[1]?.label).toBe("~/proj-b");
+  });
+
+  it("repo があれば repo を優先 (cwd より repo)", () => {
+    const groups = groupLanesByProject([laneOf("a", "owner/R", "/home/u/x")]);
+    expect(groups[0]?.label).toBe("owner/R");
+  });
+
+  it("repo/cwd どちらも無いレーンは key='' の単一グループ (label=undefined)", () => {
+    const lanes = [laneOf("x"), laneOf("y"), laneOf("z", "owner/A")];
+    const groups = groupLanesByProject(lanes);
+    const none = groups.find((g) => g.key === "");
+    expect(none?.label).toBeUndefined();
+    expect(none?.lanes.map((l) => l.session.session_id)).toEqual(["x", "y"]);
+  });
+
+  it("空入力は空グループ", () => {
+    expect(groupLanesByProject([])).toEqual([]);
+  });
+
+  it("branch は grouping キーにしない (同一 repo 別 branch も同じグループ)", () => {
+    const lanes = [
+      { session: { session_id: "a", repo: "o/r", branch: "main", cwd: undefined } },
+      { session: { session_id: "b", repo: "o/r", branch: "dev", cwd: undefined } },
+    ];
+    const groups = groupLanesByProject(lanes);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.lanes.map((l) => l.session.session_id)).toEqual(["a", "b"]);
   });
 });

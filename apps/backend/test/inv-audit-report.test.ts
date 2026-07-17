@@ -109,6 +109,7 @@ function rangeReport(sessions: readonly AuditSessionSummary[]): AuditRangeReport
       approvals_by_decision: { allow: 2, allow_for_session: 1, deny: 1, cancel: 0 },
       approval_total: 4,
       high_risk_op_count: 1,
+      auto_allowed_count: 2,
       sessions_with_secret: 1,
     },
     sessions,
@@ -341,8 +342,8 @@ describe("TDA-1: range formatter cross-format 列 parity (ドリフト防止)", 
     const report = rangeReport([sampleSummary(), sampleSummary({ session_id: "sess_b" })]);
     // CSV: header 行 / data 行のセル数 (sampleSummary はカンマ非含ゆえ split(',') が正確)。
     const csvLines = auditReportToCsv(report).split("\r\n");
-    const csvHeaderCols = csvLines[0].split(",").length;
-    const csvRowCols = csvLines[1].split(",").length;
+    const csvHeaderCols = csvLines[0]!.split(",").length;
+    const csvRowCols = csvLines[1]!.split(",").length;
     // HTML: <thead> の <th> 数 / tbody 先頭行の <td> 数。
     const html = auditReportToHtml(report);
     const thead = html.match(/<thead>[\s\S]*?<\/thead>/)?.[0] ?? "";
@@ -352,11 +353,11 @@ describe("TDA-1: range formatter cross-format 列 parity (ドリフト防止)", 
     // Markdown: "## Sessions" の header 行 / 先頭 data 行のセル数。
     const mdLines = auditReportToMarkdown(report).split("\n");
     const h = mdLines.findIndex((l) => l.startsWith("| session_id |"));
-    const mdHeaderCols = cellCount(mdLines[h]);
-    const mdRowCols = cellCount(mdLines[h + 2]); // header(+0), separator(+1), data(+2)
+    const mdHeaderCols = cellCount(mdLines[h]!);
+    const mdRowCols = cellCount(mdLines[h + 2]!); // header(+0), separator(+1), data(+2)
 
-    expect(csvHeaderCols).toBe(18);
-    // 6 計測 (3 formatter × header/row) がすべて 18 で一致 (1 formatter に列追加すると Set>1 で赤)。
+    expect(csvHeaderCols).toBe(19); // + auto_allowed_count (high_risk_op_count と対称・QA-1)
+    // 6 計測 (3 formatter × header/row) がすべて 19 で一致 (1 formatter に列追加すると Set>1 で赤)。
     const counts = new Set([
       csvHeaderCols,
       csvRowCols,
@@ -365,7 +366,28 @@ describe("TDA-1: range formatter cross-format 列 parity (ドリフト防止)", 
       mdHeaderCols,
       mdRowCols,
     ]);
-    expect(counts).toEqual(new Set([18]));
+    expect(counts).toEqual(new Set([19]));
+  });
+
+  it("auto_allowed_count が range totals (HTML/MD) と CSV per-session に surface する (high_risk_op_count と対称・QA-1)", () => {
+    // rangeReport の totals.auto_allowed_count = 2、session を distinct な 5 で override。
+    const report = rangeReport([sampleSummary({ auto_allowed_count: 5 })]);
+
+    // range totals: HTML/MD が auto_allowed_count を high_risk_op_count と並べて surface する。
+    const html = auditReportToHtml(report);
+    expect(html).toContain("<tr><th>auto_allowed_count</th><td>2</td></tr>");
+    expect(auditReportToMarkdown(report)).toContain("| auto_allowed_count | 2 |");
+
+    // CSV: header に auto_allowed_count 列、per-session 行に当該 session の値 (5)。
+    const csvLines = auditReportToCsv(report).split("\r\n");
+    expect(csvLines[0]!.split(",")).toContain("auto_allowed_count");
+    const headerCols = csvLines[0]!.split(",");
+    const rowCols = csvLines[1]!.split(",");
+    expect(rowCols[headerCols.indexOf("auto_allowed_count")]).toBe("5");
+    // high_risk_op_count と同数の列位置に隣接して存在する (対称)。
+    expect(headerCols.indexOf("auto_allowed_count")).toBe(
+      headerCols.indexOf("high_risk_op_count") + 1,
+    );
   });
 
   it("by-kind fold は全 formatter で同一区切り `;` (以前の CSV `;` / HTML/MD `; ` ドリフトを固定)", () => {

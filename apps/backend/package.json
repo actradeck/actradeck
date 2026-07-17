@@ -9,7 +9,7 @@
   "types": "./src/index.ts",
   "scripts": {
     "build": "tsc -b",
-    "type-check": "tsc -b",
+    "type-check": "tsc -b && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/index.ts",

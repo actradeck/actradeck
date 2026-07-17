@@ -8,7 +8,7 @@
  * (requested 済 ∧ 未 resolved で異常 unwind → resolved(deny) を 1 件だけ emit) を
  * in-process WS server + onLog throw 注入で決定論的に被覆する。
  */
-import { AddressInfo } from "node:net";
+import type { AddressInfo } from "node:net";
 
 import { describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
