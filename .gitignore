@@ -2,11 +2,12 @@
 .mcp.json
 .mcp.local.json
 
-# OSS 公開ミラーの生成物 (scripts/prepare-oss.sh の出力) と sync 作業ツリー。
-# private repo には決してコミットしない (公開は scripts/sync-oss.sh が別 repo へ)。
+# Maintainer publication artifacts (overlay tooling outputs) — never tracked here.
+# /oss/ は retire 済み旧 mirror pipeline の生成物 (歴史的・無害なので ignore は残す)。
+# /.oss-sync/ は landing-sync が website repo を clone する作業ツリー。
 /oss/
 /.oss-sync/
-# landing 公開ミラーの生成物 (scripts/prepare-landing.sh の出力 → actradeck/website)。
+# landing 公開物 (overlay の scripts/prepare-landing.sh の出力 → website repo)。
 /oss-landing/
 
 # フック実行時の状態ファイル

@@ -101,15 +101,15 @@ jobs:
           bash scripts/test-ad-attach.sh
           bash scripts/test-install.sh
           bash scripts/test-install-e2e.sh
-          # Import-flow sanitizer gate (外部評価R2 #2・decision 019f4fc1): import-oss-pr.sh の
-          # untrusted-input 面 (SEC-1 PR-title sanitizer / SEC-2 sensitive-path warn) の
-          # falsifiability テスト。maintainer 専用ツールで .ossfilter によりミラー除外のため、
-          # 公開ミラー CI では存在ガードで graceful skip する (release prep gate と同方式・
-          # メモリ ci-gate-must-self-adapt-to-oss-mirror-excluded-paths)。private では必ず実走。
+          # Import-flow sanitizer gate (外部評価R2 #2・decision 019f4fc1): 旧 mirror 時代の
+          # import-oss-pr.sh (untrusted-input 面の falsifiability テスト)。2026-07-18 の
+          # canonical cutover で import ツールは retire 済み (PR は通常 merge)。ツールは
+          # どの checkout にも存在しないため存在ガードが常に graceful skip する
+          # (absent-path self-adapt・機構は将来の復活にも耐えるためそのまま残す)。
           if [ -f scripts/test-import-oss-pr.sh ]; then
             bash scripts/test-import-oss-pr.sh
           else
-            echo "test-import-oss-pr.sh absent (public mirror) — private import-flow gate skipped"
+            echo "test-import-oss-pr.sh absent (retired at the canonical cutover) — import-flow gate skipped"
           fi
 
       # Landing drift + idempotency gate (docs-lp QA-1・sweep 019f3d77 / decision 019f3d77).
@@ -122,14 +122,14 @@ jobs:
       #     - git diff --exit-code landing/ で committed 生成物 == 再生成 を assert (source drift 込み)。
       #   jsdom は apps/webui 依存 (install 済)。実害は marketing HTML の churn のみ (secret/correctness
       #   非該当) だが、silent drift で公開ページが陳腐化するのを防ぐ軽量ゲート。
-      #   **公開ミラーで self-adapt**: `landing/` は private 専用で OSS mirror から除外され (LP は
-      #   landing-sync で別 website repo へ同期・decision 019f051f)、公開ミラーには存在しない。
-      #   landing/ 不在なら gate を graceful skip する (release prep gate と同じ mirror 自己適応)。
-      #   これが無いと gen-ja-topic-pages が landing/ source の ENOENT で公開ミラー CI を赤化させる。
+      #   **canonical では self-adapt**: `landing/` は maintainer overlay 専用で canonical repo は
+      #   track しない (LP は landing-sync で別 website repo へ同期・decision 019f051f)。CI の
+      #   checkout に landing/ が無ければ gate を graceful skip する (absent-path self-adapt)。
+      #   これが無いと gen-ja-topic-pages が landing/ source の ENOENT で CI を赤化させる。
       - name: Landing gen idempotency + drift gate (docs-lp QA-1)
         run: |
           if [ ! -d landing ]; then
-            echo "landing/ absent (OSS mirror surface) — landing gate is private-only; skipping."
+            echo "landing/ absent (maintainer-overlay surface) — landing gate is overlay-only; skipping."
             exit 0
           fi
           node scripts/gen-ja-topic-pages.mjs
@@ -146,8 +146,9 @@ jobs:
       #   raw paths, release.yml permissions are least-privilege, and install.sh's verify
       #   path rejects a tampered/absent-attestation tarball. Needs the installed prod store
       #   (SBOM via pnpm licenses) — runs after Install; git + python3 present on the runner.
-      #   Self-adapts in the public mirror (builds the tarball via `git archive HEAD` when the
-      #   private prepare-oss tooling is absent). Wiring it here keeps the gate from going dead.
+      #   Builds the tarball via `git archive HEAD` (the old private prepare-oss tooling
+      #   retired at the canonical cutover; the absent-path branch is now the only path).
+      #   Wiring it here keeps the gate from going dead.
       # SEC-PIN-R2-1 / TDA-PIN-R3-1: the supply-chain pin gates (INV-ACTIONS-SHA-PINNED /
       #   INV-IMAGE-DIGEST-PINNED) parse workflows/compose with PyYAML and fail-closed if it is
       #   absent. ubuntu-latest ships python3-yaml preinstalled, so we only VERIFY its presence —

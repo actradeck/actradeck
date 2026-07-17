@@ -22,18 +22,18 @@ export default tseslint.config(
       //   (eslint targets `.js`/`.ts`) nor by the prettier/format glob — intentional, not an
       //   oversight. Do not add a new gate for them; the contract test + SEC-1 fixture regression
       //   guard the fixture instead.
-      // oss/ は publish ミラーの再生成成果物 (.gitignore 済・prepare-oss が source から再生成)。
-      //   dist/.next と同じ生成物カテゴリなので lint 対象外。source (landing/, packages/ 等) を
-      //   直接 lint すれば足り、ミラーの二重 lint は gate を不整合にする (oss/landing/app.js の重複)。
+      // oss/ は retire 済み旧 mirror pipeline の再生成成果物 (.gitignore 済・canonical cutover
+      //   以後は生成されない)。dist/.next と同じ生成物カテゴリなので lint 対象外 (ignore は
+      //   歴史的 checkout に残る生成物対策として無害なので残す)。
       "oss/**",
-      // oss-landing/ は landing 公開ミラーの再生成成果物 (.gitignore 済・prepare-landing が
-      //   source の landing/ から再生成)。oss/ と同カテゴリ。source の landing/ を直接 lint すれば
-      //   足り、ミラー oss-landing/app.js の二重 lint (browser globals no-undef) は gate を不整合化する。
+      // oss-landing/ は landing 公開物の再生成成果物 (.gitignore 済・overlay の prepare-landing
+      //   が source の landing/ から再生成)。source の landing/ を直接 lint すれば足り、
+      //   oss-landing/app.js の二重 lint (browser globals no-undef) は gate を不整合化する。
       "oss-landing/**",
-      // .oss-sync/ は sync-oss / sync-landing が公開 repo を clone し ./oss・./oss-landing を
-      //   rsync するミラー作業ツリー (.gitignore 済)。oss/・oss-landing/ と同じ生成物カテゴリで、
-      //   browser globals override (files: ["landing/**/*.js"]) の外にある .oss-sync/website/app.js を
-      //   二重 lint すると no-undef で gate が不整合化する。source を直接 lint すれば足りる。
+      // .oss-sync/ は landing-sync が website repo を clone し ./oss-landing を rsync する
+      //   作業ツリー (.gitignore 済)。oss-landing/ と同じ生成物カテゴリで、browser globals
+      //   override (files: ["landing/**/*.js"]) の外にある .oss-sync/*/app.js を二重 lint
+      //   すると no-undef で gate が不整合化する。source を直接 lint すれば足りる。
       ".oss-sync/**",
     ],
   },
