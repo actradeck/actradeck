@@ -73,16 +73,16 @@ Response: `{ "results": [ <IngestAck>, ... ] }`. `results` is in the event order
 
 `IngestAck` (main fields):
 
-| Field                | Type     | Meaning                                                     |
-| -------------------- | -------- | ---------------------------------------------------------- |
-| `ok`                 | boolean  | Ingestion success/failure                                  |
-| `event_id`           | string   | Target event (idempotency key)                             |
-| `inserted`           | boolean  | Whether it was newly inserted (false = idempotent dup)     |
-| `duplicate`          | boolean  | Whether it was a resend of an existing event_id            |
-| `monotonic`          | boolean  | Whether the timestamp was monotonic within the session     |
-| `state`              | string?  | The normalized state after projection                      |
+| Field                | Type     | Meaning                                                           |
+| -------------------- | -------- | ----------------------------------------------------------------- |
+| `ok`                 | boolean  | Ingestion success/failure                                         |
+| `event_id`           | string   | Target event (idempotency key)                                    |
+| `inserted`           | boolean  | Whether it was newly inserted (false = idempotent dup)            |
+| `duplicate`          | boolean  | Whether it was a resend of an existing event_id                   |
+| `monotonic`          | boolean  | Whether the timestamp was monotonic within the session            |
+| `state`              | string?  | The normalized state after projection                             |
 | `invalid_transition` | boolean? | Whether an invalid state transition was detected (still ingested) |
-| `error`              | string?  | The reason when `ok:false` (contains no raw secret)        |
+| `error`              | string?  | The reason when `ok:false` (contains no raw secret)               |
 
 ### 3.2 WebSocket `/ingest/ws`
 
@@ -102,25 +102,25 @@ Reprocessing / resending is safe.
 The source of truth is `NormalizedEvent` (zod) in `@actradeck/event-model`. Required / optional
 fields are as follows.
 
-| Field                                       | Req. | Type / constraint                    | Description                                                             |
-| ------------------------------------------- | ---- | ------------------------------------ | ----------------------------------------------------------------------- |
-| `event_id`                                  | ✅   | UUIDv7                               | Idempotency key and global ID                                          |
-| `provider`                                  | ✅   | slug `^[a-z][a-z0-9_-]{0,31}$`       | Originating agent (WHO). §4.1                                          |
-| `source`                                    | ✅   | closed enum                          | Ingestion path (HOW). §4.2                                             |
-| `session_id`                                | ✅   | non-empty string                     | Canonical identifier of the observed run (join key)                    |
-| `event_type`                                | ✅   | closed enum                          | Event kind (semantics). §4.3                                          |
-| `timestamp`                                 | ✅   | ISO8601 (UTC)                        | Time of occurrence                                                     |
-| `state`                                     |      | normalized state enum                | `running.*` / `waiting.*` / terminal, etc. Optional for delta/heartbeat |
-| `provider_session_id`                       |      | string                               | The raw session id issued by the provider (for correlation · not used as a projection key) |
-| `capture_mode`                              |      | `managed`\|`attach`\|`codex_rollout` | Observation mode (display only)                                        |
-| `permission_mode`                           |      | string                               | Sandbox / permission mode (display only)                              |
-| `thread_id` `turn_id` `agent_id`            |      | string                               | Correlation metadata                                                  |
-| `cwd`                                       |      | string                               | Working directory                                                     |
-| `summary`                                   |      | string                               | Human-readable one-line summary (for the timeline)                   |
-| `payload`                                   |      | object                               | A structured record consistent with `event_type` (`{}` when omitted) |
-| `metrics`                                   |      | object                               | `elapsed_ms` / `tokens_in` / `tokens_out` / `cost_usd`, etc. (`{}` when omitted) |
+| Field                                       | Req. | Type / constraint                    | Description                                                                                     |
+| ------------------------------------------- | ---- | ------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `event_id`                                  | ✅   | UUIDv7                               | Idempotency key and global ID                                                                   |
+| `provider`                                  | ✅   | slug `^[a-z][a-z0-9_-]{0,31}$`       | Originating agent (WHO). §4.1                                                                   |
+| `source`                                    | ✅   | closed enum                          | Ingestion path (HOW). §4.2                                                                      |
+| `session_id`                                | ✅   | non-empty string                     | Canonical identifier of the observed run (join key)                                             |
+| `event_type`                                | ✅   | closed enum                          | Event kind (semantics). §4.3                                                                    |
+| `timestamp`                                 | ✅   | ISO8601 (UTC)                        | Time of occurrence                                                                              |
+| `state`                                     |      | normalized state enum                | `running.*` / `waiting.*` / terminal, etc. Optional for delta/heartbeat                         |
+| `provider_session_id`                       |      | string                               | The raw session id issued by the provider (for correlation · not used as a projection key)      |
+| `capture_mode`                              |      | `managed`\|`attach`\|`codex_rollout` | Observation mode (display only)                                                                 |
+| `permission_mode`                           |      | string                               | Sandbox / permission mode (display only)                                                        |
+| `thread_id` `turn_id` `agent_id`            |      | string                               | Correlation metadata                                                                            |
+| `cwd`                                       |      | string                               | Working directory                                                                               |
+| `summary`                                   |      | string                               | Human-readable one-line summary (for the timeline)                                              |
+| `payload`                                   |      | object                               | A structured record consistent with `event_type` (`{}` when omitted)                            |
+| `metrics`                                   |      | object                               | `elapsed_ms` / `tokens_in` / `tokens_out` / `cost_usd`, etc. (`{}` when omitted)                |
 | `redaction_count` `redaction_count_by_kind` |      | non-negative integer / record        | See §5. **The client's declaration is not trusted; the backend authoritatively re-derives it.** |
-| `seq`                                       |      | non-negative integer                 | Optional per-session drop-detection counter. See §4.4.                                        |
+| `seq`                                       |      | non-negative integer                 | Optional per-session drop-detection counter. See §4.4.                                          |
 
 ### 4.1 provider = WHO (open slug)
 
@@ -144,12 +144,12 @@ fields are as follows.
 
 `source` represents "which ingestion path it entered by" and is a **closed enum**.
 
-| Value        | Meaning                                                          |
-| ------------ | --------------------------------------------------------------- |
-| `hooks`      | Claude Code hooks (HTTP)                                        |
-| `app_server` | Codex App Server (JSON-RPC)                                     |
-| `rollout`    | Codex TUI rollout JSONL passive tail                           |
-| `sdk`        | SDK streaming connector                                        |
+| Value        | Meaning                                                                                |
+| ------------ | -------------------------------------------------------------------------------------- |
+| `hooks`      | Claude Code hooks (HTTP)                                                               |
+| `app_server` | Codex App Server (JSON-RPC)                                                            |
+| `rollout`    | Codex TUI rollout JSONL passive tail                                                   |
+| `sdk`        | SDK streaming connector                                                                |
 | `external`   | **The path where a third-party adapter POSTs directly to `/ingest` per this contract** |
 
 Direct ingestion from a third-party tool must always use **`source: "external"`**. Because the
@@ -210,7 +210,7 @@ This surfaces in the cockpit's audit-coverage panel per provider (a hedged `≥N
   becomes a meaningless huge number. The backend therefore **suppresses** the drop signal for any session
   where more than half the interval is holes (a density-assumption violation), so detection only works
   when the adapter follows the contiguous-per-session convention.
-- **Honest limitation — it is a *lower* bound**: a **tail drop** (everything after the highest received
+- **Honest limitation — it is a _lower_ bound**: a **tail drop** (everything after the highest received
   `seq`) and a **head drop** (before the lowest) are **undetectable in principle** — the interval just
   shrinks. Only holes **inside** the received `[min, max]` interval are counted, so the true number of
   lost events may be higher. The backend does **not** re-derive `seq` (unlike redaction counts): ordering
@@ -322,3 +322,37 @@ fabricated). It comes with a contract test `INV-GEMINI-ADAPTER-*`
 (`apps/backend/test/inv-gemini-lifecycle.test.ts`), both driven by a REAL capture from Gemini CLI
 0.42.0. See §1-3 of the `README.md` in that directory for the mapping table, the canonical hook
 config, and the same **honest disclosure that the backend floor is the only redaction defense**.
+
+## 8. Verify your adapter (conformance checker)
+
+Before you wire an adapter to a live backend, check that the events it emits actually satisfy
+this contract. Capture your adapter's output as **JSONL** (one NormalizedEvent per line, in
+emission order) and pipe it through the conformance checker:
+
+```bash
+pnpm --filter @actradeck/event-model build          # once, to build the schema
+node scripts/check-conformance.mjs < your-adapter-output.jsonl
+# or:  node scripts/check-conformance.mjs your-adapter-output.jsonl [--json]
+```
+
+It reports the stream-level and cross-field invariants a single-event schema parse cannot see,
+and exits non-zero if any are broken:
+
+- **schema** — every event parses as a NormalizedEvent (§4);
+- **payload.kind === event_type** — the schema does **not** cross-validate this, so the checker does;
+- **event_id uniqueness** — no event is emitted twice (idempotency, §3.3);
+- **per-session timestamp** — non-decreasing in emission order (independent floor per session);
+- **per-session seq** — 0-based contiguous when present, so the backend can detect silent
+  mid-stream drops (§4.4); a session that emits no `seq` is a **warning**, not an error.
+
+Redaction is **not** checked — the ingress redaction floor (§5) is the sole redaction point, so
+an adapter cannot and need not prove it. Runnable examples live in `docs/examples/conformance/`:
+
+```bash
+node scripts/check-conformance.mjs docs/examples/conformance/valid.jsonl     # PASS (exit 0)
+node scripts/check-conformance.mjs docs/examples/conformance/invalid.jsonl   # FAIL (exit 1) — one of each error class
+```
+
+The checker's core (`checkConformance` in `@actradeck/event-model`) is pinned by
+`INV-CONFORMANCE` (`packages/event-model/test/inv-conformance.test.ts`), which also verifies the
+two example fixtures stay accurate as the schema evolves.

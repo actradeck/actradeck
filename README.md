@@ -119,6 +119,11 @@ command exit codes, diffs; redaction happens at the backend ingress floor; appro
   with Gemini CLI 0.42.0; it can migrate from a Claude Code hook config via
   `gemini hooks migrate --from-claude`.
 
+Writing your own adapter? Pipe its JSONL output through the **conformance checker** to verify
+it satisfies the contract (schema, ordering, unique ids, drop-detection wiring) before you
+wire it to a backend: `node scripts/check-conformance.mjs < your-output.jsonl` — see
+[ingestion contract §8](./docs/ingestion-contract.md#8-verify-your-adapter-conformance-checker).
+
 | Capability                                     | opencode (external adapter) | Gemini CLI (external adapter) |
 | ---------------------------------------------- | :-------------------------: | :---------------------------: |
 | Observe — state, current action, diffs         |             ✅              |              ✅               |

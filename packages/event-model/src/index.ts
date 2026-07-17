@@ -159,5 +159,15 @@ export type { BoundedMonotonicOptions } from "./timestamp.js";
 export { NormalizedEvent, Metrics, Payload, parseEvent, safeParseEvent } from "./event.js";
 export type { NormalizedEventInput } from "./event.js";
 
+// Stream-level conformance checker for third-party ingestion adapters (schema + cross-field
+// + ordering + drop-detection wiring). scripts/check-conformance.mjs is the CLI wrapper.
+export { checkConformance } from "./conformance.js";
+export type {
+  ConformanceReport,
+  ConformanceFinding,
+  ConformanceRule,
+  ConformanceSeverity,
+} from "./conformance.js";
+
 /** package メタ。 */
 export const EVENT_MODEL_PACKAGE = "@actradeck/event-model" as const;

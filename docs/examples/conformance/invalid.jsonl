@@ -1,0 +1,4 @@
+{"event_id":"019f7170-5098-71cb-a751-8b4e52c54b9a","timestamp":"2026-07-18T00:00:00.000Z","provider":"myagent","source":"external","session_id":"ses_bad","event_type":"turn.started","seq":0,"payload":{"kind":"error","message":"x","retryable":false}}
+{"event_id":"019f7170-5098-71cb-a751-8600947a056a","timestamp":"2026-07-18T00:00:01.000Z","provider":"myagent","source":"external","session_id":"ses_bad","event_type":"turn.completed","seq":2,"payload":{"kind":"turn.completed"}}
+{"event_id":"019f7170-5098-71cb-a751-8600947a056a","timestamp":"2026-07-18T00:00:00.500Z","provider":"myagent","source":"external","session_id":"ses_bad","event_type":"heartbeat","seq":3,"payload":{"kind":"heartbeat","process_alive":true}}
+{"event_id":"not-a-uuid","timestamp":"2026-07-18T00:00:02.000Z","provider":"myagent","source":"external","session_id":"ses_bad","event_type":"turn.started","seq":4,"payload":{}}
