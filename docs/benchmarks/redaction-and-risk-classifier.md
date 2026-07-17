@@ -339,7 +339,19 @@ fallback), and Stripe keys shorter than 16 characters.
 
 ## Relationship to the invariant tests
 
-This benchmark is a **measurement**, not a gate. The hard guarantees live in the `INV-REDACTION-*`
-and classifier invariant tests (`packages/redaction/test/`, `apps/sidecar/test/`), which fail CI on
-regression. The benchmark corpus is deliberately separate so that adding measurement vectors never
-weakens a security invariant, and so the published numbers can be regenerated on demand.
+This benchmark is a **measurement**, not a security gate. The hard guarantees live in the
+`INV-REDACTION-*` and classifier invariant tests (`packages/redaction/test/`, `apps/sidecar/test/`),
+which fail CI on regression. The benchmark corpus is deliberately separate so that adding measurement
+vectors never weakens a security invariant, and so the published numbers can be regenerated on demand.
+
+**The published numbers on this page cannot silently rot.** `INV-SAFETY-BENCH-PUBLISHED`
+(`apps/sidecar/test/inv-safety-bench-published.test.ts`) runs the live bench (`scoreRedaction` /
+`scoreClassifier` over the real redactor + classifier) and asserts every figure above — recall,
+mask precision, benign preservation, the per-category and gate-decision tables, risk-level accuracy,
+and danger recall — against a single source of truth, then asserts this markdown **prints those same
+numbers**. A code change that moves a number fails the bench-side check; an edit that drifts the doc
+away from the numbers fails the doc-side check. This gates DOC HONESTY (not code behaviour): if a
+number legitimately changes, you update the constant and the doc together and the test passes again.
+The corpus-completeness (`INV-SAFETY-BENCH-KINDS`) and fragment-metric (`INV-SAFETY-BENCH-METRIC`)
+guards remain. The gitleaks cross-evaluation (58.8%) is intentionally outside this guard because it
+is network-dependent and not run in CI.
