@@ -2,10 +2,13 @@ name: Release
 
 # Signed, provenance-attested GitHub Release (ADR 0013 / decision 019f2bc1, Phase 1).
 #
-# This workflow SHIPS in the public mirror and fires when an annotated tag `vX.Y.Z`
-# is pushed to the mirror (scripts/version.sh stamps the tag locally; scripts/sync-oss.sh
-# carries it to the mirror with OSS_SYNC_TAGS=1). Because it runs INSIDE the mirror, the
-# tree it archives is already sanitized by scripts/prepare-oss.sh (git archive of the tag).
+# Fires ONCE when an annotated tag `vX.Y.Z` is pushed directly to this canonical
+# repository (scripts/version.sh stamps the tag locally; the maintainer publishes it
+# with `git push origin vX.Y.Z`). The maintainer-side pre-push gate scans the tag
+# object (message, tagger identity) and the peeled commit range before the push
+# leaves the machine; release-tag deletion/re-pointing is denied there by default.
+# (Historical note: before the 2026-07-18 canonical cutover this repo was a curated
+# mirror and the tag arrived via the retired sync pipeline.)
 #
 # Assets: (1) source tarball (git archive of the tag), (2) CycloneDX SBOM of the
 # production dependency closure (single-source scripts/lib/sbom.sh), (3) checksums.txt,

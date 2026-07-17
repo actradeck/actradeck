@@ -143,7 +143,7 @@ ok "Rolled CHANGELOG: '[Unreleased]' -> '[$VERSION] - $DATE'."
 if [ "$NO_TAG" = 0 ]; then
   git -C "$ROOT" tag -a "$TAG" -m "ActraDeck $TAG"
   ok "Created local annotated tag $TAG (NOT pushed)."
-  say "Publish it deliberately when ready:  git push origin $TAG   (or via scripts/sync-oss.sh OSS_SYNC_TAGS=1)"
+  say "Publish it deliberately when ready:  git push origin $TAG   (fires the Release workflow once; the pre-push gate scans the tag first)"
 else
   say "Skipped tag creation (--no-tag). Files + CHANGELOG stamped to $VERSION."
 fi
