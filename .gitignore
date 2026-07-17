@@ -58,3 +58,35 @@ apps/sidecar/.data/
 apps/backend/bench/
 probe-*.mts
 probe-*.mjs
+
+# --- private maintainer overlay (never tracked here; see GOVERNANCE.md) ---
+CLAUDE.md
+AGENTS.md
+plan.md
+.claude/
+.ossfilter
+.overlay.git/
+internal/
+landing/
+assets/brand/
+# OSS + landing publication tooling and the canonical-mode hooks (source oss-patterns.sh)
+scripts/prepare-oss.sh
+scripts/sync-oss.sh
+scripts/oss-history-scan.sh
+scripts/test-oss-prep.sh
+scripts/import-oss-pr.sh
+scripts/test-import-oss-pr.sh
+scripts/prepare-landing.sh
+scripts/sync-landing.sh
+scripts/test-landing-prep.sh
+scripts/serve-landing.mjs
+scripts/verify-landing.mjs
+scripts/test-githooks.sh
+scripts/rehearse-canonical-flip.sh
+scripts/githooks/
+scripts/lib/oss-patterns.sh
+# private product/process docs
+docs/implementation-plan.md
+docs/codex-attach-phaseA-instructions.md
+docs/validation/
+docs/media/first-run.cast
