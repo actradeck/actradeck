@@ -1,8 +1,10 @@
 # ADR 0013: Release signing & distribution — signed GitHub Releases, SBOM, provenance
 
 - Status: Accepted (Phase 1 signed Release + Phase 2 GHCR image implemented; Phase 3 npm
-  bootstrap CLI implemented + verified locally, first publish pending — v0.5)
-- Source: decisions `019f2bc1` (Phases 1–2), `019f5131` (Phase 3 npm)
+  bootstrap CLI implemented, published from v0.5.0; amended 2026-07-18 to add the
+  `conformance` subcommand — see "Phase 3 amendment" below)
+- Source: decisions `019f2bc1` (Phases 1–2), `019f5131` (Phase 3 npm), `019f739f` /
+  `019f73db` (Phase 3 amendment: `conformance` subcommand)
 
 ## Context
 
@@ -239,6 +241,33 @@ image / `scripts/install.sh`.
 private), `INV-NPM-VERSION-LOCKSTEP` (cli covered by the single-source version gate + the
 `version.sh` stamp set), `INV-NPM-PUBLISH-GATED` (AST pin + runtime-guard matrix +
 remove/defang/invert), and an isolated-HOME `npm exec` E2E.
+
+### Phase 3 amendment (2026-07-18) — `conformance` subcommand + a scoped bundle exception
+
+Source: decision `019f739f` (design) / `019f73db` (APPROVE). This amends two claims above so the
+ADR matches the implementation:
+
+- **Five commands, not four.** A fifth command `conformance` was added: it reads an adapter's
+  JSONL event stream and validates it against the ingestion contract
+  (`docs/ingestion-contract.md` §8). It performs no network or filesystem writes beyond reading
+  the input.
+- **"Not bundling anything" is now scoped to _the product_.** The CLI still does **not** bundle
+  the product (the four tiers + Postgres); the honest install story is unchanged. But
+  `conformance` **does** bundle one thing at build time: the canonical `checkConformance` core
+  from the private `@actradeck/event-model` (via `esbuild-wasm`, ~333 KB, into `dist/`). This is
+  deliberate and keeps the earlier guarantees intact — event-model stays `private:true`
+  (`INV-NPM-PRIVATE-GUARD`), the published `actradeck` keeps **zero runtime dependencies**, and
+  the pack allowlist is unchanged (the bundle is one `dist/**` file, no sourcemap). It exists so
+  third-party adapter authors can run the checker without cloning the monorepo, without reversing
+  the "monorepo stays private" decision (ADR `019f5131`). Bundled MIT deps (zod, uuid) ship their
+  notices in `dist/THIRD-PARTY-NOTICES.txt`. New falsifiable gates:
+  `INV-NPM-CLI-BUNDLE-SELF-CONTAINED` (the bundle resolves nothing external at runtime) and
+  `INV-NPM-CLI-TYPE-MIRROR` (the CLI's local report types stay equal to event-model's canonical
+  types, compile-time checked).
+- **Availability is honest.** `conformance` is **not** in the currently published `actradeck`
+  (it was added after the latest release); it ships in the next tagged release. Until then the
+  from-clone path (§8) is the way to run the checker. First npm publish of any version remains
+  USER-GATED.
 
 ## USER-GATED boundary (honest scope)
 
