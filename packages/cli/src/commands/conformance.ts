@@ -10,8 +10,9 @@ export interface ConformanceOpts {
 
 // `actradeck conformance [file] [--json]` — validate an adapter's JSONL event stream against the
 // ingestion contract (docs/ingestion-contract.md §8). It mirrors scripts/check-conformance.mjs:
-// same checks (schema · payload.kind === event_type · event_id uniqueness · per-session timestamp
-// monotonicity · per-session 0-based contiguous seq), the same human report or `--json` machine
+// same checks (schema · payload.kind === event_type · per-session timestamp monotonicity ·
+// per-session dense 0-based seq; a repeated event_id or seq is an at-least-once-retry warning, not
+// an error), the same human report or `--json` machine
 // report, and the same exit codes — 0 = conformant (warnings allowed) · 1 = one or more errors ·
 // 2 = usage/setup error. The checker core is event-model's `checkConformance`, injected through
 // Deps (bundled into dist at build time, never a runtime dependency).

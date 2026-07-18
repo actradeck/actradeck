@@ -5,8 +5,9 @@
 // For third-party adapter authors: pipe your adapter's emitted NormalizedEvents
 // (one JSON object per line — JSONL) into this checker and it reports whether the
 // stream conforms to the ActraDeck ingestion contract (docs/ingestion-contract.md):
-// schema validity, payload.kind === event_type, unique event_id, per-session
-// non-decreasing timestamps, and per-session 0-based contiguous seq (drop detection).
+// schema validity, payload.kind === event_type, per-session non-decreasing timestamps,
+// and per-session dense 0-based seq (drop detection). A repeated event_id or seq is a
+// WARNING, not an error — an at-least-once retry is legitimate (the backend dedupes, §3.3/§4.4).
 //
 // Redaction is NOT checked here — the backend ingress redaction floor (contract §5)
 // is the sole redaction point, so an adapter neither can nor needs to prove it.

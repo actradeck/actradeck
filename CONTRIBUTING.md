@@ -130,10 +130,10 @@ or just open one of these:
 
 **Open `good first issue`s are reserved for you.** Many of them are carved out of the
 maintainers' internal backlog and deliberately delegated to the community: we do **not**
-silently implement an open `good first issue` on the private canonical side. If we ever
-need to reclaim one (for example it blocks a release, or it has sat unclaimed for a long
-time), we comment on the issue first — so an open issue here means the work is genuinely
-available. Each curated issue states its target files, how to test, and acceptance
+silently implement an open `good first issue` internally (this repository is the public
+canonical; maintainer-only work lives in a private overlay). If we ever need to reclaim one
+(for example it blocks a release, or it has sat unclaimed for a long time), we comment on the
+issue first — so an open issue here means the work is genuinely available. Each curated issue states its target files, how to test, and acceptance
 criteria, so you can start without asking for context.
 
 > These are the areas the maintainers actively triage for newcomers. The areas in the

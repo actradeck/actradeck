@@ -22,13 +22,15 @@ npx actradeck@latest doctor        # diagnose: platform / Node / pnpm / git / Do
 npx actradeck@latest install       # verify + fetch the latest signed release, then quickstart
 npx actradeck@latest up            # print the Docker cockpit command (prints only; runs nothing)
 npx actradeck@latest version       # your CLI version + whether a newer stable release exists
-npx actradeck@latest conformance < events.jsonl   # check an adapter's event stream vs the contract
+npx actradeck@latest conformance < events.jsonl   # (next release) check an adapter's stream vs the contract
 ```
 
-> **Not yet published.** This CLI ships in the next tagged release (npm publish is USER-GATED — see
-> the project's ADR 0013). Until then the commands above describe the intended flow; the canonical,
-> already-signed way to get ActraDeck is the GitHub Release / GHCR image or `scripts/install.sh`
-> from the repo.
+> **`conformance` is not in the published CLI yet.** The four commands above ship in the current
+> published `actradeck`; `conformance` was added after the latest release and lands in the next
+> tagged one (npm publish is USER-GATED — see ADR 0013). To run the checker today, use the from-clone
+> path in the [ingestion contract §8](../../docs/ingestion-contract.md#8-verify-your-adapter-conformance-checker).
+> The canonical, already-signed way to get the full product is the GitHub Release / GHCR image or
+> `scripts/install.sh`.
 
 ### `install`
 
@@ -51,8 +53,11 @@ GitHub CLI.
 ### `conformance`
 
 Validate that a third-party ingestion adapter's event stream satisfies the ActraDeck ingestion
-contract — **without cloning the monorepo**. Capture your adapter's emitted NormalizedEvents as
-**JSONL** (one JSON object per line, in emission order) and pipe them in:
+contract — **without cloning the monorepo**. (Ships in the next release; the currently published
+CLI predates it — run the checker from a clone today, see the
+[ingestion contract §8](../../docs/ingestion-contract.md#8-verify-your-adapter-conformance-checker).)
+Capture your adapter's emitted NormalizedEvents as **JSONL** (one JSON object per line, in emission
+order) and pipe them in:
 
 ```sh
 npx actradeck@latest conformance < events.jsonl      # read JSONL from stdin
@@ -61,10 +66,11 @@ npx actradeck@latest conformance events.jsonl --json # machine-readable JSON rep
 ```
 
 It checks the stream-level and cross-field invariants a single-event schema parse cannot see:
-every event parses as a NormalizedEvent; `payload.kind === event_type`; `event_id` is unique
-(idempotency); per-session `timestamp` is non-decreasing; and per-session `seq`, when present, is a
-0-based contiguous counter (so the backend can detect silent mid-stream drops — a session that
-emits no `seq` is a **warning**, not an error). Redaction is **not** checked: the backend ingress
+every event parses as a NormalizedEvent; `payload.kind === event_type`; per-session `timestamp` is
+non-decreasing; and per-session `seq`, when present, is a dense 0-based counter (so the backend can
+detect silent mid-stream drops — a session that emits no `seq` is a **warning**, not an error). A
+repeated `event_id` or `seq` is a **warning**, not an error — an at-least-once retry is legitimate
+and the backend dedupes it (§3.3 / §4.4). Redaction is **not** checked: the backend ingress
 redaction floor is the sole redaction point, so an adapter cannot and need not prove it.
 
 **Exit codes:** `0` = conformant (warnings allowed) · `1` = one or more errors · `2` = usage /

@@ -329,15 +329,7 @@ Before you wire an adapter to a live backend, check that the events it emits act
 this contract. Capture your adapter's output as **JSONL** (one NormalizedEvent per line, in
 emission order) and pipe it through the conformance checker.
 
-**No clone required** — run the same checker from the published CLI (the checker core is bundled
-into it at build time; the CLI has zero runtime dependencies):
-
-```bash
-npx actradeck conformance < your-adapter-output.jsonl
-# or:  npx actradeck conformance your-adapter-output.jsonl [--json]
-```
-
-**From a clone of this repo** — build the schema once, then run the script directly:
+**From a clone of this repo** (works today) — build the schema once, then run the script directly:
 
 ```bash
 pnpm --filter @actradeck/event-model build          # once, to build the schema
@@ -345,28 +337,43 @@ node scripts/check-conformance.mjs < your-adapter-output.jsonl
 # or:  node scripts/check-conformance.mjs your-adapter-output.jsonl [--json]
 ```
 
-Both paths run the identical `checkConformance` core and print the same report and exit code. The
-`actradeck conformance` bundle reads its whole input into memory (sized for adapter sample streams).
-For **piped/redirected/CI** output the two are byte-identical; by design they differ only in an
-interactive TTY (the script adds ANSI color, the CLI stays plain), in the stderr tool-name prefix,
-and in the script's extra exit-2 "not built" path (the CLI's checker is bundled, so it cannot occur).
+**From the published CLI** — `npx actradeck conformance` runs the same checker with **no clone**
+(the checker core is bundled into the CLI at build time; the CLI keeps zero runtime dependencies).
+This command **ships in the next tagged release** — the currently published `actradeck` predates it,
+so use the from-clone path above until that release lands:
 
-It reports the stream-level and cross-field invariants a single-event schema parse cannot see,
-and exits non-zero if any are broken:
+```bash
+npx actradeck conformance < your-adapter-output.jsonl        # once the next release ships
+# or:  npx actradeck conformance your-adapter-output.jsonl [--json]
+```
 
-- **schema** — every event parses as a NormalizedEvent (§4);
-- **payload.kind === event_type** — the schema does **not** cross-validate this, so the checker does;
-- **event_id uniqueness** — no event is emitted twice (idempotency, §3.3);
-- **per-session timestamp** — non-decreasing in emission order (independent floor per session);
-- **per-session seq** — 0-based contiguous when present, so the backend can detect silent
-  mid-stream drops (§4.4); a session that emits no `seq` is a **warning**, not an error.
+Both paths run the identical `checkConformance` core and print the same report and exit code. For
+**piped/redirected/CI** output they are byte-identical; by design they differ only in an interactive
+TTY (the script adds ANSI color, the CLI stays plain), in the stderr tool-name prefix, and in the
+script's extra exit-2 "not built" path (the CLI's checker is bundled, so it cannot occur).
+
+The checker reports the stream-level and cross-field invariants a single-event schema parse cannot
+see. It is a **structural + ordering + identity** check — it does **not** (and cannot) verify
+redaction (§5, the backend's job) or delivery semantics (at-least-once is the adapter's choice). It
+exits non-zero only when an **error**-level invariant is broken; **warnings** are contract-consistent
+and pass:
+
+- **schema** (error) — every event parses as a NormalizedEvent (§4);
+- **payload.kind === event_type** (error) — the schema does **not** cross-validate this, so the checker does;
+- **event_id repeats** (**warning**) — legitimate under at-least-once retry: the backend dedupes on
+  `event_id` (§3.3), so a re-send is fine. The warning only flags it so you can confirm it is a true
+  retry of the **same** event, not a distinct event reusing an id;
+- **per-session timestamp** (error) — non-decreasing in emission order (independent floor per session);
+- **per-session seq** (error) — a dense 0-based counter when present, so the backend can detect
+  silent mid-stream drops (§4.4); an at-least-once retry (a re-sent `seq`) collapses and is **not** a
+  gap (symmetric with the `event_id` warning above); a session that emits no `seq` is a **warning**.
 
 Redaction is **not** checked — the ingress redaction floor (§5) is the sole redaction point, so
 an adapter cannot and need not prove it. Runnable examples live in `docs/examples/conformance/`:
 
 ```bash
 node scripts/check-conformance.mjs docs/examples/conformance/valid.jsonl     # PASS (exit 0)
-node scripts/check-conformance.mjs docs/examples/conformance/invalid.jsonl   # FAIL (exit 1) — one of each error class
+node scripts/check-conformance.mjs docs/examples/conformance/invalid.jsonl   # FAIL (exit 1) — every error class (+ an event_id-repeat warning)
 ```
 
 The checker's core (`checkConformance` in `@actradeck/event-model`) is pinned by

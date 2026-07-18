@@ -6,10 +6,14 @@
  * but the contract also has STREAM-level and CROSS-FIELD invariants a single-event parse
  * cannot see:
  *   - `payload.kind` must equal `event_type` (the schema does NOT cross-validate this),
- *   - `event_id` must be unique across the stream (idempotency / no duplicate emission),
+ *   - `event_id` duplicates within the stream are a WARNING, not an error: the contract uses
+ *     `event_id` as the idempotency key and the backend absorbs at-least-once retries
+ *     (contract §3.3), so a re-sent event is legitimate — the warning only flags it so the
+ *     author can confirm they are true retries, not distinct events colliding on one id,
  *   - per session, `timestamp` must be non-decreasing in emission order,
- *   - per session, `seq` (when used) must be a 0-based contiguous counter — this is what
- *     lets the backend detect silent mid-stream drops (contract §4.4 / `evaluateSeqMissing`).
+ *   - per session, `seq` (when used) must be a dense 0-based counter — this is what lets the
+ *     backend detect silent mid-stream drops (contract §4.4 / `evaluateSeqMissing`); at-least-once
+ *     retries of the same seq collapse (symmetric with event_id, §3.3) and are not a gap.
  *
  * `checkConformance` runs these over an ordered event stream and returns a structured
  * report. It is a PURE function (no I/O); `scripts/check-conformance.mjs` is the CLI that
@@ -19,7 +23,9 @@
  * ordering, identity, and drop-detection wiring only.
  *
  * Severity split: `error` findings are contract breaks (the harness fails); `warning`
- * findings (a session that emits no `seq`) are schema-valid but forgo drop detection.
+ * findings — a session that emits no `seq` (forgoes drop detection), or a duplicate `event_id`
+ * (legitimate under at-least-once retry, §3.3) — are contract-consistent and do NOT fail the
+ * harness.
  */
 import { safeParseEvent } from "./event.js";
 import { toEpochMs } from "./timestamp.js";
@@ -29,9 +35,9 @@ export type ConformanceSeverity = "error" | "warning";
 export type ConformanceRule =
   | "schema" // safeParseEvent rejected the event
   | "payload-kind-mismatch" // payload.kind !== event_type
-  | "event-id-duplicate" // event_id repeated in the stream
+  | "event-id-duplicate" // (warning) event_id repeated — legitimate under at-least-once retry (§3.3)
   | "timestamp-regression" // per-session timestamp went backwards in emission order
-  | "seq-not-contiguous" // per-session seq is not 0,1,2,… (gap / duplicate / reset / partial)
+  | "seq-not-contiguous" // per-session seq is not a dense 0-based counter (gap / non-zero start / partial); at-least-once retries collapse
   | "seq-absent"; // (warning) a session emitted no seq — no drop detection
 
 export interface ConformanceFinding {
@@ -106,15 +112,18 @@ export function checkConformance(events: readonly unknown[]): ConformanceReport 
       }
     }
 
-    // stream: event_id uniqueness (idempotency / no duplicate emission).
+    // stream: event_id duplicates. The contract uses event_id as the idempotency key and the
+    // backend absorbs at-least-once retries (§3.3), so a repeat is legitimate — surface it as a
+    // WARNING (not a contract break) so the author can confirm it is a true retry of the SAME
+    // event, not two distinct events colliding on one id.
     if (seenIds.has(eventId)) {
       findings.push({
         index,
-        severity: "error",
+        severity: "warning",
         rule: "event-id-duplicate",
         sessionId,
         eventId,
-        message: `event_id "${eventId}" already appeared earlier in the stream`,
+        message: `event_id "${eventId}" repeats earlier in the stream — fine as an at-least-once retry (the backend dedupes, §3.3); confirm it is the SAME event, not a distinct one reusing the id`,
       });
     } else {
       seenIds.add(eventId);
@@ -165,15 +174,27 @@ export function checkConformance(events: readonly unknown[]): ConformanceReport 
       });
       continue;
     }
-    const expected = st.seqs.map((_, i) => i);
-    const contiguous = st.seqs.length === expected.length && st.seqs.every((s, i) => s === i);
+    // At-least-once retries re-send the SAME event = the same seq (symmetric with event_id, §3.3 /
+    // §4.4): `distinct(seq)` absorbs them, so collapse duplicates — preserving first-appearance
+    // order, which is the original emission order — before the dense-0-based check. A gap or a
+    // non-zero start is still an error; a re-sent seq is not (matching the backend's
+    // `evaluateSeqMissing`, which counts `distinct(seq)`).
+    const seen = new Set<number>();
+    const distinctInOrder: number[] = [];
+    for (const s of st.seqs) {
+      if (!seen.has(s)) {
+        seen.add(s);
+        distinctInOrder.push(s);
+      }
+    }
+    const contiguous = distinctInOrder.every((s, i) => s === i);
     if (!contiguous) {
       findings.push({
         index: st.firstIndex,
         severity: "error",
         rule: "seq-not-contiguous",
         sessionId,
-        message: `session "${sessionId}" seq is not 0-based contiguous (expected 0..${st.eventCount - 1}, got ${st.seqs.join(",")})`,
+        message: `session "${sessionId}" seq is not a dense 0-based counter (expected 0..${distinctInOrder.length - 1} after collapsing at-least-once retries; got distinct ${distinctInOrder.join(",")})`,
       });
     }
   }

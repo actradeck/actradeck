@@ -80,16 +80,22 @@ describe("INV-CONFORMANCE: adapter stream conformance checker", () => {
     expect(bad.findings.map((f) => f.rule)).toContain("payload-kind-mismatch");
   });
 
-  it("flags a duplicate event_id across the stream (idempotency / no double emission)", () => {
+  it("WARNS (not errors) on a duplicate event_id — legitimate under at-least-once retry (§3.3)", () => {
+    // The contract uses event_id as the idempotency key; the backend absorbs at-least-once
+    // retries (contract §3.3 / INV-EVENT-ORDER). So a re-sent event_id is contract-consistent:
+    // it must NOT fail the harness, only surface a warning so the author can confirm it is a
+    // true retry rather than two distinct events colliding on one id.
     const id = newEventId();
     const stream = [
       ev({ session_id: "s1", seq: 0, event_id: id, timestamp: "2026-07-18T00:00:00.000Z" }),
       ev({ session_id: "s1", seq: 1, event_id: id, timestamp: "2026-07-18T00:00:01.000Z" }),
     ];
     const r = checkConformance(stream);
-    expect(r.ok).toBe(false);
+    expect(r.ok).toBe(true); // a warning does not fail the harness
+    expect(r.errors).toBe(0);
     const dup = r.findings.find((f) => f.rule === "event-id-duplicate");
     expect(dup).toBeDefined();
+    expect(dup!.severity).toBe("warning");
     expect(dup!.index).toBe(1);
   });
 
@@ -125,6 +131,26 @@ describe("INV-CONFORMANCE: adapter stream conformance checker", () => {
     const gap = r.findings.find((f) => f.rule === "seq-not-contiguous");
     expect(gap).toBeDefined();
     expect(gap!.sessionId).toBe("s1");
+  });
+
+  it("PASSES a full at-least-once retry — same event_id AND seq collapse, no seq gap (§4.4)", () => {
+    // A true retry re-sends the SAME event: same event_id, same seq, same timestamp. The seq check
+    // must absorb the duplicate `seq` (distinct(seq), symmetric with event_id idempotency) — it is
+    // NOT a gap. Only the event_id repeat surfaces, as a warning. Guards against the asymmetric fix
+    // where event_id was downgraded but the retry's seq still errored (QA-1).
+    const idC = newEventId();
+    const stream = [
+      ev({ session_id: "s1", seq: 0, timestamp: "2026-07-18T00:00:00.000Z" }),
+      ev({ session_id: "s1", seq: 1, timestamp: "2026-07-18T00:00:01.000Z" }),
+      ev({ session_id: "s1", seq: 2, event_id: idC, timestamp: "2026-07-18T00:00:02.000Z" }),
+      ev({ session_id: "s1", seq: 2, event_id: idC, timestamp: "2026-07-18T00:00:02.000Z" }), // retry
+    ];
+    const r = checkConformance(stream);
+    expect(r.ok, JSON.stringify(r.findings)).toBe(true); // a legitimate retry must not FAIL
+    expect(r.errors).toBe(0);
+    expect(r.findings.map((f) => f.rule)).not.toContain("seq-not-contiguous");
+    const warn = r.findings.filter((f) => f.severity === "warning").map((f) => f.rule);
+    expect(warn).toContain("event-id-duplicate");
   });
 
   it("flags a non-zero-based seq (must start at 0)", () => {
@@ -197,16 +223,23 @@ describe("INV-CONFORMANCE: adapter stream conformance checker", () => {
     it("invalid.jsonl fails and demonstrates every documented error class", () => {
       const r = checkConformance(loadJsonl("invalid.jsonl"));
       expect(r.ok).toBe(false);
-      const rules = new Set(r.findings.filter((f) => f.severity === "error").map((f) => f.rule));
+      const errorRules = new Set(
+        r.findings.filter((f) => f.severity === "error").map((f) => f.rule),
+      );
       for (const rule of [
         "payload-kind-mismatch",
-        "event-id-duplicate",
         "timestamp-regression",
         "schema",
         "seq-not-contiguous",
       ] as const) {
-        expect(rules.has(rule), `invalid.jsonl should demonstrate ${rule}`).toBe(true);
+        expect(errorRules.has(rule), `invalid.jsonl should demonstrate ${rule}`).toBe(true);
       }
+      // event-id-duplicate is a WARNING (at-least-once retry is contract-legitimate, §3.3), not an
+      // error — the fixture still carries it, but as a warning that does not fail the harness.
+      const warnRules = new Set(
+        r.findings.filter((f) => f.severity === "warning").map((f) => f.rule),
+      );
+      expect(warnRules.has("event-id-duplicate")).toBe(true);
     });
   });
 });
