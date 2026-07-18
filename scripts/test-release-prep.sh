@@ -1597,6 +1597,35 @@ if command -v npm >/dev/null 2>&1 && command -v pnpm >/dev/null 2>&1 && command 
       else
         ng "INV-NPM-PACK-ALLOWLIST: REAL npm pack tarball ships a file outside the allowlist"
       fi
+      # The conformance bundle (esbuild output) MUST be packed and MUST be a plain dist/** .js with
+      # no sibling .map (capture-then-test; no `| grep -q` per the header convention).
+      bundle_hit="$(printf '%s\n' "$real_listing" | grep -E '^dist/lib/conformance-core\.js$')" || true
+      if [ -n "$bundle_hit" ]; then
+        ok "INV-NPM-PACK-ALLOWLIST: REAL tarball ships the conformance bundle (dist/lib/conformance-core.js)"
+      else
+        ng "INV-NPM-PACK-ALLOWLIST: REAL tarball is MISSING the conformance bundle (dist/lib/conformance-core.js)"
+      fi
+      bundle_map="$(printf '%s\n' "$real_listing" | grep -E '^dist/lib/conformance-core\.js\.map$')" || true
+      if [ -z "$bundle_map" ]; then
+        ok "INV-NPM-PACK-ALLOWLIST: no sourcemap emitted alongside the conformance bundle"
+      else
+        ng "INV-NPM-PACK-ALLOWLIST: a sourcemap was packed next to the conformance bundle (forbidden)"
+      fi
+      # SEC-2: the bundled MIT deps (zod + uuid) ship no inline license comment, so their notices
+      # are collected into dist/THIRD-PARTY-NOTICES.txt — it MUST be packed and MUST carry an MIT
+      # permission notice (attribution requirement of the redistributed npm artifact).
+      notices_hit="$(printf '%s\n' "$real_listing" | grep -E '^dist/THIRD-PARTY-NOTICES\.txt$')" || true
+      if [ -n "$notices_hit" ]; then
+        notices_txt="$(tar -xzOf "$NPM_TGZ" package/dist/THIRD-PARTY-NOTICES.txt 2>/dev/null)" || true
+        mit_hit="$(printf '%s' "$notices_txt" | grep -icE 'permission is hereby granted')" || true
+        if [ "${mit_hit:-0}" -ge 1 ]; then
+          ok "INV-NPM-PACK-ALLOWLIST: THIRD-PARTY-NOTICES packed with the bundled-deps MIT notice(s)"
+        else
+          ng "INV-NPM-PACK-ALLOWLIST: THIRD-PARTY-NOTICES packed but carries NO MIT permission notice"
+        fi
+      else
+        ng "INV-NPM-PACK-ALLOWLIST: THIRD-PARTY-NOTICES.txt is MISSING from the packed tarball"
+      fi
       NPX="$E2E/pack/x"; mkdir -p "$NPX"; tar xzf "$NPM_TGZ" -C "$NPX"
       # SHARED checker (forbidden files + coupling scan when oss-patterns.sh is present) — no
       # literal coupling pattern in this shipped file.
@@ -1632,6 +1661,114 @@ if command -v npm >/dev/null 2>&1 && command -v pnpm >/dev/null 2>&1 && command 
   fi
 else
   echo "SKIP  INV-NPM-EXEC-E2E / REAL pack: npm/pnpm/node or node_modules absent — config-level npm INVs above still ran (falsifiable)."
+fi
+
+# --- INV-NPM-CLI-BUNDLE-SELF-CONTAINED --------------------------------------
+# The `conformance` subcommand's checker is @actradeck/event-model's `checkConformance` BUNDLED
+# into dist at build time (esbuild-wasm · decision 019f739f), so the published `actradeck` stays
+# dependency-zero (ADR 019f5131) and event-model stays private. Prove the built dist is genuinely
+# SELF-CONTAINED: copied into a dir with ZERO node_modules and NO package dependencies, the
+# conformance code path still runs — it resolves neither `@actradeck/*` nor a bare `zod`/`uuid` at
+# runtime (everything is inlined). Falsifiable: a mutant bundle that DID import a bare module must
+# fail in the same isolated dir. Environment-dependent (needs node + pnpm + an installed workspace);
+# informational SKIP otherwise (the config-level INVs above still ran).
+if command -v node >/dev/null 2>&1 && command -v pnpm >/dev/null 2>&1 && [ -d "$ROOT/node_modules" ] && [ -f "$CLI_PKG" ]; then
+  if pnpm --filter ./packages/cli run build >/dev/null 2>&1; then
+    BND="$ROOT/packages/cli/dist/lib/conformance-core.js"
+    if [ -f "$BND" ]; then
+      ok "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: build emitted the conformance bundle (dist/lib/conformance-core.js)"
+      # STATIC: the bundle inlines its whole closure — no residual external import specifier for
+      # @actradeck/*, zod, or uuid (minified esbuild output uses from"x"/require("x")). Capture-then-
+      # test; the file is scanned directly (no pipe from a heavy producer).
+      ext_hit="$(grep -oE 'from"@actradeck/[^"]+"|from"zod"|require\("zod"\)|from"uuid"|require\("uuid"\)' "$BND")" || true
+      if [ -z "$ext_hit" ]; then
+        ok "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: bundle carries NO external @actradeck/zod/uuid import (inlined)"
+      else
+        ng "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: bundle still references an external module ($ext_hit)"
+      fi
+      # falsifiable: the same scan MUST fire on a bare-zod import (else the scan is dead).
+      probe='import{z}from"zod";const a=1;'
+      probe_hit="$(printf '%s' "$probe" | grep -oE 'from"zod"')" || true
+      if [ -n "$probe_hit" ]; then
+        ok "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: external-import scan FIRES on a bare zod import (falsifiable)"
+      else
+        ng "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: DEAD SCAN — a bare zod import was not detected"
+      fi
+      # RUNTIME: copy dist into a ZERO-node_modules dir (under /tmp WORK, no ancestor node_modules)
+      # and run the checker end to end over the real fixtures.
+      ISO="$WORK/bundle-iso"; rm -rf "$ISO"; mkdir -p "$ISO"
+      cp -r "$ROOT/packages/cli/dist" "$ISO/dist"
+      printf '{"name":"iso","version":"0.0.0","type":"module","bin":{"actradeck":"dist/index.js"}}\n' > "$ISO/package.json"
+      VALIDJL="$ROOT/docs/examples/conformance/valid.jsonl"
+      INVALIDJL="$ROOT/docs/examples/conformance/invalid.jsonl"
+      iso_ok=1
+      vout="$(node "$ISO/dist/index.js" conformance "$VALIDJL" 2>/dev/null)"; vcode=$?
+      vpass="$(printf '%s' "$vout" | grep -E '^PASS')" || true
+      [ -n "$vpass" ] && [ "$vcode" -eq 0 ] || iso_ok=0
+      ivout="$(node "$ISO/dist/index.js" conformance "$INVALIDJL" 2>/dev/null)"; ivcode=$?
+      ivfail="$(printf '%s' "$ivout" | grep -E '^FAIL')" || true
+      [ -n "$ivfail" ] && [ "$ivcode" -eq 1 ] || iso_ok=0
+      if [ "$iso_ok" -eq 1 ]; then
+        ok "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: dist runs conformance with ZERO node_modules (valid->PASS/0, invalid->FAIL/1)"
+      else
+        ng "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: dist FAILED to run conformance without node_modules (vcode=$vcode ivcode=$ivcode)"
+      fi
+      # falsifiable: a MUTANT bundle that imports a bare `zod` must FAIL in the SAME isolated dir
+      # (ERR_MODULE_NOT_FOUND) — proving the isolation genuinely denies external resolution (not a
+      # vacuous PASS because node_modules happened to be reachable).
+      MUT="$WORK/bundle-iso-mut"; rm -rf "$MUT"; mkdir -p "$MUT/dist"
+      cp -r "$ROOT/packages/cli/dist/." "$MUT/dist/"
+      { printf 'import"zod";\n'; cat "$BND"; } > "$MUT/dist/lib/conformance-core.js"
+      printf '{"name":"iso","version":"0.0.0","type":"module"}\n' > "$MUT/package.json"
+      node "$MUT/dist/index.js" conformance "$VALIDJL" >/dev/null 2>&1; mcode=$?
+      if [ "$mcode" -ne 0 ]; then
+        ok "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: mutant bundle importing bare zod FAILS in the isolated dir (isolation is real -> falsifiable)"
+      else
+        ng "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: DEAD GATE — mutant bundle with bare zod still ran (isolation not enforced)"
+      fi
+    else
+      ng "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: build did NOT emit dist/lib/conformance-core.js"
+    fi
+  else
+    ng "INV-NPM-CLI-BUNDLE-SELF-CONTAINED: could not build packages/cli (pnpm --filter ./packages/cli run build failed)"
+  fi
+else
+  echo "SKIP  INV-NPM-CLI-BUNDLE-SELF-CONTAINED: node/pnpm/node_modules absent — config-level npm INVs above still ran."
+fi
+
+# --- INV-NPM-CLI-TYPE-MIRROR (TDA-1) ----------------------------------------
+# The CLI ships a LOCAL mirror of event-model's conformance report types (dep-zero: it cannot
+# import the private event-model at build time). A compile-time bidirectional `Equal<>` assertion
+# (packages/cli/test/conformance-types.type-test.ts, run by `type-check:test`) ties the mirror to
+# the canonical exports — the output-equivalence E2E canNOT catch a type drift (both sides call the
+# same runtime checker). Assert the live assertion is GREEN, and prove the mechanism is FALSIFIABLE
+# without mutating the tracked tree (a copy of the real mirror + a deliberately WRONG `Equal<>` must
+# make tsc RED).
+if command -v pnpm >/dev/null 2>&1 && [ -d "$ROOT/node_modules" ] && [ -f "$CLI_PKG" ] && jq -e '.scripts["type-check:test"]' "$CLI_PKG" >/dev/null 2>&1; then
+  if pnpm --filter ./packages/cli run type-check:test >/dev/null 2>&1; then
+    ok "INV-NPM-CLI-TYPE-MIRROR: mirror<->canonical type-equivalence holds (type-check:test green)"
+  else
+    ng "INV-NPM-CLI-TYPE-MIRROR: type-check:test FAILED — the local mirror drifted from event-model canonical"
+  fi
+  TM="$WORK/typemirror"; rm -rf "$TM"; mkdir -p "$TM"
+  cp "$ROOT/packages/cli/src/lib/conformance-types.ts" "$TM/mirror.ts"
+  cat > "$TM/probe.ts" <<'PROBE'
+import type { ConformanceReport } from "./mirror.js";
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+// WRONG on purpose: the canonical report is far richer than { total }, so Equal<> is `false`.
+const bad: Equal<ConformanceReport, { total: number }> = true;
+void bad;
+PROBE
+  cat > "$TM/tsconfig.json" <<'TSC'
+{ "compilerOptions": { "module": "NodeNext", "moduleResolution": "NodeNext", "strict": true, "noEmit": true, "skipLibCheck": true }, "include": ["probe.ts", "mirror.ts"] }
+TSC
+  if pnpm --filter ./packages/cli exec tsc -p "$TM/tsconfig.json" >/dev/null 2>&1; then
+    ng "INV-NPM-CLI-TYPE-MIRROR: DEAD GATE — a wrong-shape Equal<> assertion still type-checked"
+  else
+    ok "INV-NPM-CLI-TYPE-MIRROR: Equal<> assertion FAILS on a wrong report shape (mechanism live -> falsifiable)"
+  fi
+else
+  echo "SKIP  INV-NPM-CLI-TYPE-MIRROR: pnpm/node_modules/type-check:test absent."
 fi
 
 # --- INV-NPM-TS-SHELL-PARITY (TDA-2) ----------------------------------------

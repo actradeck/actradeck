@@ -32,8 +32,9 @@
     "bootstrap"
   ],
   "scripts": {
-    "build": "tsc -b",
-    "type-check": "tsc --noEmit",
+    "build": "tsc -b && node scripts/bundle-conformance.mjs",
+    "type-check": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "type-check:test": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },

@@ -6,6 +6,8 @@
 // unit tests inject fakes and never touch the network or the real filesystem (REAL DATA
 // discipline still holds: the integration/E2E path exercises the real Deps end to end).
 
+import type { ConformanceReport } from "./conformance-types.js";
+
 export interface IO {
   /** Write an informational line to stdout. */
   out(msg: string): void;
@@ -45,6 +47,22 @@ export interface Deps {
   fetchJson(url: string): Promise<unknown>;
   /** HTTP GET returning the raw body bytes, or throw on a non-2xx / network error. */
   fetchBytes(url: string): Promise<Uint8Array>;
+
+  /**
+   * Read the whole input as UTF-8: the file at `file`, or STDIN (fd 0) when no file is given.
+   * Throws on an IO error (the `conformance` command maps that to exit code 2).
+   */
+  readInput(file?: string): Promise<string>;
+  /**
+   * Run the ingestion-contract conformance checker over an ordered event stream and return the
+   * structured report. Pure logic (no IO), but injected so the command stays testable AND so the
+   * shipped bin loads the checker from the BUILD-TIME bundle (dist/lib/conformance-core.js — the
+   * inlined @actradeck/event-model closure) instead of a runtime dependency: `actradeck` stays
+   * dependency-zero and event-model stays private (ADR 019f5131 · decision 019f739f). The real
+   * Deps lazy-loads the bundle so `doctor`/`version` stay lean; the fake uses the same canonical
+   * `checkConformance` from event-model's source, keeping unit tests on the single source of truth.
+   */
+  checkConformance(events: readonly unknown[]): Promise<ConformanceReport>;
 
   /** Create a fresh temp directory and return its absolute path. */
   mkdtemp(): Promise<string>;

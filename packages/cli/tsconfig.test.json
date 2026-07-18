@@ -1,0 +1,19 @@
+{
+  // Type-checks the FULL test surface — src (incl. lib/fake.ts) + test/ — that the production
+  // tsconfig.json deliberately excludes from the emitted build. This is where the compile-time
+  // mirror<->canonical type-equivalence assertions (test/conformance-types.type-test.ts) are
+  // EVALUATED. noEmit + composite:false so pulling event-model's SOURCE (via a relative type-only
+  // import) does not trip the rootDir emit constraint and produces no artifact — nothing here is
+  // built or packed, so `actradeck` stays dependency-zero and event-model stays private.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["dist", "node_modules"]
+}

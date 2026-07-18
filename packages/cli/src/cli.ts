@@ -3,6 +3,7 @@ import { cmdDoctor } from "./commands/doctor.js";
 import { cmdUp } from "./commands/up.js";
 import { cmdVersion } from "./commands/version.js";
 import { cmdInstall, type InstallOpts } from "./commands/install.js";
+import { cmdConformance, type ConformanceOpts } from "./commands/conformance.js";
 
 const USAGE = `actradeck — bootstrap CLI for ActraDeck (local-first audit cockpit for coding agents)
 
@@ -17,6 +18,10 @@ Commands:
               --skip-provenance  checksum-only (explicit opt-out; not recommended)
   up          Print the Docker cockpit bring-up command (prints only — does not run it).
   version     Print this CLI's version and whether a newer stable release is available.
+  conformance Validate an adapter's JSONL event stream against the ingestion contract.
+              [file]   read JSONL from a file (default: stdin)
+              --json   emit a machine-readable JSON report instead of the summary
+              Exit: 0 = conformant · 1 = one or more errors · 2 = usage/setup error.
 
 Global:
   -h, --help      show this help
@@ -53,6 +58,16 @@ export function parseInstallOpts(args: string[]): InstallOpts {
   return { version, dryRun, skipProvenance };
 }
 
+/**
+ * Parse the options for `conformance`. Lenient (mirrors scripts/check-conformance.mjs): `--json`
+ * selects the machine report; the first non-`--` argument is the input file (stdin when absent).
+ */
+export function parseConformanceOpts(args: string[]): ConformanceOpts {
+  const json = args.includes("--json");
+  const file = args.find((a) => !a.startsWith("--"));
+  return file !== undefined ? { file, json } : { json };
+}
+
 /** Route argv to a command. Returns the process exit code. Never throws (errors -> code 1). */
 export async function run(deps: Deps, argv: string[]): Promise<number> {
   const cmd = argv[0];
@@ -77,6 +92,8 @@ export async function run(deps: Deps, argv: string[]): Promise<number> {
         return await cmdVersion(deps);
       case "install":
         return await cmdInstall(deps, parseInstallOpts(rest));
+      case "conformance":
+        return await cmdConformance(deps, parseConformanceOpts(rest));
       default:
         deps.io.err(`Unknown command: ${cmd}`);
         deps.io.out(USAGE);
