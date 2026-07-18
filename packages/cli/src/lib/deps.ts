@@ -3,7 +3,7 @@
 // tested over a fake Deps). Node built-ins only — the package has ZERO runtime dependencies.
 import { spawn } from "node:child_process";
 import { access, mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { constants as FS } from "node:fs";
+import { constants as FS, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,6 +85,18 @@ export async function makeRealDeps(): Promise<Deps> {
     },
     async fetchBytes(url) {
       return new Uint8Array(await (await fetchOk(url)).arrayBuffer());
+    },
+    async readInput(file) {
+      // fd 0 = stdin. readFileSync accepts a path OR a file descriptor and, with "utf8", returns a
+      // string — the async fs/promises readFile does not type a raw fd, and reading the whole input
+      // up front (as scripts/check-conformance.mjs does) is the right shape for a one-shot checker.
+      return file !== undefined ? readFileSync(file, "utf8") : readFileSync(0, "utf8");
+    },
+    async checkConformance(events) {
+      // Lazy-load the build-time bundle (dist/lib/conformance-core.js — the inlined event-model
+      // closure) only when `conformance` actually runs, so doctor/version load no zod.
+      const { checkConformance } = await import("./conformance-core.js");
+      return checkConformance(events);
     },
     async mkdtemp() {
       return mkdtemp(join(tmpdir(), "actradeck-"));

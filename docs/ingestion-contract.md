@@ -327,13 +327,29 @@ config, and the same **honest disclosure that the backend floor is the only reda
 
 Before you wire an adapter to a live backend, check that the events it emits actually satisfy
 this contract. Capture your adapter's output as **JSONL** (one NormalizedEvent per line, in
-emission order) and pipe it through the conformance checker:
+emission order) and pipe it through the conformance checker.
+
+**No clone required** — run the same checker from the published CLI (the checker core is bundled
+into it at build time; the CLI has zero runtime dependencies):
+
+```bash
+npx actradeck conformance < your-adapter-output.jsonl
+# or:  npx actradeck conformance your-adapter-output.jsonl [--json]
+```
+
+**From a clone of this repo** — build the schema once, then run the script directly:
 
 ```bash
 pnpm --filter @actradeck/event-model build          # once, to build the schema
 node scripts/check-conformance.mjs < your-adapter-output.jsonl
 # or:  node scripts/check-conformance.mjs your-adapter-output.jsonl [--json]
 ```
+
+Both paths run the identical `checkConformance` core and print the same report and exit code. The
+`actradeck conformance` bundle reads its whole input into memory (sized for adapter sample streams).
+For **piped/redirected/CI** output the two are byte-identical; by design they differ only in an
+interactive TTY (the script adds ANSI color, the CLI stays plain), in the stderr tool-name prefix,
+and in the script's extra exit-2 "not built" path (the CLI's checker is bundled, so it cannot occur).
 
 It reports the stream-level and cross-field invariants a single-event schema parse cannot see,
 and exits non-zero if any are broken:

@@ -2,6 +2,11 @@
 // side-effecting calls (writeFile / extract / handoff). Excluded from the coverage gate — it
 // is test scaffolding, not shipped logic (files: [dist,...] never packs src anyway).
 import type { Deps, ExecResult } from "./types.js";
+// This test-only fake is EXCLUDED from the tsc build and from the pack (tsconfig `exclude` +
+// `files:[dist]`), so it may reach across the package boundary into event-model's SOURCE to serve
+// the SAME canonical `checkConformance` the production bundle inlines — keeping unit tests on the
+// single source of truth without making event-model a dependency of the published `actradeck`.
+import { checkConformance as realCheckConformance } from "../../../event-model/src/conformance.js";
 
 export interface FakeConfig {
   env?: Record<string, string | undefined>;
@@ -22,6 +27,10 @@ export interface FakeConfig {
   handoffCode?: number;
   /** make extractTarball throw. */
   extractFails?: boolean;
+  /** stdin served to readInput() when no file arg (or an Error to simulate a read failure). */
+  stdin?: string | Error;
+  /** file path -> content served to readInput(path) (or an Error to simulate a read failure). */
+  files?: Record<string, string | Error>;
 }
 
 export interface FakeState {
@@ -76,6 +85,20 @@ export function makeFakeDeps(cfg: FakeConfig = {}): FakeState {
       if (v === undefined) throw new Error(`fake: no bytes stub for ${url}`);
       if (v instanceof Error) throw v;
       return v;
+    },
+    async readInput(file) {
+      if (file !== undefined) {
+        const v = (cfg.files ?? {})[file];
+        if (v === undefined) throw new Error(`fake: no file stub for ${file}`);
+        if (v instanceof Error) throw v;
+        return v;
+      }
+      const s = cfg.stdin;
+      if (s instanceof Error) throw s;
+      return s ?? "";
+    },
+    async checkConformance(events) {
+      return realCheckConformance(events);
     },
     async mkdtemp() {
       return "/tmp/fake-work";
