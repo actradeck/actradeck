@@ -1,9 +1,14 @@
 # Security Policy
 
 ActraDeck handles agent stdout/stderr, file diffs, approval requests, and events,
-and its core promise is that **the redaction pipeline runs before anything is
-stored or transmitted**. Detection is best-effort pattern matching; measured
-limits are documented in
+and its core promise is that **secrets are redacted before they are stored — and,
+for sidecar-observed sessions, before they are transmitted**. Native sessions
+(observed by the local sidecar) are redacted before an event reaches disk or the
+network; events an external adapter POSTs to the backend arrive as the adapter sent
+them and pass an unconditional redaction floor at the ingress _before persistence_
+(not before that first hop). Detection is best-effort pattern matching — a strong
+safety net within a single-operator / local-fs / loopback trust model, not an
+absolute guarantee; measured limits are documented in
 [the redaction benchmark](docs/benchmarks/redaction-and-risk-classifier.md).
 A redaction bypass, an approval-gate bypass, or a secret reaching disk/network
 is treated as an incident, not a normal bug.
