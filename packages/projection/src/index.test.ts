@@ -1071,4 +1071,60 @@ describe("ADR 0014: orthogonal lifecycle axes (terminal poisoning fix)", () => {
     expect(proj.continuation).toBeUndefined();
     expect(proj.terminal_evidence).toBeUndefined();
   });
+
+  // QA-1 (falsifying): last_turn_outcome は terminal 到達後に凍結される。terminal 後に紛れ込む
+  //   turn.* イベント (poisoning-adjacent) で outcome を書き換えない。凍結ガード
+  //   (index.ts の currentTerminal 分岐) を外すと、この assert が "failed" になって赤くなる。
+  it("last_turn_outcome は terminal 到達後に凍結され、ignore されるイベントで書き換わらない", () => {
+    // completed で確定 → outcome="completed"。
+    const done = applyEvent(
+      initialProjection("s1"),
+      ev({ event_type: "turn.completed", state: "completed" }),
+    );
+    expect(done.projection.state).toBe("completed");
+    expect(done.projection.last_turn_outcome).toBe("completed");
+    // terminal 後に turn.failed が来ても ignore され、outcome は "completed" のまま (凍結)。
+    const after = applyEvent(
+      done.projection,
+      ev({
+        event_type: "turn.failed",
+        state: "idle",
+        timestamp: "2026-06-06T00:00:01.000Z",
+        payload: { error: "late abort" },
+      }),
+    );
+    expect(after.ignoredAfterTerminal).toBe(true);
+    expect(after.projection.last_turn_outcome).toBe("completed"); // 凍結 (❗ ガード無しだと "failed")
+    expect(after.projection.state).toBe("completed");
+  });
+
+  // QA-5 (terminal-clears-pending・suspended 版): 新 terminal suspended も他 terminal と同様に
+  //   pending_approvals をクリアする (finalize の terminal 分岐)。unload 済み run の承認は moot。
+  it("suspended 到達で pending_approvals がクリアされる (terminal クリア契約に suspended を含む)", () => {
+    const pending = applyEvent(
+      initialProjection("s1"),
+      ev({
+        event_type: "tool.permission.requested",
+        state: "waiting.approval",
+        payload: {
+          request_id: "s1:apr-1",
+          tool_name: "Bash",
+          command: "deploy",
+          risk_level: "high",
+        },
+      }),
+    ).projection;
+    expect(pending.pending_approvals).toHaveLength(1);
+    const suspended = applyEvent(
+      pending,
+      ev({
+        event_type: "session.ended",
+        state: "suspended",
+        timestamp: "2026-06-06T00:00:01.000Z",
+      }),
+    ).projection;
+    expect(suspended.state).toBe("suspended");
+    expect(suspended.pending_approvals).toHaveLength(0);
+    expect(suspended.needs_attention).toBe(false);
+  });
 });

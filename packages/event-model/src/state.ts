@@ -62,6 +62,20 @@ export const TERMINAL_STATES: readonly State[] = [
   "suspended",
 ] as const;
 
+/**
+ * **失敗を表す** terminal 状態の正典集合（TERMINAL_STATES の部分集合）。
+ *
+ * 「失敗/異常終了」を意味する terminal はこれだけ: `failed`（確定失敗）と `interrupted`（中断）。
+ * `completed`（正常終了）と `suspended`（provider unload・再開可・ADR 0014）は **失敗ではない**。
+ *
+ * ⚠️ **減算派生しないこと（ADR 0014 SEC-1/TDA-1 回帰防止）**: 以前 webui 通知面は
+ * `TERMINAL_STATES.filter(s => s !== "completed")` で失敗集合を導出していたため、TERMINAL_STATES に
+ * 非失敗の新 terminal（`suspended`）を足した瞬間、再開可能な休止が「異常終了」通知へ誤って巻き込まれた。
+ * 失敗判定は「terminal から何かを引く」のではなく、この **明示 allowlist** を唯一の出所とする。
+ * 新しい terminal を足すときは、失敗であるものだけをここへ明示追加する（既定は非失敗＝安全側）。
+ */
+export const FAILURE_TERMINAL_STATES: readonly State[] = ["failed", "interrupted"] as const;
+
 /** running.* サブ状態 (相互に自由遷移可能なアクティブ作業群)。 */
 export const RUNNING_STATES: readonly State[] = [
   "running.model_wait",
@@ -159,6 +173,18 @@ export function isTerminalState(state: State): boolean {
  */
 export function isTerminalStateValue(state: string | undefined): boolean {
   return typeof state === "string" && (TERMINAL_STATES as readonly string[]).includes(state);
+}
+
+/**
+ * `state` が **失敗を表す** terminal（`FAILURE_TERMINAL_STATES`）か。`isTerminalStateValue` の
+ * 失敗限定版（string 緩包含・DTO 由来 `string | undefined` を narrow せず判定）。webui 通知の
+ * 失敗分類の単一出所（減算派生 FAILED_STATES を置換・ADR 0014 SEC-1/TDA-1）。completed / suspended /
+ * 未知値 / undefined は false（＝失敗でない・安全側）。
+ */
+export function isFailureTerminalStateValue(state: string | undefined): boolean {
+  return (
+    typeof state === "string" && (FAILURE_TERMINAL_STATES as readonly string[]).includes(state)
+  );
 }
 
 /**

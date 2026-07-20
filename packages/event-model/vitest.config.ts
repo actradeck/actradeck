@@ -35,6 +35,12 @@ export default defineConfig({
         //   INV-SEQ-DROP が全境界を網羅する worst 100/100/100/100 → floor 95/90/90/95 は worst の下
         //   (per-file-coverage-floor-below-worst-not-best・erosion tripwire であって target ではない)。
         "src/seq-drop.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
+        // state.ts (T1 状態機械 + ADR 0014 直交軸マップ/helper・コア領域) = 小ファイル tripwire。
+        //   純同期関数/写像で決定的。inv-terminal-axes + inv-event-transition が worst 100/100/100/100
+        //   まで網羅 → floor 95/90/90/95 は worst の下 (per-file-coverage-floor-below-worst-not-best・
+        //   erosion tripwire)。continuation/terminal_evidence/failure 判定の何かが未到達になると trip
+        //   (QA-2: 以前 floor 無しで func57%/branch66% の silent erosion を許していた回帰防止)。
+        "src/state.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
       },
     },
   },
