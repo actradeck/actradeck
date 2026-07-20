@@ -20,6 +20,7 @@ import {
   BoundedMonotonicTimestampChecker,
   FILE_EVENT_TYPES,
   isActionKind,
+  LastTurnOutcome,
   MODEL_STREAM_EVENT_TYPES,
   type ActionKind,
   type NormalizedEvent,
@@ -216,9 +217,25 @@ export class IngestStore {
       typeof ev.permission_mode === "string" && ev.permission_mode.length > 0
         ? ev.permission_mode
         : null;
+    // ADR 0014 Phase 3a (run lineage・decision 019f8032): sessions へ 5 列を additive 投影する。
+    //   空文字は null 化 (permissionMode の書式に倣う)。**projection key には使わない** (lineage/表示専用)。
+    //   sticky 方針は sqL の COALESCE 向きで表現する (下記):
+    //   - provider_session_id / start_kind / resumed_from_session_id = **first-wins**
+    //     (COALESCE(sessions.x, EXCLUDED.x)・started_at と同型。run の起点情報は一度確定したら変えない)。
+    //   - end_kind / recoverability = **last-non-null-wins**
+    //     (COALESCE(EXCLUDED.x, sessions.x)・permission_mode と同型。終了時に確定/更新)。
+    //   この段では sidecar が distinct に採番しない (3b) ため大半 NULL のまま入る (非破壊)。
+    const nonEmpty = (v: string | undefined): string | null =>
+      typeof v === "string" && v.length > 0 ? v : null;
+    const providerSessionId = nonEmpty(ev.provider_session_id);
+    const startKind = nonEmpty(ev.start_kind);
+    const resumedFrom = nonEmpty(ev.resumed_from_session_id);
+    const endKind = nonEmpty(ev.end_kind);
+    const recoverability = nonEmpty(ev.recoverability);
     await client.query(
-      `INSERT INTO sessions (session_id, provider, source, agent_id, repo, branch, cwd, started_at, capture_mode, permission_mode)
-       VALUES ($1,$2,$3,$4,$5,$6,$7, CASE WHEN $8 THEN $9::timestamptz ELSE NULL END, $10, $11)
+      `INSERT INTO sessions (session_id, provider, source, agent_id, repo, branch, cwd, started_at, capture_mode, permission_mode,
+                             provider_session_id, start_kind, resumed_from_session_id, end_kind, recoverability)
+       VALUES ($1,$2,$3,$4,$5,$6,$7, CASE WHEN $8 THEN $9::timestamptz ELSE NULL END, $10, $11, $12, $13, $14, $15, $16)
        ON CONFLICT (session_id) DO UPDATE SET
          agent_id = COALESCE(EXCLUDED.agent_id, sessions.agent_id),
          repo     = COALESCE(EXCLUDED.repo, sessions.repo),
@@ -227,6 +244,13 @@ export class IngestStore {
          started_at = COALESCE(sessions.started_at, EXCLUDED.started_at),
          capture_mode = COALESCE(EXCLUDED.capture_mode, sessions.capture_mode),
          permission_mode = COALESCE(EXCLUDED.permission_mode, sessions.permission_mode),
+         -- run lineage 起点情報: first-wins (一度確定したら変えない)。
+         provider_session_id     = COALESCE(sessions.provider_session_id, EXCLUDED.provider_session_id),
+         start_kind              = COALESCE(sessions.start_kind, EXCLUDED.start_kind),
+         resumed_from_session_id = COALESCE(sessions.resumed_from_session_id, EXCLUDED.resumed_from_session_id),
+         -- run 終了情報: last-non-null-wins (終了時に確定/更新)。
+         end_kind                = COALESCE(EXCLUDED.end_kind, sessions.end_kind),
+         recoverability          = COALESCE(EXCLUDED.recoverability, sessions.recoverability),
          updated_at = now()`,
       [
         ev.session_id,
@@ -240,6 +264,11 @@ export class IngestStore {
         new Date(toEpochMs(ev.timestamp)).toISOString(),
         captureMode,
         permissionMode,
+        providerSessionId,
+        startKind,
+        resumedFrom,
+        endKind,
+        recoverability,
       ],
     );
   }
@@ -250,7 +279,7 @@ export class IngestStore {
       `SELECT session_id, state, current_action, current_action_kind, current_action_subject,
               last_event_id, last_event_at,
               needs_attention, liveness, pending_approvals,
-              secret_detected, secret_redaction_count, secret_redaction_count_by_kind
+              secret_detected, secret_redaction_count, secret_redaction_count_by_kind, last_turn_outcome
          FROM session_state WHERE session_id = $1`,
       [sessionId],
     );
@@ -269,6 +298,7 @@ export class IngestStore {
       secret_detected: boolean | null;
       secret_redaction_count: number | null;
       secret_redaction_count_by_kind: unknown;
+      last_turn_outcome: string | null;
     };
     return {
       session_id: r.session_id,
@@ -297,11 +327,12 @@ export class IngestStore {
       // ADR 0014 直交軸: continuation / terminal_evidence は永続 `state` の純関数ゆえ読込時に
       //   無コストで再導出する (専用列を足さない・drift 源を作らない)。次の applyEvent の finalize
       //   が resultState から同値を再計算するため、この read 値は transient (DTO へは Phase 5 で配線)。
-      //   last_turn_outcome は state から導出不能な sticky 軸で、live 永続は Phase 3 (session_state
-      //   ライフサイクル列) で着地する。現状 UI 未消費ゆえ undefined で可 (flicker なし)。
+      //   last_turn_outcome は state から導出不能な sticky 軸で、ADR 0014 Phase 3a で session_state
+      //   列へ永続する。ここで DB 行を closed-enum gate (toLastTurnOutcome) して復元し、reducer の
+      //   prev へ渡す → live 経路が persisted 値を読む → live/replay 非対称 (TDA-2) が解消する。
       continuation: terminalContinuation((r.state ?? undefined) as State | undefined),
       terminal_evidence: terminalEvidenceFor((r.state ?? undefined) as State | undefined),
-      last_turn_outcome: undefined,
+      last_turn_outcome: toLastTurnOutcome(r.last_turn_outcome),
     };
   }
 
@@ -333,8 +364,8 @@ export class IngestStore {
          (session_id, state, current_action, current_action_kind, current_action_subject,
           last_event_id, last_event_at,
           liveness, needs_attention, pending_approvals,
-          secret_detected, secret_redaction_count, secret_redaction_count_by_kind, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb,$11,$12,$13::jsonb, now())
+          secret_detected, secret_redaction_count, secret_redaction_count_by_kind, last_turn_outcome, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb,$11,$12,$13::jsonb,$14, now())
        ON CONFLICT (session_id) DO UPDATE SET
          state                          = EXCLUDED.state,
          current_action                 = EXCLUDED.current_action,
@@ -348,6 +379,8 @@ export class IngestStore {
          secret_detected                = EXCLUDED.secret_detected,
          secret_redaction_count         = EXCLUDED.secret_redaction_count,
          secret_redaction_count_by_kind = EXCLUDED.secret_redaction_count_by_kind,
+         -- ADR 0014 Phase 3a: turn 結果を EXCLUDED で最新反映 (reducer が sticky 合成済ゆえ正しい)。
+         last_turn_outcome              = EXCLUDED.last_turn_outcome,
          updated_at                     = now()`,
       [
         proj.session_id,
@@ -370,6 +403,8 @@ export class IngestStore {
         proj.secret_detected,
         proj.secret_redaction_count,
         secretRedactionCountByKindJson,
+        // ADR 0014 Phase 3a: reducer 合成済 last_turn_outcome を永続 (undefined→NULL)。
+        proj.last_turn_outcome ?? null,
       ],
     );
   }
@@ -402,7 +437,7 @@ export class IngestStore {
       `SELECT session_id, state, current_action, current_action_kind, current_action_subject,
               last_event_id, last_event_at,
               needs_attention, liveness, pending_approvals,
-              secret_detected, secret_redaction_count, secret_redaction_count_by_kind
+              secret_detected, secret_redaction_count, secret_redaction_count_by_kind, last_turn_outcome
          FROM session_state WHERE session_id = $1`,
       [sessionId],
     );
@@ -427,6 +462,7 @@ export class IngestStore {
       secret_detected: boolean | null;
       secret_redaction_count: number | null;
       secret_redaction_count_by_kind: unknown;
+      last_turn_outcome: string | null;
     };
     const projection: SessionProjection = {
       session_id: r.session_id,
@@ -444,10 +480,10 @@ export class IngestStore {
         typeof r.secret_redaction_count === "number" ? r.secret_redaction_count : 0,
       secret_redaction_count_by_kind: parseRedactionCountByKind(r.secret_redaction_count_by_kind),
       // ADR 0014 直交軸 (readProjection と同一・上記コメント参照): state 純関数の 2 軸は再導出、
-      //   last_turn_outcome は Phase 3 永続まで undefined (UI 未消費)。
+      //   last_turn_outcome は Phase 3a で session_state 列から closed-enum gate して復元する。
       continuation: terminalContinuation((r.state ?? undefined) as State | undefined),
       terminal_evidence: terminalEvidenceFor((r.state ?? undefined) as State | undefined),
-      last_turn_outcome: undefined,
+      last_turn_outcome: toLastTurnOutcome(r.last_turn_outcome),
     };
     return { projection, liveness: reconstructLiveness(r.liveness) };
   }
@@ -687,6 +723,22 @@ function extractMs(ts: Date | string): number | undefined {
  */
 function toActionKind(raw: string | null): ActionKind | undefined {
   return typeof raw === "string" && isActionKind(raw) ? raw : undefined;
+}
+
+/**
+ * ADR 0014 Phase 3a: session_state.last_turn_outcome (text) を LastTurnOutcome へ復元する。
+ * `toActionKind`→`isActionKind` と同型の closed-enum 読み出しゲート: 正典値
+ * (completed/failed/interrupted) のみ採用し、NULL / 未知値 (forward-compat・旧行) は **undefined**
+ * へ安全側に倒す (再導出しない・原文非依存)。
+ *
+ * TDA-1 解消: 許容値集合をローカル Set で手写しせず、event-model の runtime `LastTurnOutcome`
+ *   (zod enum・単一出所) の `.safeParse` を再利用する (drift 不可・
+ *   security-gate-reuse-canonical-parser / consolidation-invariant-sweep-all-copies)。挙動不変。
+ */
+function toLastTurnOutcome(raw: string | null): LastTurnOutcome | undefined {
+  if (typeof raw !== "string") return undefined;
+  const parsed = LastTurnOutcome.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function parseRedactionCountByKind(raw: unknown): Record<string, number> {

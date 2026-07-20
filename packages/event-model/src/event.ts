@@ -9,7 +9,7 @@ import { z } from "zod";
 import { EventType } from "./event-type.js";
 import { EventId } from "./id.js";
 import { Provider, Source } from "./provider.js";
-import { State } from "./state.js";
+import { EndKind, Recoverability, StartKind, State } from "./state.js";
 import { Timestamp } from "./timestamp.js";
 
 /**
@@ -54,6 +54,35 @@ export const NormalizedEvent = z.object({
    * 当面これを永続しても **projection key には使わない** (将来の相関/resume/thread 用)。
    */
   provider_session_id: z.string().optional(),
+  /**
+   * ADR 0014 Phase 3 (run lineage) — この観測 run の**開始種別** (fresh/resume/recovery/clear/unknown)。
+   * provider_session_id / capture_mode と同じ後方互換パターン: **optional** (既存イベント・既存 parse は
+   * 本フィールド無しでも通る)・**projection key には使わない**・欠落可 (over-claim しない既定)。
+   * この段 (3a) は列と backend 永続経路を用意するのみ。sidecar が distinct に採番するのは 3b
+   * (それまで現状イベントは大半これを載せず sessions.start_kind は NULL のまま)。値は state.ts の StartKind。
+   */
+  start_kind: StartKind.optional(),
+  /**
+   * ADR 0014 Phase 3 (run lineage) — resume run が**どの session_id から継続したか** (lineage エッジ)。
+   * provider_session_id と同じ後方互換パターン: **optional**・**projection key には使わない**・欠落可。
+   * この段 (3a) は列と永続経路のみ。sidecar が resume 採番で設定するのは 3b (それまで NULL)。
+   * canonical session_id (別 run) 参照ゆえ raw 文字列 (enum ではない)。
+   */
+  resumed_from_session_id: z.string().optional(),
+  /**
+   * ADR 0014 Phase 3 (run lineage) — この観測 run の**終了種別**
+   * (completed/failed/interrupted/unloaded/cleared/logout/other/unknown)。"unloaded"=Codex unload/suspended。
+   * provider_session_id と同じ後方互換パターン: **optional**・**projection key には使わない**・欠落可。
+   * この段 (3a) は列と永続経路のみ。sidecar が終端で設定するのは 3b (それまで NULL)。値は state.ts の EndKind。
+   */
+  end_kind: EndKind.optional(),
+  /**
+   * ADR 0014 Phase 3 (run lineage) — この run の**再開可能性** (resumable/not_resumable/unknown)。
+   * Phase 1 の直交軸 Continuation を**再利用**した zod enum (Recoverability・新語彙を作らない・単一出所)。
+   * provider_session_id と同じ後方互換パターン: **optional**・**projection key には使わない**・欠落可。
+   * この段 (3a) は列と永続経路のみ。sidecar が終端で設定するのは 3b (それまで NULL)。
+   */
+  recoverability: Recoverability.optional(),
   /**
    * 観測モード (ADR 019ea476 D8)。managed = ActraDeck が起動を所有する PTY/app-server 経路、
    * attach = 起動を所有しない CC を hooks 経由で後付け capture する経路。

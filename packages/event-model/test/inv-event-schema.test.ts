@@ -9,7 +9,14 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { NormalizedEvent, EventPayload, safeParseEvent } from "../src/index.js";
+import {
+  NormalizedEvent,
+  EventPayload,
+  safeParseEvent,
+  StartKind,
+  EndKind,
+  Recoverability,
+} from "../src/index.js";
 import { validEvent } from "./helpers.js";
 
 describe("INV-EVENT-SCHEMA", () => {
@@ -65,6 +72,80 @@ describe("INV-EVENT-SCHEMA", () => {
 
   it("rejects a non-string provider_session_id", () => {
     expect(safeParseEvent(validEvent({ provider_session_id: 123 as never })).success).toBe(false);
+  });
+
+  // --- ADR 0014 Phase 3a: run lineage optional fields (start_kind / resumed_from_session_id /
+  //     end_kind / recoverability)。provider_session_id と同じ後方互換パターン ---
+  it("accepts the 4 lineage optional fields when present and preserves them on parse", () => {
+    const ev = validEvent({
+      start_kind: "resume",
+      resumed_from_session_id: "sess_prev_run",
+      end_kind: "unloaded",
+      recoverability: "resumable",
+    });
+    const res = safeParseEvent(ev);
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.start_kind).toBe("resume");
+      expect(res.data.resumed_from_session_id).toBe("sess_prev_run");
+      expect(res.data.end_kind).toBe("unloaded");
+      expect(res.data.recoverability).toBe("resumable");
+    }
+  });
+
+  it("is backward-compatible: events WITHOUT lineage fields still parse (all optional)", () => {
+    const ev = validEvent();
+    // validEvent は元々 lineage fields を持たない。undefined で通ることを明示。
+    const res = safeParseEvent(ev);
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.start_kind).toBeUndefined();
+      expect(res.data.resumed_from_session_id).toBeUndefined();
+      expect(res.data.end_kind).toBeUndefined();
+      expect(res.data.recoverability).toBeUndefined();
+    }
+  });
+
+  it("round-trips every StartKind enum value", () => {
+    for (const v of StartKind.options) {
+      const res = safeParseEvent(validEvent({ start_kind: v }));
+      expect(res.success).toBe(true);
+      if (res.success) expect(res.data.start_kind).toBe(v);
+    }
+  });
+
+  it("round-trips every EndKind enum value", () => {
+    for (const v of EndKind.options) {
+      const res = safeParseEvent(validEvent({ end_kind: v }));
+      expect(res.success).toBe(true);
+      if (res.success) expect(res.data.end_kind).toBe(v);
+    }
+  });
+
+  it("round-trips every Recoverability enum value", () => {
+    for (const v of Recoverability.options) {
+      const res = safeParseEvent(validEvent({ recoverability: v }));
+      expect(res.success).toBe(true);
+      if (res.success) expect(res.data.recoverability).toBe(v);
+    }
+  });
+
+  it("rejects out-of-enum lineage values (closed enums)", () => {
+    expect(safeParseEvent(validEvent({ start_kind: "rebooted" as never })).success).toBe(false);
+    expect(safeParseEvent(validEvent({ end_kind: "vaporized" as never })).success).toBe(false);
+    expect(safeParseEvent(validEvent({ recoverability: "maybe" as never })).success).toBe(false);
+  });
+
+  it("rejects a non-string resumed_from_session_id", () => {
+    expect(safeParseEvent(validEvent({ resumed_from_session_id: 7 as never })).success).toBe(false);
+  });
+
+  // recoverability は Phase 1 の Continuation を再利用した単一出所 (新語彙を作らない・ADR 0014)。
+  // Recoverability enum の値集合が Continuation 型の union と厳密一致することを固定する。
+  it("Recoverability enum values match the Continuation vocabulary (single source, no drift)", () => {
+    expect([...Recoverability.options].sort()).toEqual(
+      ["resumable", "not_resumable", "unknown"].sort(),
+    );
   });
 
   // provider は slug 開放 (ADR 019f2d2c D1)。未知 slug は受理される

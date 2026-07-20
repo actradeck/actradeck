@@ -190,16 +190,61 @@ export function isFailureTerminalStateValue(state: string | undefined): boolean 
 /**
  * ADR 0014 直交軸 (1/3) — **turn の結果** (セッションの結果ではない)。
  * 正規化 phase (`State`) と独立: 1 つの turn が中断/失敗しても run 自体は継続しうる。
+ *
+ * Phase 3a (ADR 0014・TDA-1 昇格): 姉妹軸 StartKind/EndKind/Recoverability と同じく
+ *   **zod enum を値の唯一の出所**とする (純 TS union から昇格)。ingest-store の DB 読み出し
+ *   gate が許容値集合を手写し (ローカル Set コピー) する drift 源を消し、runtime を単一出所へ
+ *   再利用させるため (`.safeParse`/`.options` を共有・security-gate-reuse-canonical-parser)。
+ *   **値は不変**: completed / failed / interrupted。`LastTurnOutcome` 型は infer に統一する。
  */
-export type LastTurnOutcome = "completed" | "failed" | "interrupted";
+export const LastTurnOutcome = z.enum(["completed", "failed", "interrupted"]);
+export type LastTurnOutcome = z.infer<typeof LastTurnOutcome>;
 
 /**
  * ADR 0014 直交軸 (2/3) — **再開可能性** (recoverability)。
  * terminal 状態に到達したとき、その run/会話を再開できるかの evidence。
  * `resumable` = provider が再開手段を持つ (Codex unload 等)。`not_resumable` = 正常終了。
  * `unknown` = 判定不能 (失敗/中断で証跡が無い)。
+ *
+ * Phase 3 (ADR 0014): NormalizedEvent.recoverability / sessions.recoverability 列の正典 enum。
+ *   **recoverability 用に新語彙を作らず Continuation を再利用**する (軸の二重定義回避・単一出所)。
+ *   zod enum `Recoverability` を値の唯一の出所とし、`Continuation` 型はその infer に統一する
+ *   (値は不変: resumable / not_resumable / unknown。既存 TERMINAL_CONTINUATION 等はそのまま)。
  */
-export type Continuation = "resumable" | "not_resumable" | "unknown";
+export const Recoverability = z.enum(["resumable", "not_resumable", "unknown"]);
+export type Continuation = z.infer<typeof Recoverability>;
+
+/**
+ * ADR 0014 Phase 3 (run lineage) — **run の開始種別**。1 つの観測 run がどう始まったか。
+ * `fresh` = 新規起動 (Claude SessionStart source=startup 等)。`resume` = 既存会話の再開
+ * (provider の resume・別 session_id + lineage)。`recovery` = 異常終了からの復旧起動。
+ * `clear` = 会話クリア後の再開 (source=clear)。`unknown` = 判定不能 (既定・over-claim しない)。
+ *
+ * この段 (3a) では列と検証を用意するのみ。sidecar が distinct に採番するのは 3b。
+ */
+export const StartKind = z.enum(["fresh", "resume", "recovery", "clear", "unknown"]);
+export type StartKind = z.infer<typeof StartKind>;
+
+/**
+ * ADR 0014 Phase 3 (run lineage) — **run の終了種別**。observed run がどう終わったか。
+ * `completed` = 正常完了。`failed` = 失敗。`interrupted` = 中断。
+ * `unloaded` = provider の unload/suspend (Codex thread/closed=一時休止・再開可・delete ではない)。
+ * `cleared` = 会話クリアで終端。`logout` = 認証喪失/ログアウト。`other` = 上記以外の明示終端。
+ * `unknown` = 判定不能 (既定・over-claim しない)。
+ *
+ * この段 (3a) では列と検証を用意するのみ。sidecar が distinct に採番するのは 3b。
+ */
+export const EndKind = z.enum([
+  "completed",
+  "failed",
+  "interrupted",
+  "unloaded",
+  "cleared",
+  "logout",
+  "other",
+  "unknown",
+]);
+export type EndKind = z.infer<typeof EndKind>;
 
 /**
  * ADR 0014 直交軸 (3/3) — **終端の根拠**。どうやって terminal と判定したか。

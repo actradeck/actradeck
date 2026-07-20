@@ -14,7 +14,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { newEventId } from "@actradeck/event-model";
+import { LastTurnOutcome, newEventId } from "@actradeck/event-model";
 import { Pool } from "pg";
 
 import { IngestStore } from "../src/ingest-store.js";
@@ -881,6 +881,370 @@ describe.skipIf(!reachable)("INV-IDEMPOTENCY / INV-EVENT-ORDER (real Postgres)",
       // raw secret 形が subject に絶対に出ないこと (load-bearing 安全性)。
       expect(d?.current_action_subject).not.toContain("ghp_RAWSECRETMUSTNOTLEAK");
       expect(d?.current_action_subject).not.toMatch(/ghp_[A-Za-z0-9]{20,}/);
+    });
+  });
+
+  // --- ADR 0014 Phase 3a (run lineage + last_turn_outcome 永続化・decision 019f8032) -----------
+
+  describe("INV-LAST-TURN-OUTCOME-PERSIST (real PG round-trip) — TDA-2 解消", () => {
+    it("turn.failed 後に別 turn を跨いでも last_turn_outcome='failed' が persisted される (live/replay 対称)", async () => {
+      // TDA-2 の falsifiable 担保: readProjection が last_turn_outcome を DB から復元しないと
+      //   (旧 `last_turn_outcome: undefined` 固定)、ingest#3 の prev が undefined になり sticky が
+      //   壊れて outcome が失われる → 本テスト赤化 (mutation 反証)。
+      const store = new IngestStore({ pool });
+      const sid = newSession("sess_lto_persist");
+      const base = Date.now();
+      // #1 起動 (starting)。
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "starting",
+          event_type: "session.started",
+          timestamp: iso(base, 0),
+        }),
+      );
+      // #2 turn.failed → last_turn_outcome='failed'。state は terminal に落とさない (Phase1 修正)。
+      const r2 = await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "idle",
+          event_type: "turn.failed",
+          timestamp: iso(base, 1_000),
+        }),
+      );
+      expect(r2.projection.last_turn_outcome).toBe("failed");
+      // 永続列も 'failed'。
+      const after2 = await pool.query(
+        `SELECT last_turn_outcome FROM session_state WHERE session_id = $1`,
+        [sid],
+      );
+      expect(after2.rows[0].last_turn_outcome).toBe("failed");
+
+      // #3 新しい turn.started (別 ingest ゆえ prev は DB から読み戻す)。outcome は turn.failed/
+      //   completed 以外では sticky = 前値保持。DB から 'failed' を復元できて初めて維持される。
+      const r3 = await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "running.model_wait",
+          event_type: "turn.started",
+          timestamp: iso(base, 2_000),
+        }),
+      );
+      // 凍結されず正常 projection (受入#1)。
+      expect(r3.invalidTransition).toBe(false);
+      expect(r3.projection.state).toBe("running.model_wait");
+      // ★ TDA-2: sticky な last_turn_outcome が DB round-trip を越えて維持される。
+      expect(r3.projection.last_turn_outcome).toBe("failed");
+      const after3 = await pool.query(
+        `SELECT state, last_turn_outcome FROM session_state WHERE session_id = $1`,
+        [sid],
+      );
+      expect(after3.rows[0].state).toBe("running.model_wait");
+      expect(after3.rows[0].last_turn_outcome).toBe("failed");
+    });
+
+    it("turn.completed で last_turn_outcome='completed' が persisted され、no-op 再送でも一致する", async () => {
+      const store = new IngestStore({ pool });
+      const sid = newSession("sess_lto_completed");
+      const base = Date.now();
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "running.model_wait",
+          event_type: "turn.started",
+          timestamp: iso(base, 0),
+        }),
+      );
+      const done = makeEvent({
+        session_id: sid,
+        state: "idle",
+        event_type: "turn.completed",
+        timestamp: iso(base, 1_000),
+      });
+      const r1 = await store.ingest(done);
+      expect(r1.inserted).toBe(true);
+      expect(r1.projection.last_turn_outcome).toBe("completed");
+      // 冪等 no-op 再送は persisted state (readPersistedState) を読み、同値を返す。
+      const r2 = await store.ingest(done);
+      expect(r2.inserted).toBe(false);
+      expect(r2.projection.last_turn_outcome).toBe("completed");
+      const { rows } = await pool.query(
+        `SELECT last_turn_outcome FROM session_state WHERE session_id = $1`,
+        [sid],
+      );
+      expect(rows[0].last_turn_outcome).toBe("completed");
+    });
+
+    it("last_turn_outcome を持たない run は NULL / undefined (後方互換・旧行相当)", async () => {
+      const store = new IngestStore({ pool });
+      const sid = newSession("sess_lto_none");
+      const r = await store.ingest(
+        makeEvent({ session_id: sid, state: "starting", event_type: "session.started" }),
+      );
+      expect(r.projection.last_turn_outcome).toBeUndefined();
+      const { rows } = await pool.query(
+        `SELECT last_turn_outcome FROM session_state WHERE session_id = $1`,
+        [sid],
+      );
+      expect(rows[0].last_turn_outcome).toBeNull();
+    });
+  });
+
+  describe("INV-LAST-TURN-OUTCOME-PERSIST (closed-enum read gate — QA-2 / TDA-1)", () => {
+    it("QA-2 DRIFT-WITNESS: out-of-enum last_turn_outcome は read gate で undefined 化 (raw 素通し禁止・readPersistedState + readProjection 両経路)", async () => {
+      // restore-from-backup / ops backfill / gate デプロイ前の旧行 経由で out-of-enum 値が
+      //   session_state.last_turn_outcome に紛れても、read 層 (toLastTurnOutcome) が closed-enum
+      //   gate で undefined へ倒す。gate を外し raw 素通しにすると 'vaporized' が projection へ
+      //   漏れて本テストが RED (mutation 反証)。
+      const store = new IngestStore({ pool });
+      const sid = newSession("sess_lto_drift");
+      const ev = makeEvent({ session_id: sid, state: "starting", event_type: "session.started" });
+      await store.ingest(ev);
+      // out-of-enum 値を列へ直接注入。
+      await pool.query(
+        `UPDATE session_state SET last_turn_outcome = 'vaporized' WHERE session_id = $1`,
+        [sid],
+      );
+      // (a) readPersistedState 経路: 同一 event_id 再送 (no-op) は persisted state を読む。
+      const noop = await store.ingest(ev);
+      expect(noop.inserted).toBe(false);
+      expect(noop.projection.last_turn_outcome).toBeUndefined();
+      // (b) readProjection 経路: 新規イベント (sticky heartbeat) の prev 読み出しも gate で undefined。
+      //   sticky ゆえ最終 projection も undefined、永続列も NULL へ収束する。
+      const fresh = await store.ingest(
+        makeEvent({
+          session_id: sid,
+          event_type: "heartbeat",
+          timestamp: iso(Date.now(), 1),
+          payload: { kind: "heartbeat", process_alive: true },
+        }),
+      );
+      expect(fresh.inserted).toBe(true);
+      expect(fresh.projection.last_turn_outcome).toBeUndefined();
+      const { rows } = await pool.query(
+        `SELECT last_turn_outcome FROM session_state WHERE session_id = $1`,
+        [sid],
+      );
+      expect(rows[0].last_turn_outcome).toBeNull();
+    });
+
+    it("TDA-1: 全 LastTurnOutcome enum 値 (completed/failed/interrupted) が read gate を往復する (enum 昇格の網羅回帰・inv-event-schema の StartKind/EndKind 全値往復と同型)", async () => {
+      // 値の出所は event-model の runtime enum (`LastTurnOutcome.options`)。ingest-store の gate が
+      //   この enum を再利用する (手写し Set 廃止) ため、enum に値が増えたら本テストが自動網羅する。
+      const store = new IngestStore({ pool });
+      for (const v of LastTurnOutcome.options) {
+        const sid = newSession(`sess_lto_rt_${v}`);
+        const ev = makeEvent({
+          session_id: sid,
+          state: "starting",
+          event_type: "session.started",
+        });
+        await store.ingest(ev);
+        await pool.query(`UPDATE session_state SET last_turn_outcome = $2 WHERE session_id = $1`, [
+          sid,
+          v,
+        ]);
+        // no-op 再送 → readPersistedState (toLastTurnOutcome) が正典値をそのまま復元する。
+        const noop = await store.ingest(ev);
+        expect(noop.inserted).toBe(false);
+        expect(noop.projection.last_turn_outcome).toBe(v);
+      }
+    });
+  });
+
+  describe("INV-SESSIONS-LINEAGE-PERSIST (real PG round-trip) — sticky/last-non-null", () => {
+    it("provider_session_id/start_kind/resumed_from は first-wins、end_kind/recoverability は last-non-null-wins", async () => {
+      const store = new IngestStore({ pool });
+      const sid = newSession("sess_lineage");
+      const base = Date.now();
+      // #1 起点情報を載せた session.started。end 系はまだ無い。
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "starting",
+          event_type: "session.started",
+          timestamp: iso(base, 0),
+          provider_session_id: "prov-sess-abc",
+          start_kind: "resume",
+          resumed_from_session_id: "sess_prev",
+        }),
+      );
+      const after1 = await pool.query(
+        `SELECT provider_session_id, start_kind, resumed_from_session_id, end_kind, recoverability
+           FROM sessions WHERE session_id = $1`,
+        [sid],
+      );
+      expect(after1.rows[0].provider_session_id).toBe("prov-sess-abc");
+      expect(after1.rows[0].start_kind).toBe("resume");
+      expect(after1.rows[0].resumed_from_session_id).toBe("sess_prev");
+      expect(after1.rows[0].end_kind).toBeNull();
+      expect(after1.rows[0].recoverability).toBeNull();
+
+      // #2 起点情報を「別値 / 欠落」で載せた後続イベント + 終了情報を確定。
+      //   first-wins: provider_session_id/start_kind/resumed_from は #1 の値を保持 (上書きしない)。
+      //   last-non-null-wins: end_kind/recoverability が確定する。
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "idle",
+          event_type: "session.ended",
+          timestamp: iso(base, 1_000),
+          provider_session_id: "prov-sess-CHANGED", // 無視される (first-wins)
+          start_kind: "fresh", // 無視される (first-wins)
+          end_kind: "unloaded",
+          recoverability: "resumable",
+        }),
+      );
+      const after2 = await pool.query(
+        `SELECT provider_session_id, start_kind, resumed_from_session_id, end_kind, recoverability
+           FROM sessions WHERE session_id = $1`,
+        [sid],
+      );
+      // first-wins 起点情報は不変。
+      expect(after2.rows[0].provider_session_id).toBe("prov-sess-abc");
+      expect(after2.rows[0].start_kind).toBe("resume");
+      expect(after2.rows[0].resumed_from_session_id).toBe("sess_prev");
+      // last-non-null-wins 終了情報が確定。
+      expect(after2.rows[0].end_kind).toBe("unloaded");
+      expect(after2.rows[0].recoverability).toBe("resumable");
+
+      // #3 終了情報を欠落させた後続イベントで end_kind/recoverability を NULL 上書きしない。
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          event_type: "heartbeat",
+          timestamp: iso(base, 2_000),
+          payload: { kind: "heartbeat", process_alive: true },
+        }),
+      );
+      const after3 = await pool.query(
+        `SELECT provider_session_id, end_kind, recoverability FROM sessions WHERE session_id = $1`,
+        [sid],
+      );
+      expect(after3.rows[0].provider_session_id).toBe("prov-sess-abc");
+      expect(after3.rows[0].end_kind).toBe("unloaded"); // 欠落で戻さない
+      expect(after3.rows[0].recoverability).toBe("resumable");
+    });
+
+    it("QA-1: COALESCE 向き弁別 — end_kind/recoverability=last-non-null-wins (2 つの異なる非NULL値)、resumed_from=first-wins (別値でも先勝ち)", async () => {
+      // 上の第1ケースは end_kind/recoverability の #2 が「NULL からの初出」ゆえ
+      //   COALESCE(NULL, x) が両向き同値で **向きを弁別しない**。resumed_from も #3 で欠落のみ。
+      //   ここでは 2 つの異なる非NULL値 / 別値を与えて COALESCE の向きそのものを falsify する。
+      const store = new IngestStore({ pool });
+      const sid = newSession("sess_lineage_dir");
+      const base = Date.now();
+      // #1 終了系の 1 回目 (非NULL) と resumed_from を確定。
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "starting",
+          event_type: "session.started",
+          timestamp: iso(base, 0),
+          resumed_from_session_id: "sess_prev",
+          end_kind: "interrupted",
+          recoverability: "unknown",
+        }),
+      );
+      const after1 = await pool.query(
+        `SELECT resumed_from_session_id, end_kind, recoverability FROM sessions WHERE session_id = $1`,
+        [sid],
+      );
+      expect(after1.rows[0].resumed_from_session_id).toBe("sess_prev");
+      expect(after1.rows[0].end_kind).toBe("interrupted");
+      expect(after1.rows[0].recoverability).toBe("unknown");
+
+      // #2 すべて **別の非NULL値** で更新する。
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "idle",
+          event_type: "session.ended",
+          timestamp: iso(base, 1_000),
+          resumed_from_session_id: "sess_OTHER", // first-wins ゆえ無視される
+          end_kind: "unloaded",
+          recoverability: "resumable",
+        }),
+      );
+      const after2 = await pool.query(
+        `SELECT resumed_from_session_id, end_kind, recoverability FROM sessions WHERE session_id = $1`,
+        [sid],
+      );
+      // last-non-null-wins: 後者 (unloaded/resumable) が残る。
+      //   ★ 実装を first-wins (COALESCE(sessions.x, EXCLUDED.x)) へ反転すると前者
+      //     (interrupted/unknown) が残り、この 2 assert が RED になる (= 向きを弁別している)。
+      expect(after2.rows[0].end_kind).toBe("unloaded");
+      expect(after2.rows[0].recoverability).toBe("resumable");
+      // first-wins: 別値 sess_OTHER を与えても #1 の sess_prev が残る。
+      //   ★ last-wins (COALESCE(EXCLUDED.x, sessions.x)) へ反転すると sess_OTHER になり RED。
+      expect(after2.rows[0].resumed_from_session_id).toBe("sess_prev");
+    });
+
+    it("QA-2: nonEmpty — provider_session_id='' (空文字) は NULL 化される (permission_mode の書式に倣う)", async () => {
+      const store = new IngestStore({ pool });
+      const sid = newSession("sess_lineage_empty");
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          state: "starting",
+          event_type: "session.started",
+          provider_session_id: "", // 空文字 → nonEmpty で null 化 (ingest-store.ts nonEmpty)
+        }),
+      );
+      const { rows } = await pool.query(
+        `SELECT provider_session_id FROM sessions WHERE session_id = $1`,
+        [sid],
+      );
+      expect(rows[0].provider_session_id).toBeNull();
+    });
+
+    it("lineage 列を持たない run は 5 列すべて NULL (後方互換・3b まで大半 NULL)", async () => {
+      const store = new IngestStore({ pool });
+      const sid = newSession("sess_lineage_none");
+      await store.ingest(
+        makeEvent({ session_id: sid, state: "starting", event_type: "session.started" }),
+      );
+      const { rows } = await pool.query(
+        `SELECT provider_session_id, start_kind, resumed_from_session_id, end_kind, recoverability
+           FROM sessions WHERE session_id = $1`,
+        [sid],
+      );
+      expect(rows[0].provider_session_id).toBeNull();
+      expect(rows[0].start_kind).toBeNull();
+      expect(rows[0].resumed_from_session_id).toBeNull();
+      expect(rows[0].end_kind).toBeNull();
+      expect(rows[0].recoverability).toBeNull();
+    });
+
+    it("provider_session_id で lineage 検索できる (index 経路・NULL 行は非対象)", async () => {
+      const store = new IngestStore({ pool });
+      const provId = `prov-lineage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const sidA = newSession("sess_lineage_idxA");
+      const sidB = newSession("sess_lineage_idxB");
+      await store.ingest(
+        makeEvent({
+          session_id: sidA,
+          state: "starting",
+          event_type: "session.started",
+          provider_session_id: provId,
+        }),
+      );
+      await store.ingest(
+        makeEvent({
+          session_id: sidB,
+          state: "starting",
+          event_type: "session.started",
+          provider_session_id: provId,
+        }),
+      );
+      // 同一 provider 会話に属する 2 つの観測 run を lineage キーで束ねられる。
+      const { rows } = await pool.query(
+        `SELECT session_id FROM sessions WHERE provider_session_id = $1 ORDER BY session_id`,
+        [provId],
+      );
+      const found = rows.map((r) => r.session_id as string);
+      expect(found).toContain(sidA);
+      expect(found).toContain(sidB);
+      expect(found).toHaveLength(2);
     });
   });
 });
