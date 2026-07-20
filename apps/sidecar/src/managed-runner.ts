@@ -327,10 +327,12 @@ export function startManagedClaude(opts: ManagedRunnerOptions): ManagedSession {
       // 発生時刻を**今**固定 (hold されても観測時刻が timestamp に乗る)。
       const observedAt = new Date().toISOString();
       // heartbeat は周期的なので有界化時は最新優先で間引いてよい (category="heartbeat")。
-      opts.identity.emitMonitoring("heartbeat", (canonicalSessionId) => {
+      opts.identity.emitMonitoring("heartbeat", (canonicalSessionId, providerSessionId) => {
         opts.sink.emit(
           buildEvent({
             session_id: canonicalSessionId,
+            // ADR 0014 D4: 監視イベントにも provider raw id を populate (従来 NULL)。
+            ...(providerSessionId !== undefined ? { provider_session_id: providerSessionId } : {}),
             event_type: "heartbeat",
             timestamp: observedAt,
             ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),

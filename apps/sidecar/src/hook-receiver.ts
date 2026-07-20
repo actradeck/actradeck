@@ -231,35 +231,55 @@ export class HookReceiver {
       return;
     }
 
-    // ADR 019e9462: 検証済み hook の session_id を learn-once で canonical 確定する。
-    // **emit より前**に呼ぶことで、初確定時に held 監視イベント (heartbeat/diff/output) が
-    // canonical id で発生時刻順 flush され、その後に本 hook イベントが ingest される
-    // (順序: 確定 → buffer flush → hook ingest)。learn は idempotent (後勝ちしない)。
+    // ADR 019e9462 / ADR 0014 Phase 3b-1: 検証済み hook の session_id を RunIdentity で解決する。
+    // **emit より前**に呼ぶことで、初確定時に held 監視イベント (heartbeat/diff/output) が canonical id で
+    // 発生時刻順 flush され、その後に本 hook イベントが ingest される (順序: 確定 → flush → hook ingest)。
     //
-    // Attach multiplex (ADR 019ea476 D6): resolveIdentity があれば hook の session_id で
-    // per-session identity を解決 (初出 entry 生成 / GitWatcher 起動は registry 側の副作用)。
-    // 解決した identity を learn する (explicitSessionId 即確定なので learn は no-op だが、
-    // registry の lastHookAt 更新と GitWatcher 起動の起点になる)。
-    if (this.resolveIdentity !== undefined) {
-      const id = this.resolveIdentity(input.session_id, input.cwd);
-      id.learn(input.session_id);
-    } else {
-      this.identity?.learn(input.session_id);
+    // Attach multiplex (ADR 019ea476 D6): resolveIdentity があれば hook の session_id で per-session
+    // identity を解決 (初出 entry 生成 / GitWatcher 起動は registry 側の副作用)。
+    //
+    // run 境界 (ADR 0014 D2): onHookSession が provider id 変化 / terminal-reopen を判定し、この hook を
+    // どの canonical run へ ingest するか (start_kind / resumed_from を run 起点に載せるか) を返す。
+    // 監視イベントは境界を駆動しない (D3・分裂防止)。
+    const identity =
+      this.resolveIdentity !== undefined
+        ? this.resolveIdentity(input.session_id, input.cwd)
+        : this.identity;
+    let lineage: NormalizeContext = {};
+    if (identity !== undefined) {
+      const boundary = identity.onHookSession(input.session_id, {
+        isSessionStart: input.hook_event_name === "SessionStart",
+        ...(typeof input.source === "string" ? { source: input.source } : {}),
+      });
+      lineage = {
+        // D5: 全候補の session_id は canonical run id、provider_session_id は provider raw id。
+        canonicalSessionId: boundary.runId,
+        providerSessionId: input.session_id,
+        // D4: 境界 (or generation 0) の run 起点にのみ start_kind / resumed_from を載せる。
+        ...(boundary.startKind !== undefined ? { runStartKind: boundary.startKind } : {}),
+        ...(boundary.resumedFrom !== undefined
+          ? { resumedFromSessionId: boundary.resumedFrom }
+          : {}),
+      };
     }
 
     this.onHook?.(input.hook_event_name);
 
     // 承認ゲート: PermissionRequest / PreToolUse は承認ブリッジへ。
     if (input.hook_event_name === "PermissionRequest" || input.hook_event_name === "PreToolUse") {
-      await this.handleApprovalGate(input, res);
+      await this.handleApprovalGate(input, res, lineage);
       return;
     }
 
     // 通常 hook: 正規化 → sink。応答は空 (非ブロッキング)。
-    this.ingest(input);
-    // SessionEnd は session.ended を ingest した**後**に reap を促す (event 永続化 → presence release
-    // の順序を保つ・ADR 019eb365)。registry が GitWatcher を止め hello 再送で connected を落とす。
+    this.ingest(input, lineage);
+    // ADR 0014 D2#2: SessionEnd を ingest した後に run を terminal 化する (以後、同一 provider id の
+    // 再来は terminal-reopen として新 run を切る)。managed は静的 identity ゆえ跨いで有効。attach は
+    // 直後に reap で identity が破棄されるため best-effort (次 hook は fresh gen0・親未観測 = lineage 無し)。
     if (input.hook_event_name === "SessionEnd") {
+      identity?.markRunTerminal();
+      // SessionEnd は session.ended を ingest した**後**に reap を促す (event 永続化 → presence release
+      // の順序を保つ・ADR 019eb365)。registry が GitWatcher を止め hello 再送で connected を落とす。
       this.onSessionEnd?.(input.session_id);
     }
     this.respond(res, 200, {});
@@ -277,17 +297,23 @@ export class HookReceiver {
    * 承認ゲート: 高リスク操作は UI 承認を待つ。PermissionRequest を正本とし、
    * PreToolUse は high-risk のみゲート (それ以外は defer して通常フローへ)。
    */
-  private async handleApprovalGate(input: HookCommonInput, res: ServerResponse): Promise<void> {
+  private async handleApprovalGate(
+    input: HookCommonInput,
+    res: ServerResponse,
+    lineage: NormalizeContext = {},
+  ): Promise<void> {
     // 承認ブリッジが採番した request_id を捕捉し、解決イベント (resolved) にも載せて
     // reducer が pending_approvals から該当 request_id を除去できるようにする (ADR 019e9999)。
     // low-risk (defer) では emitRequest が呼ばれず undefined のまま (resolved も emit しない)。
     let capturedRequestId: string | undefined;
     const decision = await this.approvalBridge.requestApproval(input, (requestId, reason) => {
       capturedRequestId = requestId;
-      // 承認要求イベントを正規化して emit (UI が承認カードを出せる)。
+      // 承認要求イベントを正規化して emit (UI が承認カードを出せる)。ADR 0014: lineage (canonical /
+      // provider_session_id / run 起点) を全 ingest に相乗りさせる (承認カードも同一 run へ属す)。
       // 自動ガード (ADR 019ecc70 D4): guard 理由 (trigger / secret_kinds) を ingest へ渡し、
       // normalize が tool.permission.requested payload に載せる。INV-AUTOGUARD-NO-RAW: kind 名のみ。
       this.ingest(input, {
+        ...lineage,
         approvalRequestId: requestId,
         guardTrigger: reason.trigger,
         ...(reason.secretKinds.length > 0 ? { guardSecretKinds: reason.secretKinds } : {}),
@@ -308,7 +334,7 @@ export class HookReceiver {
     if (decision.behavior === "defer") {
       // PreToolUse は payload を normalize して観測 (command.started 等) する。
       // PermissionRequest の defer はそのまま通常フローへ (waiting.approval を出さない)。
-      if (input.hook_event_name === "PreToolUse") this.ingest(input);
+      if (input.hook_event_name === "PreToolUse") this.ingest(input, lineage);
       this.respond(res, 200, {});
       return;
     }
@@ -324,6 +350,7 @@ export class HookReceiver {
       // 区別不能だった証跡の痩せを解消)。over-allow ではない (人間が同一署名を1回明示同意済み)。
       if (input.hook_event_name === "PreToolUse")
         this.ingest(input, {
+          ...lineage,
           autoAllowed: true,
           // ADR 019ee0c0: 再起動跨ぎ disk grant 由来の auto-allow は persist_grant で識別する。
           ...(decision.persistGrant === true ? { persistGrant: true } : {}),
@@ -355,7 +382,9 @@ export class HookReceiver {
     // metrics のデフォルトを一箇所 (T1 正典経由) に集約し、手組みリテラルの drift を防ぐ。
     this.sink.emit(
       buildEvent({
-        session_id: input.session_id,
+        // ADR 0014 D4/D5: canonical run id + provider raw id を載せる (session.ended 等と同一 run へ属す)。
+        session_id: lineage.canonicalSessionId ?? input.session_id,
+        provider_session_id: lineage.providerSessionId ?? input.session_id,
         event_type: "tool.permission.resolved",
         state: allowed ? "running.tool_preparing" : "running.model_wait",
         ...(this.captureMode !== undefined ? { capture_mode: this.captureMode } : {}),

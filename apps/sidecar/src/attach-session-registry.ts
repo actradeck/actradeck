@@ -99,9 +99,17 @@ export class AttachSessionRegistry {
     }
   }
 
-  /** 観測中の全 attach session の canonical id (hello.session_ids 用)。 */
+  /**
+   * 観測中の全 attach session の **canonical run id** (hello.session_ids 用・INV-ATTACH-CANONICAL-ADVERTISED)。
+   *
+   * ADR 0014 Phase 3b-1 (D5): Map key は **provider session id** (不変・INV-ATTACH-MULTIPLEX の相互汚染
+   * 防止) だが、hello は各 entry の identity が持つ **canonical run id** を広告する (provider id でなく)。
+   * これで relay 所有 / interrupt scope が run を追う (INV-REALTIME-RELAY-SCOPE と整合)。common case は
+   * canonical === provider id === Map key ゆえ値は一致するが、意味論として canonical を出所にする
+   * (terminal-reopen synthetic mint で乖離しうる形へ将来拡張しても hello が run を指し続ける)。
+   */
   sessionIds(): string[] {
-    return [...this.sessions.keys()];
+    return [...this.sessions.values()].map((s) => s.identity.currentRunId());
   }
 
   /** 観測中の session 数 (status 表示用)。 */
