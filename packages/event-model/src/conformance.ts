@@ -30,6 +30,14 @@
  * lifecycle only. **Restart-RECOVERY fidelity is NOT provable by this checker** (it never restarts a
  * process); a separate integration harness with real process restarts covers that (ADR 0014 Phase 2).
  *
+ * NOTE (local-dev tool): findings are meant for an adapter author validating their OWN JSONL on their
+ * OWN machine (`scripts/check-conformance.mjs` reads only an operator-named file/stdin — no network).
+ * A finding `message` may echo adapter-controlled, non-secret structural metadata (event_type, the
+ * payload `kind` discriminator, request_id, session_id, event_id) verbatim; it never echoes payload
+ * body content (`canonicalize` is compared internally and discarded, never emitted). If this checker
+ * is ever exposed as a hosted endpoint that renders findings across a trust boundary, re-sanitize
+ * those adapter-controlled fields before display (SEC-L1, ADR 0014 Phase 2).
+ *
  * Severity split: `error` findings are contract breaks (the harness fails); `warning` findings
  * are contract-consistent and do NOT fail the harness — a duplicate `event_id` with identical
  * content (a true retry, §3.3), a session that emits no `seq` (forgoes drop detection), or an
@@ -376,20 +384,23 @@ function seqFindings(sessionId: string, st: SessionState, findings: ConformanceF
  * keys makes it order-insensitive; the input is already schema-validated with defaults applied.
  */
 function canonicalize(ev: NormalizedEvent): string {
-  return JSON.stringify(ev, replacerSortKeys(ev));
+  return JSON.stringify(ev, sortKeysReplacer);
 }
 
-/** Build a JSON.stringify replacer that emits object keys in sorted order (recursively). */
-function replacerSortKeys(_root: unknown): (key: string, value: unknown) => unknown {
-  return (_key, value) => {
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      const obj = value as Record<string, unknown>;
-      const sorted: Record<string, unknown> = {};
-      for (const k of Object.keys(obj).sort()) sorted[k] = obj[k];
-      return sorted;
-    }
-    return value;
-  };
+/**
+ * JSON.stringify replacer that re-emits every object with its keys in sorted order (recursively;
+ * arrays keep their order). This makes `canonicalize` order-insensitive, so a retry that serializes
+ * the same content with a different key order is recognized as identical (a duplicate warning), not
+ * a collision. Load-bearing for the retry-vs-collision split — pinned by INV-CONFORMANCE.
+ */
+function sortKeysReplacer(_key: string, value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const k of Object.keys(obj).sort()) sorted[k] = obj[k];
+    return sorted;
+  }
+  return value;
 }
 
 /** First zod issue as a compact "path: message" string (never echoes the whole event). */

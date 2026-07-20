@@ -128,6 +128,36 @@ describe("INV-CONFORMANCE: adapter stream conformance checker", () => {
     expect(r.findings.map((f) => f.rule)).not.toContain("event-id-duplicate");
   });
 
+  it("a retry with REORDERED payload keys is a duplicate, not a collision (canonicalize sorts keys)", () => {
+    // QA-1 falsifier: the retry-vs-collision split hinges on canonicalize() being order-insensitive
+    // (it sorts object keys). A real adapter may serialize the same payload with a different key
+    // order on retry — that is identical CONTENT and must stay a `event-id-duplicate` WARNING. If the
+    // key-sort in `sortKeysReplacer` were removed, the two would stringify differently and this would
+    // flip to an `event-id-collision` ERROR → this test goes RED. (The other retry tests re-send
+    // byte-identical payloads, so they would NOT catch a dropped sort — this one is the guard.)
+    const id = newEventId();
+    const base = {
+      session_id: "s1",
+      seq: 0,
+      event_id: id,
+      event_type: "command.started",
+      timestamp: "2026-07-18T00:00:00.000Z",
+    };
+    const first = ev({
+      ...base,
+      payload: { kind: "command.started", command: "echo hi", request_id: "tu:1" },
+    });
+    // same content, keys in a DIFFERENT insertion order:
+    const retryReordered = ev({
+      ...base,
+      payload: { request_id: "tu:1", kind: "command.started", command: "echo hi" },
+    });
+    const r = checkConformance([first, retryReordered]);
+    expect(r.errors, JSON.stringify(r.findings)).toBe(0);
+    expect(r.findings.map((f) => f.rule)).toContain("event-id-duplicate");
+    expect(r.findings.map((f) => f.rule)).not.toContain("event-id-collision");
+  });
+
   it("flags a per-session timestamp regression (emission-order non-decreasing)", () => {
     const stream = [
       ev({ session_id: "s1", seq: 0, timestamp: "2026-07-18T00:00:05.000Z" }),

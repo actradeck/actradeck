@@ -84,7 +84,7 @@ describe("cmdConformance — human report", () => {
     expect(f.out.join("\n")).toMatch(/PASS —/);
   });
 
-  it("FAIL / exit 1 and reports every error class (incl. an event_id collision)", async () => {
+  it("FAIL / exit 1 and reports representative error classes (incl. an event_id collision)", async () => {
     // payload-kind-mismatch (ev0) · timestamp-regression (ev2 has an earlier ts) · schema (ev3 bad
     // id) · seq-not-contiguous (0,2,3) are ERRORS. ev2 also reuses id1 but with DIFFERENT content
     // (heartbeat vs turn.completed) — that is an event-id-collision ERROR (a distinct event on one
