@@ -43,8 +43,15 @@ export {
   TERMINAL_EVIDENCE_DEFAULT,
   terminalContinuation,
   terminalEvidenceFor,
+  // ADR 0014 Phase 3 (run lineage) — recoverability は Continuation を再利用した zod enum。
+  Recoverability,
+  StartKind,
+  EndKind,
+  // ADR 0014 Phase 3a (TDA-1 昇格): LastTurnOutcome も zod enum を値の単一出所として value export
+  //   する (ingest-store gate が .safeParse/.options を再利用・手写し Set 廃止)。
+  LastTurnOutcome,
 } from "./state.js";
-export type { LastTurnOutcome, Continuation, TerminalEvidence } from "./state.js";
+export type { Continuation, TerminalEvidence } from "./state.js";
 
 // event types
 export { EventType, ALL_EVENT_TYPES } from "./event-type.js";

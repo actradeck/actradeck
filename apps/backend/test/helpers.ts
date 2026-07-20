@@ -31,6 +31,24 @@ export interface MakeEventOverrides {
   redaction_count_by_kind?: Record<string, number>;
   /** per-session seq (ADR 019f4cdb Phase2・silent-drop 下限検知)。省略時は未指定 (= 検知対象外)。 */
   seq?: number;
+  /** ADR 0014 Phase 3a: provider 発行 raw session id (run lineage)。省略時は未指定 (= NULL)。 */
+  provider_session_id?: string;
+  /** ADR 0014 Phase 3a: run 開始種別 (StartKind)。省略時は未指定 (= NULL)。 */
+  start_kind?: "fresh" | "resume" | "recovery" | "clear" | "unknown";
+  /** ADR 0014 Phase 3a: resume 元 session_id (lineage エッジ)。省略時は未指定 (= NULL)。 */
+  resumed_from_session_id?: string;
+  /** ADR 0014 Phase 3a: run 終了種別 (EndKind)。省略時は未指定 (= NULL)。 */
+  end_kind?:
+    | "completed"
+    | "failed"
+    | "interrupted"
+    | "unloaded"
+    | "cleared"
+    | "logout"
+    | "other"
+    | "unknown";
+  /** ADR 0014 Phase 3a: 再開可能性 (Recoverability=Continuation 再利用)。省略時は未指定 (= NULL)。 */
+  recoverability?: "resumable" | "not_resumable" | "unknown";
 }
 
 /**
@@ -58,6 +76,13 @@ export function makeEvent(o: MakeEventOverrides = {}): NormalizedEvent {
   if (o.redaction_count_by_kind !== undefined)
     input.redaction_count_by_kind = o.redaction_count_by_kind;
   if (o.seq !== undefined) input.seq = o.seq;
+  // ADR 0014 Phase 3a: run lineage フィールド (optional・省略時は未指定)。
+  if (o.provider_session_id !== undefined) input.provider_session_id = o.provider_session_id;
+  if (o.start_kind !== undefined) input.start_kind = o.start_kind;
+  if (o.resumed_from_session_id !== undefined)
+    input.resumed_from_session_id = o.resumed_from_session_id;
+  if (o.end_kind !== undefined) input.end_kind = o.end_kind;
+  if (o.recoverability !== undefined) input.recoverability = o.recoverability;
   return parseEvent(input);
 }
 
