@@ -90,6 +90,13 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
   (error/warning per the capability manifest).
 - Restart-recovery is NOT proven by the conformance checker alone; a separate integration
   harness with real process restarts covers it.
+- Accepted-risk (QA-4): a legitimate at-least-once retry stays a warning only when it re-sends
+  content **identical** to the first appearance of that `event_id` (compared order-insensitively).
+  An adapter that rebuilds the event on retry and lets any field drift (e.g. a fresh `timestamp` or
+  updated `metrics`) now trips `event-id-collision` (error). This is defensible — the backend keeps
+  the first write and dedupes later ones (contract §3.3), so a "retry" whose content changed is
+  genuinely a different event on a reused id — and adapters are told to re-send the same event, but
+  it is a stricter reading than "same id ⇒ retry". Severity is intentional, not a manifest concern.
 
 **Phase 3 — `provider_session_id` persistence + run lineage.**
 - Persist `provider_session_id` on `sessions` (and `events` if needed); add

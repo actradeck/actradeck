@@ -84,10 +84,11 @@ describe("cmdConformance — human report", () => {
     expect(f.out.join("\n")).toMatch(/PASS —/);
   });
 
-  it("FAIL / exit 1 and reports every error class (plus an event_id-repeat warning)", async () => {
+  it("FAIL / exit 1 and reports representative error classes (incl. an event_id collision)", async () => {
     // payload-kind-mismatch (ev0) · timestamp-regression (ev2 has an earlier ts) · schema (ev3 bad
-    // id) · seq-not-contiguous (0,2,3) are ERRORS. ev2 also reuses id1 — a WARNING now, since an
-    // at-least-once retry is contract-legitimate (§3.3), so it does not add to the error count.
+    // id) · seq-not-contiguous (0,2,3) are ERRORS. ev2 also reuses id1 but with DIFFERENT content
+    // (heartbeat vs turn.completed) — that is an event-id-collision ERROR (a distinct event on one
+    // id), NOT a legitimate at-least-once retry (which would re-send identical content, §3.3).
     const broken = [
       ev({
         event_id: IDS[0],
@@ -124,11 +125,12 @@ describe("cmdConformance — human report", () => {
     expect(await cmdConformance(f.deps, { json: false })).toBe(1);
     const out = f.out.join("\n");
     expect(out).toMatch(/\(payload-kind-mismatch\)/);
-    expect(out).toMatch(/WARN .*\(event-id-duplicate\)/); // a repeat is a warning, not an error
+    expect(out).toMatch(/ERROR .*\(event-id-collision\)/); // distinct event reusing an id — an error
     expect(out).toMatch(/\(timestamp-regression\)/);
     expect(out).toMatch(/\(schema\): event failed schema validation/);
     expect(out).toMatch(/\(seq-not-contiguous\)/);
-    expect(out).toMatch(/^FAIL — \d+ error\(s\), 1 warning\(s\)$/m);
+    expect(out).not.toMatch(/\(event-id-duplicate\)/); // NOT downgraded to the retry warning
+    expect(out).toMatch(/^FAIL — \d+ error\(s\), 0 warning\(s\)$/m);
   });
 
   it("labels a non-JSON line as 'not valid JSON' (not a generic schema failure)", async () => {
