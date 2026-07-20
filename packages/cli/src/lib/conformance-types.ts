@@ -17,11 +17,19 @@ export type ConformanceSeverity = "error" | "warning";
 
 export type ConformanceRule =
   | "schema"
+  | "empty-stream"
   | "payload-kind-mismatch"
+  | "payload-kind-absent"
   | "event-id-duplicate"
+  | "event-id-collision"
   | "timestamp-regression"
   | "seq-not-contiguous"
-  | "seq-absent";
+  | "seq-collision"
+  | "seq-absent"
+  | "event-after-terminal"
+  | "restart-after-terminal"
+  | "approval-resolved-unrequested"
+  | "approval-unresolved-at-terminal";
 
 export interface ConformanceFinding {
   /** 0-based position in the input stream; -1 for a session-level (post-scan) finding. */

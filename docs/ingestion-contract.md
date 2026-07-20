@@ -352,28 +352,41 @@ Both paths run the identical `checkConformance` core and print the same report a
 TTY (the script adds ANSI color, the CLI stays plain), in the stderr tool-name prefix, and in the
 script's extra exit-2 "not built" path (the CLI's checker is bundled, so it cannot occur).
 
-The checker reports the stream-level and cross-field invariants a single-event schema parse cannot
-see. It is a **structural + ordering + identity** check — it does **not** (and cannot) verify
-redaction (§5, the backend's job) or delivery semantics (at-least-once is the adapter's choice). It
-exits non-zero only when an **error**-level invariant is broken; **warnings** are contract-consistent
-and pass:
+The checker reports the stream-level, cross-field, and lifecycle invariants a single-event schema
+parse cannot see. It is a **structural + ordering + identity + lifecycle** check — it does **not**
+(and cannot) verify redaction (§5, the backend's job) or delivery semantics (at-least-once is the
+adapter's choice), and it **cannot prove restart-recovery** (it never restarts a process — a separate
+integration harness with real restarts covers that). It exits non-zero only when an **error**-level
+invariant is broken; **warnings** are contract-consistent and pass:
 
+- **empty stream** (error) — a stream with no events is a vacuous pass, not a conformance proof;
 - **schema** (error) — every event parses as a NormalizedEvent (§4);
-- **payload.kind === event_type** (error) — the schema does **not** cross-validate this, so the checker does;
-- **event_id repeats** (**warning**) — legitimate under at-least-once retry: the backend dedupes on
-  `event_id` (§3.3), so a re-send is fine. The warning only flags it so you can confirm it is a true
-  retry of the **same** event, not a distinct event reusing an id;
+- **payload.kind** (error) — must be **present** and **equal `event_type`**. The loose event schema
+  enforces neither, and every event in this contract self-describes with `kind` (see the golden
+  example, §6); an absent `kind` silently skips the match check, so it is itself an error;
+- **event_id repeats** — a repeat with **identical content** is a legitimate at-least-once retry
+  (the backend dedupes on `event_id`, §3.3) → **warning**; a repeat with **different content** is two
+  distinct events colliding on one id (the backend would drop the later one) → **error**;
 - **per-session timestamp** (error) — non-decreasing in emission order (independent floor per session);
 - **per-session seq** (error) — a dense 0-based counter when present, so the backend can detect
-  silent mid-stream drops (§4.4); an at-least-once retry (a re-sent `seq`) collapses and is **not** a
-  gap (symmetric with the `event_id` warning above); a session that emits no `seq` is a **warning**.
+  silent mid-stream drops (§4.4); an at-least-once retry (the **same** `seq` on the **same**
+  `event_id`) collapses and is **not** a gap, but the **same** `seq` on a **different** `event_id` is
+  a collision (error); a session that emits no `seq` is a **warning**;
+- **lifecycle** (ADR 0014) — once a session reaches a terminal state it is immutable: a later new
+  event on the same `session_id` is an **error** (`event-after-terminal`), and a re-start
+  (`created`/`starting`) after terminal is an **error** (`restart-after-terminal` — a resume must
+  mint a **new** `session_id` linked by lineage). An approval must be requested before it is
+  resolved: a `tool.permission.resolved` with no prior matching `tool.permission.requested` in the
+  session is an **error** (`approval-resolved-unrequested`); an approval still unresolved when the
+  session goes terminal is a **warning** (whether it is an error depends on the adapter's declared
+  approval capability — a future manifest concern).
 
 Redaction is **not** checked — the ingress redaction floor (§5) is the sole redaction point, so
 an adapter cannot and need not prove it. Runnable examples live in `docs/examples/conformance/`:
 
 ```bash
 node scripts/check-conformance.mjs docs/examples/conformance/valid.jsonl     # PASS (exit 0)
-node scripts/check-conformance.mjs docs/examples/conformance/invalid.jsonl   # FAIL (exit 1) — every error class (+ an event_id-repeat warning)
+node scripts/check-conformance.mjs docs/examples/conformance/invalid.jsonl   # FAIL (exit 1) — demonstrates the error classes
 ```
 
 The checker's core (`checkConformance` in `@actradeck/event-model`) is pinned by
