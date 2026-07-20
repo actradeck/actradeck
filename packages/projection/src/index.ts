@@ -11,9 +11,14 @@ import {
   isKnownRedactionKind,
   isTerminalState,
   isValidTransition,
+  terminalContinuation,
+  terminalEvidenceFor,
   type ActionKind,
+  type Continuation,
+  type LastTurnOutcome,
   type NormalizedEvent,
   type State,
+  type TerminalEvidence,
 } from "@actradeck/event-model";
 
 /**
@@ -108,6 +113,26 @@ export interface SessionProjection {
    * 二重加算しない (INV-SECRET-DETECTED-FOLD kind 別版)。
    */
   readonly secret_redaction_count_by_kind: Record<string, number>;
+  /**
+   * ADR 0014 直交軸 (1/3) — **最後の turn の結果** (セッションの結果ではない)。
+   * event_type `turn.completed`→"completed" / `turn.failed`→"failed" で更新し、それ以外の
+   * イベントでは前値を保持する (sticky)。**terminal 到達後は凍結**する (terminal 不変性と整合)。
+   * これにより「turn が失敗しても session は継続中」を phase (`state`) と分離して表せる:
+   * turn.failed で state を terminal `failed` へ落とさず (normalizer 側修正)、outcome だけ載せる。
+   */
+  readonly last_turn_outcome: LastTurnOutcome | undefined;
+  /**
+   * ADR 0014 直交軸 (2/3) — terminal 到達時の **再開可能性** (event-model TERMINAL_CONTINUATION
+   * 正準写像由来)。suspended→"resumable" / completed→"not_resumable" / failed・interrupted→
+   * "unknown"。non-terminal では undefined。失われた能力を **隠さず宣言**するための軸。
+   */
+  readonly continuation: Continuation | undefined;
+  /**
+   * ADR 0014 直交軸 (3/3) — terminal 到達時の **根拠** (event-model TERMINAL_EVIDENCE_DEFAULT
+   * 正準写像由来)。provider 明示イベント (completed/interrupted/suspended)→"provider"、normalizer
+   * 経路の failed→"inferred" (明示証跡なしに over-claim しない)。non-terminal では undefined。
+   */
+  readonly terminal_evidence: TerminalEvidence | undefined;
 }
 
 export function initialProjection(sessionId: string): SessionProjection {
@@ -125,6 +150,9 @@ export function initialProjection(sessionId: string): SessionProjection {
     secret_detected: false,
     secret_redaction_count: 0,
     secret_redaction_count_by_kind: {},
+    last_turn_outcome: undefined,
+    continuation: undefined,
+    terminal_evidence: undefined,
   };
 }
 
@@ -466,6 +494,22 @@ export function applyEvent(prev: SessionProjection, ev: NormalizedEvent): Reduce
   const currentActionKind = eventTypeToActionKind(ev.event_type);
   const currentActionSubject = deriveCurrentActionSubject(ev);
 
+  // ADR 0014 直交軸 (1/3): last_turn_outcome。turn 結果を phase (`state`) と分離して載せる。
+  //   - event_type turn.completed/turn.failed で更新し、それ以外は前値を保持 (sticky)。
+  //     turn.failed は state を terminal `failed` へ落とさない (normalizer 側修正) ため、
+  //     ここが「turn は失敗したが session は継続」を表す唯一の軸になる。受入#1: turn.failed の後の
+  //     turn.started が凍結されず正常 projection されることを担保する (poisoning 修正の可視化面)。
+  //   - **terminal 到達後は凍結** (currentTerminal): terminal 不変性と整合し、terminal 後に
+  //     紛れ込むイベント (poisoning-adjacent) で outcome を書き換えない。
+  const currentTerminal = current !== undefined && isTerminalState(current);
+  const lastTurnOutcome: LastTurnOutcome | undefined = currentTerminal
+    ? prev.last_turn_outcome
+    : ev.event_type === "turn.completed"
+      ? "completed"
+      : ev.event_type === "turn.failed"
+        ? "failed"
+        : prev.last_turn_outcome;
+
   const baseNext: SessionProjection = {
     ...prev,
     last_event_id: ev.event_id,
@@ -477,16 +521,23 @@ export function applyEvent(prev: SessionProjection, ev: NormalizedEvent): Reduce
     secret_detected: secretDetected,
     secret_redaction_count: secretRedactionCount,
     secret_redaction_count_by_kind: secretRedactionCountByKind,
+    last_turn_outcome: lastTurnOutcome,
   };
 
   const finalize = (resultState: State | undefined): SessionProjection => {
     const terminal = resultState !== undefined && isTerminalState(resultState);
     const effectivePending = terminal ? [] : pending;
+    // ADR 0014 直交軸 (2/3・3/3): continuation / terminal_evidence は terminal でのみ意味を持つ。
+    //   出所は event-model の正準写像 (TERMINAL_CONTINUATION / TERMINAL_EVIDENCE_DEFAULT) で、
+    //   **resultState のみに依存** (イベント非依存) ゆえ ignore-after-terminal 経路で再計算しても
+    //   同値 (drift しない)。non-terminal は undefined (失われた能力の宣言は terminal 到達時のみ)。
     return {
       ...baseNext,
       pending_approvals: effectivePending,
       ...(resultState !== undefined ? { state: resultState } : {}),
       needs_attention: deriveNeedsAttention(resultState, effectivePending.length),
+      continuation: terminal ? terminalContinuation(resultState) : undefined,
+      terminal_evidence: terminal ? terminalEvidenceFor(resultState) : undefined,
     };
   };
 

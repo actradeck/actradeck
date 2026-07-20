@@ -17,7 +17,8 @@
  *
  * terminal 除外 (ADR 019f4c19 wall-ended-badge): recency proxy の存在意義は「WS を持てないが **まだ活動中**
  * の external を出す」ことに尽きる。session.ended を発火し正規化状態が terminal(completed/failed/
- * interrupted・`TERMINAL_STATES` 正典)へ落ちた external は **もう活動中でない** ゆえ、last_event_at が
+ * interrupted/suspended・`TERMINAL_STATES` 正典。suspended=provider unload・ADR 0014)へ落ちた external は
+ * **もう活動中でない** ゆえ、last_event_at が
  * WALL_RECENT_MS 窓内でも「直近 active」に該当させない(LiveWall=動いているものの壁から落とす)。
  * これがないと「終了直後の external」が緑の ✓LIVE で残り、plan.md 最重要 KPI(表示は観測された実際の
  * 作業状態=completed は live な作業状態でない)に反する。connected=true(managed/attach)は本除外の
@@ -51,7 +52,7 @@ export interface PresenceRecencyInput {
   readonly last_event_at: string | undefined;
   /**
    * 正規化状態 (`session_state.state`・State enum 値)。terminal(`TERMINAL_STATES`=completed/failed/
-   * interrupted)なら external の recency proxy 対象外(終了済みは「直近 active」でない)。
+   * interrupted/suspended)なら external の recency proxy 対象外(終了済み/休止は「直近 active」でない)。
    * 未提供(undefined)は非 terminal 扱い(従来挙動を保つ・後方互換)。
    */
   readonly state?: string | undefined;
@@ -68,8 +69,8 @@ export interface PresenceRecencyInput {
  *  1. `connected === true` → true(source 無関係。presence があれば無条件で表示)。
  *  2. `source !== "external"` → false(recency proxy は **external 限定**。
  *     managed/attach/codex_rollout の !connected は presence を持てる経路ゆえ offline 扱い)。
- *  2.5 external かつ `state` が terminal(completed/failed/interrupted) → false(session.ended を
- *     発火した終了済み external は「直近 active」でない・LiveWall から落とす・ADR 019f4c19 wall-ended-badge)。
+ *  2.5 external かつ `state` が terminal(completed/failed/interrupted/suspended) → false(session.ended を
+ *     発火した終了済み/休止 external は「直近 active」でない・LiveWall から落とす・ADR 019f4c19 wall-ended-badge)。
  *  3. external で last_event_at が有効な ISO 文字列かつ age(=nowMs - Date.parse(last_event_at))が
  *     **両側有界** `0 <= age <= WALL_RECENT_MS` → true(境界 age==0 / age==WALL_RECENT_MS は含む)。
  *     それ以外 → false。下限 age>=0 は未来日時(age<0)が WALL_RECENT_MS 窓を超えて居座るのを防ぐ

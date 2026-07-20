@@ -40,6 +40,10 @@ describe("INV-EVENT-TRANSITION", () => {
     ["waiting.user_input", "running.model_wait"],
     ["idle", "running.planning"],
     ["disconnected", "running.command_executing"],
+    // ADR 0014: suspended (provider unload) は他 terminal と同様アクティブ状態から到達可能 (EXITS)。
+    ["running.command_executing", "suspended"],
+    ["idle", "suspended"],
+    ["stalled", "suspended"],
   ];
 
   const INVALID: ReadonlyArray<[State, State]> = [
@@ -47,6 +51,10 @@ describe("INV-EVENT-TRANSITION", () => {
     ["completed", "starting"],
     ["failed", "running.model_wait"],
     ["interrupted", "running.testing"],
+    // ADR 0014: suspended は terminal・再オープン不可 (resume は新 session_id で扱う)。
+    ["suspended", "running.model_wait"],
+    ["suspended", "starting"],
+    ["suspended", "idle"],
     ["created", "running.command_executing"], // starting を飛ばせない
     ["created", "completed"],
     ["created", "waiting.approval"],
