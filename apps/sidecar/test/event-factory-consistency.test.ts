@@ -95,6 +95,9 @@ describe("TDA-3: event-factory defaults are consistent across all sink.emit path
     // buildEvent で同じ入力を作ったときの shape と既定キーが一致する (event_id/timestamp 除く)。
     const reference = buildEvent({
       session_id: "s1",
+      // ADR 0014 Phase 3b-1 (D4): resolved も provider_session_id を populate する
+      //   (identity 未配線でも lineage.providerSessionId ?? input.session_id = "s1")。
+      provider_session_id: "s1",
       event_type: "tool.permission.resolved",
       state: "running.tool_preparing",
       summary: "承認 許可",

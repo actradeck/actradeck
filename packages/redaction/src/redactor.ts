@@ -289,6 +289,13 @@ function looksLikePath(candidate: string): boolean {
 const CORRELATION_KEY_FIELDS = new Set([
   "session_id",
   "provider_session_id",
+  // ADR 0014 Phase 3b-1 (SEC-1・D8): resume run が継続元とした canonical session_id (lineage エッジ)。
+  //   値は provider-uuid か fallback `sess_<uuidv7>` 形。後者は high-entropy ルール
+  //   ([A-Za-z0-9+/_-]{40,} + 3-class) に誤発火し `[REDACTED:high-entropy-secret]` へ化けると
+  //   lineage 断 + secret_redaction_count 汚染 + secret_detected 誤 true を招く。provider_session_id と
+  //   **完全に同一の** depth-0 限定 + isCorrelationKeyValue shape gate で救済する (埋込 real secret
+  //   ghp_/40+char-3-class は依然 mask)。SEC-1: populate より前に本 allowlist を着地させる。
+  "resumed_from_session_id",
   "thread_id",
   "turn_id",
   "agent_id",

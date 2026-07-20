@@ -70,10 +70,12 @@ export class OutputCollector {
     // 発生時刻を**今**固定 (hold されても flush 時刻でなく観測時刻を timestamp に乗せる)。
     const observedAt = new Date().toISOString();
     // output は情報価値が高いので有界化時も保持優先 (category="output")。
-    this.identity.emitMonitoring("output", (canonicalSessionId) => {
+    this.identity.emitMonitoring("output", (canonicalSessionId, providerSessionId) => {
       this.onEvent(
         buildEvent({
           session_id: canonicalSessionId,
+          // ADR 0014 D4: 監視イベントにも provider raw id を populate (従来 NULL)。
+          ...(providerSessionId !== undefined ? { provider_session_id: providerSessionId } : {}),
           event_type: "command.output.delta",
           timestamp: observedAt,
           ...(this.cwd !== undefined ? { cwd: this.cwd } : {}),

@@ -153,10 +153,14 @@ export class GitWatcher {
         // timestamp に乗る → INV-EVENT-ORDER 単調性が実発生順で保たれる (ADR 019e9462)。
         const observedAt = new Date().toISOString();
         // diff は情報価値が高いので有界化時も保持優先 (category="diff")。
-        this.identity.emitMonitoring("diff", (canonicalSessionId) => {
+        this.identity.emitMonitoring("diff", (canonicalSessionId, providerSessionId) => {
           this.onEvent(
             buildEvent({
               session_id: canonicalSessionId,
+              // ADR 0014 D4: 監視イベントにも provider raw id を populate (従来 NULL)。
+              ...(providerSessionId !== undefined
+                ? { provider_session_id: providerSessionId }
+                : {}),
               event_type: "diff.updated",
               timestamp: observedAt,
               cwd: this.repoRoot,

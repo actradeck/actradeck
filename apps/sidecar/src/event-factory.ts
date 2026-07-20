@@ -5,11 +5,14 @@
  * バリデートする。provider=claude_code / source=hooks を既定とする。
  */
 import {
+  type Continuation,
+  type EndKind,
   EventPayload,
   type EventType,
   type NormalizedEvent,
   type Provider,
   type Source,
+  type StartKind,
   type State,
   newEventId,
   parseEvent,
@@ -27,6 +30,27 @@ export interface BuildEventInput {
    * 分離して出所を記録する。hook 経路では `session_id` と同値、fallback 経路では未指定。
    */
   readonly provider_session_id?: string;
+  /**
+   * ADR 0014 Phase 3b — run 開始種別 (fresh/resume/recovery/clear/unknown)。run 起点イベント
+   * (session.started 等) にのみ載せる。backend upsertSession が first-wins で確定 (3a 済)。
+   */
+  readonly start_kind?: StartKind;
+  /**
+   * ADR 0014 Phase 3b — resume run の継続元 canonical session_id (lineage エッジ)。親 run を実際に
+   * 観測した境界でのみ設定 (実在 ActraDeck session_id を指す・未観測は absent)。SEC-1: redaction の
+   * CORRELATION_KEY_FIELDS に allowlist 済 (D8・populate より前に着地)。
+   */
+  readonly resumed_from_session_id?: string;
+  /**
+   * ADR 0014 Phase 3b — run 終了種別 (completed/failed/interrupted/unloaded/cleared/logout/other/unknown)。
+   * run 終端イベント (session.ended) にのみ載せる。backend が last-non-null-wins で確定 (3a 済)。
+   */
+  readonly end_kind?: EndKind;
+  /**
+   * ADR 0014 Phase 3b — run の再開可能性 (resumable/not_resumable/unknown)。Phase 1 直交軸
+   * Continuation を再利用 (terminalContinuation(state) 単一出所)。終端イベントにのみ載せる。
+   */
+  readonly recoverability?: Continuation;
   /**
    * 観測モード (ADR 019ea476 D8)。managed = PTY/app-server 所有経路、attach = hooks 後付け観測。
    * 省略時は wire 上 undefined のまま (= 欠落 = managed 既定扱い, 後方互換)。
@@ -117,6 +141,12 @@ export function buildEvent(input: BuildEventInput): NormalizedEvent {
   };
   if (input.provider_session_id !== undefined)
     candidate.provider_session_id = input.provider_session_id;
+  // ADR 0014 Phase 3b run lineage (additive・存在時のみ付与)。
+  if (input.start_kind !== undefined) candidate.start_kind = input.start_kind;
+  if (input.resumed_from_session_id !== undefined)
+    candidate.resumed_from_session_id = input.resumed_from_session_id;
+  if (input.end_kind !== undefined) candidate.end_kind = input.end_kind;
+  if (input.recoverability !== undefined) candidate.recoverability = input.recoverability;
   if (input.capture_mode !== undefined) candidate.capture_mode = input.capture_mode;
   if (input.permission_mode !== undefined) candidate.permission_mode = input.permission_mode;
   if (input.state !== undefined) candidate.state = input.state;

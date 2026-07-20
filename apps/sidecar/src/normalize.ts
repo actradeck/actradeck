@@ -11,7 +11,16 @@
  * ⚠️ ここで作る候補は EventSink.emit() に渡され、その中で redaction されてから
  *    parse/persist/send される。normalize 自体は redaction しない (choke point は一箇所)。
  */
-import type { EventType, PolicyCategory, RiskLevel, State } from "@actradeck/event-model";
+import {
+  type Continuation,
+  type EndKind,
+  type EventType,
+  type PolicyCategory,
+  type RiskLevel,
+  type StartKind,
+  type State,
+  terminalContinuation,
+} from "@actradeck/event-model";
 
 import { type BuildEventInput, buildEvent } from "./event-factory.js";
 import { redactString } from "@actradeck/redaction";
@@ -1392,17 +1401,75 @@ export interface NormalizeContext {
    * 全候補イベントに capture_mode="attach" を付与する。省略時は付与しない (managed 既定扱い)。
    */
   readonly captureMode?: "managed" | "attach";
+  /**
+   * ADR 0014 Phase 3b-1 (D5): RunIdentity が解決した canonical run id。設定時は全候補の session_id に
+   * これを載せる (input.session_id 直載せから切替)。省略時は後方互換で input.session_id を使う。
+   * common case は input.session_id と同値・terminal-reopen synthetic のみ乖離する。
+   */
+  readonly canonicalSessionId?: string;
+  /**
+   * ADR 0014 Phase 3b-1 (D4): provider の raw session id。全候補の provider_session_id に載せる。
+   * 省略時は input.session_id を出所とする (common case で session_id と同値・従来 NULL からの populate)。
+   */
+  readonly providerSessionId?: string;
+  /**
+   * ADR 0014 Phase 3b-1 (D4): run 起点の開始種別。RunIdentity が境界 (or generation 0) を検出した
+   * hook でのみ渡す。全候補の start_kind に載せる (backend first-wins で run 起点に確定)。
+   */
+  readonly runStartKind?: StartKind;
+  /**
+   * ADR 0014 Phase 3b-1 (D4): resume run の継続元 canonical session_id。親 run を観測した境界でのみ渡す
+   * (over-claim しない)。全候補の resumed_from_session_id に載せる。
+   */
+  readonly resumedFromSessionId?: string;
+}
+
+/**
+ * ADR 0014 Phase 3b-1 (D4): SessionEnd の `reason` を EndKind closed-enum へ写像する。
+ * Claude Code hooks の reason は `clear` / `logout` / `prompt_input_exit` / `other` (版依存で増減しうる)。
+ *  - clear → cleared (会話クリアで終端)
+ *  - logout → logout (認証喪失/ログアウト)
+ *  - prompt_input_exit → completed (通常終了)
+ *  - 上記以外 → other (明示終端だが分類不能・over-claim しない)。
+ * 未知 reason は "other" へ倒す (silent に completed へ寄せない = 誤 completed を作らない)。
+ */
+function endKindForSessionEndReason(reason: string): EndKind {
+  switch (reason) {
+    case "clear":
+      return "cleared";
+    case "logout":
+      return "logout";
+    case "prompt_input_exit":
+      return "completed";
+    default:
+      return "other";
+  }
 }
 
 export function normalizeHook(
   input: HookCommonInput,
   ctx: NormalizeContext = {},
 ): ReturnType<typeof buildEvent>[] {
+  // ADR 0014 Phase 3b-1 (D4/D5): session_id は RunIdentity 解決の canonical、provider_session_id は
+  //   provider raw id (従来 NULL からの populate)。start_kind/resumed_from は境界 hook のみ ctx で渡り、
+  //   全候補 (= run 起点イベント群) に載る。common case は canonical === provider === input.session_id。
   const base: Pick<
     BuildEventInput,
-    "session_id" | "cwd" | "agent_id" | "capture_mode" | "permission_mode"
+    | "session_id"
+    | "provider_session_id"
+    | "start_kind"
+    | "resumed_from_session_id"
+    | "cwd"
+    | "agent_id"
+    | "capture_mode"
+    | "permission_mode"
   > = {
-    session_id: input.session_id,
+    session_id: ctx.canonicalSessionId ?? input.session_id,
+    provider_session_id: ctx.providerSessionId ?? input.session_id,
+    ...(ctx.runStartKind !== undefined ? { start_kind: ctx.runStartKind } : {}),
+    ...(ctx.resumedFromSessionId !== undefined
+      ? { resumed_from_session_id: ctx.resumedFromSessionId }
+      : {}),
     ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
     ...(input.agent_id !== undefined ? { agent_id: input.agent_id } : {}),
     ...(ctx.captureMode !== undefined ? { capture_mode: ctx.captureMode } : {}),
@@ -1419,6 +1486,9 @@ export function normalizeHook(
       summary?: string;
       payload?: Record<string, unknown>;
       turn_id?: string;
+      // ADR 0014 Phase 3b-1 (D4): run 終端イベント (session.ended) のみに載せる終了種別/再開可能性。
+      endKind?: EndKind;
+      recoverability?: Continuation;
     } = {},
   ): ReturnType<typeof buildEvent> =>
     buildEvent({
@@ -1427,6 +1497,8 @@ export function normalizeHook(
       ...(state !== undefined ? { state } : {}),
       ...(extra.summary !== undefined ? { summary: extra.summary } : {}),
       ...(extra.turn_id !== undefined ? { turn_id: extra.turn_id } : {}),
+      ...(extra.endKind !== undefined ? { end_kind: extra.endKind } : {}),
+      ...(extra.recoverability !== undefined ? { recoverability: extra.recoverability } : {}),
       payload: { kind: event_type, ...(extra.payload ?? {}) },
     });
 
@@ -1760,10 +1832,17 @@ export function normalizeHook(
 
     case "SessionEnd": {
       const reason = asString(input.reason) ?? "other";
+      // ADR 0014 Phase 3b-1 (D4): SessionEnd reason → EndKind closed-enum gate。state は既存どおり
+      //   "completed" (terminal・全 reason 一律) を維持し end_kind で終端種別を細別する。recoverability は
+      //   terminalContinuation(state) 単一出所を再利用 (手書き分岐を置かない・completed→not_resumable)。
+      const endKind = endKindForSessionEndReason(reason);
+      const recoverability = terminalContinuation("completed");
       return [
         make("session.ended", "completed", {
           summary: `セッション終了 (${reason})`,
           payload: { reason },
+          endKind,
+          ...(recoverability !== undefined ? { recoverability } : {}),
         }),
       ];
     }
