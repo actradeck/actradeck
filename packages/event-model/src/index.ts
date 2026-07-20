@@ -30,13 +30,21 @@ export {
   RUNNING_STATES,
   WAITING_STATES,
   TERMINAL_STATES,
+  FAILURE_TERMINAL_STATES,
   STATE_TRANSITIONS,
   isTerminalState,
   isTerminalStateValue,
+  isFailureTerminalStateValue,
   isValidTransition,
   assertValidTransition,
   InvalidStateTransitionError,
+  // ADR 0014 直交軸 (provider lifecycle fidelity)
+  TERMINAL_CONTINUATION,
+  TERMINAL_EVIDENCE_DEFAULT,
+  terminalContinuation,
+  terminalEvidenceFor,
 } from "./state.js";
+export type { LastTurnOutcome, Continuation, TerminalEvidence } from "./state.js";
 
 // event types
 export { EventType, ALL_EVENT_TYPES } from "./event-type.js";

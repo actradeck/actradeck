@@ -13,9 +13,9 @@
  *    `window.Notification` のみ。バックグラウンドのタブ(document.hidden=true)で発火する。
  *
  * 表示層・純ロジック: realtime/bff/backend を value-import しない（token-isolation）。
- * event-model からは type-only + T1 enum 値(TERMINAL_STATES)のみを取り込む。
+ * event-model からは type-only + T1 enum 値(FAILURE_TERMINAL_STATES)のみを取り込む。
  */
-import { TERMINAL_STATES } from "@actradeck/event-model";
+import { FAILURE_TERMINAL_STATES } from "@actradeck/event-model";
 
 import { shortSessionId } from "./wall-display";
 
@@ -32,15 +32,15 @@ export const NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
 ] as const;
 
 /**
- * 失敗とみなす終端 state 集合。**completed は含めない**（正常終了は通知しない）。
- * T1 の TERMINAL_STATES (= completed/failed/interrupted) から completed を除いて導出する
- * （リテラル "failed"/"interrupted" を直書きしない・単一出所）。`SessionListItem.state` は
- * `string | undefined` のため Set<string> に正規化して照合する。
+ * 失敗とみなす終端 state 集合 = event-model の正典 `FAILURE_TERMINAL_STATES` (= failed/interrupted)。
+ *
+ * ⚠️ **減算派生しない（ADR 0014 SEC-1/TDA-1 回帰防止）**: 以前は `TERMINAL_STATES.filter(≠completed)`
+ * で導出していたため、TERMINAL_STATES に **非失敗**の新 terminal `suspended`（provider unload・再開可）が
+ * 加わった瞬間、再開可能な休止が「異常終了」通知へ誤って巻き込まれた。失敗判定は「terminal から引く」
+ * のではなく、失敗であるものだけを明示列挙した T1 正典集合を唯一の出所とする（新 terminal 追加は既定で
+ * 非失敗＝安全側）。`SessionListItem.state` は `string | undefined` のため Set<string> に正規化して照合する。
  */
-const COMPLETED_STATE = "completed";
-export const FAILED_STATES: ReadonlySet<string> = new Set(
-  TERMINAL_STATES.filter((s) => s !== COMPLETED_STATE),
-);
+export const FAILED_STATES: ReadonlySet<string> = new Set(FAILURE_TERMINAL_STATES);
 
 /** UI が `window.Notification` へ渡すための、純粋な通知仕様（i18n 解決前）。 */
 export interface NotificationSpec {

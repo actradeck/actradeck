@@ -162,13 +162,16 @@ describe("INV-CODEX-NORMALIZE: notification (b) mapping", () => {
       status: { type: "systemError" },
     });
     expect(sysErr.event_type).toBe("error");
-    expect(sysErr.state).toBe("failed");
+    // ADR 0014 Phase 1: systemError は診断信号 → terminal `failed` でなく復帰可能 `stalled`。
+    expect(sysErr.state).toBe("stalled");
   });
 
-  it("thread/closed → session.ended / completed", () => {
+  it("thread/closed → session.ended / suspended (unload・再開可・ADR 0014)", () => {
+    // Codex thread/closed は ~30 分無活動後の一時 unload (delete でない・resumable)。
+    // terminal だが再開可能な `suspended` へ写す (以前の誤 `completed` を修正・poisoning 対策)。
     const ev = one("thread/closed", { threadId: "T1" });
     expect(ev.event_type).toBe("session.ended");
-    expect(ev.state).toBe("completed");
+    expect(ev.state).toBe("suspended");
   });
 
   it("process/exited → DROP (AGG-1: process/spawn ライフサイクル通知・session 終端ではない)", () => {
@@ -197,7 +200,7 @@ describe("INV-CODEX-NORMALIZE: notification (b) mapping", () => {
     ).toEqual([]);
   });
 
-  it("error willRetry=true → state 維持(undefined) / false → failed", () => {
+  it("error willRetry=true → state 維持(undefined) / false → stalled (非 terminal・ADR 0014)", () => {
     const retry = one("error", {
       threadId: "T1",
       turnId: "turn_1",
@@ -207,13 +210,15 @@ describe("INV-CODEX-NORMALIZE: notification (b) mapping", () => {
     expect(retry.event_type).toBe("error");
     expect(retry.state).toBeUndefined();
     expect((retry.payload as { retryable?: boolean }).retryable).toBe(true);
+    // ADR 0014 Phase 1: 非 retryable でも「この操作を再試行しない」に過ぎず session 確定失敗では
+    //   ない → terminal `failed` でなく復帰可能 `stalled`。terminal は明示 process exit に予約。
     const fail = one("error", {
       threadId: "T1",
       turnId: "turn_1",
       error: { message: "fatal" },
       willRetry: false,
     });
-    expect(fail.state).toBe("failed");
+    expect(fail.state).toBe("stalled");
   });
 
   it("thread/tokenUsage/updated → heartbeat with metrics", () => {

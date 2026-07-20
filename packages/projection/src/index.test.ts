@@ -915,3 +915,216 @@ describe("@actradeck/projection reducer", () => {
     });
   });
 });
+
+/**
+ * ADR 0014 Phase 1 — provider lifecycle fidelity (terminal poisoning 修正) の直交軸。
+ *
+ * 正規化 phase (`state`) と独立に turn 結果 / 再開可能性 / 終端根拠を投影する。normalizer 側の
+ * 誤 terminal 化 (turn_aborted→failed / systemError→failed / thread/closed→completed) を非 terminal /
+ * suspended に修正したうえで、reducer が「凍結」せず後続イベントを正しく projection することを固定する。
+ */
+describe("ADR 0014: orthogonal lifecycle axes (terminal poisoning fix)", () => {
+  it("initialProjection の直交軸は全て undefined", () => {
+    const p = initialProjection("s1");
+    expect(p.last_turn_outcome).toBeUndefined();
+    expect(p.continuation).toBeUndefined();
+    expect(p.terminal_evidence).toBeUndefined();
+  });
+
+  // 受入#1: turn.failed の後の turn.started が凍結されず正常 projection される。
+  it("#1 turn.failed(state=idle) → 次の turn.started が正常 projection される (凍結しない)", () => {
+    let p = applyEvent(
+      initialProjection("s1"),
+      ev({ event_type: "turn.started", state: "running.model_wait" }),
+    ).projection;
+    // 中断: normalizer は turn.failed を state=idle (非 terminal) で emit する。
+    const aborted = applyEvent(
+      p,
+      ev({
+        event_type: "turn.failed",
+        state: "idle",
+        timestamp: "2026-06-06T00:00:01.000Z",
+        payload: { error: "turn aborted" },
+      }),
+    );
+    expect(aborted.ignoredAfterTerminal).toBe(false);
+    expect(aborted.projection.state).toBe("idle"); // terminal 化していない
+    expect(aborted.projection.last_turn_outcome).toBe("failed"); // 失敗は直交軸に載る
+    expect(aborted.projection.continuation).toBeUndefined(); // 非 terminal ゆえ未確定
+    // 次 turn: idle → running.model_wait は正当遷移で、凍結されず反映される。
+    const next = applyEvent(
+      aborted.projection,
+      ev({
+        event_type: "turn.started",
+        state: "running.model_wait",
+        timestamp: "2026-06-06T00:00:02.000Z",
+      }),
+    );
+    expect(next.ignoredAfterTerminal).toBe(false);
+    expect(next.projection.state).toBe("running.model_wait");
+    expect(next.projection.last_turn_outcome).toBe("failed"); // sticky (前 turn の結果を保持)
+  });
+
+  // 受入#2: systemError 相当 (state=stalled) から active へ復帰する。
+  it("#2 systemError(state=stalled) → active へ復帰できる (terminal 化しない)", () => {
+    let p = applyEvent(
+      initialProjection("s1"),
+      ev({ event_type: "command.started", state: "running.command_executing" }),
+    ).projection;
+    const err = applyEvent(
+      p,
+      ev({
+        event_type: "error",
+        state: "stalled",
+        timestamp: "2026-06-06T00:00:01.000Z",
+        payload: { message: "thread systemError" },
+      }),
+    );
+    expect(err.ignoredAfterTerminal).toBe(false);
+    expect(err.projection.state).toBe("stalled");
+    const recovered = applyEvent(
+      err.projection,
+      ev({
+        event_type: "command.started",
+        state: "running.command_executing",
+        timestamp: "2026-06-06T00:00:02.000Z",
+      }),
+    );
+    expect(recovered.ignoredAfterTerminal).toBe(false);
+    expect(recovered.projection.state).toBe("running.command_executing"); // 復帰
+  });
+
+  // 受入#5: thread/closed → suspended。completed と区別され、再開可能と宣言される。
+  it("#5 thread/closed(state=suspended) は completed 化せず resumable と宣言する", () => {
+    let p = applyEvent(
+      initialProjection("s1"),
+      ev({ event_type: "turn.started", state: "running.model_wait" }),
+    ).projection;
+    const closed = applyEvent(
+      p,
+      ev({
+        event_type: "session.ended",
+        state: "suspended",
+        timestamp: "2026-06-06T00:00:01.000Z",
+      }),
+    );
+    expect(closed.projection.state).toBe("suspended");
+    expect(closed.projection.state).not.toBe("completed");
+    expect(closed.projection.continuation).toBe("resumable");
+    expect(closed.projection.terminal_evidence).toBe("provider");
+    // suspended は terminal ゆえ、この run では後続イベントは凍結される (再開は新 session_id・Phase 3)。
+    const after = applyEvent(
+      closed.projection,
+      ev({
+        event_type: "turn.started",
+        state: "running.model_wait",
+        timestamp: "2026-06-06T00:00:02.000Z",
+      }),
+    );
+    expect(after.ignoredAfterTerminal).toBe(true);
+    expect(after.projection.state).toBe("suspended");
+    expect(after.projection.continuation).toBe("resumable"); // ignore 経路でも同値 (drift しない)
+  });
+
+  it("completed は not_resumable / provider、failed は unknown / inferred を宣言する", () => {
+    const completed = applyEvent(
+      initialProjection("s1"),
+      ev({ event_type: "turn.completed", state: "completed" }),
+    ).projection;
+    expect(completed.continuation).toBe("not_resumable");
+    expect(completed.terminal_evidence).toBe("provider");
+    expect(completed.last_turn_outcome).toBe("completed");
+
+    let r = applyEvent(
+      initialProjection("s2"),
+      ev({ session_id: "s2", event_type: "command.started", state: "running.command_executing" }),
+    ).projection;
+    const failed = applyEvent(
+      r,
+      ev({
+        session_id: "s2",
+        event_type: "session.ended",
+        state: "failed",
+        timestamp: "2026-06-06T00:00:01.000Z",
+      }),
+    ).projection;
+    expect(failed.continuation).toBe("unknown");
+    expect(failed.terminal_evidence).toBe("inferred"); // over-claim しない安全側
+  });
+
+  // 受入#8 (projection subset): terminal signal の無いストリームは terminal 状態を捏造しない。
+  it("#8 terminal state を持たないイベント列は terminal を捏造しない (continuation も付かない)", () => {
+    const proj = reduceEvents("s1", [
+      ev({ event_type: "session.started", state: "starting" }),
+      ev({
+        event_type: "command.started",
+        state: "running.command_executing",
+        timestamp: "2026-06-06T00:00:01.000Z",
+      }),
+      ev({
+        event_type: "command.completed",
+        state: "running.command_executing",
+        timestamp: "2026-06-06T00:00:02.000Z",
+      }),
+    ]);
+    expect(proj.state).toBe("running.command_executing");
+    expect(proj.continuation).toBeUndefined();
+    expect(proj.terminal_evidence).toBeUndefined();
+  });
+
+  // QA-1 (falsifying): last_turn_outcome は terminal 到達後に凍結される。terminal 後に紛れ込む
+  //   turn.* イベント (poisoning-adjacent) で outcome を書き換えない。凍結ガード
+  //   (index.ts の currentTerminal 分岐) を外すと、この assert が "failed" になって赤くなる。
+  it("last_turn_outcome は terminal 到達後に凍結され、ignore されるイベントで書き換わらない", () => {
+    // completed で確定 → outcome="completed"。
+    const done = applyEvent(
+      initialProjection("s1"),
+      ev({ event_type: "turn.completed", state: "completed" }),
+    );
+    expect(done.projection.state).toBe("completed");
+    expect(done.projection.last_turn_outcome).toBe("completed");
+    // terminal 後に turn.failed が来ても ignore され、outcome は "completed" のまま (凍結)。
+    const after = applyEvent(
+      done.projection,
+      ev({
+        event_type: "turn.failed",
+        state: "idle",
+        timestamp: "2026-06-06T00:00:01.000Z",
+        payload: { error: "late abort" },
+      }),
+    );
+    expect(after.ignoredAfterTerminal).toBe(true);
+    expect(after.projection.last_turn_outcome).toBe("completed"); // 凍結 (❗ ガード無しだと "failed")
+    expect(after.projection.state).toBe("completed");
+  });
+
+  // QA-5 (terminal-clears-pending・suspended 版): 新 terminal suspended も他 terminal と同様に
+  //   pending_approvals をクリアする (finalize の terminal 分岐)。unload 済み run の承認は moot。
+  it("suspended 到達で pending_approvals がクリアされる (terminal クリア契約に suspended を含む)", () => {
+    const pending = applyEvent(
+      initialProjection("s1"),
+      ev({
+        event_type: "tool.permission.requested",
+        state: "waiting.approval",
+        payload: {
+          request_id: "s1:apr-1",
+          tool_name: "Bash",
+          command: "deploy",
+          risk_level: "high",
+        },
+      }),
+    ).projection;
+    expect(pending.pending_approvals).toHaveLength(1);
+    const suspended = applyEvent(
+      pending,
+      ev({
+        event_type: "session.ended",
+        state: "suspended",
+        timestamp: "2026-06-06T00:00:01.000Z",
+      }),
+    ).projection;
+    expect(suspended.state).toBe("suspended");
+    expect(suspended.pending_approvals).toHaveLength(0);
+    expect(suspended.needs_attention).toBe(false);
+  });
+});

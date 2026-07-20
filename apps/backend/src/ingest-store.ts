@@ -28,7 +28,10 @@ import {
   PROCESS_ALIVE_PAYLOAD_KEY,
   safeParseEvent,
   STDOUT_EVENT_TYPES,
+  terminalContinuation,
+  terminalEvidenceFor,
   toEpochMs,
+  type State,
 } from "@actradeck/event-model";
 import type { Pool, PoolClient } from "pg";
 
@@ -291,6 +294,14 @@ export class IngestStore {
         typeof r.secret_redaction_count === "number" ? r.secret_redaction_count : 0,
       // 強み(a)③: kind 別累積。NULL (旧行) は {} 起点 (NULL≡未加算で fold 恒等)。
       secret_redaction_count_by_kind: parseRedactionCountByKind(r.secret_redaction_count_by_kind),
+      // ADR 0014 直交軸: continuation / terminal_evidence は永続 `state` の純関数ゆえ読込時に
+      //   無コストで再導出する (専用列を足さない・drift 源を作らない)。次の applyEvent の finalize
+      //   が resultState から同値を再計算するため、この read 値は transient (DTO へは Phase 5 で配線)。
+      //   last_turn_outcome は state から導出不能な sticky 軸で、live 永続は Phase 3 (session_state
+      //   ライフサイクル列) で着地する。現状 UI 未消費ゆえ undefined で可 (flicker なし)。
+      continuation: terminalContinuation((r.state ?? undefined) as State | undefined),
+      terminal_evidence: terminalEvidenceFor((r.state ?? undefined) as State | undefined),
+      last_turn_outcome: undefined,
     };
   }
 
@@ -432,6 +443,11 @@ export class IngestStore {
       secret_redaction_count:
         typeof r.secret_redaction_count === "number" ? r.secret_redaction_count : 0,
       secret_redaction_count_by_kind: parseRedactionCountByKind(r.secret_redaction_count_by_kind),
+      // ADR 0014 直交軸 (readProjection と同一・上記コメント参照): state 純関数の 2 軸は再導出、
+      //   last_turn_outcome は Phase 3 永続まで undefined (UI 未消費)。
+      continuation: terminalContinuation((r.state ?? undefined) as State | undefined),
+      terminal_evidence: terminalEvidenceFor((r.state ?? undefined) as State | undefined),
+      last_turn_outcome: undefined,
     };
     return { projection, liveness: reconstructLiveness(r.liveness) };
   }

@@ -352,9 +352,14 @@ export function normalizeCodexNotification(
       return normalizeStatusChanged(ctx, p);
 
     case "thread/closed":
+      // ADR 0014 Phase 1: Codex `thread/closed` は ~30 分無活動後の **一時 unload** であり
+      //   delete ではない (resumable via `thread/resume`・真の終端は thread/delete→thread/deleted)。
+      //   以前は state=`completed` へ写像し「正常終了」と誤表示していた。terminal だが再開可能な
+      //   新状態 `suspended` (recoverability="resumable") へ写す。continuation="resumable" /
+      //   terminal_evidence="provider" は reducer が state から正準導出する (受入#5)。
       return [
-        make(ctx, p, "session.ended", "completed", {
-          summary: "Codex セッション終了",
+        make(ctx, p, "session.ended", "suspended", {
+          summary: "Codex スレッド休止 (unload・再開可)",
           payload: {},
         }),
       ];
@@ -370,8 +375,14 @@ export function normalizeCodexNotification(
       const errObj = asParams(p.error);
       const message = asString(errObj.message) ?? "codex error";
       const willRetry = p.willRetry === true;
+      // ADR 0014 Phase 1: provider の `error` 通知は「この操作は (再) 試行しない」を意味するだけで
+      //   **session/run の確定失敗ではない**。以前は willRetry=false を terminal `failed` へ落とし、
+      //   以降のイベントを projection が凍結していた (poisoning)。terminal `failed` は明示的な
+      //   process exit (codex-runner の子 OS 終了・sidecar.md: crash=failed) や thread/delete のような
+      //   確定終端に予約し、ここは非 terminal の診断状態 `stalled` (復帰可能) に留める。willRetry=true は
+      //   従来どおり state 非更新 (undefined)。process が本当に死ねば liveness 層が stalled→failed を確定する。
       return [
-        make(ctx, p, "error", willRetry ? undefined : "failed", {
+        make(ctx, p, "error", willRetry ? undefined : "stalled", {
           summary: `エラー: ${message}`,
           payload: { message, retryable: willRetry },
         }),
@@ -411,7 +422,8 @@ export function normalizeCodexNotification(
  * thread/status/changed の ThreadStatus.type で分岐 (ADR (b)):
  *  - active → 省略 (active 維持)。state を上書きしない heartbeat にしない = 何も emit しない。
  *  - idle → heartbeat (state=idle)。
- *  - systemError → error (state=failed)。
+ *  - systemError → error (state=stalled)。ADR 0014 Phase 1: systemError は診断信号であり
+ *    session の確定失敗ではない → 復帰可能な `stalled` に留め、terminal poisoning を避ける。
  *  - notLoaded → 省略。
  */
 function normalizeStatusChanged(
@@ -429,8 +441,10 @@ function normalizeStatusChanged(
         }),
       ];
     case "systemError":
+      // ADR 0014 Phase 1: 診断信号ゆえ terminal `failed` でなく復帰可能 `stalled` に留める
+      //   (明示 process exit があって初めて liveness 層が failed を確定する)。
       return [
-        make(ctx, p, "error", "failed", {
+        make(ctx, p, "error", "stalled", {
           summary: "システムエラー",
           payload: { message: "thread systemError" },
         }),

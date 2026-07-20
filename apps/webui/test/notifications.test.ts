@@ -103,8 +103,18 @@ describe("computeNotifications — edges", () => {
     expect(specs.map((s) => s.category)).toEqual(["stalled"]);
   });
 
-  it("INV-NOTIFY-ON-TRANSITION: state→failed/interrupted で failed spec", () => {
-    for (const st of FAILED_STATES) {
+  // ADR 0014 SEC-1/TDA-1 回帰防止: 失敗集合を **リテラルで membership-pin** する。以前は
+  //   `for (const st of FAILED_STATES)` と判定集合そのものを oracle にしていたため、TERMINAL_STATES
+  //   への非失敗 terminal (`suspended`) 混入を原理的に検出できず誤挙動を緑固定していた (tautology)。
+  //   FAILED_STATES は正典 FAILURE_TERMINAL_STATES 由来＝failed/interrupted のみであることを固定する。
+  it("INV-NOTIFY-FAILED-SET: FAILED_STATES は failed/interrupted のみ (completed/suspended を含まない)", () => {
+    expect(FAILED_STATES).toEqual(new Set(["failed", "interrupted"]));
+    expect(FAILED_STATES.has("completed")).toBe(false);
+    expect(FAILED_STATES.has("suspended")).toBe(false);
+  });
+
+  it("INV-NOTIFY-ON-TRANSITION: state→failed/interrupted で failed spec (リテラル駆動)", () => {
+    for (const st of ["failed", "interrupted"] as const) {
       const specs = computeNotifications(
         item({ state: "running.command_executing" }),
         item({ state: st }),
@@ -118,6 +128,17 @@ describe("computeNotifications — edges", () => {
     const specs = computeNotifications(
       item({ state: "running.command_executing" }),
       item({ state: "completed" }),
+      { categories: ALL_CATS },
+    );
+    expect(specs).toEqual([]);
+  });
+
+  // ADR 0014 SEC-1/TDA-1 の落ちる回帰テスト: suspended (provider unload・再開可) は失敗ではない。
+  //   減算派生に戻すと FAILED_STATES に suspended が混入し、この assert が赤くなる。
+  it("suspended(unload・再開可) は failed 通知を出さない (誤『異常終了』通知の回帰防止)", () => {
+    const specs = computeNotifications(
+      item({ state: "running.command_executing" }),
+      item({ state: "suspended" }),
       { categories: ALL_CATS },
     );
     expect(specs).toEqual([]);

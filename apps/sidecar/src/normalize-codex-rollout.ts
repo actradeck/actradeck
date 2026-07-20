@@ -391,8 +391,14 @@ function normalizeEventMsg(
     }
 
     case "turn_aborted":
+      // ADR 0014 Phase 1 (terminal poisoning 修正): turn の中断は **turn の結果**であり
+      //   **session の終端ではない**。以前は state=`failed` (terminal) へ落とし、以降のイベント
+      //   (新 turn・resume) を projection が凍結・無視していた (live correctness bug)。turn.failed
+      //   イベントは維持しつつ state は非 terminal `idle` (= 次 turn 待ち) にし、「失敗」は直交軸
+      //   `last_turn_outcome` (reducer が event_type=turn.failed から導出) で表す。次の task_started
+      //   (idle→running.model_wait) が正常に projection される (受入#1)。
       return [
-        makeEvent(ctx, line, p, "turn.failed", "failed", {
+        makeEvent(ctx, line, p, "turn.failed", "idle", {
           turnId: asString(p.turn_id),
           summary: "Turn aborted",
           payload: { error: asString(p.reason) ?? "turn aborted", reason: p.reason },

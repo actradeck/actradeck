@@ -92,13 +92,15 @@ describe("INV-CODEX-ROLLOUT-NORMALIZE: rollout JSONL -> canonical EventType", ()
         payload: { type: "task_complete", turn_id: "turn_1", duration_ms: 123 },
       }).event_type,
     ).toBe("turn.completed");
-    expect(
-      one({
-        type: "event_msg",
-        timestamp: "2026-06-18T03:00:03.000Z",
-        payload: { type: "turn_aborted", turn_id: "turn_1", reason: "cancelled" },
-      }).event_type,
-    ).toBe("turn.failed");
+    // ADR 0014 Phase 1: turn_aborted は turn.failed イベントを保つが state は非 terminal `idle`
+    //   (session を誤終端させない・poisoning 修正)。「失敗」は直交軸 last_turn_outcome で表す。
+    const aborted = one({
+      type: "event_msg",
+      timestamp: "2026-06-18T03:00:03.000Z",
+      payload: { type: "turn_aborted", turn_id: "turn_1", reason: "cancelled" },
+    });
+    expect(aborted.event_type).toBe("turn.failed");
+    expect(aborted.state).toBe("idle");
   });
 
   it("assistant message variants -> agent.message.delta", () => {
