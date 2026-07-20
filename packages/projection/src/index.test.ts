@@ -933,7 +933,7 @@ describe("ADR 0014: orthogonal lifecycle axes (terminal poisoning fix)", () => {
 
   // 受入#1: turn.failed の後の turn.started が凍結されず正常 projection される。
   it("#1 turn.failed(state=idle) → 次の turn.started が正常 projection される (凍結しない)", () => {
-    let p = applyEvent(
+    const p = applyEvent(
       initialProjection("s1"),
       ev({ event_type: "turn.started", state: "running.model_wait" }),
     ).projection;
@@ -967,7 +967,7 @@ describe("ADR 0014: orthogonal lifecycle axes (terminal poisoning fix)", () => {
 
   // 受入#2: systemError 相当 (state=stalled) から active へ復帰する。
   it("#2 systemError(state=stalled) → active へ復帰できる (terminal 化しない)", () => {
-    let p = applyEvent(
+    const p = applyEvent(
       initialProjection("s1"),
       ev({ event_type: "command.started", state: "running.command_executing" }),
     ).projection;
@@ -996,7 +996,7 @@ describe("ADR 0014: orthogonal lifecycle axes (terminal poisoning fix)", () => {
 
   // 受入#5: thread/closed → suspended。completed と区別され、再開可能と宣言される。
   it("#5 thread/closed(state=suspended) は completed 化せず resumable と宣言する", () => {
-    let p = applyEvent(
+    const p = applyEvent(
       initialProjection("s1"),
       ev({ event_type: "turn.started", state: "running.model_wait" }),
     ).projection;
@@ -1035,7 +1035,7 @@ describe("ADR 0014: orthogonal lifecycle axes (terminal poisoning fix)", () => {
     expect(completed.terminal_evidence).toBe("provider");
     expect(completed.last_turn_outcome).toBe("completed");
 
-    let r = applyEvent(
+    const r = applyEvent(
       initialProjection("s2"),
       ev({ session_id: "s2", event_type: "command.started", state: "running.command_executing" }),
     ).projection;
