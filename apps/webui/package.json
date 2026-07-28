@@ -16,7 +16,7 @@
     "@actradeck/design-tokens": "workspace:*",
     "@actradeck/event-model": "workspace:*",
     "@actradeck/projection": "workspace:*",
-    "next": "16.2.7",
+    "next": "16.2.11",
     "react": "19.2.7",
     "react-dom": "19.2.7",
     "react-is": "19.2.0",
