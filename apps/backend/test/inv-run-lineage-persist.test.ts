@@ -178,5 +178,77 @@ describe.skipIf(!reachable)(
       );
       expect(after.rows[0]).toEqual(before.rows[0]);
     });
+
+    // ADR 0014 Phase 3b-2 (D6/D7): Codex rollout の forked_from lineage を real-PG で固定する。
+    //   意味論は実データ (~/.codex/sessions の 019f6637→forked_from=stable 019f4f85 / 019df85e→019df343)
+    //   を模す: session_id=run(ファイル) id、provider_session_id=安定 session_id (乖離可)、
+    //   resumed_from=親 run id。id は shared-PG 衝突回避のため newSession で unique 化する
+    //   (literal-id grounding は sidecar normalizer unit + real-data e2e 側が担う)。
+    it("Codex rollout forked child: distinct provider_session_id + resumed_from=親 を永続し、親 run 行は不変 (REAL 019f6637→019f4f85 semantics)", async () => {
+      const store = new IngestStore({ pool });
+      const parent = newSession("codex_rollout_parent"); // 親 run (rollout ファイル id)
+      const stable = newSession("codex_stable_conv"); // 安定 session_id (= provider_session_id・run id と別)
+      const child = newSession("codex_rollout_child"); // 子 run (fork 先ファイル id)
+      const base = Date.now();
+
+      // 親 run: rollout は observe-only ゆえ start_kind=unknown (fresh と断定しない)。rollout は通常
+      //   session.ended を出さないため started のみ。distinct provider_session_id を持たない親 (stable 宣言なし)。
+      await store.ingest(
+        makeEvent({
+          session_id: parent,
+          provider: "codex",
+          source: "rollout",
+          provider_session_id: parent,
+          state: "starting",
+          event_type: "session.started",
+          timestamp: iso(base, 0),
+          start_kind: "unknown",
+        }),
+      );
+      const parentBefore = await pool.query(
+        `SELECT provider_session_id, start_kind, resumed_from_session_id, end_kind, recoverability,
+              started_at, updated_at
+         FROM sessions WHERE session_id = $1`,
+        [parent],
+      );
+      expect(parentBefore.rows[0].start_kind).toBe("unknown");
+      expect(parentBefore.rows[0].resumed_from_session_id).toBeNull();
+
+      // 子 run: forked_from=親。session_id=子 run id、provider_session_id=安定 session_id (session_id と乖離)、
+      //   resumed_from_session_id=親 canonical。
+      await store.ingest(
+        makeEvent({
+          session_id: child,
+          provider: "codex",
+          source: "rollout",
+          provider_session_id: stable, // canonical≠provider の行
+          state: "starting",
+          event_type: "session.started",
+          timestamp: iso(base, 1_000),
+          start_kind: "resume",
+          resumed_from_session_id: parent,
+        }),
+      );
+
+      // distinct 行 + lineage エッジ + canonical≠provider の永続。
+      const childRow = await pool.query(
+        `SELECT provider_session_id, start_kind, resumed_from_session_id FROM sessions WHERE session_id = $1`,
+        [child],
+      );
+      expect(childRow.rowCount).toBe(1);
+      expect(childRow.rows[0].provider_session_id).toBe(stable);
+      expect(childRow.rows[0].provider_session_id).not.toBe(child);
+      expect(childRow.rows[0].start_kind).toBe("resume");
+      expect(childRow.rows[0].resumed_from_session_id).toBe(parent);
+
+      // INV-TERMINAL-IMMUTABLE-ACROSS-RESUME を rollout 経路へ拡張: 子 ingest 後も親 run 行 byte 不変。
+      const parentAfter = await pool.query(
+        `SELECT provider_session_id, start_kind, resumed_from_session_id, end_kind, recoverability,
+              started_at, updated_at
+         FROM sessions WHERE session_id = $1`,
+        [parent],
+      );
+      expect(parentAfter.rows[0]).toEqual(parentBefore.rows[0]);
+    });
   },
 );

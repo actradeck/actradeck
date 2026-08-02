@@ -208,6 +208,51 @@ describe("startManagedCodex: SESSION-ID + REDACTION-TRANSPARENCY", () => {
     expect(ended).toBeDefined();
   });
 
+  // ADR 0014 Phase 3b-2 (D7): child OS exit の session.ended に end_kind/recoverability を付与する。
+  //   exit 0 → completed/not_resumable、非 0 → failed/not_resumable (プロセス消滅=再開不能)。
+  //   MUTATION: end_kind を落とす / recoverability を "resumable" にすると当該 assert が RED。
+  it("child OS exit code 0 → session.ended completed / end_kind=completed / not_resumable", async () => {
+    const rig = makeRig();
+    await waitHandshake(rig.identity);
+    rig.child.emitLine({
+      method: "thread/started",
+      params: { thread: { id: THREAD_ID, sessionId: SESSION_ID } },
+    });
+    rig.child.emitExit(0, null);
+    await new Promise((r) => setTimeout(r, 20));
+    const ended = rig.store.allRows().find((r) => r.event_type === "session.ended");
+    expect(ended).toBeDefined();
+    const ev = JSON.parse(ended!.event_json) as {
+      state: string;
+      end_kind?: string;
+      recoverability?: string;
+    };
+    expect(ev.state).toBe("completed");
+    expect(ev.end_kind).toBe("completed");
+    expect(ev.recoverability).toBe("not_resumable");
+  });
+
+  it("child OS exit non-zero → session.ended failed / end_kind=failed / not_resumable", async () => {
+    const rig = makeRig();
+    await waitHandshake(rig.identity);
+    rig.child.emitLine({
+      method: "thread/started",
+      params: { thread: { id: THREAD_ID, sessionId: SESSION_ID } },
+    });
+    rig.child.emitExit(1, null);
+    await new Promise((r) => setTimeout(r, 20));
+    const ended = rig.store.allRows().find((r) => r.event_type === "session.ended");
+    expect(ended).toBeDefined();
+    const ev = JSON.parse(ended!.event_json) as {
+      state: string;
+      end_kind?: string;
+      recoverability?: string;
+    };
+    expect(ev.state).toBe("failed");
+    expect(ev.end_kind).toBe("failed");
+    expect(ev.recoverability).toBe("not_resumable");
+  });
+
   it("ORDERING: notification before canonical-learn is persisted with canonical (not fallback)", async () => {
     // 回帰固定: thread/started が thread/start Response より **先着** する競合 (実機の並列負荷で
     // 観測) を再現する。早期 notification を build 時の fallback session_id で hold すると
