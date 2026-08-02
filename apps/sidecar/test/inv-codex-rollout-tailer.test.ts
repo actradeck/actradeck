@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -363,5 +363,143 @@ describe("INV-CODEX-ROLLOUT-TAILER", () => {
     expect(stopResolved).toBe(true);
     // in-flight scan の emit は stop 完了前に届いている (drain・取りこぼし無し)。
     expect(sink.events.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * INV-CODEX-ROLLOUT-LINEAGE-WIRING (ADR 0014 Phase 3b-2・裁定 019fc4c6 QA-1/QA-2/QA-3):
+ * tailer が実 session_meta から run lineage を production 配線することを、実 FS + 実 scanOnce で固定する。
+ * 純写像 (rolloutStartLineage / normalizeRolloutLine + 手注入 ctx) のテストとは独立に、
+ * 「tailer が ctx を実際に populate する」統合境界そのものを pin する (これが無いと
+ * tailer の lineage spread / presence-prime 抽出を落としても全テスト緑のまま = QA-1 の生存 mutation)。
+ */
+describe("INV-CODEX-ROLLOUT-LINEAGE-WIRING", () => {
+  const RUN_ID = "019f6637-96c4-74f2-91e9-b3b208762cd9";
+  const STABLE_ID = "019f4f85-ec41-7e80-8e8d-857897d73b51";
+  const PARENT_ID = "019df343-2222-70d2-b4b4-35bdcafb06ad";
+
+  let tmp: string | undefined;
+
+  afterEach(() => {
+    if (tmp !== undefined) rmSync(tmp, { recursive: true, force: true });
+    tmp = undefined;
+  });
+
+  function setup(): { codexHome: string; sessionDir: string; statePath: string } {
+    tmp = mkdtempSync(join(tmpdir(), "actradeck-codex-lineage-"));
+    const codexHome = join(tmp, "codex");
+    const sessionDir = join(codexHome, "sessions", "2026", "06", "18");
+    mkdirSync(sessionDir, { recursive: true });
+    return { codexHome, sessionDir, statePath: join(tmp, "offsets.json") };
+  }
+
+  function lineageMetaLine(payload: Record<string, unknown>): string {
+    return JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-06-18T03:00:00.000Z",
+      payload: { cwd: "/repo", source: "tui", ...payload },
+    });
+  }
+
+  it("emit path: tailer populates provider_session_id on all events and the lineage edge on session.started [QA-1]", async () => {
+    const { codexHome, sessionDir, statePath } = setup();
+    const file = join(sessionDir, `rollout-2026-06-18T11-35-32-${RUN_ID}.jsonl`);
+    // QA-2: PARENT_ID の rollout はこのテストで一切観測されない。rollout lineage は CC 3b-1 と
+    // 意図的に非対称で、宣言された forked_from_id を**そのまま** emit する (観測ゲート不能・
+    // 裁定 019fc4c6 TDA-1)。この as-declared 挙動自体をここで pin する。
+    writeFileSync(
+      file,
+      `${[
+        lineageMetaLine({ id: RUN_ID, session_id: STABLE_ID, forked_from_id: PARENT_ID }),
+        agentLine("hello"),
+      ].join("\n")}\n`,
+    );
+    const events: NormalizedEvent[] = [];
+    const tailer = new CodexRolloutTailer({
+      codexHome,
+      statePath,
+      backfill: true,
+      pollIntervalMs: 10_000,
+      onEvents: (e) => events.push(...e),
+    });
+    await tailer.scanOnce({ initial: true });
+
+    const started = events.find((e) => e.event_type === "session.started");
+    expect(started).toBeDefined();
+    expect(started!.session_id).toBe(RUN_ID); // run id = ファイル id (1-file-1-run 不変)。
+    expect(started!.provider_session_id).toBe(STABLE_ID); // 安定 session_id を優先 (run id と乖離)。
+    expect(started!.start_kind).toBe("resume");
+    expect(started!.resumed_from_session_id).toBe(PARENT_ID); // 親未観測でも as-declared で emit。
+
+    const delta = events.find((e) => e.event_type === "agent.message.delta");
+    expect(delta).toBeDefined();
+    expect(delta!.session_id).toBe(RUN_ID);
+    expect(delta!.provider_session_id).toBe(STABLE_ID); // provider_session_id は全イベントに載る。
+    expect(delta!.start_kind).toBeUndefined(); // lineage エッジは run 起点のみ。
+    expect(delta!.resumed_from_session_id).toBeUndefined();
+  });
+
+  it("presence-prime path: a primed existing file stamps the primed provider_session_id on mid-stream events [QA-1]", async () => {
+    const { codexHome, sessionDir, statePath } = setup();
+    const file = join(sessionDir, `rollout-2026-06-18T11-35-32-${RUN_ID}.jsonl`);
+    writeFileSync(
+      file,
+      `${[
+        lineageMetaLine({ id: RUN_ID, session_id: STABLE_ID, forked_from_id: PARENT_ID }),
+        agentLine("pre-existing"),
+      ].join("\n")}\n`,
+    );
+    utimesSync(file, new Date(), new Date()); // 最近書込 = presence-prime 対象。
+
+    const events: NormalizedEvent[] = [];
+    const contexts: Array<{ sessionId: string }> = [];
+    const tailer = new CodexRolloutTailer({
+      codexHome,
+      statePath,
+      // backfill 省略 = false (tail-from-end)。session_meta (offset 0) は今後**二度と再読しない**。
+      pollIntervalMs: 10_000,
+      onEvents: (e) => events.push(...e),
+      onSessionContext: (c) => contexts.push(c),
+    });
+    await tailer.scanOnce({ initial: true });
+    expect(events.length).toBe(0); // presence-only (履歴 backfill しない)。
+    expect(contexts.length).toBe(1);
+
+    // mid-stream 追記 → この行だけが読まれる。lineage は presence-prime が runtime に確定済みの
+    // 値でなければならない (prime の lineage 抽出を落とすと provider_session_id が run id へ
+    // fallback して赤 = QA-1 mutation (iv) を RED 化)。
+    appendFileSync(file, `${agentLine("mid-stream", "2026-06-18T03:00:05.000Z")}\n`);
+    await tailer.scanOnce({ initial: false });
+
+    const delta = events.find((e) => e.event_type === "agent.message.delta");
+    expect(delta).toBeDefined();
+    expect(delta!.session_id).toBe(RUN_ID);
+    expect(delta!.provider_session_id).toBe(STABLE_ID); // primed lineage が mid-stream に載る。
+  });
+
+  it("empty-string lineage fields fall back honestly (no resume claim, run-id provider_session_id) [QA-3]", async () => {
+    const { codexHome, sessionDir, statePath } = setup();
+    const file = join(sessionDir, `rollout-2026-06-18T11-35-32-${RUN_ID}.jsonl`);
+    writeFileSync(
+      file,
+      `${[lineageMetaLine({ id: RUN_ID, session_id: "", forked_from_id: "" }), agentLine("x")].join(
+        "\n",
+      )}\n`,
+    );
+    const events: NormalizedEvent[] = [];
+    const tailer = new CodexRolloutTailer({
+      codexHome,
+      statePath,
+      backfill: true,
+      pollIntervalMs: 10_000,
+      onEvents: (e) => events.push(...e),
+    });
+    await tailer.scanOnce({ initial: true });
+
+    const started = events.find((e) => e.event_type === "session.started");
+    expect(started).toBeDefined();
+    expect(started!.provider_session_id).toBe(RUN_ID); // 空文字は run id へ fallback。
+    expect(started!.start_kind).toBe("unknown"); // fresh と断定しない。
+    expect(started!.resumed_from_session_id).toBeUndefined();
   });
 });

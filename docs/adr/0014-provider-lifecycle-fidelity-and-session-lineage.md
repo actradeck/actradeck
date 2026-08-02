@@ -106,7 +106,18 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
   new run id per SessionStart `source=startup|resume|clear`; put the raw id in
   `provider_session_id`; `source=compact` does NOT create a new run (a compaction event within
   the existing run).
-- Codex rollout: one rollout file = one observation run; the thread UUID = `provider_session_id`.
+- Codex rollout (Phase 3b-2, implemented): one rollout file = one observation run
+  (`session_id` = the file's `session_meta.payload.id`). `provider_session_id` = the stable
+  conversation `session_meta.payload.session_id` when declared, else the file id.
+  `resumed_from_session_id` = the declared `forked_from_id`, and `start_kind = "resume"` only
+  when that edge exists (otherwise `"unknown"`, never a claimed `"fresh"`). Unlike the CC hook
+  path — which sets `resumed_from` only when the parent run was actually observed in-process —
+  the rollout edge is emitted **as declared**: the parent may be unobserved, and the referent
+  may be the stable conversation id (= `provider_session_id`) rather than an observed per-file
+  run id. Consumers (the "continued from" UI) must resolve the edge by `session_id`, render a
+  missing referent as linked-unknown (not an error), and must not self-loop when
+  `forked_from_id` equals the stable conversation id. `parent_thread_id` is a subagent spawn
+  hierarchy, not a continuation, and is never mapped to `resumed_from_session_id`.
 - UI links runs sharing a `provider_session_id` as "continued from".
 - Existing events without `provider_session_id` are treated as single-run lineages (no
   destructive migration).

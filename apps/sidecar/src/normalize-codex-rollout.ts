@@ -32,7 +32,12 @@ export interface CodexRolloutNormalizeContext {
    *   payload.id (この run のファイル id・fallback)。common case (session_id 欠落) は
    *   session_id===provider_session_id。安定 session_id が別値のときだけ両者が乖離する。
    *   全イベントに載る (欠落時 makeEvent が ctx.sessionId へ fallback)。
-   * - `resumedFromSessionId` = payload.forked_from_id (観測済み親 rollout の id を指す継続エッジ)。
+   * - `resumedFromSessionId` = payload.forked_from_id (**宣言された**継続エッジ)。親 rollout は
+   *   **未観測でありうる**し、参照先は per-file run id でなく安定 `session_id` (= provider_session_id)
+   *   でありうる (実データに forked_from_id == 安定 session_id の形が実在)。CC 3b-1 の
+   *   「in-process で観測した canonical のみ resumed_from に載せる」ゲートとは**意図的に非対称**
+   *   (observe-only ゆえ観測ゲート不能・宣言値をそのまま記録する)。消費者 (3c continued-from) は
+   *   参照先 run の実在を仮定せず、不在は linked-unknown 表示・self-loop 禁止 (裁定 019fc4c6 TDA-1)。
    *   run 起点 (session.started) のみに載る。parent_thread_id (subagent spawn 階層) は **写像しない**
    *   (継続でない・over-claim 回避)。
    * - `startKind` = forked_from_id があれば "resume"、無ければ "unknown" (observe-only の正直さ・
