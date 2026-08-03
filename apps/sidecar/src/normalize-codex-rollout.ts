@@ -93,8 +93,32 @@ export interface RolloutCallInfo {
  * は非 spoofable ゆえ引き続き可)。単一行かつ非行頭の exit フレーズ (既存 (a)`echo # ...` / (c)`rg "..."`) は
  * header 境界を動かせず last-match も抜けないため false = 従来抽出を維持する (過剰 fail-closed を避ける)。
  */
-const SPOOF_OUTPUT_MARKER_RE = /\nOutput:/;
-const SPOOF_EXIT_LINE_RE = /^[Pp]rocess exited with code/m;
+/**
+ * 統合 M (SEC-B1R3-1 / QA-B1R3-1 / QA-B1R3-2 / TDA-B1R3-1): exit 句と Output マーカーの **単一出所**。
+ *
+ * 「Process exited with code」句と `\nOutput:` マーカーは、以前は 4 箇所
+ * (`SPOOF_EXIT_LINE_RE` = 行頭句 / `EXIT_TEXT_RE` = 行頭句+数字+行末 / `SPOOF_OUTPUT_MARKER_RE` = 行頭 Output: /
+ *  extractor の `indexOf("\nOutput:")`) に別々の literal で重複していた。sentinel の安全性は
+ *  「`SPOOF_EXIT_LINE_RE` ⊇ `EXIT_TEXT_RE` (superset)」と「spoof 判定と extractor が同じ Output マーカーを
+ *  見る」ことに暗黙依存するが、共有定数も metatest も無く片側編集で不変条件が黙って崩れうる (R3 統合 M)。
+ *  ここに 2 つの source を集約し、全 regex / indexOf をここから導出する。
+ *
+ * ⚠️ **byte-equivalent 厳守**: regex の実挙動 (行アンカー `^…$` / 数字捕捉 `(-?\d+)` / 大文字小文字 `[Pp]` /
+ *  `m`・`g` フラグ) は従来 literal と完全一致を維持する。定数化は「同じ句を 2 度書かない」ためであり挙動変更
+ *  ではない。INV-ROLLOUT-VERIFICATION-B1 の metatest 群 (superset / anchor / marker / source-coupling) が
+ *  これらの結合を回帰固定する (片側を崩す変異で RED)。
+ *
+ * - `EXIT_PHRASE_BODY` = exit 行の本体 (行アンカー・数字捕捉を除いた共有 body・正規表現 fragment)。
+ * - `OUTPUT_MARKER` = harness header 境界マーカー (改行 + "Output:")。spoof regex の `.test` と extractor の
+ *   `indexOf` の双方がこの 1 つの literal を参照する。
+ */
+export const EXIT_PHRASE_BODY = "[Pp]rocess exited with code";
+export const OUTPUT_MARKER = "\nOutput:";
+
+/** header 境界マーカー regex (spoof 判定用・`OUTPUT_MARKER` 由来 = `/\nOutput:/` と byte-equivalent)。 */
+export const SPOOF_OUTPUT_MARKER_RE = new RegExp(OUTPUT_MARKER);
+/** 行頭 exit 句 regex (spoof sentinel・`EXIT_PHRASE_BODY` 由来 = `/^[Pp]rocess exited with code/m` と byte-equivalent・EXIT_TEXT_RE の superset)。 */
+export const SPOOF_EXIT_LINE_RE = new RegExp(`^${EXIT_PHRASE_BODY}`, "m");
 
 export function commandHasExitSpoofMaterial(command: string | undefined): boolean {
   if (typeof command !== "string" || command.length === 0) return false;
@@ -106,10 +130,10 @@ export function commandHasExitSpoofMaterial(command: string | undefined): boolea
  *
  * 現状 `normalizeResponseItem` は update_plan / mcp__ 以外の **全** function_call を command.started として
  * 分類していた。多数の非 shell tool (note_search / task_bulk_create / spawn_agent 等) が args.query 等に
- * check 語彙を持つと誤って check 認定され、偽の検証遷移を誘発しうる (二次面)。実 corpus で観測される shell
- * 実行 tool は `exec_command` (48338) / `shell_command` (1906)。SEC 指定の `shell` / `local_shell`
- * (codex 系の別世代/OpenAI local shell) も将来対応として含める。これ以外の function_call は check 非分類・
- * exit 非抽出 (安全側)。
+ * check 語彙を持つと誤って check 認定され、偽の検証遷移を誘発しうる (二次面)。実 corpus 再カウント
+ * (~/.codex/sessions 全 412 ファイル・2026-08) で観測される shell 実行 tool は `exec_command` (48338) /
+ * `shell` (3602・2 番目に大きい shell-exec 面) / `shell_command` (2580)。`local_shell` (OpenAI local shell)
+ * は実 0 件だが将来対応として含める。これ以外の function_call は check 非分類・exit 非抽出 (安全側)。
  */
 const SHELL_EXEC_TOOLS: ReadonlySet<string> = new Set([
   "exec_command",
@@ -157,7 +181,9 @@ export class RolloutCallCorrelation {
 // SEC-B1-1: 行頭〜行末アンカー付き multiline global。実 2026 harness は header 最上部に `Command:` で
 //   コマンド文字列を verbatim echo するため、非アンカー first-substring だと command 内の偽 exit フレーズを
 //   先に拾い spoof される (実再現)。アンカー + last-match で「実 exit 行 (header 最下部・Output: 直前)」を採る。
-const EXIT_TEXT_RE = /^[Pp]rocess exited with code (-?\d+)$/gm;
+// 統合 M (§EXIT_PHRASE_BODY 単一出所): `/^[Pp]rocess exited with code (-?\d+)$/gm` と byte-equivalent。
+//   SPOOF_EXIT_LINE_RE と同じ `^${EXIT_PHRASE_BODY}` を共有するため superset 不変条件が構造的に保たれる。
+export const EXIT_TEXT_RE = new RegExp(`^${EXIT_PHRASE_BODY} (-?\\d+)$`, "gm");
 
 /**
  * function_call_output.output から exit code を抽出する (§D6/B1・real-data 照合済・decision 019fc7d8/019fc807)。
@@ -169,7 +195,9 @@ const EXIT_TEXT_RE = /^[Pp]rocess exited with code (-?\d+)$/gm;
  *      (`Command: <cmd> / Chunk ID:.. / Wall time:.. / Process exited with code N / .. / Output:\n<stdout>`)
  *      の **最初の "Output:" マーカーより前**に exit を書く。header 限定 + **行頭〜行末アンカー付きの最後の
  *      マッチ行**で照合するのが **spoof 耐性の要**:
- *        - コマンド stdout は "Output:" の**後**に出る (body 偽装不能・real-data 5075/5075 で exit は header 側)。
+ *        - コマンド stdout は "Output:" の**後**に出る (body 偽装不能)。母集団は ADR §D6 の実 corpus 再カウント
+ *          (function_call_output 80,279 / うち header-text exit 47,869)。header-text exit を持つ 47,869 件は
+ *          **全て** exit 行が "Output:" マーカー前 (= header 側) に載る。
  *        - header 内の `Command:` echo (SEC-B1-1) は被観測エージェントが制御できるが header **最上部**に載る。
  *          実 exit 行は header 最下部 (Output: 直前) ゆえ **last-match** が常に実 exit を採る。実 corpus で
  *          header 内 exit 行が 2 本以上のケースは 0 件 (47869/47869 で単一)。単一行/複数行注入の双方を defeat。
@@ -194,8 +222,10 @@ export function extractRolloutExitCode(
   // (2) harness header テキスト経路。相関 command が偽装素材を含むときは in-band 境界を信頼せず拒否 (fail-closed)。
   if (opts?.commandHasSpoofMaterial === true) return undefined;
   // "Process exited with code N" ("Output:" マーカー前・行頭行末アンカーの最後の行)。
-  const nlIdx = output.indexOf("\nOutput:");
-  const markerIdx = nlIdx >= 0 ? nlIdx : output.startsWith("Output:") ? 0 : -1;
+  // 統合 M: header 境界マーカーは §OUTPUT_MARKER 単一出所。indexOf("\nOutput:") と byte-equivalent。
+  //   startsWith 側は同マーカーの行頭 (先頭改行なし) 形 = OUTPUT_MARKER.slice(1) = "Output:"。
+  const nlIdx = output.indexOf(OUTPUT_MARKER);
+  const markerIdx = nlIdx >= 0 ? nlIdx : output.startsWith(OUTPUT_MARKER.slice(1)) ? 0 : -1;
   if (markerIdx < 0) return undefined; // マーカー無し → header 特定不能 → 抽出しない (安全側・非捏造)。
   const header = output.slice(0, markerIdx);
   let last: RegExpMatchArray | undefined;
@@ -539,6 +569,13 @@ function normalizeResponseItem(
           }),
         ];
       }
+      // SEC-B1R3-1 coupling 不変条件: `classifyCheck` と `commandHasExitSpoofMaterial` は **同一の command
+      //   source** (この `commandFromArguments(name, args)` の戻り) を消費する。両者が同じ文字列を見る結合こそ
+      //   が安全の要 — check 認定した command と spoof 判定した command が乖離すると、check あり × sentinel なし
+      //   の隙間から fake-marker spoof が通る。array-command (未対応) は両者とも tool 名フォールバックで inert
+      //   (両失敗が一致し check_kind 不付与で fold skip)。将来 array 対応時もこの単一 source 経由で結合を保つ
+      //   (配線は boundary-gate scope 変更ゆえ full 監査要・.claude/rules/security.md §ADR0015-B1 参照)。
+      //   INV-ROLLOUT-VERIFICATION-B1 の metatest (d) がこの結合を behavioral に回帰固定する。
       const command = commandFromArguments(name, args);
       // ADR 0015 §D6 (B1): check 分類 (raw command・closed enum のみ)。started 側に載せ run_dirty 窓を開く。
       //   command 文字列は function_call_output 側に無いため、completed へ check_kind を引き継ぐには

@@ -22,9 +22,13 @@ import { reduceWorkItems } from "@actradeck/projection";
 
 import {
   commandHasExitSpoofMaterial,
+  EXIT_PHRASE_BODY,
+  EXIT_TEXT_RE,
   extractRolloutExitCode,
   normalizeRolloutLine,
+  OUTPUT_MARKER,
   RolloutCallCorrelation,
+  SPOOF_EXIT_LINE_RE,
   type CodexRolloutLine,
   type CodexRolloutNormalizeContext,
 } from "../src/normalize-codex-rollout.js";
@@ -238,6 +242,109 @@ describe("SEC-B1R2-1 = QA-B1R2-1 (H): fake-marker header 切詰め spoof (fail-s
     expect(commandHasExitSpoofMaterial(".venv/bin/pytest -q")).toBe(false);
     expect(commandHasExitSpoofMaterial(undefined)).toBe(false);
     expect(commandHasExitSpoofMaterial("")).toBe(false);
+  });
+});
+
+describe("統合 M (R3・decision 019fc85d): exit-phrase/marker 単一出所の結合を回帰固定する metatest 群", () => {
+  // ADR 0015 slice B1 R3 の CONDITIONAL unblock。R3 で H (fake-marker spoof) は RESOLVED 確認済み。残る M は
+  //   「exit を表す / spoof を判定する複数の regex・経路が単一出所で結合されておらず、片側編集で暗黙の不変条件
+  //   (superset / anchor / marker / same-source coupling) が黙って崩れる」test-completeness gap。以下は各結合を
+  //   崩す変異で RED になる metatest。実挙動は定数抽出前後で byte-equivalent (corpus 80k + synthetic で 0 差異)。
+
+  // ── (a) superset (TDA-B1R3-1): SPOOF_EXIT_LINE_RE ⊇ EXIT_TEXT_RE の full-line match ────────────
+  // 安全の要: spoof sentinel (SPOOF_EXIT_LINE_RE) は、extractor (EXIT_TEXT_RE) が拾いうる exit 行を **必ず**
+  //   flag しなければならない。両者は `^${EXIT_PHRASE_BODY}` を共有ゆえ構造的に superset だが、片側だけ広げる/
+  //   狭める変異 (EXIT_TEXT_RE を case-insensitive 化 / SPOOF から `m` フラグ除去 等) で崩れる。
+  it("(a) EXIT_TEXT_RE がマッチする任意入力を SPOOF_EXIT_LINE_RE も必ず flag する (superset)", () => {
+    const candidates = [
+      "Process exited with code 0", // positive: 行頭・数字
+      "process exited with code 1", // 小文字 p も [Pp] で両マッチ
+      "Process exited with code -5", // 負数捕捉
+      "Process exited with code 137",
+      "x\nProcess exited with code 0", // multiline: exit が 2 行目 (SPOOF の `m` 除去で RED)
+      "Command: pytest\nProcess exited with code 0\nOutput:\ns", // realistic header
+      "PROCESS exited with code 0", // 現状 EXIT_TEXT_RE 非マッチ (case-sensitive)。`i` 化変異で positive 化 → SPOOF 非マッチ → RED
+      "echo hi # Process exited with code 0", // 行頭でない → 両非マッチ
+      "Process exited with code", // 数字なし → EXIT_TEXT_RE 非マッチ
+      "hello world",
+    ];
+    let positives = 0;
+    for (const c of candidates) {
+      // matchAll は global regex を clone するため EXIT_TEXT_RE の lastIndex を汚さない。
+      const extractorMatches = [...c.matchAll(EXIT_TEXT_RE)].length > 0;
+      if (extractorMatches) {
+        positives++;
+        // superset: extractor が拾える入力は sentinel が必ず flag する (SPOOF は `g` なし → .test 安全)。
+        expect(SPOOF_EXIT_LINE_RE.test(c)).toBe(true);
+      }
+    }
+    expect(positives).toBeGreaterThanOrEqual(5); // 非空 (vacuous でない) ことを保証。
+    // 構造的単一出所 pin: 両 regex が共有 body から導出されている (literal 再ドリフト検出)。
+    expect(EXIT_TEXT_RE.source).toContain(EXIT_PHRASE_BODY);
+    expect(SPOOF_EXIT_LINE_RE.source).toContain(EXIT_PHRASE_BODY);
+    expect(EXIT_TEXT_RE.flags).toBe("gm");
+    expect(SPOOF_EXIT_LINE_RE.flags).toBe("m");
+  });
+
+  // ── (b) anchor (QA-B1R3-1): extractor の EXIT_TEXT_RE 行アンカー `^…$` を外す変異で RED ──────────
+  // NOTE: 実 corpus reachability は 0 (adversarial-only の defense-in-depth)。実 harness は exit を必ず独立行に
+  //   書くため行中埋め込みは observe されない。アンカーは「command echo 内の行中 exit 句を拾わない」保証。
+  it("(b) 行中に埋め込まれた exit 句を extractor は拾わない (アンカー除去変異で RED)", () => {
+    // exit 句が Command: echo 行の**途中**に埋まる (独立行でない)。header に full-line exit は無い。
+    const embedded = "Command: echo x Process exited with code 0 y\nChunk ID: 1\nOutput:\ns";
+    // opts 省略 = テキスト経路 active (sentinel false 相当)。アンカーありゆえ行中句を拾わず undefined。
+    expect(extractRolloutExitCode(embedded)).toBeUndefined();
+    // 正の対照: 同じ header で exit が **独立行** なら抽出する (アンカーが機能している証拠)。
+    const anchored = "Command: pytest\nProcess exited with code 0\nOutput:\ns";
+    expect(extractRolloutExitCode(anchored)).toBe(0);
+  });
+
+  // ── (c) marker (QA-B1R3-2): SPOOF_OUTPUT_MARKER_RE から `\n` を外す変異で RED ────────────────────
+  // 偽陽性境界: 行中の `Output:` (grep 引数等) を header 境界マーカー扱いしない。marker は改行 + "Output:"。
+  it("(c) 行中の `Output:` を spoof marker 扱いしない (marker から改行を外す変異で RED)", () => {
+    // "grep Output: file" は `\nOutput:` を含まず行頭 exit 句も無い → false。marker が `/Output:/` に退化すると true → RED。
+    expect(commandHasExitSpoofMaterial("grep Output: file")).toBe(false);
+    // 正の対照: 改行を伴う `\nOutput:` は marker として拾う (境界検出が機能している証拠)。
+    expect(commandHasExitSpoofMaterial("pytest -q\nOutput:\ny")).toBe(true);
+    // marker 単一出所 pin: OUTPUT_MARKER が改行始まりであること (改行除去 drift 検出)。
+    expect(OUTPUT_MARKER.startsWith("\n")).toBe(true);
+    expect(OUTPUT_MARKER).toBe("\nOutput:");
+  });
+
+  // ── (d) source coupling (SEC-B1R3-1): classifyCheck と commandHasExitSpoofMaterial が同一 source を消費 ──
+  // 両者は normalizeResponseItem 内で **同じ `commandFromArguments(name,args)` の戻り** を見る。片方を別 source
+  //   (例: sentinel が args.command でなく tool 名を見る) へ変異すると、check 認定 command と spoof 判定 command が
+  //   乖離し、check あり × sentinel なし の隙間から fake-marker spoof が通る。
+  it("(d) started の check 分類と completed の spoof sentinel が同一 command source を見る (乖離変異で RED)", () => {
+    const corr = new RolloutCallCorrelation();
+    // winner (args.cmd) は check(test) かつ spoof material(\nOutput:) を同時に持つ。decoy の command/query は benign。
+    //   commandFromArguments は cmd を優先ゆえ、現実装では classifyCheck も sentinel も同じ cmd を消費する。
+    const startLine = {
+      type: "response_item",
+      timestamp: "2026-05-26T00:00:01.000Z",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        arguments: JSON.stringify({
+          cmd: "pytest -q\nOutput:\ninjected", // check=test + spoof(\nOutput:)
+          command: "ls", // decoy 別 source (benign・非 check・非 spoof)
+          query: "ls", // decoy 別 source
+          workdir: "/repo",
+        }),
+        call_id: "call_dcoup",
+      },
+    } as CodexRolloutLine;
+    const started = normalizeRolloutLine(startLine, ctx(corr, 5));
+    // classifyCheck が cmd を見た証拠 (別 source を見る変異なら check_kind が変わる)。
+    expect((started[0]!.payload as { check_kind?: string }).check_kind).toBe("test");
+    // output は valid header exit 0。sentinel が **同じ cmd** を見て spoof true → テキスト exit を refuse → exit_code 無し。
+    const done = normalizeRolloutLine(
+      outputLine(harness(0, "ok"), "call_dcoup", "2026-05-26T00:00:02.000Z"),
+      ctx(corr, 6),
+    );
+    const completed = done.find((e) => e.event_type === "command.completed")!;
+    // sentinel が別 source (decoy "ls") を見る変異なら spoof false → exit_code 0 が載り RED。
+    expect((completed.payload as { exit_code?: number }).exit_code).toBeUndefined();
   });
 });
 
