@@ -593,3 +593,14 @@ export function reduceEvents(
   }
   return proj;
 }
+
+// Work-items 直交 fold (ADR 0015 evidence-based completion・§D4)。session_state reducer とは
+//   独立し、backend 増分投影 (work_items テーブル) と webui client fold が共有する単一出所。
+export {
+  MAX_WORK_ITEMS,
+  initialWorkItemsProjection,
+  applyWorkItemsEvent,
+  reduceWorkItems,
+  deriveWorkItemBadge,
+} from "./work-items.js";
+export type { WorkItem, WorkItemsProjection, WorkItemBadge } from "./work-items.js";

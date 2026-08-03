@@ -58,8 +58,8 @@ describe("INV-CURRENT-ACTION-KIND: vocabulary", () => {
   });
 });
 
-describe("INV-CURRENT-ACTION-KIND: eventTypeToActionKind covers all 30 EventTypes", () => {
-  // 全 30 EventType の期待 kind (network/normalizer が emit する正典分類)。
+describe("INV-CURRENT-ACTION-KIND: eventTypeToActionKind covers all 31 EventTypes", () => {
+  // 全 31 EventType の期待 kind (network/normalizer が emit する正典分類)。
   const EXPECTED: Record<string, ActionKind> = {
     "session.started": "session",
     "session.ended": "session",
@@ -88,6 +88,9 @@ describe("INV-CURRENT-ACTION-KIND: eventTypeToActionKind covers all 30 EventType
     "subagent.started": "other",
     "subagent.completed": "other",
     "context.compacted": "other",
+    // ADR 0015: work item は直交観測 (§D1)。primary action ではないため forward-compat の "other" へ畳む
+    //   (専用 ActionKind を増やさない・work-items は独立 fold で描画する)。
+    "work.item.updated": "other",
     heartbeat: "liveness",
     "stalled.detected": "liveness",
     error: "tool",
@@ -95,7 +98,7 @@ describe("INV-CURRENT-ACTION-KIND: eventTypeToActionKind covers all 30 EventType
 
   it("every EventType has an expected mapping (no gaps / no extras)", () => {
     expect(Object.keys(EXPECTED).sort()).toEqual([...ALL_EVENT_TYPES].sort());
-    expect(ALL_EVENT_TYPES.length).toBe(30);
+    expect(ALL_EVENT_TYPES.length).toBe(31);
   });
 
   for (const eventType of ALL_EVENT_TYPES) {

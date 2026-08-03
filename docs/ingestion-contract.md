@@ -179,7 +179,8 @@ are rejected):
 `tool.permission.resolved` `command.started` `command.output.delta` `command.completed`
 `file.change.proposed` `file.change.approved` `file.change.applied` `diff.updated`
 `mcp.call.started` `mcp.call.completed` `web.search.started` `subagent.started`
-`subagent.completed` `context.compacted` `heartbeat` `stalled.detected` `error`
+`subagent.completed` `context.compacted` `work.item.updated` `heartbeat`
+`stalled.detected` `error`
 
 <!-- EVENT-TYPES:END -->
 

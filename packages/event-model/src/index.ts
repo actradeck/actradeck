@@ -159,6 +159,27 @@ export type { PresenceRecencyInput } from "./presence.js";
 // event id (UUIDv7)
 export { EventId, newEventId, isUuidV7 } from "./id.js";
 
+// isomorphic 同期 SHA-256 (work-item id / tree fingerprint の素・browser/Node 共通・ADR 0015)
+export { sha256Hex } from "./hash.js";
+
+// work item / completion claim / verification 契約 (ADR 0015 evidence-based completion・T1 正典)
+//   enum 群 + 正準導出 (deriveWorkItemId / treeFingerprint)。fold は packages/projection。
+export {
+  WorkItemStatus,
+  VerificationState,
+  CheckKind,
+  CheckMatch,
+  ObservationAvailability,
+  ObservationMethod,
+  ObservationFidelity,
+  ObservedCapability,
+  ObservationStamp,
+  CapabilityEvidence,
+  WorkItemIdScheme,
+  deriveWorkItemId,
+  treeFingerprint,
+} from "./work-item.js";
+
 // timestamp + monotonicity
 export {
   Timestamp,
