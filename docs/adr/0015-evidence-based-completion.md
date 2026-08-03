@@ -72,8 +72,14 @@ verified / verification failed / changed after verification.
   for a _sticky orthogonal axis_; `deriveActionSubject` reads only redacted-payload allowlist
   fields. `pending_approvals` (bounded jsonb, cap 64) is the bounded-fold precedent.
 - Managed Codex `command.completed` carries `exit_code` (`item.exitCode`); the CC hook path
-  carries `exit_code` when numeric; the rollout `function_call_output` path currently extracts
-  **no** exit code (§D6 honesty fallback).
+  carries `exit_code` when numeric; the rollout `function_call_output` path extracts the exit
+  code in **two forms** (§D6): (1) structured `metadata.exit_code` (legacy 2025 shape,
+  preferred, non-spoofable) and (2) the current 2026 harness header text `Process exited with
+code N` (matched only in the header before the `Output:` marker, via a line-anchored
+  last-match — and, because a multiline `Command:` echo can relocate that marker to truncate the
+  header above the real exit line, the text path is refused entirely when the correlated command
+  carries fake header material, SEC-B1R2-1 fail-safe sentinel); when neither is present the
+  outcome is unknown and `verification_state` does not move (§D6 honesty fallback).
 - Rollout event ids are deterministic (`stableRolloutEventId`: session + file basename + offset
   - eventIndex) → typed plan emission stays idempotent across re-tails.
 - Migrations live in `db/migrations/` (11 so far, all additive after init; TEXT columns, no
@@ -134,8 +140,8 @@ TaskUpdate)` parsing (all transitions; only fields verified against live CC are 
   stream → rebuildable by construction, no dual-authority drift; (ii) zero new emission /
   redaction surface; (iii) it retroactively works for any source whose commands we observe,
   including external adapters. Evidence refs are the underlying `event_id`s
-  (claim_event_id / verification_event_id / stale_event_id), so the UI can jump to the exact
-  timeline entries — the evidence _is_ the event log.
+  (claim*event_id / verification_event_id / stale_event_id), so the UI can jump to the exact
+  timeline entries — the evidence \_is* the event log.
 - Rejected alternatives: `task.created/updated/completed` event family (provider-biased noun;
   "task.completed" would bake the claim in as fact — the whole point is that completion is a
   _claim_; and 3 types where 1 level-based type suffices); deriving work items from generic
@@ -180,9 +186,9 @@ deterministic (same redactor rules → same text → same id).
 
 ### D4. Data model: one additive projection table + one shared pure fold
 
-- **Storage adjudication**: (A) session_state jsonb blob — rejected (per-item lifecycle +
+- **Storage adjudication**: (A) session*state jsonb blob — rejected (per-item lifecycle +
   cross-session queries outgrow a bounded blob; session_state row bloat). (C) separate
-  append-only claim/verification tables — rejected (the events table _is_ the append-only
+  append-only claim/verification tables — rejected (the events table \_is* the append-only
   history; parallel append-only stores duplicate authority). Adopted: **(B) `work_items`
   projection table** (migration #12, additive), 1 row per (session_id, work_item_id), written
   in the same ingest transaction as session_state, **rebuildable from events** (projection, not
@@ -291,10 +297,54 @@ passed|failed` (newer bound check re-runs); `* → unverified` only via claim re
   - No `other_check` backstop: this is not a security gate; a false negative just means "no
     evidence", which is the honest default.
 - Exit codes: CC hook path — present (verified); managed Codex — present (`item.exitCode`);
-  rollout — P0-B extracts `exit_code` from `function_call_output` metadata where present
-  (verified against real rollouts during implementation); when absent, the check is observed
-  but its outcome is unknown → it does **not** flip `verification_state` (no fabricated green
-  or red).
+  rollout — `extractRolloutExitCode` reads `function_call_output` in two real forms, in
+  priority order (verified against real rollouts; decision 019fc7d8 / 019fc807):
+  1. **structured** `metadata.exit_code` — legacy 2025 rollout shape (and external adapters
+     emitting structured output); non-spoofable, so it wins when present.
+  2. **harness header text** `Process exited with code N` — the current 2026 codex writes the
+     output as plain text with a harness header (`Command: <cmd>` / `Chunk ID:` / `Wall time:` /
+     `Process exited with code N` / … / `Output:\n<stdout>`). Extraction is confined to the
+     slice **before the first `Output:` marker** (command stdout comes after, so the body cannot
+     forge it) and, within that header, uses a **line-anchored (`^…$`, multiline) last-match**.
+     R1 (SEC-B1-1) relied on the harness verbatim-echoing the command in a `Command:` field at
+     the **top** of the header, so an agent's inline `Process exited with code 0` lands **above**
+     the real exit line and last-match takes the genuine exit.
+
+     **SEC-B1R2-1 (R2 fake-marker defeat + fix).** The `Command:` echo is verbatim and
+     multiline, so a command that embeds its **own** `\nOutput:` line relocates the "first
+     `Output:` marker" boundary **up into the command echo**, truncating the header above the
+     real exit line; the injected fake exit then becomes the last match. Header anchoring +
+     last-match do **not** close this — the boundary itself is agent-influenced. The fix is a
+     **fail-safe sentinel**: at the `function_call` (started) side the correlated call info
+     records a **boolean** (`commandSpoofRisk`, NO-RAW — no command text is retained) that is
+     true when the known command string contains a `\nOutput:` fragment **or** a line-anchored
+     `Process exited with code` phrase; at the `function_call_output` (completed) side the text
+     path (2) is then **refused** (→ `undefined` → no flip = fail-closed). Structured
+     `metadata.exit_code` (1) is non-spoofable and still honored. Benign single-line commands
+     whose exit phrase is not at line-start (`echo … # Process exited with code 0`,
+     `rg "Process exited with code 0"`) keep `commandSpoofRisk = false` so their genuine exit is
+     still extracted (no over-broad fail-closed).
+
+  **Corpus population (recounted, READ-ONLY, `~/.codex/sessions`).** 412 rollout files,
+  **80,279** `function_call_output` records (this is the population/denominator). Of these:
+  structured `metadata.exit_code` = **3,506**; harness header-text exit (`Process exited with
+code N` before the first `Output:`) = **47,869**; a `Command:` echo is present in **2,487**
+  records, of which **57 are multiline** (the fake-marker reachability surface). (The earlier
+  ADR figure `2489/75658` had an undefined denominator; this recount fixes both numbers and
+  states the population.) Extraction and check classification are additionally gated to real
+  shell-exec tool names (`exec_command` / `shell_command` / `shell` / `local_shell`) so a
+  non-shell tool's args cannot be misread as a check. When no exit is extractable the check is
+  observed but its outcome is unknown → it does **not** flip `verification_state` (no fabricated
+  green or red).
+
+  **Out of scope for this slice: `shell_command`'s `Exit code: N` form.** `shell_command`
+  headers use `Exit code: N` (not `Process exited with code N`) — **2,578** real records. The
+  extractor does **not** match this form, so `shell_command` checks observe but never flip
+  `verification_state` (safe-direction: silent non-function, **no false-green**). This slice
+  deliberately does **not** widen the extractor (each added surface adds spoof surface). If
+  future work adds `Exit code: N` support it **must** carry the same anti-spoof discipline as
+  the fake-marker sentinel above (started-side boolean sentinel + completed-side refuse).
+
 - External adapters MAY self-declare `check_kind` on their command events (open ingest
   contract); their fidelity is whatever their evidence declaration claims (§D7).
 

@@ -598,6 +598,7 @@ export function reduceEvents(
 //   独立し、backend 増分投影 (work_items テーブル) と webui client fold が共有する単一出所。
 export {
   MAX_WORK_ITEMS,
+  WORK_ITEM_REACTIVE_EVENT_TYPES,
   initialWorkItemsProjection,
   applyWorkItemsEvent,
   reduceWorkItems,

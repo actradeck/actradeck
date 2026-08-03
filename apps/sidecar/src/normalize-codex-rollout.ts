@@ -8,6 +8,8 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
 import type {
+  CheckKind,
+  CheckMatch,
   EventType,
   NormalizedEvent,
   StartKind,
@@ -16,6 +18,7 @@ import type {
 } from "@actradeck/event-model";
 import { parseEvent, WorkItemStatus } from "@actradeck/event-model";
 
+import { classifyCheck } from "./check-classifier.js";
 import { assertPayloadConsistency } from "./event-factory.js";
 
 export interface CodexRolloutLine {
@@ -52,6 +55,184 @@ export interface CodexRolloutNormalizeContext {
   readonly providerSessionId?: string | undefined;
   readonly resumedFromSessionId?: string | undefined;
   readonly startKind?: StartKind | undefined;
+  /**
+   * ADR 0015 §D6 (B1): function_call ↔ function_call_output を call_id で相関する per-file 状態。
+   * tailer が FileRuntime ごとに 1 つ生成して注入する。無ければ相関しない (per-line stateless 縮退・
+   * check_kind は command.completed へ乗らず update_plan ack の de-orphan もされない — 安全側)。
+   */
+  readonly callCorrelation?: RolloutCallCorrelation | undefined;
+}
+
+/** 相関に記録する function_call の要点 (name + 分類済 check・NO-RAW: 生 command は保持しない)。 */
+export interface RolloutCallInfo {
+  readonly name: string | undefined;
+  readonly checkKind?: CheckKind | undefined;
+  readonly checkMatch?: CheckMatch | undefined;
+  /** SEC-B1-1 item3: この call が実 shell exec tool 由来か (exit 抽出を shell 経路へ gate するため)。 */
+  readonly isShellExec?: boolean | undefined;
+  /**
+   * SEC-B1R2-1 = QA-B1R2-1 (H): この call の command 文字列が harness header 境界 / exit 行を偽装しうる
+   * 素材を含むか (NO-RAW: **boolean のみ**・生 command は保持しない)。true のとき completed 側は
+   * テキスト経路の exit 抽出を拒否する (→undefined→非 flip=fail-closed)。§commandHasExitSpoofMaterial。
+   */
+  readonly commandSpoofRisk?: boolean | undefined;
+}
+
+/**
+ * SEC-B1R2-1 = QA-B1R2-1 (H) の fail-safe sentinel。**既知の command 文字列**が harness header の境界
+ * 決定を agent 制御下に置く偽装素材を含むかを判定する (NO-RAW: **boolean のみ** を返す・生 command を
+ * 保持しない・呼び出し側もこの bool のみを相関 info に載せる)。
+ *
+ * 実 harness は command を header 最上部の `Command:` フィールドへ **改行込み verbatim echo** する。よって
+ * command 内に次を仕込むと header parse が破られる:
+ *  - **`\nOutput:` 断片** — header 境界 (`indexOf("\nOutput:")`) を command echo 内へ前倒しし、実 exit 行を
+ *    header slice の外 (= body 側) へ落とす。残った偽 exit 行を last-match が採る (fake-marker 切詰め spoof)。
+ *  - **行頭 `Process exited with code` 句** — 偽 Output: と組み合わさると切詰め後 header の最後の exit 行になる。
+ *
+ * どちらか一方でも含めば true。true のとき completed 側でテキスト抽出を refuse する (構造化 metadata.exit_code
+ * は非 spoofable ゆえ引き続き可)。単一行かつ非行頭の exit フレーズ (既存 (a)`echo # ...` / (c)`rg "..."`) は
+ * header 境界を動かせず last-match も抜けないため false = 従来抽出を維持する (過剰 fail-closed を避ける)。
+ */
+/**
+ * 統合 M (SEC-B1R3-1 / QA-B1R3-1 / QA-B1R3-2 / TDA-B1R3-1): exit 句と Output マーカーの **単一出所**。
+ *
+ * 「Process exited with code」句と `\nOutput:` マーカーは、以前は 4 箇所
+ * (`SPOOF_EXIT_LINE_RE` = 行頭句 / `EXIT_TEXT_RE` = 行頭句+数字+行末 / `SPOOF_OUTPUT_MARKER_RE` = 行頭 Output: /
+ *  extractor の `indexOf("\nOutput:")`) に別々の literal で重複していた。sentinel の安全性は
+ *  「`SPOOF_EXIT_LINE_RE` ⊇ `EXIT_TEXT_RE` (superset)」と「spoof 判定と extractor が同じ Output マーカーを
+ *  見る」ことに暗黙依存するが、共有定数も metatest も無く片側編集で不変条件が黙って崩れうる (R3 統合 M)。
+ *  ここに 2 つの source を集約し、全 regex / indexOf をここから導出する。
+ *
+ * ⚠️ **byte-equivalent 厳守**: regex の実挙動 (行アンカー `^…$` / 数字捕捉 `(-?\d+)` / 大文字小文字 `[Pp]` /
+ *  `m`・`g` フラグ) は従来 literal と完全一致を維持する。定数化は「同じ句を 2 度書かない」ためであり挙動変更
+ *  ではない。INV-ROLLOUT-VERIFICATION-B1 の metatest 群 (superset / anchor / marker / source-coupling) が
+ *  これらの結合を回帰固定する (片側を崩す変異で RED)。
+ *
+ * - `EXIT_PHRASE_BODY` = exit 行の本体 (行アンカー・数字捕捉を除いた共有 body・正規表現 fragment)。
+ * - `OUTPUT_MARKER` = harness header 境界マーカー (改行 + "Output:")。spoof regex の `.test` と extractor の
+ *   `indexOf` の双方がこの 1 つの literal を参照する。
+ */
+export const EXIT_PHRASE_BODY = "[Pp]rocess exited with code";
+export const OUTPUT_MARKER = "\nOutput:";
+
+/** header 境界マーカー regex (spoof 判定用・`OUTPUT_MARKER` 由来 = `/\nOutput:/` と byte-equivalent)。 */
+export const SPOOF_OUTPUT_MARKER_RE = new RegExp(OUTPUT_MARKER);
+/** 行頭 exit 句 regex (spoof sentinel・`EXIT_PHRASE_BODY` 由来 = `/^[Pp]rocess exited with code/m` と byte-equivalent・EXIT_TEXT_RE の superset)。 */
+export const SPOOF_EXIT_LINE_RE = new RegExp(`^${EXIT_PHRASE_BODY}`, "m");
+
+export function commandHasExitSpoofMaterial(command: string | undefined): boolean {
+  if (typeof command !== "string" || command.length === 0) return false;
+  return SPOOF_OUTPUT_MARKER_RE.test(command) || SPOOF_EXIT_LINE_RE.test(command);
+}
+
+/**
+ * 実 shell exec tool 名 (SEC-B1-1 item3)。check 分類 + exit 抽出はこの集合に gate する。
+ *
+ * 現状 `normalizeResponseItem` は update_plan / mcp__ 以外の **全** function_call を command.started として
+ * 分類していた。多数の非 shell tool (note_search / task_bulk_create / spawn_agent 等) が args.query 等に
+ * check 語彙を持つと誤って check 認定され、偽の検証遷移を誘発しうる (二次面)。実 corpus 再カウント
+ * (~/.codex/sessions 全 412 ファイル・2026-08) で観測される shell 実行 tool は `exec_command` (44986) /
+ * `shell` (3602・2 番目に大きい shell-exec 面) / `shell_command` (2580)。`local_shell` (OpenAI local shell)
+ * は実 0 件だが将来対応として含める。これ以外の function_call は check 非分類・exit 非抽出 (安全側)。
+ */
+const SHELL_EXEC_TOOLS: ReadonlySet<string> = new Set([
+  "exec_command",
+  "shell_command",
+  "shell",
+  "local_shell",
+]);
+
+/** call_id ごとの記録上限 (DoS 境界)。超過は最古 FIFO 破棄 = 相関喪失 → bare/no-flip の安全側縮退。 */
+const MAX_CORRELATION_ENTRIES = 4096;
+
+/**
+ * function_call → function_call_output を call_id で結ぶ per-file 相関 (§D6/B1・TDA-5)。
+ *
+ * rollout は 1 行ずつ stateless に正規化されるため、`command.completed` (= function_call_output) 側は
+ * command 文字列を持たない。check_kind を completed へ乗せるには、対応する function_call (started 側・
+ * command あり) で分類した結果を call_id で引き継ぐ必要がある。同じ相関が update_plan ack の de-orphan
+ * (TDA-5: ack を command.completed へ誤対応させない) にも使われる。
+ *
+ * 実データ照合 (decision 019fc7d8): call_id は function_call↔output を 100% (17003/17003) 相関し、
+ * function_call は全件 call_id を持つ。相関喪失 (daemon 再起動跨ぎ等) は bare orphan / check 非付与へ
+ * 安全に縮退する (fold は check_kind 無しの completed を無視・A2 pin と同性質)。
+ */
+export class RolloutCallCorrelation {
+  private readonly map = new Map<string, RolloutCallInfo>();
+
+  record(callId: string | undefined, info: RolloutCallInfo): void {
+    if (callId === undefined || callId.length === 0) return;
+    if (this.map.size >= MAX_CORRELATION_ENTRIES && !this.map.has(callId)) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) this.map.delete(oldest);
+    }
+    this.map.set(callId, info);
+  }
+
+  /** 記録を取り出して消費する (output は call ごとに 1 回ゆえ take-once)。 */
+  take(callId: string | undefined): RolloutCallInfo | undefined {
+    if (callId === undefined || callId.length === 0) return undefined;
+    const v = this.map.get(callId);
+    if (v !== undefined) this.map.delete(callId);
+    return v;
+  }
+}
+
+// SEC-B1-1: 行頭〜行末アンカー付き multiline global。実 2026 harness は header 最上部に `Command:` で
+//   コマンド文字列を verbatim echo するため、非アンカー first-substring だと command 内の偽 exit フレーズを
+//   先に拾い spoof される (実再現)。アンカー + last-match で「実 exit 行 (header 最下部・Output: 直前)」を採る。
+// 統合 M (§EXIT_PHRASE_BODY 単一出所): `/^[Pp]rocess exited with code (-?\d+)$/gm` と byte-equivalent。
+//   SPOOF_EXIT_LINE_RE と同じ `^${EXIT_PHRASE_BODY}` を共有するため superset 不変条件が構造的に保たれる。
+export const EXIT_TEXT_RE = new RegExp(`^${EXIT_PHRASE_BODY} (-?\\d+)$`, "gm");
+
+/**
+ * function_call_output.output から exit code を抽出する (§D6/B1・real-data 照合済・decision 019fc7d8/019fc807)。
+ *
+ * 2 形態 (両方 real):
+ *  (1) **構造化** — output が JSON object へ parse でき `metadata.exit_code` が整数 (legacy 2025 rollout +
+ *      structured output を出す外部 adapter)。非 spoofable ゆえ最優先。
+ *  (2) **harness テキスト** — current codex (2026) は output を平文で書き、harness header
+ *      (`Command: <cmd> / Chunk ID:.. / Wall time:.. / Process exited with code N / .. / Output:\n<stdout>`)
+ *      の **最初の "Output:" マーカーより前**に exit を書く。header 限定 + **行頭〜行末アンカー付きの最後の
+ *      マッチ行**で照合するのが **spoof 耐性の要**:
+ *        - コマンド stdout は "Output:" の**後**に出る (body 偽装不能)。母集団は ADR §D6 の実 corpus 再カウント
+ *          (function_call_output 80,279 / うち header-text exit 47,869)。header-text exit を持つ 47,869 件は
+ *          **全て** exit 行が "Output:" マーカー前 (= header 側) に載る。
+ *        - header 内の `Command:` echo (SEC-B1-1) は被観測エージェントが制御できるが header **最上部**に載る。
+ *          実 exit 行は header 最下部 (Output: 直前) ゆえ **last-match** が常に実 exit を採る。実 corpus で
+ *          header 内 exit 行が 2 本以上のケースは 0 件 (47869/47869 で単一)。単一行/複数行注入の双方を defeat。
+ *  (3) どちらでもない → undefined (= 結果不明・fold は verification_state を動かさない・受入 12)。
+ *
+ * 戻り値は整数のみ (NO-RAW: 生テキストを保持しない)。ReDoS 安全 (アンカー付き固定パターン + header slice で有界)。
+ *
+ * SEC-B1R2-1 = QA-B1R2-1 (H): `opts.commandHasSpoofMaterial === true` のとき **テキスト経路 (2) を拒否**する
+ *   (→undefined→非 flip=fail-closed)。header 境界 (`"\nOutput:"`) は attacker が `Command:` echo 経由で
+ *   前倒しできるため、既知 command が偽装素材を含むと判った時点で in-band 境界を信頼しない。構造化
+ *   metadata.exit_code (1) は非 spoofable ゆえ sentinel true でも維持する。sentinel 未指定 (相関喪失など)
+ *   は従来どおりテキスト抽出する — この経路の結果は check_kind 非搬送ゆえ fold で flip 不能 (inert)。
+ */
+export function extractRolloutExitCode(
+  output: string | undefined,
+  opts?: { readonly commandHasSpoofMaterial?: boolean | undefined },
+): number | undefined {
+  if (typeof output !== "string" || output.length === 0) return undefined;
+  // (1) 構造化 metadata.exit_code (非 spoofable・最優先・sentinel true でも維持)。
+  const structured = asNumber(asParams(parseJsonObject(output).metadata).exit_code);
+  if (structured !== undefined && Number.isInteger(structured)) return structured;
+  // (2) harness header テキスト経路。相関 command が偽装素材を含むときは in-band 境界を信頼せず拒否 (fail-closed)。
+  if (opts?.commandHasSpoofMaterial === true) return undefined;
+  // "Process exited with code N" ("Output:" マーカー前・行頭行末アンカーの最後の行)。
+  // 統合 M: header 境界マーカーは §OUTPUT_MARKER 単一出所。indexOf("\nOutput:") と byte-equivalent。
+  //   startsWith 側は同マーカーの行頭 (先頭改行なし) 形 = OUTPUT_MARKER.slice(1) = "Output:"。
+  const nlIdx = output.indexOf(OUTPUT_MARKER);
+  const markerIdx = nlIdx >= 0 ? nlIdx : output.startsWith(OUTPUT_MARKER.slice(1)) ? 0 : -1;
+  if (markerIdx < 0) return undefined; // マーカー無し → header 特定不能 → 抽出しない (安全側・非捏造)。
+  const header = output.slice(0, markerIdx);
+  let last: RegExpMatchArray | undefined;
+  for (const m of header.matchAll(EXIT_TEXT_RE)) last = m; // 最後のアンカー一致 = 実 exit 行 (spoof 耐性)。
+  if (last === undefined) return undefined;
+  const n = Number.parseInt(last[1]!, 10);
+  return Number.isInteger(n) ? n : undefined;
 }
 
 /**
@@ -355,6 +536,9 @@ function normalizeResponseItem(
       //   対応する function_call_output ("Plan updated" ack) は check_kind を持たないため、
       //   command.completed になっても work-items fold の検証束縛には一切入らない (§D6・誤対応しない)。
       if (name === "update_plan") {
+        // TDA-5 (B1): この plan snapshot に対する function_call_output ("Plan updated" ack) を、
+        //   後段で command.completed へ誤対応させない (de-orphan) ため call_id→name を記録する。
+        ctx.callCorrelation?.record(callId, { name: "update_plan" });
         const parsed = planFromUpdatePlan(args);
         const explanation = asString(args.explanation);
         const payload: Params = {};
@@ -385,13 +569,41 @@ function normalizeResponseItem(
           }),
         ];
       }
+      // SEC-B1R3-1 coupling 不変条件: `classifyCheck` と `commandHasExitSpoofMaterial` は **同一の command
+      //   source** (この `commandFromArguments(name, args)` の戻り) を消費する。両者が同じ文字列を見る結合こそ
+      //   が安全の要 — check 認定した command と spoof 判定した command が乖離すると、check あり × sentinel なし
+      //   の隙間から fake-marker spoof が通る。array-command (未対応) は両者とも tool 名フォールバックで inert
+      //   (両失敗が一致し check_kind 不付与で fold skip)。将来 array 対応時もこの単一 source 経由で結合を保つ
+      //   (配線は boundary-gate scope 変更ゆえ full 監査要・.claude/rules/security.md §ADR0015-B1 参照)。
+      //   INV-ROLLOUT-VERIFICATION-B1 の metatest (d) がこの結合を behavioral に回帰固定する。
       const command = commandFromArguments(name, args);
+      // ADR 0015 §D6 (B1): check 分類 (raw command・closed enum のみ)。started 側に載せ run_dirty 窓を開く。
+      //   command 文字列は function_call_output 側に無いため、completed へ check_kind を引き継ぐには
+      //   call_id 相関で記録する (実データ照合済・decision 019fc7d8)。
+      // SEC-B1-1 item3: check 分類は **実 shell exec tool** に gate する。非 shell tool (MCP 様) の
+      //   args.query 等に check 語彙が入っても検証証拠として扱わない (誤分類→偽検証を構造的に排除)。
+      const isShellExec = name !== undefined && SHELL_EXEC_TOOLS.has(name);
+      const check = isShellExec ? classifyCheck(command) : undefined;
+      // SEC-B1R2-1 (H): shell-exec の command が header/exit を偽装しうる素材を含むかを boolean sentinel で
+      //   相関 info へ記録する (NO-RAW: bool のみ)。completed 側がこれを見てテキスト exit 抽出を fail-closed する。
+      const commandSpoofRisk = isShellExec ? commandHasExitSpoofMaterial(command) : undefined;
+      ctx.callCorrelation?.record(callId, {
+        name,
+        isShellExec,
+        ...(commandSpoofRisk === true ? { commandSpoofRisk } : {}),
+        ...(check !== undefined
+          ? { checkKind: check.check_kind, checkMatch: check.check_match }
+          : {}),
+      });
       return [
         makeEvent(ctx, line, p, "command.started", "running.command_executing", {
           summary: `Command: ${command}`,
           cwd: asString(args.workdir) ?? asString(args.cwd) ?? ctx.cwd,
           payload: {
             command,
+            ...(check !== undefined
+              ? { check_kind: check.check_kind, check_match: check.check_match }
+              : {}),
             ...(asString(args.workdir) !== undefined ? { cwd: asString(args.workdir) } : {}),
             ...(callId !== undefined ? { request_id: callId } : {}),
             arguments: args,
@@ -404,6 +616,12 @@ function normalizeResponseItem(
     case "function_call_output": {
       const output = asString(p.output) ?? "";
       const callId = asString(p.call_id);
+      const info = ctx.callCorrelation?.take(callId);
+      // TDA-5 (B1): update_plan の ack ("Plan updated") は plan snapshot の副産物ゆえ command
+      //   ストリームへ一切出さない (bare orphan command.completed / output delta を抑止する = de-orphan)。
+      //   相関が取れないとき (相関喪失) は従来どおり bare command.completed が出るが check_kind 無しゆえ
+      //   fold は無反応 (A2 pin と同性質・安全側縮退)。
+      if (info?.name === "update_plan") return [];
       const events: NormalizedEvent[] = [];
       if (output.length > 0) {
         events.push(
@@ -413,11 +631,34 @@ function normalizeResponseItem(
           }),
         );
       }
+      // §D6 (B1): exit code を harness 出力から抽出 (spoof 耐性・§extractRolloutExitCode)。
+      //   check_kind/check_match は対応 function_call (started) で分類した結果を call_id 相関で引き継ぐ。
+      //   欠落時 (exit 抽出不能 or 相関喪失) は当該 field を載せない → fold は verification_state 不動 (受入 12)。
+      // SEC-B1-1 item3: 相関がある **かつ** 非 shell exec と判っている call の output からは exit を抽出しない
+      //   (非 shell tool の output に紛れる exit フレーズを検証信号にしない)。相関喪失 (info===undefined) は
+      //   従来どおり抽出する (この経路は check_kind 非搬送ゆえ fold で flip 不能 = inert・観測性優先の安全側)。
+      // SEC-B1R2-1 (H): shell-exec 相関がある時は started 側 sentinel (commandSpoofRisk) を渡し、command が
+      //   header/exit 偽装素材を含むならテキスト抽出を fail-closed する (fake-marker 切詰め spoof を封じる)。
+      const exitCode =
+        info === undefined
+          ? extractRolloutExitCode(output)
+          : info.isShellExec === true
+            ? extractRolloutExitCode(output, {
+                commandHasSpoofMaterial: info.commandSpoofRisk === true,
+              })
+            : undefined;
       events.push(
         makeEvent(ctx, line, p, "command.completed", "running.model_wait", {
           eventIndex: events.length,
-          summary: "Command completed",
-          payload: { ...(callId ? { request_id: callId } : {}) },
+          summary:
+            exitCode !== undefined ? `Command completed (exit ${exitCode})` : "Command completed",
+          payload: {
+            ...(callId ? { request_id: callId } : {}),
+            ...(exitCode !== undefined ? { exit_code: exitCode } : {}),
+            ...(info?.checkKind !== undefined
+              ? { check_kind: info.checkKind, check_match: info.checkMatch }
+              : {}),
+          },
         }),
       );
       return events;

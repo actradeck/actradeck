@@ -24,6 +24,7 @@ import type {
 } from "@actradeck/event-model";
 import { terminalContinuation, WorkItemStatus } from "@actradeck/event-model";
 
+import { checkFields } from "./check-classifier.js";
 import { buildEvent } from "./event-factory.js";
 
 /** 1 件の codex notification (JSON-RPC notification の method + params)。 */
@@ -132,7 +133,8 @@ function normalizeItem(
         return [
           make(ctx, p, "command.started", "running.command_executing", {
             summary: `コマンド実行: ${command}`,
-            payload: { command, ...idPayload },
+            // ADR 0015 §D6 (B1): check 分類 (raw command・closed enum のみ)。run_dirty 窓を開く。
+            payload: { command, ...checkFields(command), ...idPayload },
           }),
         ];
       }
@@ -145,6 +147,8 @@ function normalizeItem(
           payload: {
             ...(command.length > 0 ? { command } : {}),
             ...(exitCode !== undefined ? { exit_code: exitCode } : {}),
+            // ADR 0015 §D6 (B1): completed 側 check 分類 (exit_code と合わせ検証遷移を駆動)。
+            ...(command.length > 0 ? checkFields(command) : {}),
             ...(status !== undefined ? { status } : {}),
             ...idPayload,
           },
