@@ -54,7 +54,7 @@ import {
   type WorkItem,
   type WorkItemsProjection,
 } from "@actradeck/projection";
-import { isTerminalStateValue } from "@actradeck/event-model";
+import { isTerminalStateValue, TERMINAL_STATES } from "@actradeck/event-model";
 
 /**
  * TDA-2: liveness 集約クエリ用の event_type グルーピングは event-model の T1 正典
@@ -84,6 +84,17 @@ const WORK_ITEM_FOLD_EVENT_TYPES: ReadonlySet<string> = new Set([
 function isWorkItemFoldEvent(ev: NormalizedEvent): boolean {
   return WORK_ITEM_FOLD_EVENT_TYPES.has(ev.event_type) || isTerminalStateValue(ev.state);
 }
+
+/**
+ * TDA-2: rebuild SELECT の WHERE gate 用配列 (**単一出所**)。increment 側 `isWorkItemFoldEvent` と
+ * **同一集合** を SQL 用に導出する (event_type membership ∪ terminal state 値・手書き二重化しない):
+ * event_type は `WORK_ITEM_FOLD_EVENT_TYPES` から、terminal state は `isTerminalStateValue` が参照する
+ * 正典 `TERMINAL_STATES` から導出する。`applyWorkItemsEvent` は非対象イベントで prev をそのまま返すため
+ * `reduceWorkItems([gated]) == reduceWorkItems([all])` (証明可能に等価)。よって rebuild は gate 済み行
+ * だけを読めば十分 (write-tx 内の per-session 全走査を避ける)。
+ */
+const WORK_ITEM_FOLD_EVENT_TYPES_SQL: readonly string[] = [...WORK_ITEM_FOLD_EVENT_TYPES];
+const WORK_ITEM_FOLD_TERMINAL_STATES_SQL: readonly string[] = TERMINAL_STATES as readonly string[];
 
 /**
  * work-items 投影キャッシュの上限 (LRU)。BoundedMonotonicTimestampChecker (順序チェッカ) と同様、
@@ -197,6 +208,8 @@ export class IngestStore {
    */
   private readonly workItemsCache = new Map<string, WorkItemsProjection>();
   private readonly workItemsCacheMax: number;
+  /** TDA-2 観測 (テスト/監視用): 直近 rebuild で読み込んだ gate 済みイベント数 (無 gate なら全件になる)。 */
+  private _lastRebuiltEventCount = 0;
 
   constructor(opts: IngestStoreOptions) {
     this.pool = opts.pool;
@@ -605,40 +618,51 @@ export class IngestStore {
     return this.workItemsCache.size;
   }
 
-  /**
-   * ADR 0015 §D4: work-items 直交 fold を 1 イベント分だけ増分適用し、変化した行を work_items へ upsert。
-   *
-   * - **cache hit**: 直近の fold 状態 (transient な tree_fp / pending_checks を含む) を prev とする。
-   * - **cache miss** (backend 再起動 / 初回 work イベント / LRU eviction): 当該 session の
-   *   **全イベントを canonical 順で読み直し** (current を除く)、`reduceWorkItems` で prev を再構成する
-   *   (lazy 再 fold・events は append-only ゆえ完全 rebuild 可能・migration 不要)。
-   *
-   * prev → applyWorkItemsEvent(prev, ev) = next。prev/next の item を **参照比較**で diff し、変化した
-   * 行だけ upsert する (fold は不変 item の参照を保つため・変化した item は必ず新オブジェクト → under-upsert
-   * しない)。next をキャッシュへ書き戻す。
-   *
-   * 冪等: 本メソッドは ingest() の `inserted===true` 分岐からのみ呼ばれる (重複 event_id は到達せず)。
-   * よって同一 event_id 再送で二重 fold しない (§INV-IDEMPOTENCY と同じ inserted ゲート)。
-   *
-   * 正直な限界 (session_state reducer と同性質): 増分 apply は **到達順**で畳む。cache miss 時の
-   * rebuild は canonical 順 (timestamp, event_id) で prior を畳み current を最後に適用するため、
-   * イベントが canonical 順で ingest される通常経路 (sidecar tail / 受入テスト) では
-   * table == reduceWorkItems(canonical) が成立する (受入14)。到達順が canonical と乖離する稀な
-   * out-of-order 再送では、次の rebuild (再起動 / eviction) で canonical へ self-heal する。
-   */
-  private async applyWorkItemsIncremental(client: PoolClient, ev: NormalizedEvent): Promise<void> {
-    const sid = ev.session_id;
-    let prev = this.workItemsCache.get(sid);
-    if (prev === undefined) {
-      prev = await this.rebuildWorkItems(client, sid, ev.event_id);
-    }
-    const next = applyWorkItemsEvent(prev, ev);
-    this.cacheWorkItems(sid, next);
-    await this.upsertWorkItemRows(client, prev, next);
+  /** TDA-2: 直近 rebuild で読んだ gate 済みイベント数 (gate falsifier 用・rebuild 未発生なら 0)。 */
+  get lastRebuiltEventCount(): number {
+    return this._lastRebuiltEventCount;
   }
 
   /**
-   * lazy 再 fold: 当該 session の **current を除く全イベント**を canonical 順で読み直し、
+   * ADR 0015 §D4: work-items 直交 fold を 1 イベント分だけ増分適用し、変化した行を work_items へ upsert。
+   *
+   * - **cache hit** (increment 経路): 直近の fold 状態 (transient な tree_fp / pending_checks を含む) を
+   *   prev とし、prev → next の item を **参照比較 diff** で書く (fold は不変 item の参照を保つため・変化した
+   *   item は必ず新オブジェクト → under-upsert しない・over-upsert は冪等)。
+   * - **cache miss** (backend 再起動 / 初回 work イベント / LRU eviction): 当該 session の gate 済み全
+   *   イベントを canonical 順で読み直し (current を除く) `reduceWorkItems` で prev を再構成する
+   *   (lazy 再 fold・events は append-only ゆえ完全 rebuild 可能・migration 不要)。**QA-1**: rebuild 経路は
+   *   参照 diff でなく **rebuilt+applied projection の全 item を無条件 upsert (full-reconcile)** する。
+   *   これにより、過去に out-of-order 到達で DB 行が canonical と乖離していても (例 table=unverified vs
+   *   canonical=passed、tree_fp 未復元)、rebuild を踏んだ時点で canonical へ**修復**される (rebuild は既に
+   *   全読済ゆえ追加コストは ≤ MAX_WORK_ITEMS=200 行の upsert のみ・cache-hit 経路の参照 diff は不変)。
+   *
+   * next をキャッシュへ書き戻す。冪等: 本メソッドは ingest() の `inserted===true` 分岐からのみ呼ばれる
+   * (重複 event_id は到達せず) ゆえ同一 event_id 再送で二重 fold しない (§INV-IDEMPOTENCY と同じ inserted ゲート)。
+   *
+   * 正直な限界 (session_state reducer と同性質): increment (cache-hit) は **到達順**で畳むため、稀な
+   * out-of-order 再送では canonical と乖離しうる。乖離は次の rebuild (再起動 / eviction) の full-reconcile で
+   * canonical へ修復される (自動修復は rebuild 時点のみ・**rebuild 間の乖離窓は残る**)。canonical 順で
+   * ingest される通常経路 (sidecar tail / 受入テスト) では乖離自体が発生しない (table == reduceWorkItems・受入14)。
+   */
+  private async applyWorkItemsIncremental(client: PoolClient, ev: NormalizedEvent): Promise<void> {
+    const sid = ev.session_id;
+    const cached = this.workItemsCache.get(sid);
+    const rebuilt = cached === undefined;
+    const prev = rebuilt ? await this.rebuildWorkItems(client, sid, ev.event_id) : cached;
+    const next = applyWorkItemsEvent(prev, ev);
+    this.cacheWorkItems(sid, next);
+    if (rebuilt) {
+      // QA-1 full-reconcile: rebuild 経路は全 item を upsert し DB の乖離を修復する。
+      await this.upsertItems(client, next.items);
+    } else {
+      // increment 経路: 参照 diff で変化行のみ書く。
+      await this.upsertWorkItemRows(client, prev, next);
+    }
+  }
+
+  /**
+   * lazy 再 fold: 当該 session の **current を除く gate 済みイベント**を canonical 順で読み直し、
    * `reduceWorkItems` で fold 状態 (items + transient tree_fp / pending_checks + frozen) を再構成する。
    */
   private async rebuildWorkItems(
@@ -647,12 +671,17 @@ export class IngestStore {
     excludeEventId: string,
   ): Promise<WorkItemsProjection> {
     const events = await this.loadSessionEventsForFold(client, sessionId, excludeEventId);
+    this._lastRebuiltEventCount = events.length;
     return reduceWorkItems(sessionId, events);
   }
 
   /**
-   * fold 用に session の全イベント (current 除く) を canonical 順 (timestamp ASC, event_id ASC・
+   * fold 用に session の gate 済みイベント (current 除く) を canonical 順 (timestamp ASC, event_id ASC・
    * replay/webui client fold と同一) で読み、full payload 付き NormalizedEvent へ復元する。
+   *
+   * TDA-2: SELECT は increment 側と **同一 gate** (WORK_ITEM_FOLD_EVENT_TYPES membership ∪ terminal
+   * state 値・単一出所の `*_SQL` 配列) を WHERE へ適用する。非対象イベントは `applyWorkItemsEvent` が
+   * prev を返すため fold 結果は不変で、per-session 全走査 (write-tx 内・無界) を避けられる。
    * 契約違反行 (理論上 ingest の parseEvent 境界を通るため発生しないが、別経路書込/破損に備える) は
    * T1 検証で skip する (fold へ流入させない・NO secret 出力)。
    */
@@ -666,8 +695,14 @@ export class IngestStore {
               event_type, state, timestamp, cwd, summary, payload, metrics
          FROM events
         WHERE session_id = $1 AND event_id <> $2
+          AND (event_type = ANY($3::text[]) OR state = ANY($4::text[]))
         ORDER BY timestamp ASC, event_id ASC`,
-      [sessionId, excludeEventId],
+      [
+        sessionId,
+        excludeEventId,
+        WORK_ITEM_FOLD_EVENT_TYPES_SQL as string[],
+        WORK_ITEM_FOLD_TERMINAL_STATES_SQL as string[],
+      ],
     );
     const out: NormalizedEvent[] = [];
     for (const raw of rows as EventRow[]) {
@@ -689,7 +724,7 @@ export class IngestStore {
   }
 
   /**
-   * prev → next で **変化した work item 行のみ**を work_items へ upsert する (参照 diff)。fold は
+   * increment 経路 (cache-hit): prev → next で **参照が変わった item のみ**を upsert する (参照 diff)。fold は
    * 不変 item の参照を保つため、参照が変わった item = 値が変わった item (over-upsert しても冪等・
    * under-upsert はしない)。行は増える一方 (removed も status=removed で残る・MAX 200 で bound) ゆえ
    * DELETE は不要。
@@ -700,10 +735,16 @@ export class IngestStore {
     next: WorkItemsProjection,
   ): Promise<void> {
     const prevById = new Map(prev.items.map((it) => [it.work_item_id, it]));
+    const changed = next.items.filter((it) => prevById.get(it.work_item_id) !== it);
+    await this.upsertItems(client, changed);
+  }
+
+  /** work_items へ複数行を upsert する (列順は WORK_ITEM_COLUMNS 単一出所)。increment/rebuild 共有。 */
+  private async upsertItems(client: PoolClient, items: readonly WorkItem[]): Promise<void> {
+    if (items.length === 0) return;
     const setClause = WORK_ITEM_COLUMNS.map((c) => `${c} = EXCLUDED.${c}`).join(",\n         ");
     const placeholders = WORK_ITEM_COLUMNS.map((_, i) => `$${i + 1}`).join(",");
-    for (const it of next.items) {
-      if (prevById.get(it.work_item_id) === it) continue; // 参照不変 = 未変化 → skip。
+    for (const it of items) {
       await client.query(
         `INSERT INTO work_items (${WORK_ITEM_COLUMNS.join(",")})
          VALUES (${placeholders})

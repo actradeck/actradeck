@@ -363,6 +363,244 @@ describe.skipIf(!reachable)("INV-WORKITEMS-WIRING (real Postgres)", () => {
     assertParity(await fetchRows(sid), expected.items);
   });
 
+  it("TDA-2: rebuild SELECT is gated — reads only fold-relevant rows, not the whole session", async () => {
+    const store1 = new IngestStore({ pool });
+    const sid = newSession("wi_gate_rebuild");
+    // 3 target (fold-relevant) + 4 non-target (session.started / message / reasoning / heartbeat)。
+    const priorEvents: NormalizedEvent[] = [
+      makeEvent({
+        session_id: sid,
+        state: "starting",
+        event_type: "session.started",
+        timestamp: iso(base, 0),
+      }), // non-target
+      planCompleted(sid, 10), // target
+      makeEvent({
+        session_id: sid,
+        event_type: "agent.message.delta",
+        state: "running.model_streaming",
+        timestamp: iso(base, 15),
+        payload: { kind: "agent.message.delta", delta: "chatter" },
+      }), // non-target
+      makeEvent({
+        session_id: sid,
+        event_type: "command.started",
+        state: "running.command_executing",
+        timestamp: iso(base, 20),
+        payload: {
+          kind: "command.started",
+          command: "vitest run",
+          check_kind: "test",
+          check_match: "program",
+          request_id: "r1",
+        },
+      }), // target
+      makeEvent({
+        session_id: sid,
+        event_type: "agent.reasoning_summary.delta",
+        state: "running.model_streaming",
+        timestamp: iso(base, 25),
+        payload: { kind: "agent.reasoning_summary.delta", delta: "thinking" },
+      }), // non-target
+      makeEvent({
+        session_id: sid,
+        event_type: "command.completed",
+        state: "running.model_wait",
+        timestamp: iso(base, 30),
+        payload: {
+          kind: "command.completed",
+          exit_code: 0,
+          check_kind: "test",
+          check_match: "program",
+          request_id: "r1",
+        },
+      }), // target
+      makeEvent({
+        session_id: sid,
+        event_type: "heartbeat",
+        timestamp: iso(base, 35),
+        payload: { kind: "heartbeat", process_alive: true },
+      }), // non-target
+    ];
+    for (const ev of priorEvents) await store1.ingest(ev);
+
+    // fresh store = 空キャッシュ → 次の work イベントで rebuild が prior を読む。
+    const store2 = new IngestStore({ pool });
+    const trigger = makeEvent({
+      session_id: sid,
+      event_type: "diff.updated",
+      state: "running.file_editing",
+      timestamp: iso(base, 40),
+      payload: { kind: "diff.updated", diff_hash: "h9", head_sha: "sha9" },
+    });
+    await store2.ingest(trigger);
+
+    // gate 有: prior の target のみ (plan/cstart/cdone = 3)。gate を外す mutation では
+    //   非対象 4 件も読まれ 7 になり本 assert が赤化する (falsifier)。
+    expect(store2.lastRebuiltEventCount).toBe(3);
+  });
+
+  it("QA-1: rebuild full-reconcile repairs an out-of-order drift (table=unverified → canonical passed, tree_fp restored)", async () => {
+    const store1 = new IngestStore({ pool });
+    const sid = newSession("wi_drift");
+    // 到達順 (ingest) と canonical (timestamp) 順を乖離させる:
+    //   timestamp: plan(10) < cstart(20) < diff(30) < cdone(40) → canonical では diff が cdone より前
+    //     → cdone が tree_fp 確定後に完了 → passed。
+    //   ingest 順: plan, cstart, cdone(t40), diff(t30) → 到達順では cdone 時点で tree_fp 未確定
+    //     → passed 阻止 (TDA-1 非対称) → unverified のまま DB に残る (= 乖離)。
+    const plan = planCompleted(sid, 10);
+    const cstart = makeEvent({
+      session_id: sid,
+      event_type: "command.started",
+      state: "running.command_executing",
+      timestamp: iso(base, 20),
+      payload: {
+        kind: "command.started",
+        command: "vitest run",
+        check_kind: "test",
+        check_match: "program",
+        request_id: "r1",
+      },
+    });
+    const diff = makeEvent({
+      session_id: sid,
+      event_type: "diff.updated",
+      state: "running.file_editing",
+      timestamp: iso(base, 30),
+      payload: { kind: "diff.updated", diff_hash: "hh", head_sha: "ss" },
+    });
+    const cdone = makeEvent({
+      session_id: sid,
+      event_type: "command.completed",
+      state: "running.model_wait",
+      timestamp: iso(base, 40),
+      payload: {
+        kind: "command.completed",
+        exit_code: 0,
+        check_kind: "test",
+        check_match: "program",
+        request_id: "r1",
+      },
+    });
+    await store1.ingest(
+      makeEvent({
+        session_id: sid,
+        state: "starting",
+        event_type: "session.started",
+        timestamp: iso(base, 0),
+      }),
+    );
+    await store1.ingest(plan);
+    await store1.ingest(cstart);
+    await store1.ingest(cdone); // t40 到達 (tree_fp まだ無い)
+    await store1.ingest(diff); // t30 が後着
+
+    // 乖離を実証: DB=unverified、canonical=passed。
+    const drifted = await fetchRows(sid);
+    const canonical = reduceWorkItems(sid, [plan, cstart, diff, cdone]);
+    expect(canonical.items[0]!.verification_state).toBe("passed");
+    expect(canonical.items[0]!.verified_tree_fp).toBeDefined();
+    expect([...drifted.values()][0]!.verification_state).toBe("unverified"); // 現行 increment の乖離
+    expect([...drifted.values()][0]!.verified_tree_fp).toBeNull();
+
+    // fresh store (eviction 相当) が非接触イベント (同一 fingerprint diff = fold no-op) を ingest →
+    //   rebuild は canonical 順で passed を再構成し、full-reconcile が全行を upsert して DB を修復する。
+    const store2 = new IngestStore({ pool });
+    const noop = makeEvent({
+      session_id: sid,
+      event_type: "diff.updated",
+      state: "running.file_editing",
+      timestamp: iso(base, 50),
+      payload: { kind: "diff.updated", diff_hash: "hh", head_sha: "ss" }, // 同一 fingerprint → no-op
+    });
+    await store2.ingest(noop);
+
+    const repaired = [...(await fetchRows(sid)).values()][0]!;
+    // full-reconcile を外す (rebuild 経路も参照 diff に戻す) mutation ではここが unverified のまま → 赤。
+    expect(repaired.verification_state).toBe("passed");
+    expect(repaired.verified_tree_fp).toBe(canonical.items[0]!.verified_tree_fp); // tree_fp 復元 (TDA 越境メモ)
+    expect(repaired.check_exit_code).toBe(0);
+  });
+
+  it("QA-1: rebuild full-reconcile also repairs a drifted stale row (passed→stale) with tree_fp", async () => {
+    const store1 = new IngestStore({ pool });
+    const sid = newSession("wi_drift_stale");
+    // canonical: plan(10) → diff h1(20) → cdone passes on h1(30) → diff h2(40) → stale。
+    //   到達順で cdone(t30) を diff-h1(t20) より前に入れて passed を阻止し乖離を作る。
+    const plan = planCompleted(sid, 10);
+    const cstart = makeEvent({
+      session_id: sid,
+      event_type: "command.started",
+      state: "running.command_executing",
+      timestamp: iso(base, 15),
+      payload: {
+        kind: "command.started",
+        command: "tsc",
+        check_kind: "typecheck",
+        check_match: "program",
+        request_id: "r2",
+      },
+    });
+    const diff1 = makeEvent({
+      session_id: sid,
+      event_type: "diff.updated",
+      state: "running.file_editing",
+      timestamp: iso(base, 20),
+      payload: { kind: "diff.updated", diff_hash: "h1", head_sha: "s1" },
+    });
+    const cdone = makeEvent({
+      session_id: sid,
+      event_type: "command.completed",
+      state: "running.model_wait",
+      timestamp: iso(base, 30),
+      payload: {
+        kind: "command.completed",
+        exit_code: 0,
+        check_kind: "typecheck",
+        check_match: "program",
+        request_id: "r2",
+      },
+    });
+    const diff2 = makeEvent({
+      session_id: sid,
+      event_type: "diff.updated",
+      state: "running.file_editing",
+      timestamp: iso(base, 40),
+      payload: { kind: "diff.updated", diff_hash: "h2", head_sha: "s1" },
+    });
+    await store1.ingest(
+      makeEvent({
+        session_id: sid,
+        state: "starting",
+        event_type: "session.started",
+        timestamp: iso(base, 0),
+      }),
+    );
+    await store1.ingest(plan);
+    await store1.ingest(cstart);
+    await store1.ingest(cdone); // t30 到達前に diff1 未着 → passed 阻止
+    await store1.ingest(diff1); // t20 後着
+    await store1.ingest(diff2); // t40
+
+    const canonical = reduceWorkItems(sid, [plan, cstart, diff1, cdone, diff2]);
+    expect(canonical.items[0]!.verification_state).toBe("stale"); // passed(h1) → diff h2 で stale
+    expect([...(await fetchRows(sid)).values()][0]!.verification_state).not.toBe("stale"); // 乖離
+
+    const store2 = new IngestStore({ pool });
+    await store2.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "diff.updated",
+        state: "running.file_editing",
+        timestamp: iso(base, 50),
+        payload: { kind: "diff.updated", diff_hash: "h2", head_sha: "s1" }, // no-op (h2 と同一)
+      }),
+    );
+    const repaired = [...(await fetchRows(sid)).values()][0]!;
+    expect(repaired.verification_state).toBe("stale");
+    expect(repaired.verified_tree_fp).toBe(canonical.items[0]!.verified_tree_fp);
+  });
+
   it("gate: non-work-relevant events create no work_items rows", async () => {
     const store = new IngestStore({ pool });
     const sid = newSession("wi_gate");
