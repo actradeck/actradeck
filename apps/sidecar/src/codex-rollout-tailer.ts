@@ -9,6 +9,7 @@ import type { StartKind } from "@actradeck/event-model";
 
 import {
   normalizeRolloutLine,
+  RolloutCallCorrelation,
   rolloutStartLineage,
   sessionIdFromRolloutPath,
   type CodexRolloutLine,
@@ -62,6 +63,11 @@ interface FileRuntime {
   providerSessionId?: string;
   resumedFromSessionId?: string;
   startKind?: StartKind;
+  /**
+   * ADR 0015 §D6 (B1): function_call↔function_call_output を call_id で結ぶ per-file 相関。
+   *   processLine で lazy 初期化する (presence-prime 経路は function_call を正規化しないため不要)。
+   */
+  callCorrelation?: RolloutCallCorrelation;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
@@ -426,12 +432,18 @@ export class CodexRolloutTailer {
       this.onSessionContext?.({ sessionId: runtime.sessionId, cwd: runtime.cwd, file });
     }
 
+    // ADR 0015 §D6 (B1): per-file の call_id 相関を lazy 初期化して注入する (check_kind の
+    //   completed 引き継ぎ + update_plan ack の de-orphan)。runtime は上で set 済 (同一参照)。
+    if (runtime.callCorrelation === undefined)
+      runtime.callCorrelation = new RolloutCallCorrelation();
+
     const events = normalizeRolloutLine(line, {
       sessionId: runtime.sessionId,
       cwd: runtime.cwd,
       byteOffset,
       sourcePath: file,
       onWarning: this.onWarning,
+      callCorrelation: runtime.callCorrelation,
       ...(runtime.providerSessionId !== undefined
         ? { providerSessionId: runtime.providerSessionId }
         : {}),

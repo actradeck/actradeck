@@ -51,6 +51,7 @@ import {
 import {
   applyWorkItemsEvent,
   reduceWorkItems,
+  WORK_ITEM_REACTIVE_EVENT_TYPES,
   type WorkItem,
   type WorkItemsProjection,
 } from "@actradeck/projection";
@@ -71,14 +72,11 @@ const MODEL_STREAM_TYPES = MODEL_STREAM_EVENT_TYPES;
  * terminal (session.ended / terminal state 保持イベント) も含めるのは、work item を持つ session を
  * **freeze** して post-terminal の work/diff/command イベントが frozen 行を mutate しないため (受入15)。
  */
-const WORK_ITEM_FOLD_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "work.item.updated",
-  "turn.plan.updated",
-  "command.started",
-  "command.completed",
-  "diff.updated",
-  "session.ended",
-]);
+// TDA-A2-7 (B1・単一出所化): projection の `WORK_ITEM_REACTIVE_EVENT_TYPES` を **import して共有**する
+//   (手書き複製を廃止)。fold に反応 case を足しても projection 側の配列更新だけで backend gate が自動追随し、
+//   silent under-count drift を構造的に排除する。projection 側は INV-WORKITEM-REACTIVE-SET-COMPLETE が
+//   switch との乖離を回帰固定する。liveness 分類の「event-model T1 正典 import・SQL 側へ再定義しない」規律と同型。
+const WORK_ITEM_FOLD_EVENT_TYPES: ReadonlySet<string> = new Set(WORK_ITEM_REACTIVE_EVENT_TYPES);
 
 /** このイベントが work-items fold を起こしうるか (§D4 gate)。terminal state 保持イベントも含む。 */
 function isWorkItemFoldEvent(ev: NormalizedEvent): boolean {

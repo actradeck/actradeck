@@ -47,6 +47,27 @@ import { boundTurnSummary } from "./index.js";
 export const MAX_WORK_ITEMS = 200;
 
 /**
+ * fold が反応する event_type の**正準集合** (§D4・TDA-A2-7 単一出所)。
+ *
+ * `applyWorkItemsEvent` の switch が反応する 5 種 + 明示 terminal event_type `session.ended` (freeze)。
+ * backend の増分投影 gate (`isWorkItemFoldEvent`) と rebuild SELECT の WHERE はこの配列を **import して
+ * 共有**する (手書き複製しない = 反応 case 追加時の gate 更新漏れによる silent under-count を構造的に防ぐ)。
+ * terminal *state 値* (isTerminalStateValue) による freeze は event_type 非依存ゆえ本集合と直交し、backend
+ * 側で `|| isTerminalStateValue(ev.state)` と OR 合成する。
+ *
+ * ⚠️ 本集合と switch の乖離 (反応 case を足して本配列を忘れる) は INV-WORKITEM-REACTIVE-SET-COMPLETE
+ *    (test/inv-work-items-verification.test.ts) が全 EventType 走査で回帰固定する。
+ */
+export const WORK_ITEM_REACTIVE_EVENT_TYPES: readonly string[] = [
+  "work.item.updated",
+  "turn.plan.updated",
+  "command.started",
+  "command.completed",
+  "diff.updated",
+  "session.ended",
+];
+
+/**
  * work_items テーブル 1 行に対応する投影値 (§D4)。`description` は投影しない (leak/bloat trim・
  * redacted event が保持し UI detail が timeline から読む)。
  */

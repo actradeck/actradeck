@@ -148,10 +148,12 @@ describe("git-watcher (real repo)", () => {
     expect(serialized).not.toContain("ghp_");
 
     // payload は metrics キーのみ (raw diff/本文フィールドが無い)。本文を足す mutation で赤化する。
+    //   ADR 0015 §D5/§D10#4 (B1): head_sha は commit id (content-free・秘匿でない) の additive metrics。
     expect(Object.keys(ev.payload).sort()).toEqual([
       "added_lines",
       "changed_files",
       "diff_hash",
+      "head_sha",
       "kind",
       "removed_lines",
     ]);

@@ -16,6 +16,8 @@
  */
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import chokidar, { type FSWatcher } from "chokidar";
@@ -31,6 +33,44 @@ export interface DiffSnapshot {
   readonly changedFiles: number;
   readonly addedLines: number;
   readonly removedLines: number;
+  /**
+   * ADR 0015 §D5 (B1): snapshot 時点の `git rev-parse HEAD`。tree fingerprint
+   *   = sha256(head ∥ \0 ∥ diff_hash) の素。unborn/非 git では undefined (fingerprint は diff_hash-only へ縮退)。
+   */
+  readonly headSha: string | undefined;
+}
+
+/** 未追跡ファイル stat 行の DoS 境界 (異常に多い未追跡ファイルで stat 洪水を避ける)。 */
+const MAX_UNTRACKED_STAT = 10_000;
+
+/**
+ * 未追跡 (非 ignored) ファイルの stat 行 (path/size/mtime) を決定的な文字列にまとめる (§D5)。
+ *
+ * porcelain status はファイル**名**のみを列挙するため、未追跡ファイルの**内容**変更 (編集/追記) は
+ * status/diff のどちらにも映らず diff_hash が動かない盲点があった。`git ls-files --others
+ * --exclude-standard -z` で個別の未追跡ファイルを列挙し (ディレクトリ collapse しない・.gitignore 尊重)、
+ * 各ファイルの size + mtime を hash 入力へ含めて盲点を閉じる。mtime は touch でも動く (safe-direction・
+ * 過検出=stale 側で ADR の honest limit どおり)。
+ */
+async function untrackedStatDigest(repoRoot: string): Promise<string> {
+  const raw = await git(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  if (raw.length === 0) return "";
+  const paths = raw
+    .split("\0")
+    .filter((p) => p.length > 0)
+    .sort(); // 決定的順序 (列挙順に依存しない)。
+  const limited = paths.slice(0, MAX_UNTRACKED_STAT);
+  const parts: string[] = [];
+  for (const rel of limited) {
+    try {
+      const st = await stat(join(repoRoot, rel));
+      parts.push(`${rel}\0${st.size}\0${Math.trunc(st.mtimeMs)}`);
+    } catch {
+      parts.push(`${rel}\0?`); // stat 不能 (削除競合等) は存在痕跡のみ載せる。
+    }
+  }
+  if (paths.length > MAX_UNTRACKED_STAT) parts.push(`+${paths.length - MAX_UNTRACKED_STAT}`); // 超過数 (観測性)。
+  return parts.join("\n");
 }
 
 export interface GitWatcherOptions {
@@ -79,14 +119,22 @@ export async function findRepoRoot(cwd: string): Promise<string | undefined> {
 
 /** porcelain + unified diff を取得して要約メトリクスと hash を計算。 */
 export async function snapshotDiff(repoRoot: string): Promise<DiffSnapshot> {
-  const [status, diff, cached] = await Promise.all([
+  const [status, diff, cached, head, untracked] = await Promise.all([
     git(repoRoot, ["status", "--porcelain=v1"]),
     git(repoRoot, ["diff", "--no-ext-diff", "--unified=3"]),
     git(repoRoot, ["diff", "--cached", "--no-ext-diff", "--unified=3"]),
+    // ADR 0015 §D5 (B1): HEAD commit id (tree fingerprint の素)。unborn/非 git は空 → undefined。
+    git(repoRoot, ["rev-parse", "HEAD"]),
+    // ADR 0015 §D5 (B1): 未追跡ファイルの内容変更を捕捉する stat 行 (path/size/mtime)。
+    untrackedStatDigest(repoRoot),
   ]);
+  const headTrimmed = head.trim();
+  const headSha = headTrimmed.length > 0 ? headTrimmed : undefined;
 
   const combined = `${diff}\n${cached}`;
-  const hash = createHash("sha256").update(`${status}\u0000${combined}`).digest("hex");
+  // hash input gains untracked stat (D5): captures untracked-file content edits invisible to porcelain names.
+  //   diff_hash is compared only to the in-memory previous value; at-rest history is opaque, so this is safe.
+  const hash = createHash("sha256").update(`${status} ${combined} ${untracked}`).digest("hex");
 
   const changedFiles = status.split("\n").filter((l) => l.trim().length > 0).length;
   let addedLines = 0;
@@ -96,7 +144,7 @@ export async function snapshotDiff(repoRoot: string): Promise<DiffSnapshot> {
     else if (line.startsWith("-") && !line.startsWith("---")) removedLines += 1;
   }
 
-  return { hash, changedFiles, addedLines, removedLines };
+  return { hash, changedFiles, addedLines, removedLines, headSha };
 }
 
 export class GitWatcher {
@@ -171,6 +219,8 @@ export class GitWatcher {
                 changed_files: snap.changedFiles,
                 added_lines: snap.addedLines,
                 removed_lines: snap.removedLines,
+                // ADR 0015 §D5 (B1): tree fingerprint の素 (commit id・content-free)。unborn/非 git は省略。
+                ...(snap.headSha !== undefined ? { head_sha: snap.headSha } : {}),
               },
             }),
           );

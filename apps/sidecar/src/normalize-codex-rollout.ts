@@ -8,6 +8,8 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
 import type {
+  CheckKind,
+  CheckMatch,
   EventType,
   NormalizedEvent,
   StartKind,
@@ -16,6 +18,7 @@ import type {
 } from "@actradeck/event-model";
 import { parseEvent, WorkItemStatus } from "@actradeck/event-model";
 
+import { classifyCheck } from "./check-classifier.js";
 import { assertPayloadConsistency } from "./event-factory.js";
 
 export interface CodexRolloutLine {
@@ -52,6 +55,87 @@ export interface CodexRolloutNormalizeContext {
   readonly providerSessionId?: string | undefined;
   readonly resumedFromSessionId?: string | undefined;
   readonly startKind?: StartKind | undefined;
+  /**
+   * ADR 0015 §D6 (B1): function_call ↔ function_call_output を call_id で相関する per-file 状態。
+   * tailer が FileRuntime ごとに 1 つ生成して注入する。無ければ相関しない (per-line stateless 縮退・
+   * check_kind は command.completed へ乗らず update_plan ack の de-orphan もされない — 安全側)。
+   */
+  readonly callCorrelation?: RolloutCallCorrelation | undefined;
+}
+
+/** 相関に記録する function_call の要点 (name + 分類済 check・NO-RAW: 生 command は保持しない)。 */
+export interface RolloutCallInfo {
+  readonly name: string | undefined;
+  readonly checkKind?: CheckKind | undefined;
+  readonly checkMatch?: CheckMatch | undefined;
+}
+
+/** call_id ごとの記録上限 (DoS 境界)。超過は最古 FIFO 破棄 = 相関喪失 → bare/no-flip の安全側縮退。 */
+const MAX_CORRELATION_ENTRIES = 4096;
+
+/**
+ * function_call → function_call_output を call_id で結ぶ per-file 相関 (§D6/B1・TDA-5)。
+ *
+ * rollout は 1 行ずつ stateless に正規化されるため、`command.completed` (= function_call_output) 側は
+ * command 文字列を持たない。check_kind を completed へ乗せるには、対応する function_call (started 側・
+ * command あり) で分類した結果を call_id で引き継ぐ必要がある。同じ相関が update_plan ack の de-orphan
+ * (TDA-5: ack を command.completed へ誤対応させない) にも使われる。
+ *
+ * 実データ照合 (decision 019fc7d8): call_id は function_call↔output を 100% (17003/17003) 相関し、
+ * function_call は全件 call_id を持つ。相関喪失 (daemon 再起動跨ぎ等) は bare orphan / check 非付与へ
+ * 安全に縮退する (fold は check_kind 無しの completed を無視・A2 pin と同性質)。
+ */
+export class RolloutCallCorrelation {
+  private readonly map = new Map<string, RolloutCallInfo>();
+
+  record(callId: string | undefined, info: RolloutCallInfo): void {
+    if (callId === undefined || callId.length === 0) return;
+    if (this.map.size >= MAX_CORRELATION_ENTRIES && !this.map.has(callId)) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) this.map.delete(oldest);
+    }
+    this.map.set(callId, info);
+  }
+
+  /** 記録を取り出して消費する (output は call ごとに 1 回ゆえ take-once)。 */
+  take(callId: string | undefined): RolloutCallInfo | undefined {
+    if (callId === undefined || callId.length === 0) return undefined;
+    const v = this.map.get(callId);
+    if (v !== undefined) this.map.delete(callId);
+    return v;
+  }
+}
+
+const EXIT_TEXT_RE = /[Pp]rocess exited with code (-?\d+)/;
+
+/**
+ * function_call_output.output から exit code を抽出する (§D6/B1・real-data 照合済・decision 019fc7d8)。
+ *
+ * 2 形態 (両方 real):
+ *  (1) **構造化** — output が JSON object へ parse でき `metadata.exit_code` が整数 (legacy 2025 rollout +
+ *      structured output を出す外部 adapter)。非 spoofable。
+ *  (2) **harness テキスト** — current codex (2026) は output を平文で書き、harness header
+ *      (`Chunk ID:.. / Wall time:.. / Process exited with code N / .. / Output:\n<stdout>`) の
+ *      **最初の "Output:" マーカーより前**に exit を書く。header 限定で照合するのが **spoof 耐性の要**:
+ *      コマンド stdout は "Output:" の**後**に出るため header を偽装できない (real-data 5075/5075 で
+ *      exit は必ず header 側・body のみ出現ゼロ)。
+ *  (3) どちらでもない → undefined (= 結果不明・fold は verification_state を動かさない・受入 12)。
+ *
+ * 戻り値は整数のみ (NO-RAW: 生テキストを保持しない)。ReDoS 安全 (固定パターン + header slice で有界)。
+ */
+export function extractRolloutExitCode(output: string | undefined): number | undefined {
+  if (typeof output !== "string" || output.length === 0) return undefined;
+  // (1) 構造化 metadata.exit_code (非 spoofable)。
+  const structured = asNumber(asParams(parseJsonObject(output).metadata).exit_code);
+  if (structured !== undefined && Number.isInteger(structured)) return structured;
+  // (2) harness header の "Process exited with code N" ("Output:" マーカー前のみ)。
+  const nlIdx = output.indexOf("\nOutput:");
+  const markerIdx = nlIdx >= 0 ? nlIdx : output.startsWith("Output:") ? 0 : -1;
+  if (markerIdx < 0) return undefined; // マーカー無し → header 特定不能 → 抽出しない (安全側・非捏造)。
+  const m = EXIT_TEXT_RE.exec(output.slice(0, markerIdx));
+  if (m === null) return undefined;
+  const n = Number.parseInt(m[1]!, 10);
+  return Number.isInteger(n) ? n : undefined;
 }
 
 /**
@@ -355,6 +439,9 @@ function normalizeResponseItem(
       //   対応する function_call_output ("Plan updated" ack) は check_kind を持たないため、
       //   command.completed になっても work-items fold の検証束縛には一切入らない (§D6・誤対応しない)。
       if (name === "update_plan") {
+        // TDA-5 (B1): この plan snapshot に対する function_call_output ("Plan updated" ack) を、
+        //   後段で command.completed へ誤対応させない (de-orphan) ため call_id→name を記録する。
+        ctx.callCorrelation?.record(callId, { name: "update_plan" });
         const parsed = planFromUpdatePlan(args);
         const explanation = asString(args.explanation);
         const payload: Params = {};
@@ -386,12 +473,25 @@ function normalizeResponseItem(
         ];
       }
       const command = commandFromArguments(name, args);
+      // ADR 0015 §D6 (B1): check 分類 (raw command・closed enum のみ)。started 側に載せ run_dirty 窓を開く。
+      //   command 文字列は function_call_output 側に無いため、completed へ check_kind を引き継ぐには
+      //   call_id 相関で記録する (実データ照合済・decision 019fc7d8)。
+      const check = classifyCheck(command);
+      ctx.callCorrelation?.record(callId, {
+        name,
+        ...(check !== undefined
+          ? { checkKind: check.check_kind, checkMatch: check.check_match }
+          : {}),
+      });
       return [
         makeEvent(ctx, line, p, "command.started", "running.command_executing", {
           summary: `Command: ${command}`,
           cwd: asString(args.workdir) ?? asString(args.cwd) ?? ctx.cwd,
           payload: {
             command,
+            ...(check !== undefined
+              ? { check_kind: check.check_kind, check_match: check.check_match }
+              : {}),
             ...(asString(args.workdir) !== undefined ? { cwd: asString(args.workdir) } : {}),
             ...(callId !== undefined ? { request_id: callId } : {}),
             arguments: args,
@@ -404,6 +504,12 @@ function normalizeResponseItem(
     case "function_call_output": {
       const output = asString(p.output) ?? "";
       const callId = asString(p.call_id);
+      const info = ctx.callCorrelation?.take(callId);
+      // TDA-5 (B1): update_plan の ack ("Plan updated") は plan snapshot の副産物ゆえ command
+      //   ストリームへ一切出さない (bare orphan command.completed / output delta を抑止する = de-orphan)。
+      //   相関が取れないとき (相関喪失) は従来どおり bare command.completed が出るが check_kind 無しゆえ
+      //   fold は無反応 (A2 pin と同性質・安全側縮退)。
+      if (info?.name === "update_plan") return [];
       const events: NormalizedEvent[] = [];
       if (output.length > 0) {
         events.push(
@@ -413,11 +519,22 @@ function normalizeResponseItem(
           }),
         );
       }
+      // §D6 (B1): exit code を harness 出力から抽出 (非 spoofable・§extractRolloutExitCode)。
+      //   check_kind/check_match は対応 function_call (started) で分類した結果を call_id 相関で引き継ぐ。
+      //   欠落時 (exit 抽出不能 or 相関喪失) は当該 field を載せない → fold は verification_state 不動 (受入 12)。
+      const exitCode = extractRolloutExitCode(output);
       events.push(
         makeEvent(ctx, line, p, "command.completed", "running.model_wait", {
           eventIndex: events.length,
-          summary: "Command completed",
-          payload: { ...(callId ? { request_id: callId } : {}) },
+          summary:
+            exitCode !== undefined ? `Command completed (exit ${exitCode})` : "Command completed",
+          payload: {
+            ...(callId ? { request_id: callId } : {}),
+            ...(exitCode !== undefined ? { exit_code: exitCode } : {}),
+            ...(info?.checkKind !== undefined
+              ? { check_kind: info.checkKind, check_match: info.checkMatch }
+              : {}),
+          },
         }),
       );
       return events;

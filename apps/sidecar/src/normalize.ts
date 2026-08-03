@@ -23,6 +23,7 @@ import {
 } from "@actradeck/event-model";
 
 import { type BuildEventInput, buildEvent } from "./event-factory.js";
+import { checkFields } from "./check-classifier.js";
 import { redactString } from "@actradeck/redaction";
 
 /** Claude Code hook の共通入力 (HTTP body = command stdin と同形)。 */
@@ -76,7 +77,7 @@ interface ToolInput {
 export const MAX_COMMAND_LEN = 4096;
 
 /** コマンドを ; | && || で区切った各セグメントへ分解 (パイプ/連結内の個別 cmd を見る)。 */
-function splitSegments(command: string): string[] {
+export function splitSegments(command: string): string[] {
   return command
     .split(/[;\n]|\|\||&&|\||(?<!\d)>{1,2}|<{1,2}/)
     .map((s) => s.trim())
@@ -102,7 +103,7 @@ const QUOTE_CHARS = new Set(['"', "'", "`"]);
 function isWordChar(ch: string | undefined): boolean {
   return ch !== undefined && !/\s/.test(ch);
 }
-function tokenize(segment: string): string[] {
+export function tokenize(segment: string): string[] {
   let out = "";
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i];
@@ -124,7 +125,7 @@ function tokenize(segment: string): string[] {
  * 小文字化した basename に対して行う (`/usr/bin/RM` → `rm`)。引数・パスは大小文字を保つため
  * ここでは tokens[0] のみを対象にする。
  */
-function commandName(tokens: string[]): string {
+export function commandName(tokens: string[]): string {
   const first = tokens[0];
   if (typeof first !== "string" || first.length === 0) return "";
   const base = first.includes("/") ? (first.split("/").pop() ?? first) : first;
@@ -189,7 +190,7 @@ const MAX_WRAPPER_STRIP = 8;
  * 戻り値の `capExhausted`: 反復上限に達してもなお先頭がラッパのとき true。ラッパを多重に
  * 積んで実コマンドを上限の奥へ隠す回避を fail-safe (gated) に倒すためのシグナル。
  */
-function stripRunnerWrappers(tokens: string[]): { tokens: string[]; capExhausted: boolean } {
+export function stripRunnerWrappers(tokens: string[]): { tokens: string[]; capExhausted: boolean } {
   let cur = tokens;
   for (let iter = 0; iter < MAX_WRAPPER_STRIP; iter++) {
     if (cur.length === 0) return { tokens: cur, capExhausted: false };
@@ -554,7 +555,7 @@ const INTERPRETER_INLINE_FLAGS = new Set(["-c", "-e", "-E", "-r", "-R"]);
  * `bash`/`sh` 等サフィックス無しの名前はそのまま返す。`go1` のような非対象は影響しない。
  */
 const VERSION_SUFFIX_RE = /^([a-z]+?)\d+(?:\.\d+)*$/; // bash:語幹を非貪欲・末尾の version を有界に剥がす。
-function normalizeCommandName(name: string): string {
+export function normalizeCommandName(name: string): string {
   if (INLINE_SHELLS.has(name) || INLINE_INTERPRETERS.has(name)) return name; // サフィックス無しは即返し。
   const m = VERSION_SUFFIX_RE.exec(name);
   if (m) {
@@ -628,7 +629,7 @@ function isCleanExecutableToken(token: string): boolean {
  * セグメント先頭の env 代入トークン (`VAR=val`) をスキップして実コマンド先頭の index を返す。
  * `FOO=bar ls` のような正当な代入プレフィックスを「解析不能メタ文字」と誤認しないため。
  */
-function skipLeadingAssignments(tokens: string[]): number {
+export function skipLeadingAssignments(tokens: string[]): number {
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i];
@@ -1586,6 +1587,9 @@ export function normalizeHook(
               command: summarize(command, MAX_COMMAND_LEN),
               ...(input.cwd ? { cwd: input.cwd } : {}),
               risk_level: classifyCommandRisk(command),
+              // ADR 0015 §D6 (B1): check 分類 (raw command で判定・closed enum のみ)。started 側にも
+              //   載せるのは fold の run_dirty 窓 (start↔completed 間の diff 変化) を開くため。
+              ...checkFields(command),
               // tool_use_id 由来の相関キー。同じキーを command.completed に載せ started↔completed を結ぶ。
               ...(correlationId !== undefined ? { request_id: correlationId } : {}),
               ...autoMark,
@@ -1644,7 +1648,12 @@ export function normalizeHook(
         const correlationId = toolUseCorrelationId(input);
         const payload: Record<string, unknown> = {};
         if (exitCode !== undefined) payload.exit_code = exitCode;
-        if (command !== undefined) payload.command = summarize(command, MAX_COMMAND_LEN);
+        if (command !== undefined) {
+          payload.command = summarize(command, MAX_COMMAND_LEN);
+          // ADR 0015 §D6 (B1): completed 側の check 分類 (raw command で判定)。exit_code と合わせ
+          //   fold の session-global 束縛で verification 遷移を駆動する。command 欠落時は付与しない。
+          Object.assign(payload, checkFields(command));
+        }
         if (correlationId !== undefined) payload.request_id = correlationId;
         const exitLabel = exitCode !== undefined ? ` (exit ${exitCode})` : "";
         return [
