@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
-import type { EventType, NormalizedEvent, State } from "@actradeck/event-model";
+import type { EventType, NormalizedEvent, StartKind, State } from "@actradeck/event-model";
 import { parseEvent } from "@actradeck/event-model";
 
 import { assertPayloadConsistency } from "./event-factory.js";
@@ -25,6 +25,53 @@ export interface CodexRolloutNormalizeContext {
   readonly lineIndex?: number | undefined;
   readonly sourcePath?: string | undefined;
   readonly onWarning?: ((message: string) => void) | undefined;
+  /**
+   * ADR 0014 Phase 3b-2 (D6/D7) — run lineage。session_meta.payload から tailer が抽出して注入する。
+   *
+   * - `providerSessionId` = payload.session_id (会話全体で安定・複数 rollout ファイル間で共有) ??
+   *   payload.id (この run のファイル id・fallback)。common case (session_id 欠落) は
+   *   session_id===provider_session_id。安定 session_id が別値のときだけ両者が乖離する。
+   *   全イベントに載る (欠落時 makeEvent が ctx.sessionId へ fallback)。
+   * - `resumedFromSessionId` = payload.forked_from_id (**宣言された**継続エッジ)。親 rollout は
+   *   **未観測でありうる**し、参照先は per-file run id でなく安定 `session_id` (= provider_session_id)
+   *   でありうる (実データに forked_from_id == 安定 session_id の形が実在)。CC 3b-1 の
+   *   「in-process で観測した canonical のみ resumed_from に載せる」ゲートとは**意図的に非対称**
+   *   (observe-only ゆえ観測ゲート不能・宣言値をそのまま記録する)。消費者 (3c continued-from) は
+   *   参照先 run の実在を仮定せず、不在は linked-unknown 表示・self-loop 禁止 (裁定 019fc4c6 TDA-1)。
+   *   run 起点 (session.started) のみに載る。parent_thread_id (subagent spawn 階層) は **写像しない**
+   *   (継続でない・over-claim 回避)。
+   * - `startKind` = forked_from_id があれば "resume"、無ければ "unknown" (observe-only の正直さ・
+   *   fresh と断定しない)。run 起点のみに載る。
+   */
+  readonly providerSessionId?: string | undefined;
+  readonly resumedFromSessionId?: string | undefined;
+  readonly startKind?: StartKind | undefined;
+}
+
+/**
+ * session_meta.payload から run lineage (D6/D7) を導出する **単一出所** (tailer が呼ぶ)。
+ * ここに写像規律を集約し、tailer 側に散らさない (security-gate-reuse-canonical-parser 精神)。
+ *
+ * - `providerSessionId` = 安定 `session_id` ?? run `id` (どちらも無ければ undefined → ctx.sessionId fallback)。
+ * - `resumedFromSessionId` = `forked_from_id` (非空時のみ)。**`parent_thread_id` は使わない**
+ *   (subagent spawn 階層であって resume/continuation ではない・resumed_from の意味論を汚さない)。
+ * - `startKind` = forked_from_id があれば "resume"、無ければ "unknown"。
+ */
+export function rolloutStartLineage(p: Record<string, unknown>): {
+  providerSessionId: string | undefined;
+  resumedFromSessionId: string | undefined;
+  startKind: StartKind;
+} {
+  const id = asString(p.id);
+  const stable = asString(p.session_id);
+  const forked = asString(p.forked_from_id);
+  const providerSessionId = stable !== undefined && stable.length > 0 ? stable : id;
+  const resumedFromSessionId = forked !== undefined && forked.length > 0 ? forked : undefined;
+  return {
+    providerSessionId,
+    resumedFromSessionId,
+    startKind: resumedFromSessionId !== undefined ? "resume" : "unknown",
+  };
 }
 
 type Params = Record<string, unknown>;
@@ -135,12 +182,23 @@ function makeEvent(
     source: "rollout",
     capture_mode: "codex_rollout",
     session_id: ctx.sessionId,
-    provider_session_id: ctx.sessionId,
+    // ADR 0014 Phase 3b-2 (D4/D6): provider_session_id は安定 session_id (会話全体で共有) を優先。
+    //   session_meta が安定 session_id を宣言したときだけ session_id (= run/ファイル id) と乖離する。
+    //   欠落時 (mid-stream primed file 等) は run id へ fallback (common case は両者同値)。
+    provider_session_id: ctx.providerSessionId ?? ctx.sessionId,
     event_type: eventType,
     timestamp,
     payload: { kind: eventType, ...(extra.payload ?? {}) },
     metrics: extra.metrics ?? {},
   };
+  // ADR 0014 Phase 3b-2: lineage エッジ (start_kind / resumed_from_session_id) は run 起点イベント
+  //   (session.started) にのみ載せる。1-file-1-run ゆえ session_meta が唯一の起点。backend 3a の
+  //   sticky (first-wins) が起点値を確定する。over-claim 回避で forked_from_id があるときだけ resume。
+  if (eventType === "session.started") {
+    if (ctx.startKind !== undefined) candidate.start_kind = ctx.startKind;
+    if (ctx.resumedFromSessionId !== undefined)
+      candidate.resumed_from_session_id = ctx.resumedFromSessionId;
+  }
   if (state !== undefined) candidate.state = state;
   const turnId = extra.turnId ?? asString(p.turn_id) ?? asString(p.turnId);
   if (turnId !== undefined) candidate.turn_id = turnId;
@@ -526,6 +584,9 @@ export function normalizeRolloutLine(
               model_provider: p.model_provider,
               source: p.source,
               thread_source: p.thread_source,
+              // ADR 0014 Phase 3b-2: parent_thread_id は subagent spawn 階層 (継続でない) ゆえ
+              //   resumed_from_session_id には写像せず payload-only の観測情報として残す。
+              parent_thread_id: p.parent_thread_id,
               git: p.git,
             },
           }),

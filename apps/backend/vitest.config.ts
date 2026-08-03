@@ -33,6 +33,7 @@ const REAL_PG_TESTS = [
   "test/inv-realtime-server.test.ts",
   "test/inv-replay-history.test.ts",
   "test/inv-row-to-event.test.ts",
+  "test/inv-run-lineage-persist.test.ts",
   "test/inv-wall.test.ts",
 ];
 

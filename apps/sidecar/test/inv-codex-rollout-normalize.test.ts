@@ -4,9 +4,11 @@ import { isUuidV7 } from "@actradeck/event-model";
 
 import {
   normalizeRolloutLine,
+  rolloutStartLineage,
   sessionIdFromRolloutPath,
   stableRolloutEventId,
   type CodexRolloutLine,
+  type CodexRolloutNormalizeContext,
 } from "../src/normalize-codex-rollout.js";
 
 const SESSION = "019ed895-6f24-70d2-b4b4-35bdcafb06ad";
@@ -338,5 +340,126 @@ describe("INV-CODEX-ROLLOUT-NORMALIZE: rollout JSONL -> canonical EventType", ()
       normalize({ type: "event_msg", timestamp: "2026-06-18T03:00:32.000Z", payload: {} }),
     ).toEqual([]);
     expect(normalize({ type: "response_item", timestamp: "2026-06-18T03:00:33.000Z" })).toEqual([]);
+  });
+});
+
+describe("INV-CODEX-ROLLOUT-LINEAGE: run lineage (ADR 0014 Phase 3b-2 D6/D7・REAL DATA)", () => {
+  // tailer と同じ配線 (rolloutStartLineage で session_meta payload から lineage を導出し ctx へ載せる)。
+  function normalizeMeta(payload: Record<string, unknown>) {
+    const lineage = rolloutStartLineage(payload);
+    const runId = (payload.id as string | undefined) ?? SESSION;
+    const ctx: CodexRolloutNormalizeContext = {
+      sessionId: runId,
+      cwd: "/repo",
+      byteOffset: 0,
+      sourcePath: SOURCE_PATH,
+      providerSessionId: lineage.providerSessionId,
+      resumedFromSessionId: lineage.resumedFromSessionId,
+      startKind: lineage.startKind,
+    };
+    return { ctx, lineage };
+  }
+  function startedFromMeta(payload: Record<string, unknown>) {
+    const { ctx } = normalizeMeta(payload);
+    const events = normalizeRolloutLine(
+      { type: "session_meta", timestamp: "2026-07-15T23:39:06.000Z", payload },
+      ctx,
+    );
+    expect(events).toHaveLength(1);
+    return events[0]!;
+  }
+
+  it("forked_from_id + distinct stable session_id → resume lineage + provider_session_id 分離 [REAL 019f6637]", () => {
+    // 実データ ~/.codex/sessions/rollout-...-019f6637...jsonl: id≠session_id, forked_from=session_id。
+    const id = "019f6637-96c4-74f2-91e9-b3b208762cd9";
+    const stable = "019f4f85-ec41-7e80-8e8d-857897d73b51";
+    const ev = startedFromMeta({
+      id,
+      session_id: stable,
+      forked_from_id: stable,
+      cwd: "/repo",
+      thread_source: "subagent",
+      parent_thread_id: "019f0000-aaaa-7000-8000-000000000000",
+    });
+    expect(ev.event_type).toBe("session.started");
+    // 1-file-1-run 不変: session_id は run/ファイル id のまま。
+    expect(ev.session_id).toBe(id);
+    // provider_session_id は安定 session_id (id と乖離)。MUTATION: makeEvent を ctx.sessionId 固定に
+    //   戻すと本行が RED (distinct が消える)。
+    expect(ev.provider_session_id).toBe(stable);
+    expect(ev.provider_session_id).not.toBe(ev.session_id);
+    // lineage エッジ。MUTATION: forked_from→resumed_from 写像を外すと RED。
+    expect(ev.start_kind).toBe("resume");
+    expect(ev.resumed_from_session_id).toBe(stable);
+    // parent_thread_id は payload-only (resumed_from に写像しない)。
+    expect((ev.payload as { parent_thread_id?: string }).parent_thread_id).toBe(
+      "019f0000-aaaa-7000-8000-000000000000",
+    );
+  });
+
+  it("forked_from_id referencing an observed sibling rollout id, no stable session_id → provider_session_id falls back to run id [REAL 019df85e→019df343]", () => {
+    // 実データ: child 019df85e forked_from parent 019df343 (両方 disk 上・session_id 無し)。
+    const id = "019df85e-d921-76f2-84dd-53e5102be2c3";
+    const parent = "019df343-27d1-7eb1-895c-61433424c1a7";
+    const ev = startedFromMeta({ id, forked_from_id: parent, cwd: "/repo" });
+    expect(ev.session_id).toBe(id);
+    // session_id 欠落 → provider_session_id は run id へ fallback (common case: 両者同値)。
+    expect(ev.provider_session_id).toBe(id);
+    expect(ev.start_kind).toBe("resume");
+    expect(ev.resumed_from_session_id).toBe(parent);
+  });
+
+  it("WITHOUT forked_from_id → start_kind unknown, resumed_from absent (observe-only honesty・NOT fresh) [REAL 019f6669]", () => {
+    const id = "019f6669-9969-7213-b7bf-68f5f75c7f31";
+    const stable = "019f4f85-ec41-7e80-8e8d-857897d73b51";
+    const ev = startedFromMeta({ id, session_id: stable, cwd: "/repo", thread_source: "subagent" });
+    expect(ev.session_id).toBe(id);
+    // 安定 session_id は forked が無くても provider_session_id として分離される。
+    expect(ev.provider_session_id).toBe(stable);
+    // MUTATION: startKind を "fresh" 固定にすると RED (over-claim 禁止)。
+    expect(ev.start_kind).toBe("unknown");
+    expect(ev.resumed_from_session_id).toBeUndefined();
+  });
+
+  it("bare session_meta (id のみ) → provider_session_id===session_id, start_kind unknown", () => {
+    const ev = startedFromMeta({ id: SESSION, cwd: "/repo" });
+    expect(ev.provider_session_id).toBe(SESSION);
+    expect(ev.session_id).toBe(SESSION);
+    expect(ev.start_kind).toBe("unknown");
+    expect(ev.resumed_from_session_id).toBeUndefined();
+  });
+
+  it("lineage エッジは session.started のみ・provider_session_id は全イベントに載る", () => {
+    const id = "019f6637-96c4-74f2-91e9-b3b208762cd9";
+    const stable = "019f4f85-ec41-7e80-8e8d-857897d73b51";
+    const { ctx } = normalizeMeta({ id, session_id: stable, forked_from_id: stable });
+    const turn = normalizeRolloutLine(
+      {
+        type: "event_msg",
+        timestamp: "2026-07-15T23:40:00.000Z",
+        payload: { type: "task_started", turn_id: "t1" },
+      },
+      ctx,
+    );
+    expect(turn).toHaveLength(1);
+    expect(turn[0]!.event_type).toBe("turn.started");
+    // provider_session_id は全イベントに載る (従来 NULL からの回帰固定)。
+    expect(turn[0]!.provider_session_id).toBe(stable);
+    // MUTATION: gate を外して lineage を全イベントへ載せると本 2 行が RED。
+    expect(turn[0]!.start_kind).toBeUndefined();
+    expect(turn[0]!.resumed_from_session_id).toBeUndefined();
+  });
+
+  it("rolloutStartLineage 写像規律: parent_thread_id は resumed_from に使わない (subagent spawn ≠ 継続)", () => {
+    // parent_thread_id (~99 files) は subagent の親スレッド = spawn 階層で resume ではない。
+    const l = rolloutStartLineage({ id: "A", parent_thread_id: "PARENT_SPAWN", session_id: "S" });
+    expect(l.resumedFromSessionId).toBeUndefined();
+    expect(l.startKind).toBe("unknown");
+    expect(l.providerSessionId).toBe("S");
+    // forked_from_id のみが継続エッジ。
+    const l2 = rolloutStartLineage({ id: "A", forked_from_id: "PARENT" });
+    expect(l2.resumedFromSessionId).toBe("PARENT");
+    expect(l2.startKind).toBe("resume");
+    expect(l2.providerSessionId).toBe("A"); // session_id 無し → id
   });
 });

@@ -172,6 +172,11 @@ describe("INV-CODEX-NORMALIZE: notification (b) mapping", () => {
     const ev = one("thread/closed", { threadId: "T1" });
     expect(ev.event_type).toBe("session.ended");
     expect(ev.state).toBe("suspended");
+    // ADR 0014 Phase 3b-2 (D7): unload の終端種別/再開可能性を明示 (backend last-non-null が確定)。
+    //   MUTATION: end_kind を落とす / recoverability を "not_resumable" にすると RED
+    //   (suspended=resumable の単一出所 TERMINAL_CONTINUATION と乖離)。
+    expect(ev.end_kind).toBe("unloaded");
+    expect(ev.recoverability).toBe("resumable");
   });
 
   it("process/exited → DROP (AGG-1: process/spawn ライフサイクル通知・session 終端ではない)", () => {

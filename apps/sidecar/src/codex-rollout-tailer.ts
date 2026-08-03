@@ -5,8 +5,11 @@ import { basename, dirname, join } from "node:path";
 
 import type { NormalizedEvent } from "@actradeck/event-model";
 
+import type { StartKind } from "@actradeck/event-model";
+
 import {
   normalizeRolloutLine,
+  rolloutStartLineage,
   sessionIdFromRolloutPath,
   type CodexRolloutLine,
 } from "./normalize-codex-rollout.js";
@@ -53,6 +56,12 @@ interface OffsetState {
 interface FileRuntime {
   sessionId: string;
   cwd?: string;
+  // ADR 0014 Phase 3b-2 (D6/D7): session_meta から抽出した run lineage を file 単位で保持する。
+  //   providerSessionId は全イベントへ、resumedFromSessionId/startKind は run 起点 (session.started)
+  //   へ載る (normalize-codex-rollout の makeEvent が session.started のみ適用)。
+  providerSessionId?: string;
+  resumedFromSessionId?: string;
+  startKind?: StartKind;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
@@ -313,6 +322,17 @@ export class CodexRolloutTailer {
       };
       if (sessionMetaId !== undefined && sessionMetaId.length > 0)
         runtime.sessionId = sessionMetaId;
+      // ADR 0014 Phase 3b-2: presence-prime も lineage を確定しておく (primed 後に tail-from-end
+      //   で session_meta を再読しない既存ファイルでも mid-stream イベントが正しい provider_session_id
+      //   を載せられる)。emit はしない (presence-only)。
+      if (line.type === "session_meta") {
+        const lineage = rolloutStartLineage(p);
+        if (lineage.providerSessionId !== undefined)
+          runtime.providerSessionId = lineage.providerSessionId;
+        if (lineage.resumedFromSessionId !== undefined)
+          runtime.resumedFromSessionId = lineage.resumedFromSessionId;
+        runtime.startKind = lineage.startKind;
+      }
       if (cwd !== undefined) runtime.cwd = cwd;
       this.runtime.set(file, runtime);
       entry.sessionId = runtime.sessionId;
@@ -384,6 +404,15 @@ export class CodexRolloutTailer {
     const sessionMetaId =
       line.type === "session_meta" && typeof p.id === "string" ? p.id : undefined;
     if (sessionMetaId !== undefined && sessionMetaId.length > 0) runtime.sessionId = sessionMetaId;
+    // ADR 0014 Phase 3b-2: session_meta で run lineage を確定し file 単位で保持 (単一出所 helper)。
+    if (line.type === "session_meta") {
+      const lineage = rolloutStartLineage(p);
+      if (lineage.providerSessionId !== undefined)
+        runtime.providerSessionId = lineage.providerSessionId;
+      if (lineage.resumedFromSessionId !== undefined)
+        runtime.resumedFromSessionId = lineage.resumedFromSessionId;
+      runtime.startKind = lineage.startKind;
+    }
     const cwd =
       (line.type === "session_meta" || line.type === "turn_context") && typeof p.cwd === "string"
         ? p.cwd
@@ -403,6 +432,13 @@ export class CodexRolloutTailer {
       byteOffset,
       sourcePath: file,
       onWarning: this.onWarning,
+      ...(runtime.providerSessionId !== undefined
+        ? { providerSessionId: runtime.providerSessionId }
+        : {}),
+      ...(runtime.resumedFromSessionId !== undefined
+        ? { resumedFromSessionId: runtime.resumedFromSessionId }
+        : {}),
+      ...(runtime.startKind !== undefined ? { startKind: runtime.startKind } : {}),
     });
     if (events.length > 0) {
       this.onEvents(events, { file, sessionId: runtime.sessionId, byteOffset });

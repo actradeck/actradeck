@@ -15,7 +15,8 @@
  *    parse/persist/send される。normalize 自体は redaction しない (choke point は一箇所)。
  *    diff / command 出力など raw を payload へ素直に載せてよい (sink.redactDeep が担保)。
  */
-import type { EventType, State } from "@actradeck/event-model";
+import type { Continuation, EndKind, EventType, State } from "@actradeck/event-model";
+import { terminalContinuation } from "@actradeck/event-model";
 
 import { buildEvent } from "./event-factory.js";
 
@@ -74,7 +75,15 @@ function make(
   p: Params,
   event_type: EventType,
   state: State | undefined,
-  extra: { summary?: string; payload?: Record<string, unknown>; metrics?: Record<string, number> },
+  extra: {
+    summary?: string;
+    payload?: Record<string, unknown>;
+    metrics?: Record<string, number>;
+    // ADR 0014 Phase 3b-2 (D7): run 終端イベント (session.ended) のみに載せる終了種別/再開可能性。
+    //   CC の normalize.ts make() と同型の配線 (additive・存在時のみ付与)。
+    endKind?: EndKind;
+    recoverability?: Continuation;
+  },
 ): ReturnType<typeof buildEvent> {
   const threadId = extractThreadId(p);
   const turnId = extractTurnId(p);
@@ -87,6 +96,8 @@ function make(
     ...(turnId !== undefined ? { turn_id: turnId } : {}),
     event_type,
     ...(state !== undefined ? { state } : {}),
+    ...(extra.endKind !== undefined ? { end_kind: extra.endKind } : {}),
+    ...(extra.recoverability !== undefined ? { recoverability: extra.recoverability } : {}),
     ...(ctx.timestamp !== undefined ? { timestamp: ctx.timestamp } : {}),
     ...(extra.summary !== undefined ? { summary: extra.summary } : {}),
     payload: { kind: event_type, ...(extra.payload ?? {}) },
@@ -357,10 +368,16 @@ export function normalizeCodexNotification(
       //   以前は state=`completed` へ写像し「正常終了」と誤表示していた。terminal だが再開可能な
       //   新状態 `suspended` (recoverability="resumable") へ写す。continuation="resumable" /
       //   terminal_evidence="provider" は reducer が state から正準導出する (受入#5)。
+      // ADR 0014 Phase 3b-2 (D7): unload は end_kind="unloaded" / recoverability=resumable。
+      //   recoverability は terminalContinuation("suspended")=resumable を単一出所から引く
+      //   (手書き分岐を置かない・TERMINAL_CONTINUATION と整合)。backend last-non-null が確定。
       return [
         make(ctx, p, "session.ended", "suspended", {
           summary: "Codex スレッド休止 (unload・再開可)",
           payload: {},
+          endKind: "unloaded",
+          // "suspended" は TERMINAL_CONTINUATION に必ず存在 (=resumable) ゆえ非 null。
+          recoverability: terminalContinuation("suspended")!,
         }),
       ];
 

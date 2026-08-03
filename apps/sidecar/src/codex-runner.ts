@@ -426,6 +426,13 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
           ...(threadId !== undefined ? { thread_id: threadId } : {}),
           event_type: "session.ended",
           state: completed ? "completed" : "failed",
+          // ADR 0014 Phase 3b-2 (D7): child OS exit は確定的なプロセス消滅 = 再開不能。
+          //   end_kind は emit 済み state と整合 (completed↔completed / failed↔failed)、
+          //   recoverability は両分岐とも "not_resumable" を明示する。terminalContinuation("failed")
+          //   は "unknown" だが、ここはプロセス消滅という process_exit 証跡があるため generic な
+          //   normalizer failed より強く not_resumable と断定できる (thread/delete と同性質)。
+          end_kind: completed ? "completed" : "failed",
+          recoverability: "not_resumable",
           timestamp: ts,
           summary: cleanExit
             ? "Codex プロセス終了"
