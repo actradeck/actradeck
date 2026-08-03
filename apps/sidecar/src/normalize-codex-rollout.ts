@@ -131,7 +131,7 @@ export function commandHasExitSpoofMaterial(command: string | undefined): boolea
  * 現状 `normalizeResponseItem` は update_plan / mcp__ 以外の **全** function_call を command.started として
  * 分類していた。多数の非 shell tool (note_search / task_bulk_create / spawn_agent 等) が args.query 等に
  * check 語彙を持つと誤って check 認定され、偽の検証遷移を誘発しうる (二次面)。実 corpus 再カウント
- * (~/.codex/sessions 全 412 ファイル・2026-08) で観測される shell 実行 tool は `exec_command` (48338) /
+ * (~/.codex/sessions 全 412 ファイル・2026-08) で観測される shell 実行 tool は `exec_command` (44986) /
  * `shell` (3602・2 番目に大きい shell-exec 面) / `shell_command` (2580)。`local_shell` (OpenAI local shell)
  * は実 0 件だが将来対応として含める。これ以外の function_call は check 非分類・exit 非抽出 (安全側)。
  */
