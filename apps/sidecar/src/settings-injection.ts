@@ -20,7 +20,19 @@ export function generateHookToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
-/** Phase2 で配線する hook 一覧 (plan.md §9 + 現行 27 イベントから採用分)。 */
+/**
+ * 配線する hook 一覧 (plan.md §9 + 現行イベントから採用分)。
+ *
+ * これは managed (temp settings) と attach (settings-merge の `ATTACH_HOOK_EVENTS`) の **単一出所**。
+ * 追加はここだけで行う (両モードが自動追随・非破壊 merge / 可逆 detach / 0600 atomic は generic)。
+ *
+ * ADR 0015 §D2 (B2): `TaskCreated` / `TaskCompleted` を追加し CC の task list 観測を
+ *   `work.item.updated` (observation=official_hook/observed) へ配線する。これらは semantic な
+ *   専用 hook で、live 検証 (2026-08-04・CC 2.1.220) で 8 field payload
+ *   {session_id, transcript_path, cwd, prompt_id, hook_event_name, task_id, task_subject,
+ *   task_description} を発火することを確認済 (agent_id は無い)。未登録の間は発火しないだけ
+ *   (partial deploy は benign 縮退)・不明 hook は normalizer 既定 case (heartbeat) へ落ちる。
+ */
 export const MANAGED_HOOK_EVENTS = [
   "SessionStart",
   "UserPromptSubmit",
@@ -35,6 +47,9 @@ export const MANAGED_HOOK_EVENTS = [
   "PostCompact",
   "Stop",
   "SessionEnd",
+  // ADR 0015 §D2 (B2): CC task-list 観測 (work.item.updated・official_hook/observed)。
+  "TaskCreated",
+  "TaskCompleted",
 ] as const;
 
 export interface HookHttpEntry {
