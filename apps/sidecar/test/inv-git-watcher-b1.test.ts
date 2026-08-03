@@ -15,7 +15,12 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { treeFingerprint } from "@actradeck/event-model";
 
-import { GitWatcher, snapshotDiff } from "../src/git-watcher.js";
+import {
+  diffHashInput,
+  GitWatcher,
+  snapshotDiff,
+  untrackedDigestJoin,
+} from "../src/git-watcher.js";
 import { SessionIdentity } from "../src/session-identity.js";
 import type { NormalizedEvent } from "@actradeck/event-model";
 
@@ -85,6 +90,49 @@ describe("§D5 head_sha (受入 8 の fingerprint 基盤)", () => {
     const diff = events.find((e) => e.event_type === "diff.updated");
     expect(diff).toBeDefined();
     expect((diff!.payload as { head_sha?: string }).head_sha).toBe(headSha(dir));
+  });
+});
+
+describe("QA-B1R2-3 / TDA-B1R2-2: diff_hash 入力の NUL domain-separation (空白/改行復帰は RED)", () => {
+  // R1 で hash 入力を 3 フィールド NUL 区切りへ直したが、コードのみ着地しテスト未着地 = 空白へ戻す変異が
+  //   全 GREEN で生存した (QA-B1R2-3)。区切り byte を charCodeAt で固定 + straddle で domain separation を pin し、
+  //   退行を赤化する (テスト source にも生 NUL を書かず charCode===0 で検証する)。
+
+  it("diffHashInput は 3 フィールドを NUL(0) 区切りで結合する (空白/任意非 NUL 復帰は RED)", () => {
+    const out = diffHashInput("a", "b", "c");
+    expect(out.length).toBe(5); // a + sep + b + sep + c。
+    expect(out.charCodeAt(1)).toBe(0); // 区切りは NUL。空白復帰なら 32 → RED。
+    expect(out.charCodeAt(3)).toBe(0);
+  });
+
+  it("diffHashInput の straddle: 境界を跨ぐ内容が空白区切りでは衝突する (NUL では区別)", () => {
+    // A=(status="X", diff="Y Z", untracked="W"), B=(status="X Y", diff="Z", untracked="W")。
+    //   空白 join では両者 "X Y Z W" に畳まれ衝突 → 実変更 (フィールド境界の移動) を隠蔽する。空白復帰変異で赤化。
+    const a = diffHashInput("X", "Y Z", "W");
+    const b = diffHashInput("X Y", "Z", "W");
+    expect(a).not.toBe(b);
+  });
+
+  it("untrackedDigestJoin は NUL(0) 区切りで、改行入り filename が part 境界を跨いでも一意 (\n/空白 join は RED)", () => {
+    // rel は ls-files -z 由来で LF を含みうる。part を改行 (\n) で連結すると LF 入り rel が part 境界と衝突する。
+    //   A=["a", "b\nc"], B=["a\nb", "c"] は \n join では双方 "a\nb\nc" に畳まれ衝突 → 内側 straddle。
+    //   NUL join では区別する (rel は NUL-free ゆえ NUL が偽造不能な区切り)。
+    expect(untrackedDigestJoin(["a", "b"]).charCodeAt(1)).toBe(0); // 区切りは NUL。\n(10)/空白(32) 復帰なら RED。
+    const a = untrackedDigestJoin(["a", "b\nc"]);
+    const b = untrackedDigestJoin(["a\nb", "c"]);
+    expect(a).not.toBe(b); // \n join への退行はこの assert を赤化する (双方 "a\nb\nc")。
+  });
+
+  it("実 git: 改行入り filename の未追跡ファイルが diff_hash に一意に反映される (内側 join 実挙動)", async () => {
+    const dir = initRepo();
+    const base = await snapshotDiff(dir);
+    // POSIX filename に改行を含む未追跡ファイルを作る。内側 join が \n だと境界が曖昧化する形。
+    writeFileSync(join(dir, "a\nb"), "x\n");
+    const s1 = await snapshotDiff(dir);
+    expect(s1.hash).not.toBe(base.hash); // 改行入り未追跡ファイルの追加が検出される。
+    writeFileSync(join(dir, "a\nb"), "xxxx\n"); // size 変化でさらに動く (盲点なし)。
+    const s2 = await snapshotDiff(dir);
+    expect(s2.hash).not.toBe(s1.hash);
   });
 });
 

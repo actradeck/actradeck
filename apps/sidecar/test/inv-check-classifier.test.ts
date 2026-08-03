@@ -137,6 +137,20 @@ describe("QA-B1-2: exec-runner (npx/pnpx/pnpm exec) を貫通して内側 progra
   it("npx tsx script.ts → undefined (内側が非チェック program)", () => {
     expect(classifyCheck("npx tsx script.ts")).toBeUndefined();
   });
+
+  // QA-B1R2-4: unwrap の depth cap (MAX_EXEC_UNWRAP=3) を pin する。cap を超える多重 wrap で貫通を止める。
+  //   開示: `npx npx ... vitest` の多重 exec-runner wrap は実 corpus に **0 件** (synthetic な forward-compat
+  //   カバレッジ)。cap は無界再帰 (悪意ある/退化した多重 wrap) を有界化するための防御であり、実データ由来でない。
+  it("QA-B1R2-4: exec-runner unwrap は MAX_EXEC_UNWRAP(3) で停止する (cap 超過は非分類)", () => {
+    // cap 境界内 (≤3 wrap) は内側 program まで貫通して分類する。
+    expect(classifyCheck("npx vitest run")).toEqual({ check_kind: "test", check_match: "program" }); // 1 wrap
+    expect(classifyCheck("npx npx npx vitest run")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    }); // 3 wrap = cap ちょうど
+    // cap 超過 (4 wrap) は貫通を止め、外側の npx (非チェック program) のまま undefined。
+    expect(classifyCheck("npx npx npx npx vitest run")).toBeUndefined(); // 4 wrap > cap → 停止
+  });
 });
 
 describe("受入 11: subcommand program", () => {

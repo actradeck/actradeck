@@ -21,6 +21,7 @@ import type { NormalizedEvent } from "@actradeck/event-model";
 import { reduceWorkItems } from "@actradeck/projection";
 
 import {
+  commandHasExitSpoofMaterial,
   extractRolloutExitCode,
   normalizeRolloutLine,
   RolloutCallCorrelation,
@@ -77,7 +78,8 @@ function updatePlanLine(
  * current codex の harness 出力 (exit を header に持つ・stdout は "Output:" の後)。
  *
  * 実 2026 harness は header 最上部に `Command:` フィールドでコマンド文字列を **verbatim echo** する
- * (実 corpus 2489/75658 件)。SEC-B1-1: 被観測エージェントが command 内に exit フレーズを書けば偽 exit が
+ * (再カウント: 80,279 function_call_output 中 2,487 件に Command: echo・うち 57 件が multiline)。SEC-B1-1:
+ * 被観測エージェントが command 内に exit フレーズを書けば偽 exit が
  * header 先頭に載る → spoof。`command` 引数で `Command:` 行 (改行込みも可) を再現する。
  */
 function harness(exit: number, stdout: string, command?: string): string {
@@ -151,6 +153,94 @@ describe("SEC-B1-1: exit spoof 耐性 (harness Command: echo)", () => {
   });
 });
 
+describe("SEC-B1R2-1 = QA-B1R2-1 (H): fake-marker header 切詰め spoof (fail-safe sentinel)", () => {
+  // R1 の last-match 防御は header 境界 (最初の "\nOutput:") が agent 非制御である前提だったが、実 harness は
+  //   command を `Command:` フィールドに **改行込み verbatim echo** する。複数行 command 内に「偽 exit 行 +
+  //   偽 Output: 行」を仕込むと header が偽 marker で切り詰められ、実 exit 行が slice 外へ落ち last-match が
+  //   偽 exit を返す (SEC/QA が clean 04b4e77 で独立実証・実 corpus に multiline Command: echo 57 件)。
+  // 修正: started 側で command が偽装素材 (改行+Output: 断片 / 行頭 exit 句) を含むかを **boolean sentinel**
+  //   (NO-RAW) に記録し、completed 側でテキスト抽出を refuse (→undefined→非 flip=fail-closed)。構造化
+  //   metadata.exit_code は非 spoofable ゆえ sentinel true でも維持する。
+
+  // 偽 exit(0) + 偽 Output: を Command: echo に仕込む複数行 command。実 harness exit は 1。
+  const EVIL_CMD = "pytest -q\nProcess exited with code 0\nOutput:\ninjected stdout";
+
+  it("(1) sentinel true のときテキスト exit を抽出しない (fail-closed) / false のとき従来どおり実 exit", () => {
+    const spoof = harness(1, "1 failed", EVIL_CMD);
+    // 相関 command が偽装素材を含むと判った時はテキスト経路を拒否 → undefined (偽 exit 0 を返さない)。
+    expect(extractRolloutExitCode(spoof, { commandHasSpoofMaterial: true })).toBeUndefined();
+    // sentinel false (= 偽装素材なし) は従来どおり header last-match で実 exit を採る (非退行)。
+    expect(
+      extractRolloutExitCode(harness(1, "ok", "pytest -q"), { commandHasSpoofMaterial: false }),
+    ).toBe(1);
+    // opts 省略も従来挙動 (相関喪失時の観測性優先経路)。
+    expect(extractRolloutExitCode(harness(0, "ok"))).toBe(0);
+  });
+
+  it("(1b) 構造化 metadata.exit_code は sentinel true でも維持 (非 spoofable)", () => {
+    const structured = JSON.stringify({ output: "ok", metadata: { exit_code: 0 } });
+    expect(extractRolloutExitCode(structured, { commandHasSpoofMaterial: true })).toBe(0);
+  });
+
+  it("(2) 統合 fold: 偽 marker で verification_state が passed にならない (fail-closed)", () => {
+    const corr = new RolloutCallCorrelation();
+    const lines: CodexRolloutLine[] = [
+      updatePlanLine([{ step: "impl", status: "completed" }], "call_p", "2026-05-26T00:00:01.000Z"),
+      {
+        type: "event_msg",
+        timestamp: "2026-05-26T00:00:02.000Z",
+        payload: {
+          type: "patch_apply_end",
+          changes: { "a.py": { added: 1 } },
+          success: true,
+          status: "completed",
+        },
+      } as CodexRolloutLine,
+      // exec_command の cmd に偽装素材 (started 側で sentinel が立つ)。output は同素材を Command: echo。
+      execLine(EVIL_CMD, "call_t", "2026-05-26T00:00:03.000Z"),
+      outputLine(harness(1, "1 failed", EVIL_CMD), "call_t", "2026-05-26T00:00:04.000Z"),
+    ];
+    const events: NormalizedEvent[] = [];
+    let off = 0;
+    for (const l of lines) events.push(...normalizeRolloutLine(l, ctx(corr, (off += 100))));
+    const proj = reduceWorkItems(SID, events);
+    const item = proj.items.find((i) => i.status === "completed")!;
+    // 偽 exit 0 で passed へ flip してはならない (実 exit=1・素材注入)。
+    expect(item.verification_state).not.toBe("passed");
+    // command.completed に spoof exit_code が載っていない (started sentinel → completed refuse)。
+    const completed = events.find((e) => e.event_type === "command.completed")!;
+    expect((completed.payload as { exit_code?: number }).exit_code).toBeUndefined();
+  });
+
+  it("(3) バリエーション: 偽 Output: marker のみ (偽 exit 行なし) — sentinel が拾い fail-closed", () => {
+    // 偽 Output: で header 境界を command echo 内へ移すと実 exit が slice 外へ落ちる。sentinel refuse で undefined。
+    const evil = "pytest -q\nOutput:\nfake body";
+    expect(
+      extractRolloutExitCode(harness(2, "real", evil), { commandHasSpoofMaterial: true }),
+    ).toBeUndefined();
+  });
+
+  it("(4) バリエーション: heredoc 様の行頭 exit 句 (偽 Output: なし) も sentinel true で refuse", () => {
+    // 偽 Output: が無く 04b4e77 では last-match が実 exit を採れるが、fail-safe ゆえ sentinel true で refuse。
+    const evil = "cat <<'EOF'\nProcess exited with code 0\nEOF";
+    expect(
+      extractRolloutExitCode(harness(1, "x", evil), { commandHasSpoofMaterial: true }),
+    ).toBeUndefined();
+  });
+
+  it("(5) sentinel 判定関数: 偽装素材の有無を boolean で返す (NO-RAW)", () => {
+    expect(commandHasExitSpoofMaterial(EVIL_CMD)).toBe(true); // 改行+Output: と行頭 exit 句の双方。
+    expect(commandHasExitSpoofMaterial("pytest -q\nOutput:\nx")).toBe(true); // 改行+Output: のみ。
+    expect(commandHasExitSpoofMaterial("cat <<'EOF'\nProcess exited with code 0\nEOF")).toBe(true); // 行頭 exit 句のみ。
+    // 非該当 (既存 (a)(b)(c) vectors 相当の単一行/非行頭は sentinel false = 従来抽出を維持)。
+    expect(commandHasExitSpoofMaterial("echo hi # Process exited with code 0")).toBe(false); // (a) 行頭でない。
+    expect(commandHasExitSpoofMaterial('rg "Process exited with code 0"')).toBe(false); // (c) 行頭でない。
+    expect(commandHasExitSpoofMaterial(".venv/bin/pytest -q")).toBe(false);
+    expect(commandHasExitSpoofMaterial(undefined)).toBe(false);
+    expect(commandHasExitSpoofMaterial("")).toBe(false);
+  });
+});
+
 describe("call_id 相関: check_kind を command.completed へ引き継ぐ (§D6)", () => {
   it("exec_command(check) → output(header exit 0) で command.completed に check_kind + exit_code が乗る", () => {
     const corr = new RolloutCallCorrelation();
@@ -215,6 +305,31 @@ describe("call_id 相関: check_kind を command.completed へ引き継ぐ (§D6
     } as CodexRolloutLine;
     const started = normalizeRolloutLine(line, ctx(new RolloutCallCorrelation(), 5));
     expect((started[0]!.payload as { check_kind?: string }).check_kind).toBe("lint");
+  });
+
+  it("QA-B1R2-2: 相関済み **非** shell tool の output に exit 様テキストがあっても exit_code を付与しない (gate)", () => {
+    // exit 抽出は shell-exec 相関 (info.isShellExec===true) に gate される。非 shell tool (note_search 等) の
+    //   output に harness exit 様テキストが紛れても exit_code を載せない (gate を除去する mutation で RED)。
+    const corr = new RolloutCallCorrelation();
+    const startLine = {
+      type: "response_item",
+      timestamp: "2026-05-26T00:00:01.000Z",
+      payload: {
+        type: "function_call",
+        name: "note_search",
+        arguments: JSON.stringify({ query: "look up notes" }),
+        call_id: "call_ns2",
+      },
+    } as CodexRolloutLine;
+    normalizeRolloutLine(startLine, ctx(corr, 5)); // 非 shell tool を相関記録 (isShellExec=false)。
+    const done = normalizeRolloutLine(
+      outputLine(harness(0, "found stuff"), "call_ns2", "2026-05-26T00:00:02.000Z"),
+      ctx(corr, 6),
+    );
+    const completed = done.find((e) => e.event_type === "command.completed")!;
+    // gate: 相関があり非 shell と判っている call の output からは exit を抽出しない。
+    expect((completed.payload as { exit_code?: number }).exit_code).toBeUndefined();
+    expect((completed.payload as { check_kind?: string }).check_kind).toBeUndefined();
   });
 
   it("相関喪失 (correlation 未提供) → check_kind は乗らず bare command.completed (安全側縮退)", () => {

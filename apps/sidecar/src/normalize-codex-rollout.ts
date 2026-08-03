@@ -70,6 +70,35 @@ export interface RolloutCallInfo {
   readonly checkMatch?: CheckMatch | undefined;
   /** SEC-B1-1 item3: この call が実 shell exec tool 由来か (exit 抽出を shell 経路へ gate するため)。 */
   readonly isShellExec?: boolean | undefined;
+  /**
+   * SEC-B1R2-1 = QA-B1R2-1 (H): この call の command 文字列が harness header 境界 / exit 行を偽装しうる
+   * 素材を含むか (NO-RAW: **boolean のみ**・生 command は保持しない)。true のとき completed 側は
+   * テキスト経路の exit 抽出を拒否する (→undefined→非 flip=fail-closed)。§commandHasExitSpoofMaterial。
+   */
+  readonly commandSpoofRisk?: boolean | undefined;
+}
+
+/**
+ * SEC-B1R2-1 = QA-B1R2-1 (H) の fail-safe sentinel。**既知の command 文字列**が harness header の境界
+ * 決定を agent 制御下に置く偽装素材を含むかを判定する (NO-RAW: **boolean のみ** を返す・生 command を
+ * 保持しない・呼び出し側もこの bool のみを相関 info に載せる)。
+ *
+ * 実 harness は command を header 最上部の `Command:` フィールドへ **改行込み verbatim echo** する。よって
+ * command 内に次を仕込むと header parse が破られる:
+ *  - **`\nOutput:` 断片** — header 境界 (`indexOf("\nOutput:")`) を command echo 内へ前倒しし、実 exit 行を
+ *    header slice の外 (= body 側) へ落とす。残った偽 exit 行を last-match が採る (fake-marker 切詰め spoof)。
+ *  - **行頭 `Process exited with code` 句** — 偽 Output: と組み合わさると切詰め後 header の最後の exit 行になる。
+ *
+ * どちらか一方でも含めば true。true のとき completed 側でテキスト抽出を refuse する (構造化 metadata.exit_code
+ * は非 spoofable ゆえ引き続き可)。単一行かつ非行頭の exit フレーズ (既存 (a)`echo # ...` / (c)`rg "..."`) は
+ * header 境界を動かせず last-match も抜けないため false = 従来抽出を維持する (過剰 fail-closed を避ける)。
+ */
+const SPOOF_OUTPUT_MARKER_RE = /\nOutput:/;
+const SPOOF_EXIT_LINE_RE = /^[Pp]rocess exited with code/m;
+
+export function commandHasExitSpoofMaterial(command: string | undefined): boolean {
+  if (typeof command !== "string" || command.length === 0) return false;
+  return SPOOF_OUTPUT_MARKER_RE.test(command) || SPOOF_EXIT_LINE_RE.test(command);
 }
 
 /**
@@ -147,13 +176,24 @@ const EXIT_TEXT_RE = /^[Pp]rocess exited with code (-?\d+)$/gm;
  *  (3) どちらでもない → undefined (= 結果不明・fold は verification_state を動かさない・受入 12)。
  *
  * 戻り値は整数のみ (NO-RAW: 生テキストを保持しない)。ReDoS 安全 (アンカー付き固定パターン + header slice で有界)。
+ *
+ * SEC-B1R2-1 = QA-B1R2-1 (H): `opts.commandHasSpoofMaterial === true` のとき **テキスト経路 (2) を拒否**する
+ *   (→undefined→非 flip=fail-closed)。header 境界 (`"\nOutput:"`) は attacker が `Command:` echo 経由で
+ *   前倒しできるため、既知 command が偽装素材を含むと判った時点で in-band 境界を信頼しない。構造化
+ *   metadata.exit_code (1) は非 spoofable ゆえ sentinel true でも維持する。sentinel 未指定 (相関喪失など)
+ *   は従来どおりテキスト抽出する — この経路の結果は check_kind 非搬送ゆえ fold で flip 不能 (inert)。
  */
-export function extractRolloutExitCode(output: string | undefined): number | undefined {
+export function extractRolloutExitCode(
+  output: string | undefined,
+  opts?: { readonly commandHasSpoofMaterial?: boolean | undefined },
+): number | undefined {
   if (typeof output !== "string" || output.length === 0) return undefined;
-  // (1) 構造化 metadata.exit_code (非 spoofable・最優先)。
+  // (1) 構造化 metadata.exit_code (非 spoofable・最優先・sentinel true でも維持)。
   const structured = asNumber(asParams(parseJsonObject(output).metadata).exit_code);
   if (structured !== undefined && Number.isInteger(structured)) return structured;
-  // (2) harness header の "Process exited with code N" ("Output:" マーカー前・行頭行末アンカーの最後の行)。
+  // (2) harness header テキスト経路。相関 command が偽装素材を含むときは in-band 境界を信頼せず拒否 (fail-closed)。
+  if (opts?.commandHasSpoofMaterial === true) return undefined;
+  // "Process exited with code N" ("Output:" マーカー前・行頭行末アンカーの最後の行)。
   const nlIdx = output.indexOf("\nOutput:");
   const markerIdx = nlIdx >= 0 ? nlIdx : output.startsWith("Output:") ? 0 : -1;
   if (markerIdx < 0) return undefined; // マーカー無し → header 特定不能 → 抽出しない (安全側・非捏造)。
@@ -507,9 +547,13 @@ function normalizeResponseItem(
       //   args.query 等に check 語彙が入っても検証証拠として扱わない (誤分類→偽検証を構造的に排除)。
       const isShellExec = name !== undefined && SHELL_EXEC_TOOLS.has(name);
       const check = isShellExec ? classifyCheck(command) : undefined;
+      // SEC-B1R2-1 (H): shell-exec の command が header/exit を偽装しうる素材を含むかを boolean sentinel で
+      //   相関 info へ記録する (NO-RAW: bool のみ)。completed 側がこれを見てテキスト exit 抽出を fail-closed する。
+      const commandSpoofRisk = isShellExec ? commandHasExitSpoofMaterial(command) : undefined;
       ctx.callCorrelation?.record(callId, {
         name,
         isShellExec,
+        ...(commandSpoofRisk === true ? { commandSpoofRisk } : {}),
         ...(check !== undefined
           ? { checkKind: check.check_kind, checkMatch: check.check_match }
           : {}),
@@ -555,11 +599,17 @@ function normalizeResponseItem(
       //   欠落時 (exit 抽出不能 or 相関喪失) は当該 field を載せない → fold は verification_state 不動 (受入 12)。
       // SEC-B1-1 item3: 相関がある **かつ** 非 shell exec と判っている call の output からは exit を抽出しない
       //   (非 shell tool の output に紛れる exit フレーズを検証信号にしない)。相関喪失 (info===undefined) は
-      //   従来どおり抽出する (spoof 耐性は last-anchor 抽出側が担保・観測性優先の安全側)。
+      //   従来どおり抽出する (この経路は check_kind 非搬送ゆえ fold で flip 不能 = inert・観測性優先の安全側)。
+      // SEC-B1R2-1 (H): shell-exec 相関がある時は started 側 sentinel (commandSpoofRisk) を渡し、command が
+      //   header/exit 偽装素材を含むならテキスト抽出を fail-closed する (fake-marker 切詰め spoof を封じる)。
       const exitCode =
-        info === undefined || info.isShellExec === true
+        info === undefined
           ? extractRolloutExitCode(output)
-          : undefined;
+          : info.isShellExec === true
+            ? extractRolloutExitCode(output, {
+                commandHasSpoofMaterial: info.commandSpoofRisk === true,
+              })
+            : undefined;
       events.push(
         makeEvent(ctx, line, p, "command.completed", "running.model_wait", {
           eventIndex: events.length,

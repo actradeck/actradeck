@@ -153,15 +153,13 @@ const SUBCOMMAND_KIND: ReadonlyMap<string, ReadonlyMap<string, CheckKind>> = new
  *   下記 `unwrapExecRunner` で **check-classifier 局所に** 貫通させ、内側 program を program-match で再分類する
  *   (RUNNER_WRAPPERS を触らない = 危険コマンド分類器の挙動を変えない)。
  */
-const SCRIPT_RUNNERS: ReadonlySet<string> = new Set([
-  "npm",
-  "pnpm",
-  "yarn",
-  "bun",
-  "make",
-  "just",
-  "task",
-]);
+/**
+ * package manager 名 (TDA-B1R2-3: 単一 base)。script runner でも exec-subcommand runner でもあるため、
+ * 両集合 (SCRIPT_RUNNERS / EXEC_SUBCOMMAND_RUNNERS) をこの 1 つの base から導出し、2 セットの並置ドリフトを防ぐ。
+ */
+const PACKAGE_MANAGERS = ["npm", "pnpm", "yarn", "bun"] as const;
+
+const SCRIPT_RUNNERS: ReadonlySet<string> = new Set([...PACKAGE_MANAGERS, "make", "just", "task"]);
 
 /**
  * exec-runner (QA-B1-2): 後続を **program 直起動**として実行するラッパ。canonical chain は剥がさないため
@@ -171,7 +169,8 @@ const SCRIPT_RUNNERS: ReadonlySet<string> = new Set([
  *    `bun x <prog>`。
  */
 const EXEC_RUNNERS: ReadonlySet<string> = new Set(["npx", "pnpx", "bunx"]);
-const EXEC_SUBCOMMAND_RUNNERS: ReadonlySet<string> = new Set(["pnpm", "yarn", "npm", "bun"]);
+// TDA-B1R2-3: SCRIPT_RUNNERS と同じ PACKAGE_MANAGERS base から導出 (package manager 名の 2 セット並置を回避)。
+const EXEC_SUBCOMMAND_RUNNERS: ReadonlySet<string> = new Set(PACKAGE_MANAGERS);
 const EXEC_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "dlx", "x"]);
 /** exec-runner 貫通の最大反復 (`npx npx eslint` 様の多重も有界に止める)。 */
 const MAX_EXEC_UNWRAP = 3;

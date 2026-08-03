@@ -64,13 +64,40 @@ async function untrackedStatDigest(repoRoot: string): Promise<string> {
   for (const rel of limited) {
     try {
       const st = await stat(join(repoRoot, rel));
-      parts.push(`${rel}\0${st.size}\0${Math.trunc(st.mtimeMs)}`);
+      parts.push(`${rel}\u0000${st.size}\u0000${Math.trunc(st.mtimeMs)}`);
     } catch {
-      parts.push(`${rel}\0?`); // stat 不能 (削除競合等) は存在痕跡のみ載せる。
+      parts.push(`${rel}\u0000?`); // stat 不能 (削除競合等) は存在痕跡のみ載せる。
     }
   }
   if (paths.length > MAX_UNTRACKED_STAT) parts.push(`+${paths.length - MAX_UNTRACKED_STAT}`); // 超過数 (観測性)。
-  return parts.join("\n");
+  // TDA-B1R2-2 (L・correctness 隣接): parts 連結も **NUL 区切り**にする (以前は "\n" join)。`rel` は
+  //   `ls-files -z` 由来で POSIX filename に改行が入りうる = NUL-free だが LF は含みうるため、"\n" join では
+  //   改行入り filename が part 境界を跨いで衝突しうる (外側 diff_hash で閉じた straddle クラスの内側残存・
+  //   偽装方向は false-green)。rel は NUL-free ゆえ `rel\0size\0mtime\0rel2...` (join("\u0000")) が一意。
+  return untrackedDigestJoin(parts);
+}
+
+/**
+ * diff_hash の入力文字列を組み立てる単一出所 (QA-B1R2-3)。3 フィールド (status / combined diff / untracked
+ * stat digest) を **NUL 区切り**で連結して domain separation を保つ。空白区切りへ戻すと、あるフィールド末尾と
+ * 次フィールド先頭に跨るコンテンツが衝突し (例: status 行末が diff 先頭へ流れ込む)、実変更を隠蔽して staleness
+ * 検知を破る。NUL は git のテキスト出力に一切現れないため偽造不能な区切り (SEC-B1-2 / QA-B1-5 / TDA-B1-3)。
+ * ソースは 6 文字エスケープ (backslash u 0000) で書き、生 NUL バイトをファイルへ混入させない。
+ */
+export function diffHashInput(status: string, combined: string, untracked: string): string {
+  return `${status}\u0000${combined}\u0000${untracked}`;
+}
+
+/**
+ * untracked stat digest の parts 連結 (TDA-B1R2-2)。各 part は `rel\0size\0mtime` (NUL 区切りフィールド)
+ * だが、以前は parts 同士を **改行 (\n)** で連結していた。`rel` は `ls-files -z` 由来 = POSIX で filename に改行が
+ * 入りうる (NUL-free だが LF は含みうる) ため、\n 連結だと改行入り filename が part 境界を跨いで衝突しうる
+ * (外側 diff_hash で閉じた straddle クラスの内側残存・偽装方向は false-green)。rel が NUL-free ゆえ **NUL 連結**
+ * (`rel\0size\0mtime\0rel2...`) が一意。straddle テストで空白/改行連結への退行を赤化する。
+ * ソースは 6 文字エスケープ (backslash u 0000) で書き、生 NUL バイトを混入させない。
+ */
+export function untrackedDigestJoin(parts: readonly string[]): string {
+  return parts.join("\u0000");
 }
 
 export interface GitWatcherOptions {
@@ -140,7 +167,7 @@ export async function snapshotDiff(repoRoot: string): Promise<DiffSnapshot> {
   //   masking a real change and defeating staleness detection. NUL never appears in git's text output, so it
   //   is an unforgeable separator.
   const hash = createHash("sha256")
-    .update(`${status}\u0000${combined}\u0000${untracked}`)
+    .update(diffHashInput(status, combined, untracked))
     .digest("hex");
 
   const changedFiles = status.split("\n").filter((l) => l.trim().length > 0).length;
