@@ -5,6 +5,10 @@
  * backend の増分投影 (`work_items` テーブル・A2 で配線) と webui の client-side fold が同一関数を共有し、
  * 保存済み (redacted・append-only) イベント列から決定的に再構築できる (INV-WORKITEMS-FOLD-PARITY)。
  *
+ * ⚠️ **参照契約 (TDA-6)**: fold は item を **値変化時に必ず新しいオブジェクト参照で返す** (不変 item は
+ *    同一参照を保つ)。backend 増分 upsert はこの「参照が変わった = 値が変わった」を diff 条件に使うため、
+ *    既存 item を **in-place mutate してはならない** (mutate すると変化が参照 diff から漏れ under-upsert する)。
+ *
  * ## 対象イベント (それ以外は zero-cost skip)
  * - `work.item.updated`   : declared-id (task scheme) の per-item 観測。
  * - `turn.plan.updated`   : plan snapshot (plan scheme・absent → removed 調停・§D3)。

@@ -7,8 +7,14 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
-import type { EventType, NormalizedEvent, StartKind, State } from "@actradeck/event-model";
-import { parseEvent } from "@actradeck/event-model";
+import type {
+  EventType,
+  NormalizedEvent,
+  StartKind,
+  State,
+  WorkItemStatus as WorkItemStatusT,
+} from "@actradeck/event-model";
+import { parseEvent, WorkItemStatus } from "@actradeck/event-model";
 
 import { assertPayloadConsistency } from "./event-factory.js";
 
@@ -246,6 +252,35 @@ function toolNameFromNamespace(
   return { server: ns ?? "unknown", tool: name ?? "unknown" };
 }
 
+/** WorkItemStatus の closed-enum gate (§D2)。未知/非文字列は "unknown" (forward-compat 安全側)。 */
+function gateWorkItemStatus(v: unknown): WorkItemStatusT {
+  const r = WorkItemStatus.safeParse(v);
+  return r.success ? r.data : "unknown";
+}
+
+/**
+ * update_plan function_call の arguments から typed plan items + legacy steps を導出する (§D2/A2)。
+ * `{"plan":[{"step":str,"status":str}]}` を parse し、status を WorkItemStatus へ gate する。
+ * arguments が parse 不能 / plan 非配列なら **undefined** (= items 欠落・legacy 相当)。
+ * step 欠落エントリは飛ばす。id は付けない (fold が step テキスト hash で導出・§D3)。
+ */
+function planFromUpdatePlan(
+  args: Params,
+): { items: Array<{ step: string; status: WorkItemStatusT }>; steps: string[] } | undefined {
+  const plan = args.plan;
+  if (!Array.isArray(plan)) return undefined;
+  const items: Array<{ step: string; status: WorkItemStatusT }> = [];
+  const steps: string[] = [];
+  for (const raw of plan) {
+    const o = asParams(raw);
+    const step = asString(o.step);
+    if (step === undefined) continue;
+    items.push({ step, status: gateWorkItemStatus(asString(o.status)) });
+    steps.push(step);
+  }
+  return { items, steps };
+}
+
 function commandFromArguments(name: string | undefined, args: Params): string {
   return (
     asString(args.cmd) ??
@@ -312,6 +347,30 @@ function normalizeResponseItem(
       const namespace = asString(p.namespace);
       const args = parseJsonObject(p.arguments);
       const callId = asString(p.call_id);
+
+      // ADR 0015 §D2/A2: update_plan は plan snapshot であって command ではない。専用 case で
+      //   turn.plan.updated (typed items + legacy steps) を emit し、generic function_call →
+      //   command.started の誤ルート (command ストリーム汚染) を**構造的に排除**する。arguments が
+      //   parse 不能なら items 欠落 (legacy 相当) とし、それでも command.started へは落とさない。
+      //   対応する function_call_output ("Plan updated" ack) は check_kind を持たないため、
+      //   command.completed になっても work-items fold の検証束縛には一切入らない (§D6・誤対応しない)。
+      if (name === "update_plan") {
+        const parsed = planFromUpdatePlan(args);
+        const explanation = asString(args.explanation);
+        const payload: Params = {};
+        if (explanation !== undefined) payload.plan = explanation; // legacy `plan` = 説明文字列。
+        if (parsed !== undefined) {
+          payload.steps = parsed.steps; // legacy steps (旧 consumer 向けに維持)。
+          payload.items = parsed.items; // typed items (per-step status・§D2 upgrade path)。
+        }
+        return [
+          makeEvent(ctx, line, p, "turn.plan.updated", "running.planning", {
+            summary: explanation ?? `Plan updated (${parsed?.items.length ?? 0} steps)`,
+            payload,
+          }),
+        ];
+      }
+
       if (namespace?.startsWith("mcp__")) {
         const tool = toolNameFromNamespace(namespace, name);
         return [

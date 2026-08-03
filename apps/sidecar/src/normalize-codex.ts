@@ -15,8 +15,14 @@
  *    parse/persist/send される。normalize 自体は redaction しない (choke point は一箇所)。
  *    diff / command 出力など raw を payload へ素直に載せてよい (sink.redactDeep が担保)。
  */
-import type { Continuation, EndKind, EventType, State } from "@actradeck/event-model";
-import { terminalContinuation } from "@actradeck/event-model";
+import type {
+  Continuation,
+  EndKind,
+  EventType,
+  State,
+  WorkItemStatus as WorkItemStatusT,
+} from "@actradeck/event-model";
+import { terminalContinuation, WorkItemStatus } from "@actradeck/event-model";
 
 import { buildEvent } from "./event-factory.js";
 
@@ -266,13 +272,27 @@ export function normalizeCodexNotification(
     case "turn/plan/updated": {
       const explanation = asString(p.explanation);
       const plan = Array.isArray(p.plan) ? p.plan : [];
-      const steps = plan
-        .map((s) => asString(asParams(s).step))
-        .filter((s): s is string => s !== undefined);
+      // ADR 0015 §D2 (gap (a) 修正): per-step status を typed `items` へ保持する (以前は step 文字列
+      //   のみで status を捨てていた)。legacy `steps` は旧 consumer 向けに不変で維持する。status は
+      //   WorkItemStatus へ gate (未知/欠落は "unknown")。id は付けない (fold が step hash で導出・§D3)。
+      const steps: string[] = [];
+      const items: Array<{ step: string; status: WorkItemStatusT }> = [];
+      for (const s of plan) {
+        const o = asParams(s);
+        const step = asString(o.step);
+        if (step === undefined) continue;
+        steps.push(step);
+        const parsed = WorkItemStatus.safeParse(asString(o.status));
+        items.push({ step, status: parsed.success ? parsed.data : "unknown" });
+      }
       return [
         make(ctx, p, "turn.plan.updated", "running.planning", {
           summary: explanation ?? `計画更新 (${steps.length} ステップ)`,
-          payload: { ...(explanation !== undefined ? { plan: explanation } : {}), steps },
+          payload: {
+            ...(explanation !== undefined ? { plan: explanation } : {}),
+            steps,
+            ...(items.length > 0 ? { items } : {}),
+          },
         }),
       ];
     }

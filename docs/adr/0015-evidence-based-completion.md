@@ -204,8 +204,10 @@ deterministic (same redactor rules → same text → same id).
   verification badge from `verification_state` alone.
 - **Pure fold in `packages/projection`** (`applyWorkItemsEvent` / `reduceWorkItems`), shared by
   (i) backend incremental projection (gated to relevant event types only:
-  `work.item.updated`, `turn.plan.updated`, `command.completed` with a check annotation,
-  `diff.updated`, terminal-bearing events; all other events skip at zero cost) and (ii) the
+  `work.item.updated`, `turn.plan.updated`, `command.started` (with a check annotation — opens the
+  in-flight check window that is the `run_dirty` origin, §D5 / acceptance test 9),
+  `command.completed` with a check annotation, `diff.updated`, terminal-bearing events; all other
+  events skip at zero cost) and (ii) the
   webui, which folds **client-side over the event feed the Session Detail already fetches** —
   the exact pattern the replay reducer established. An INV parity test pins table rows ==
   `reduceEvents` output.
