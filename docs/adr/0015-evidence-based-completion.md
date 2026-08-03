@@ -11,15 +11,16 @@ reconciliation) remains in ADR 0014, untouched.
 ## Context
 
 Agents self-report work items as "completed". Nothing in the pipeline answers the operator's
-real question — the plan.md KPI "does it need intervention?" in its sharpest form: *the agent
+real question — the plan.md KPI "does it need intervention?" in its sharpest form: _the agent
 says it is done; did anything actually verify that, and is that verification still valid for
-the code as it stands now?* Shipping this closes the differentiation gate (decision `019ec619`):
+the code as it stands now?_ Shipping this closes the differentiation gate (decision `019ec619`):
 the cockpit UI must distinguish four states per claimed-complete work item — self-claimed /
 verified / verification failed / changed after verification.
 
 ### Verified provider behavior (2026-08-03, real data — not assumed)
 
 **Claude Code 2.1.220 hooks**
+
 - `TaskCreated` / `TaskCompleted` fire, with exactly 8 payload fields: `session_id`,
   `transcript_path`, `cwd`, `prompt_id`, `hook_event_name`, `task_id`, `task_subject`,
   `task_description`. There is **no `agent_id`**.
@@ -41,6 +42,7 @@ verified / verification failed / changed after verification.
   so partial deployment degrades benignly.
 
 **Codex 0.145.0**
+
 - The plan signal in real rollouts (`~/.codex/sessions/`) is the **`update_plan` function_call
   record** (349 occurrences across 19 of the last 200 files): `payload.type="function_call"`,
   `name="update_plan"`, `arguments` = JSON string → `{"plan":[{"step":str,"status":str}]}`.
@@ -61,19 +63,19 @@ verified / verification failed / changed after verification.
 
 - `git-watcher.ts` already emits `diff.updated` with `diff_hash` =
   sha256(porcelain status ∥ unstaged diff ∥ staged diff) — a working-tree dirty fingerprint.
-  It does **not** include HEAD, and untracked-file *content* changes are invisible (porcelain
+  It does **not** include HEAD, and untracked-file _content_ changes are invisible (porcelain
   lists names only). §D5 fixes both.
 - The canonical command tokenizer (`tokenize` / `commandName` / `normalizeCommandName`) lives in
   `apps/sidecar/src/normalize.ts` and is **not importable from `packages/projection`**
   (layering). §D6 places the check classifier accordingly.
 - The projection reducer freezes on terminal; `last_turn_outcome` is the implemented template
-  for a *sticky orthogonal axis*; `deriveActionSubject` reads only redacted-payload allowlist
+  for a _sticky orthogonal axis_; `deriveActionSubject` reads only redacted-payload allowlist
   fields. `pending_approvals` (bounded jsonb, cap 64) is the bounded-fold precedent.
 - Managed Codex `command.completed` carries `exit_code` (`item.exitCode`); the CC hook path
   carries `exit_code` when numeric; the rollout `function_call_output` path currently extracts
   **no** exit code (§D6 honesty fallback).
 - Rollout event ids are deterministic (`stableRolloutEventId`: session + file basename + offset
-  + eventIndex) → typed plan emission stays idempotent across re-tails.
+  - eventIndex) → typed plan emission stays idempotent across re-tails.
 - Migrations live in `db/migrations/` (11 so far, all additive after init; TEXT columns, no
   CHECK constraints, closed-enum gates at the app boundary — house style).
 
@@ -110,10 +112,10 @@ reducer is not modified; work items live in a **separate fold** (§D4).
 - **New event type `work.item.updated`** (per-item observation; CC task list and any adapter
   with declared item ids). Closed payload variant:
   `{ kind, provider_task_id: string, status: WorkItemStatus, subject?, description?,
-  observation?: ObservationStamp }`. `WorkItemStatus = z.enum(["pending","in_progress",
-  "completed","cancelled","removed","unknown"])`. Emitted from: `TaskCreated` hook
+observation?: ObservationStamp }`. `WorkItemStatus = z.enum(["pending","in_progress",
+"completed","cancelled","removed","unknown"])`. Emitted from: `TaskCreated` hook
   (status=pending), `TaskCompleted` hook (status=completed), and `PostToolUse(TaskCreate /
-  TaskUpdate)` parsing (all transitions; only fields verified against live CC are parsed,
+TaskUpdate)` parsing (all transitions; only fields verified against live CC are parsed,
   unknown → `unknown`).
 - **Additive typed items on the existing `turn.plan.updated`** (snapshot observation; Codex
   plans): `items?: Array<{ step: string, status: WorkItemStatus }>` (ordinal = array index).
@@ -122,7 +124,7 @@ reducer is not modified; work items live in a **separate fold** (§D4).
   `turn.plan.updated`; the typed field is the upgrade path that fixes gaps (a)+(c) in place.
 - **Why two shapes, not one**: the providers genuinely observe differently. CC delivers
   per-item lifecycle events but never a full task-list snapshot; Codex delivers full-plan
-  replacement snapshots and can only express item *removal* snapshot-wise. Forcing one shape
+  replacement snapshots and can only express item _removal_ snapshot-wise. Forcing one shape
   would fabricate unobserved data in one direction or lose removal in the other. Provider
   differences stay honest at the event layer; **unification happens in the work-item fold**
   (§D4) — the same layering ADR 0014 chose (common contract, declared differences).
@@ -133,10 +135,10 @@ reducer is not modified; work items live in a **separate fold** (§D4).
   redaction surface; (iii) it retroactively works for any source whose commands we observe,
   including external adapters. Evidence refs are the underlying `event_id`s
   (claim_event_id / verification_event_id / stale_event_id), so the UI can jump to the exact
-  timeline entries — the evidence *is* the event log.
+  timeline entries — the evidence _is_ the event log.
 - Rejected alternatives: `task.created/updated/completed` event family (provider-biased noun;
   "task.completed" would bake the claim in as fact — the whole point is that completion is a
-  *claim*; and 3 types where 1 level-based type suffices); deriving work items from generic
+  _claim_; and 3 types where 1 level-based type suffices); deriving work items from generic
   `tool.started` payload parsing in projection (violates the redacted-allowlist discipline and
   the layering constraint); a `verification.recorded` event emitted by the sidecar (dual
   authority with the fold; new leak surface).
@@ -158,13 +160,21 @@ deterministic (same redactor rules → same text → same id).
 - **Positional identity for Codex is rejected**: indexes silently re-bind claims to different
   work when a plan is revised/reordered (claim history corrupts without any signal). Content
   hash handles the dominant observed pattern (statuses flip on stable text: 668/623/288 status
-  churn) and degrades *loudly and honestly* on revision: a reworded step becomes a new item
+  churn) and degrades _loudly and honestly_ on revision: a reworded step becomes a new item
   (unverified) and the old one becomes `removed`. Known degradations, documented: duplicate
   step texts within one snapshot collapse to one item (last occurrence's status wins); a
   reworded step loses its verification continuity (starts over — the safe direction).
 - Snapshot reconciliation (Codex): items present → upsert with status; items previously seen
   but absent from the new snapshot → status `removed` (**inferred** — the provider stopped
-  listing it; distinct from `cancelled`, which is a declared act).
+  listing it; distinct from `cancelled`, which is a declared act). **`removed` preserves the
+  claim/verification fields** (TDA-3 adjudication): removal is a historical archive, not a
+  retraction — `status` drops to `removed` but `claimed_at` / `verification_state` /
+  `verified_tree_fp` are kept, so "it was `passed` before it disappeared" survives. Only
+  **reopen** (a present item transitioning `completed → non-completed` = active rework) retracts
+  the claim. Consequence: **every consumer of `verification_state` MUST gate on `status`** (a
+  `removed` row can still carry `verification_state=passed`); the badge derivation already does
+  (§D8: non-`completed` → no badge). A `removed` item reappearing in a later snapshot updates the
+  existing row (inheriting `claimed_at`), not a new one.
 - Cross-run continuity (a resumed run re-observing the same CC task list) is **P1** (join via
   ADR 0014 run lineage / `provider_session_id`); P0 identity is per run, honestly.
 
@@ -172,7 +182,7 @@ deterministic (same redactor rules → same text → same id).
 
 - **Storage adjudication**: (A) session_state jsonb blob — rejected (per-item lifecycle +
   cross-session queries outgrow a bounded blob; session_state row bloat). (C) separate
-  append-only claim/verification tables — rejected (the events table *is* the append-only
+  append-only claim/verification tables — rejected (the events table _is_ the append-only
   history; parallel append-only stores duplicate authority). Adopted: **(B) `work_items`
   projection table** (migration #12, additive), 1 row per (session_id, work_item_id), written
   in the same ingest transaction as session_state, **rebuildable from events** (projection, not
@@ -187,7 +197,11 @@ deterministic (same redactor rules → same text → same id).
   `stale_at`, `stale_event_id`, `updated_at` NOT NULL. PK `(session_id, work_item_id)` — no
   extra indexes in P0 (per-session cardinality is small; list surfaces join on the PK prefix).
   `description` is **not** projected (leak/bloat trim; the redacted event retains it and the
-  UI detail can read it from the timeline event).
+  UI detail can read it from the timeline event). **Status-gate invariant (TDA-3)**:
+  `verification_state` is orthogonal to `status` and a `removed` row may retain a non-`unverified`
+  `verification_state` (§D3 removal preserves the claim); therefore any query/DTO/UI that reads
+  `verification_state` MUST filter on `status` (typically `status='completed'`) — never surface a
+  verification badge from `verification_state` alone.
 - **Pure fold in `packages/projection`** (`applyWorkItemsEvent` / `reduceWorkItems`), shared by
   (i) backend incremental projection (gated to relevant event types only:
   `work.item.updated`, `turn.plan.updated`, `command.completed` with a check annotation,
@@ -222,15 +236,23 @@ deterministic (same redactor rules → same text → same id).
   1. `diff.updated` payload gains `head_sha?` (`git rev-parse HEAD` at snapshot; absent on
      unborn/non-git → fingerprint degrades to diff_hash-only and the evidence axis says so).
   2. `snapshotDiff` hash input gains per-untracked-file stat lines (path, size, mtime) —
-     closes the verified blind spot where editing an *untracked* file's content changed
+     closes the verified blind spot where editing an _untracked_ file's content changed
      nothing in porcelain/diff output. (`diff_hash` is compared only against the in-memory
      previous value; historical at-rest values are opaque, so changing the derivation is safe.)
 - **VerificationState** (closed): `unverified | passed | failed | stale | waived`.
   Transitions: `unverified → passed|failed` (a bound check completes with known exit);
   `passed → stale` (fingerprint change after `verified_at`); `passed|failed|stale →
-  passed|failed` (newer bound check re-runs); `* → unverified` only via claim retraction;
+passed|failed` (newer bound check re-runs); `* → unverified` only via claim retraction;
   `waived` is **reserved** (operator mutation surface is P1; the vocabulary is complete now so
-  the enum never churns). **No permanent verified boolean exists anywhere** — `passed` is
+  the enum never churns). **Fingerprint-basis asymmetry (TDA-1)**: a passing check may set
+  `passed` **only when a tree fingerprint has been observed** (`tree_fp` present); with no
+  fingerprint basis, a passing check is observed but does **not** move `verification_state` (the
+  same "don't move verification without a basis" discipline as the exit-absent case, §D6) — a
+  `passed` claim is only meaningful relative to `verified_tree_fp`. A **failing** check (`exit≠0`)
+  is allowed to set `failed` **without** a fingerprint basis: `failed` is a safe-direction alarm
+  about a fact that does not depend on the fingerprint, whereas `passed` is a positive assertion
+  tied to it. This asymmetry is principled, not an oversight. **No permanent verified boolean
+  exists anywhere** — `passed` is
   always relative to `verified_tree_fp` and auto-degrades to `stale`.
 - **Binding rule (P0, honest)**: checks are session-global. A classified check completion binds
   to **all** items of that session in `completed` status with `claimed_at ≤` check completion
@@ -240,7 +262,7 @@ deterministic (same redactor rules → same text → same id).
   includes this claimed work", not "this specific claim is wrong".
 - **`run_dirty`**: if a `diff.updated` fingerprint change interleaves between the bound check's
   `command.started` and `command.completed`, the verification is recorded with `run_dirty=true`
-  (the tree moved *during* the check — the pass is not cleanly attributable to either tree).
+  (the tree moved _during_ the check — the pass is not cleanly attributable to either tree).
   Derivable in the fold; prevents a real false-green.
 - Honest limits (documented, accepted): commit-after-verify changes HEAD → `stale` even though
   content is identical (safe-direction false positive; the UI can label it "committed after
@@ -256,7 +278,7 @@ deterministic (same redactor rules → same text → same id).
   in `normalize.ts`; no second parser).
 - Additive payload fields on `command.started` / `command.completed` (stamped wherever the
   command string is present at emit): `check_kind?: z.enum(["test","lint","typecheck","build",
-  "format"])`, `check_match?: z.enum(["program","script"])`.
+"format"])`, `check_match?: z.enum(["program","script"])`.
   - `program`: normalized program basename is a known check tool (vitest/jest/pytest/go test/
     cargo test/eslint/tsc/prettier --check/…). `script`: runner-wrapped script/target name
     matches the check vocabulary (`pnpm test`, `npm run lint`, `make typecheck`, …) — weaker
@@ -287,7 +309,7 @@ Fidelity     = authoritative | observed | parsed | inferred | unknown
 - **Carriage point 1 — `session.started` capability snapshot**: additive payload field
   `observation_evidence?: Partial<Record<ObservedCapability, {availability, method, fidelity}>>`
   with `ObservedCapability = z.enum(["work_items","completion_claims","verification_checks",
-  "tree_fingerprint"])`. The sidecar declares, per capture path, what it can observe and how —
+"tree_fingerprint"])`. The sidecar declares, per capture path, what it can observe and how —
   recorded on the session so the audit trail keeps its guarantee level even if wiring later
   changes (ADR 0014 Phase 5's own requirement, now in-band). `availability` semantics:
   `available` = channel wired; `unsupported` = structurally impossible in this mode;
@@ -295,24 +317,24 @@ Fidelity     = authoritative | observed | parsed | inferred | unknown
   (Named `observation_evidence`, not `evidence`, to avoid colliding with the existing
   `terminal_evidence` axis.)
 - **Carriage point 2 — per-observation stamp**: `observation?: {method, fidelity}` on
-  work-item-bearing payloads only. Needed because the *same* capability arrives over channels
+  work-item-bearing payloads only. Needed because the _same_ capability arrives over channels
   of different fidelity within one session (task hook vs PostToolUse parse). Availability is
   omitted per-event (an event that exists is available); unknown/enum-invalid stamps project to
   `undefined` (= evidence absent, safe).
-- Per-event stamping on *all* events is rejected (payload bloat, no consumer); a
+- Per-event stamping on _all_ events is rejected (payload bloat, no consumer); a
   per-capability-only snapshot is rejected (cannot express intra-session channel differences).
 - **official ≠ authoritative** — enforced by the assignments. Nothing in P0 earns
   `authoritative` (reserved for provider-persisted ground truth re-readable on demand):
 
-| Channel (real, verified) | method | fidelity |
-|---|---|---|
-| CC `TaskCreated`/`TaskCompleted` hook | `official_hook` | `observed` (dedicated semantic hook; best-effort delivery, no ordering guarantee) |
-| CC `PostToolUse(TaskCreate/TaskUpdate)` parse | `official_hook` | `parsed` (semantics extracted from a general-purpose tool record) |
-| Codex managed `turn/plan/updated` notification | `official_api` | `observed` |
-| Codex rollout `update_plan` function_call | `provider_jsonl` | `parsed` |
-| CC PostToolUse(Bash) exit_code (checks) | `official_hook` | `observed` |
-| Codex rollout check exit (metadata, when present) | `provider_jsonl` | `parsed` |
-| Tree fingerprint (git snapshot by sidecar) | `local_file` | `observed` |
+| Channel (real, verified)                          | method           | fidelity                                                                          |
+| ------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------- |
+| CC `TaskCreated`/`TaskCompleted` hook             | `official_hook`  | `observed` (dedicated semantic hook; best-effort delivery, no ordering guarantee) |
+| CC `PostToolUse(TaskCreate/TaskUpdate)` parse     | `official_hook`  | `parsed` (semantics extracted from a general-purpose tool record)                 |
+| Codex managed `turn/plan/updated` notification    | `official_api`   | `observed`                                                                        |
+| Codex rollout `update_plan` function_call         | `provider_jsonl` | `parsed`                                                                          |
+| CC PostToolUse(Bash) exit_code (checks)           | `official_hook`  | `observed`                                                                        |
+| Codex rollout check exit (metadata, when present) | `provider_jsonl` | `parsed`                                                                          |
+| Tree fingerprint (git snapshot by sidecar)        | `local_file`     | `observed`                                                                        |
 
 - **ADR 0014 Phase 5 absorption**: the closed vocabulary
   {authoritative, observed, inferred, unsupported, unverified} maps onto the axes —
@@ -330,12 +352,12 @@ Fidelity     = authoritative | observed | parsed | inferred | unknown
 Single source `deriveWorkItemBadge(item)` in the shared fold package (webui maps to locale
 strings via the existing LocaleProvider pattern — no baked Japanese):
 
-| badge | condition |
-|---|---|
-| self-claimed (自己申告完了) | `status=completed ∧ verification_state=unverified` |
-| verified (検証済み) | `status=completed ∧ verification_state=passed` (implies fingerprint currently matches) |
-| verification failed (検証失敗) | `status=completed ∧ verification_state=failed` |
-| changed after verification (検証後変更あり) | `status=completed ∧ verification_state=stale` |
+| badge                                       | condition                                                                              |
+| ------------------------------------------- | -------------------------------------------------------------------------------------- |
+| self-claimed (自己申告完了)                 | `status=completed ∧ verification_state=unverified`                                     |
+| verified (検証済み)                         | `status=completed ∧ verification_state=passed` (implies fingerprint currently matches) |
+| verification failed (検証失敗)              | `status=completed ∧ verification_state=failed`                                         |
+| changed after verification (検証後変更あり) | `status=completed ∧ verification_state=stale`                                          |
 
 Non-completed items render plain status (no badge). `waived` renders only after its P1
 mutation surface exists. Session Detail gains an additive work-items panel (fed by the
@@ -390,18 +412,18 @@ created. Enumerated new leak faces and their closures:
 
 **P0-A — spine (no UI, no hook injection):**
 
-| slice | content | high-risk faces |
-|---|---|---|
-| A1 contracts | event-model: `work.item.updated` variant + `WorkItemStatus` / `VerificationState` / `CheckKind` / `CheckMatch` / Observation enums + `TurnPlanUpdated.items` + `command.*` check fields + `diff.updated.head_sha` + `session.started.observation_evidence` + `deriveWorkItemId` + `treeFingerprint` + `deriveWorkItemBadge`; migration #12 `work_items`; pure fold in `packages/projection` + INV tests (id determinism, fold parity, transition rules, freeze) | contract review only (no live-path behavior change); event-type enum addition ⇒ **deploy backend (event-model bump) before/with sidecar** — an old backend rejects unknown event types at ingest |
-| A2 Codex plans | fix rollout misroute (add `update_plan` case → one `turn.plan.updated` with typed items; parse-fail → items absent, never the generic command fallthrough) + managed per-step status (gap (a)) + backend `work_items` incremental wiring; verify against **real rollouts** | event order/idempotency (re-tail same file → same ids, no dup items); removes existing command-stream pollution (misroute (b) is also a correctness bugfix) |
+| slice          | content                                                                                                                                                                                                                                                                                                                                                                                                                                                         | high-risk faces                                                                                                                                                                                  |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A1 contracts   | event-model: `work.item.updated` variant + `WorkItemStatus` / `VerificationState` / `CheckKind` / `CheckMatch` / Observation enums + `TurnPlanUpdated.items` + `command.*` check fields + `diff.updated.head_sha` + `session.started.observation_evidence` + `deriveWorkItemId` + `treeFingerprint`; migration #12 `work_items`; pure fold + `deriveWorkItemBadge` in `packages/projection` + INV tests (id determinism, fold parity, transition rules, freeze) | contract review only (no live-path behavior change); event-type enum addition ⇒ **deploy backend (event-model bump) before/with sidecar** — an old backend rejects unknown event types at ingest |
+| A2 Codex plans | fix rollout misroute (add `update_plan` case → one `turn.plan.updated` with typed items; parse-fail → items absent, never the generic command fallthrough) + managed per-step status (gap (a)) + backend `work_items` incremental wiring; verify against **real rollouts**                                                                                                                                                                                      | event order/idempotency (re-tail same file → same ids, no dup items); removes existing command-stream pollution (misroute (b) is also a correctness bugfix)                                      |
 
 **P0-B — vertical (ship = differentiation gate):**
 
-| slice | content | high-risk faces |
-|---|---|---|
-| B1 verification | sidecar check classifier (canonical tokenizer reuse) + exit-code extraction (rollout metadata; managed/CC already present) + `head_sha` + untracked-stat hash extension + verification/stale/`run_dirty` fold live | classifier correctness (canonical-parser reuse meta-test); redact→truncate order; fingerprint semantics (INV-VERIFICATION-STALE: no permanent verified) |
-| B2 CC tasks | settings-injection: add `TaskCreated`/`TaskCompleted` to the injected set (single-source list, managed+attach) + `normalizeHook` cases + `PostToolUse(TaskCreate/TaskUpdate)` parsing → `work.item.updated`; live-verify field names before parsing | **user settings write** (non-destructive merge, reversible detach, 0600 atomic); **redaction choke** for subject/description (INV-REDACTION-WORKITEM); dual-source claim idempotency |
-| B3 UI | Session Detail work-items panel (client fold), 4 badges, evidence/fidelity annotation, evidence-ref links, Wall claimed-unverified count | display-only; no live-gate interaction; NO-RAW in DOM (ids are hashes, subjects redacted+bounded) |
+| slice           | content                                                                                                                                                                                                                                             | high-risk faces                                                                                                                                                                      |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| B1 verification | sidecar check classifier (canonical tokenizer reuse) + exit-code extraction (rollout metadata; managed/CC already present) + `head_sha` + untracked-stat hash extension + verification/stale/`run_dirty` fold live                                  | classifier correctness (canonical-parser reuse meta-test); redact→truncate order; fingerprint semantics (INV-VERIFICATION-STALE: no permanent verified)                              |
+| B2 CC tasks     | settings-injection: add `TaskCreated`/`TaskCompleted` to the injected set (single-source list, managed+attach) + `normalizeHook` cases + `PostToolUse(TaskCreate/TaskUpdate)` parsing → `work.item.updated`; live-verify field names before parsing | **user settings write** (non-destructive merge, reversible detach, 0600 atomic); **redaction choke** for subject/description (INV-REDACTION-WORKITEM); dual-source claim idempotency |
+| B3 UI           | Session Detail work-items panel (client fold), 4 badges, evidence/fidelity annotation, evidence-ref links, Wall claimed-unverified count                                                                                                            | display-only; no live-gate interaction; NO-RAW in DOM (ids are hashes, subjects redacted+bounded)                                                                                    |
 
 Multi-tier deploy note: event-model changes require backend + sidecar dist rebuild + webui in
 one rollout (per the standing multi-tier redeploy rule); partial deployment degrades benignly
@@ -409,9 +431,10 @@ one rollout (per the standing multi-tier redeploy rule); partial deployment degr
 ingest — hence backend-first ordering).
 
 **P1 reserved (explicitly out of P0):**
+
 - **Effective Context Evidence** (fixed name): ContextSource / ContextVersion / ContextInclusion
   via additive migration; ContextPresence 5 levels `configured / discovered / eligible /
-  loaded / referenced` — "used" is forbidden vocabulary.
+loaded / referenced` — "used" is forbidden vocabulary.
 - `compact_summary` persistence: location **unverified** (docs claim PreCompact; sidecar keeps
   only the trigger today) — must be live-verified first, and persistence goes through the
   INV-REDACTION choke (LEVEL 0), stored bounded post-floor.

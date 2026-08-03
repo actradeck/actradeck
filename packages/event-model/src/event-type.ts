@@ -44,6 +44,9 @@ export const EventType = z.enum([
   "subagent.completed",
   // コンテキスト圧縮
   "context.compacted",
+  // 作業項目 (ADR 0015 evidence-based completion): per-item 観測。state は常に持たない
+  //   (§D1・純観測ゆえ session 状態機械を動かさない・INV-WORKITEM-NO-STATE)。
+  "work.item.updated",
   // Liveness / 運用
   "heartbeat",
   "stalled.detected",

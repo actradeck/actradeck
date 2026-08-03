@@ -14,6 +14,14 @@ import { z } from "zod";
 
 import { EventType } from "./event-type.js";
 import { REDACTION_KINDS } from "./redaction-kinds.js";
+import {
+  CapabilityEvidence,
+  CheckKind,
+  CheckMatch,
+  ObservationStamp,
+  ObservedCapability,
+  WorkItemStatus,
+} from "./work-item.js";
 
 /** リスク区分 (command / file の危険度。plan.md §18 Risk Lens の素地)。 */
 export const RiskLevel = z.enum(["low", "medium", "high"]);
@@ -186,6 +194,11 @@ function variant<K extends EventType, S extends z.ZodRawShape>(kind: K, shape: S
 const SessionStarted = variant("session.started", {
   repo: z.string().optional(),
   branch: z.string().optional(),
+  // ADR 0015 §D7 carriage point 1: capture 経路ごとの観測能力 snapshot。sidecar が「何を / どの
+  //   fidelity で観測できるか」を session に宣言し、後で配線が変わっても監査証跡の保証水準を保つ
+  //   (ADR 0014 Phase 5 の manifest ファイルを in-band 化)。closed enum のみ (NO-RAW)。
+  //   partialRecord: 宣言する capability だけを載せる (全 capability 必須ではない・additive)。
+  observation_evidence: z.partialRecord(ObservedCapability, CapabilityEvidence).optional(),
 });
 const SessionEnded = variant("session.ended", {
   reason: z.string().optional(),
@@ -198,6 +211,10 @@ const TurnStarted = variant("turn.started", {
 const TurnPlanUpdated = variant("turn.plan.updated", {
   plan: z.string().optional(),
   steps: z.array(z.string()).optional(),
+  // ADR 0015 §D2: Codex plan の snapshot 観測に **per-step status** を載せる typed items。
+  //   legacy `steps` (文字列のみ) は旧 consumer 向けに維持し、`items` が gap を埋める upgrade path。
+  //   ordinal は配列 index。plan-scheme id は step テキスト hash (§D3・fold で導出)。
+  items: z.array(z.object({ step: z.string(), status: WorkItemStatus })).optional(),
 });
 const TurnCompleted = variant("turn.completed", {
   // 応答要約 (エージェント公開メッセージの有界要約・plan.md「エージェントの公開メッセージ」表示許可)。
@@ -290,6 +307,10 @@ const CommandStarted = variant("command.started", {
   risk_level: RiskLevel.optional(),
   // tool_use_id 由来の相関キー (`tu:<tool_use_id>`)。command.completed と同値で結ぶ。
   request_id: z.string().optional(),
+  // ADR 0015 §D6: チェック分類 (sidecar が emit 時に canonical tokenizer で付与する closed enum・
+  //   B1 で配線)。started 側にも載せるのは run_dirty 判定 (start↔completed 間の diff 変化) のため。
+  check_kind: CheckKind.optional(),
+  check_match: CheckMatch.optional(),
 });
 const CommandOutputDelta = variant("command.output.delta", {
   stream: z.enum(["stdout", "stderr"]),
@@ -300,6 +321,9 @@ const CommandCompleted = variant("command.completed", {
   exit_code: z.number().int().optional(),
   // tool_use_id 由来の相関キー (`tu:<tool_use_id>`)。command.started と同値で結ぶ。
   request_id: z.string().optional(),
+  // ADR 0015 §D6: チェック分類 (started と対・completed の exit_code と合わせ検証遷移を駆動)。
+  check_kind: CheckKind.optional(),
+  check_match: CheckMatch.optional(),
 });
 
 // --- ファイル変更 -------------------------------------------------------
@@ -322,6 +346,10 @@ const DiffUpdated = variant("diff.updated", {
   changed_files: z.number().int().optional(),
   added_lines: z.number().int().optional(),
   removed_lines: z.number().int().optional(),
+  // ADR 0015 §D5: snapshot 時点の `git rev-parse HEAD` (B1 で配線)。tree fingerprint
+  //   = sha256(head ∥ \0 ∥ diff_hash) の素。unborn/非 git では欠落 → diff_hash-only へ縮退。
+  //   commit id は content-free (秘匿値でない)。
+  head_sha: z.string().optional(),
 });
 
 // --- MCP / Web ----------------------------------------------------------
@@ -351,6 +379,28 @@ const SubagentCompleted = variant("subagent.completed", {
 // --- コンテキスト圧縮 ---------------------------------------------------
 const ContextCompacted = variant("context.compacted", {
   trigger: z.enum(["auto", "manual"]).optional(),
+});
+
+// --- 作業項目 (ADR 0015 evidence-based completion) ----------------------
+/**
+ * per-item の work item 観測 (§D2)。CC task list や、item id を宣言する adapter が emit する。
+ *
+ * **INV-WORKITEM-NO-STATE (§D1)**: この variant を持つイベントは NormalizedEvent.state を **常に
+ * 持たない** (純観測ゆえ session 状態機械を動かさない)。state は top-level field ゆえ payload schema
+ * では強制できないが、emitter (A2/B2) はこの契約を守り、fold (INV-WORKITEM-NO-STATE テスト) が回帰固定する。
+ *
+ * - `provider_task_id`: provider の task id (CC の session-scoped serial 等)。fold が
+ *   `deriveWorkItemId("task", …)` で hash-only id へ畳む (raw を id/DOM へ持ち込まない・§D3)。
+ * - `subject` / `description`: free text。既存 sink choke (redact→persist) を通った **redacted** 値
+ *   のみが at-rest に載る (INV-REDACTION-WORKITEM・§D10)。
+ * - `observation`: per-observation の method/fidelity スタンプ (§D7・carriage point 2)。
+ */
+const WorkItemUpdated = variant("work.item.updated", {
+  provider_task_id: z.string(),
+  status: WorkItemStatus,
+  subject: z.string().optional(),
+  description: z.string().optional(),
+  observation: ObservationStamp.optional(),
 });
 
 // --- Liveness / 運用 ----------------------------------------------------
@@ -403,6 +453,7 @@ export const EventPayload = z.discriminatedUnion("kind", [
   SubagentStarted,
   SubagentCompleted,
   ContextCompacted,
+  WorkItemUpdated,
   Heartbeat,
   StalledDetected,
   ErrorPayload,

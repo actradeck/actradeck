@@ -15,7 +15,8 @@
   "scripts": {
     "build": "tsc -b",
     "type-check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@actradeck/event-model": "workspace:*"
