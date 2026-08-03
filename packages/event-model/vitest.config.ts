@@ -41,6 +41,15 @@ export default defineConfig({
         //   erosion tripwire)。continuation/terminal_evidence/failure 判定の何かが未到達になると trip
         //   (QA-2: 以前 floor 無しで func57%/branch66% の silent erosion を許していた回帰防止)。
         "src/state.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
+        // work-item.ts (ADR 0015 work-item 契約 + deriveWorkItemId/treeFingerprint・T1 正典) = 小ファイル
+        //   tripwire。純同期関数で決定的・INV-WORKITEM-ID が id 決定性/NO-RAW/fingerprint 縮退/enum
+        //   closedness を worst 100/100/100/100 まで網羅 → floor 95/90/90/95 は worst の下 (QA-3・decision
+        //   019fc622・per-file-coverage-floor-below-worst-not-best・erosion tripwire)。
+        "src/work-item.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
+        // hash.ts (ADR 0015 isomorphic 同期 SHA-256・自前実装) = 小ファイル tripwire。NIST 既知応答
+        //   ベクタ + UTF-8 マルチバイト/surrogate/lone-surrogate 分岐を worst 100/100/100/100 まで固定
+        //   → floor 95/90/90/95 (QA-3)。誤エンコード/未到達分岐が入ると trip する (id サイレント破壊防止)。
+        "src/hash.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
       },
     },
   },

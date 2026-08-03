@@ -337,6 +337,11 @@ function applyPlanSnapshot(prev: WorkItemsProjection, ev: NormalizedEvent): Work
   }
 
   // snapshot 調停: plan-scheme で以前見たが今回 snapshot に無い item → `removed` (inferred・§D3)。
+  // TDA-3 (removed 意味論・裁定): removal は **claim/verification フィールドを保持**する
+  //   (歴史的アーカイブ・撤回しない)。status だけを removed へ落とし、claimed_at / verification_state 等は
+  //   温存する。撤回するのは **reopen** (completed → 能動再作業) のみ (upsertItem の該当分岐)。
+  //   badge は status gate ゆえ非表示になるが、履歴 (「消える前は passed だった」) は失わない。
+  //   removed→再出現時は upsertItem が既存行を更新し claimed_at を継承する (新規作成しない)。
   let changed = false;
   const reconciled = proj.items.map((it) => {
     if (it.id_scheme === "plan" && it.status !== "removed" && !seen.has(it.work_item_id)) {
@@ -417,6 +422,15 @@ function applyCommandCompleted(
   const completedAt = ev.timestamp;
   const completedMs = toEpochMs(completedAt);
   const fp = prev.tree_fp;
+
+  // TDA-1 (fingerprint 基盤ガード・非対称): `passed` は tree fingerprint 相対の**正の主張**ゆえ
+  //   基盤 (tree_fp) が無い状態では成立させない (exit 欠落と同じ「基盤なしに verification を動かさない」
+  //   §D6 前例)。`failed` (exit≠0) は基盤が無くても**安全方向の警報**ゆえ許可する — この非対称は原理的
+  //   (verified は指紋に紐づく主張・failed は指紋に依存しない事実)。fp 無し passed check は observed だが
+  //   verification_state を一切動かさない (unverified 維持)。
+  if (newState === "passed" && fp === undefined) {
+    return { ...prev, pending_checks: pending };
+  }
 
   // session-global 束縛 (§D5): completed かつ claimed_at ≤ check 完了時刻の全 item を束縛する。
   //   per-item selective binding は観測から不可知ゆえ捏造しない (最新 check が item ごとに勝つ)。

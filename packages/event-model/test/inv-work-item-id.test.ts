@@ -107,6 +107,14 @@ describe("INV-WORKITEM-ID: treeFingerprint (§D5)", () => {
     expect(treeFingerprint("", "diffhashA")).toBe("diffhashA");
   });
 
+  it('head 有 + diff 欠落 → head を base 空文字で hash (64-hex・`?? ""` 分岐)', () => {
+    const fp = treeFingerprint("deadbeef", undefined);
+    expect(fp).toMatch(/^[0-9a-f]{64}$/);
+    // diff="" と同値 (base ?? "" 分岐の決定性)。head 無し diff 有りとは別 (縮退が起きない)。
+    expect(fp).toBe(treeFingerprint("deadbeef", ""));
+    expect(fp).not.toBe(treeFingerprint(undefined, "deadbeef"));
+  });
+
   it("両方欠落 → undefined", () => {
     expect(treeFingerprint(undefined, undefined)).toBeUndefined();
     expect(treeFingerprint(undefined, "")).toBeUndefined();

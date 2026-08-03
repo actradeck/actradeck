@@ -175,6 +175,113 @@ describe("INV-VERIFICATION-STALE (受入8): 検証遷移・永久 verified boole
   });
 });
 
+describe("TDA-1 (fingerprint 基盤ガード・非対称): passed は tree_fp 必須・failed は基盤なしでも許可", () => {
+  it("fp 未観測で合格 check (exit 0) → passed へ遷移させない (unverified 維持・verification 不動)", () => {
+    // diff.updated が一度も来ていない = tree_fp undefined。合格でも基盤なしに verified を主張しない。
+    const p = reduce([
+      ev({
+        event_type: "work.item.updated",
+        payload: { provider_task_id: "1", status: "completed" },
+      }),
+      ev({
+        event_type: "command.completed",
+        payload: { check_kind: "test", check_match: "program", exit_code: 0, request_id: "r1" },
+      }),
+    ]);
+    const item = onlyTaskItem(p);
+    expect(item.verification_state).toBe("unverified");
+    expect(item.verified_at).toBeUndefined();
+    expect(item.verification_event_id).toBeUndefined();
+    expect(item.check_kind).toBeUndefined();
+  });
+
+  it("fp 未観測でも失敗 check (exit≠0) → failed は許可 (安全方向の警報・基盤に依存しない事実)", () => {
+    const p = reduce([
+      ev({
+        event_type: "work.item.updated",
+        payload: { provider_task_id: "1", status: "completed" },
+      }),
+      ev({
+        event_type: "command.completed",
+        payload: { check_kind: "test", check_match: "program", exit_code: 1, request_id: "r1" },
+      }),
+    ]);
+    const item = onlyTaskItem(p);
+    expect(item.verification_state).toBe("failed");
+    expect(item.check_exit_code).toBe(1);
+    expect(deriveWorkItemBadge(item)).toBe("verification_failed");
+  });
+
+  it("fp を先に観測 → 合格 check → passed (基盤ありでは従来どおり)", () => {
+    const p = reduce([
+      ev({ event_type: "diff.updated", payload: { head_sha: "h1", diff_hash: "d1" } }),
+      ev({
+        event_type: "work.item.updated",
+        payload: { provider_task_id: "1", status: "completed" },
+      }),
+      ev({
+        event_type: "command.completed",
+        payload: { check_kind: "test", check_match: "program", exit_code: 0, request_id: "r1" },
+      }),
+    ]);
+    const item = onlyTaskItem(p);
+    expect(item.verification_state).toBe("passed");
+    expect(item.verified_tree_fp).toBeDefined();
+  });
+});
+
+describe("QA-1 (時刻条項の falsifying): claimed_at ≤ check 完了時刻でのみ束縛する", () => {
+  // この条項は **item が既に存在するが claimed_at が check 完了時刻より後** のときにのみ効く。
+  //   (item が check 後に生成される単純ケースは「item 不在」経路で unverified になり条項を突かない)。
+  //   ゆえに timestamp を **順不同**にする: claim を後刻 (t20) に持ちつつ stream 上は check より前に
+  //   処理させ、check 完了 timestamp を早刻 (t10) にする。at-least-once の再順序化で実在する状況で、
+  //   fold は stream 順ではなく **timestamp** で束縛可否を決める (toEpochMs 比較) ことを固定する。
+  //   TDA-1 ガード導入後ゆえ fp を先に観測させてから並べる。
+  it("claim 完了時刻 (t20) より前に完了した check (t10) は束縛しない (item 実在下で条項が効く)", () => {
+    const before = reduce([
+      ev({
+        event_type: "diff.updated",
+        timestamp: ts(1),
+        payload: { head_sha: "h1", diff_hash: "d1" },
+      }),
+      // claim: stream 上は先・wall-clock は後 (t20)。
+      ev({
+        event_type: "work.item.updated",
+        timestamp: ts(20),
+        payload: { provider_task_id: "1", status: "completed" },
+      }),
+      // check: item は既に存在するが完了 timestamp (t10) < claimed_at (t20) → 束縛しない。
+      ev({
+        event_type: "command.completed",
+        timestamp: ts(10),
+        payload: { check_kind: "test", exit_code: 0, request_id: "rEarly" },
+      }),
+    ]);
+    expect(onlyTaskItem(before).verification_state).toBe("unverified");
+  });
+
+  it("claim 完了時刻 (t10) の後に完了した check (t15) は束縛する (passed)", () => {
+    const after = reduce([
+      ev({
+        event_type: "diff.updated",
+        timestamp: ts(1),
+        payload: { head_sha: "h1", diff_hash: "d1" },
+      }),
+      ev({
+        event_type: "work.item.updated",
+        timestamp: ts(10),
+        payload: { provider_task_id: "1", status: "completed" },
+      }),
+      ev({
+        event_type: "command.completed",
+        timestamp: ts(15),
+        payload: { check_kind: "test", exit_code: 0, request_id: "rLate" },
+      }),
+    ]);
+    expect(onlyTaskItem(after).verification_state).toBe("passed");
+  });
+});
+
 describe("run_dirty (受入9): check の start〜completed 間に tree が動くと run_dirty=true", () => {
   it("interleave した diff.updated で run_dirty=true", () => {
     const p = reduce([
@@ -501,6 +608,94 @@ describe("deriveWorkItemBadge (§D8): 4 状態 + 非 completed は undefined", (
         deriveWorkItemBadge({ ...base, status, verification_state: "passed" }),
       ).toBeUndefined();
     }
+  });
+});
+
+describe("QA-4 (エッジ 3 ケース pin)", () => {
+  it("空 plan snapshot (items:[]) は既存 plan item を全て removed 化する", () => {
+    const p = reduce([
+      ev({
+        event_type: "turn.plan.updated",
+        payload: {
+          items: [
+            { step: "a", status: "in_progress" },
+            { step: "b", status: "pending" },
+          ],
+        },
+      }),
+      ev({ event_type: "turn.plan.updated", payload: { items: [] } }),
+    ]);
+    expect(p.items).toHaveLength(2);
+    expect(p.items.every((i) => i.status === "removed")).toBe(true);
+  });
+
+  it("legacy steps-only (items 無し) は work item を生成せず skip する", () => {
+    const p = reduce([
+      ev({ event_type: "turn.plan.updated", payload: { plan: "do things", steps: ["a", "b"] } }),
+    ]);
+    expect(p.items).toHaveLength(0);
+  });
+
+  it("同一 event の二重適用は 1 item・claimed_at 安定 (冪等)", () => {
+    const claim = ev({
+      event_type: "work.item.updated",
+      timestamp: ts(10),
+      payload: { provider_task_id: "1", status: "completed" },
+    });
+    // 同一イベント (同 event_id・同 timestamp) を 2 回畳む。
+    const p = reduceWorkItems("s1", [claim, claim]);
+    expect(p.items).toHaveLength(1);
+    expect(onlyTaskItem(p).claimed_at).toBe(ts(10));
+  });
+});
+
+describe("TDA-3 (removed 意味論 pin): removed は claim/verification を保持 (撤回しない)", () => {
+  it("completed+passed の plan item が snapshot から消えた → status=removed・verification_state=passed 保持", () => {
+    const p = reduce([
+      // fp を観測 (TDA-1 ガード) → plan item を completed 化 → 合格 check で passed。
+      ev({ event_type: "diff.updated", payload: { head_sha: "h1", diff_hash: "d1" } }),
+      ev({
+        event_type: "turn.plan.updated",
+        payload: { items: [{ step: "ship it", status: "completed" }] },
+      }),
+      ev({
+        event_type: "command.completed",
+        payload: { check_kind: "test", exit_code: 0, request_id: "r1" },
+      }),
+      // 次 snapshot から消える (絶えて listing されなくなった)。
+      ev({
+        event_type: "turn.plan.updated",
+        payload: { items: [{ step: "other", status: "pending" }] },
+      }),
+    ]);
+    const gone = itemById(p, deriveId("plan", "ship it"));
+    expect(gone?.status).toBe("removed");
+    // 撤回しない: 「消える前は passed だった」歴史を保持 (badge は status gate で非表示)。
+    expect(gone?.verification_state).toBe("passed");
+    expect(gone?.claimed_at).toBeDefined();
+    expect(gone?.verified_tree_fp).toBeDefined();
+    expect(deriveWorkItemBadge(gone!)).toBeUndefined(); // 全消費者は status gate 必須。
+  });
+
+  it("removed→再出現時は既存行を更新 claimed_at を継承 (新規作成しない)", () => {
+    const claimTs = ts(5);
+    const p = reduce([
+      ev({
+        event_type: "turn.plan.updated",
+        timestamp: claimTs,
+        payload: { items: [{ step: "x", status: "completed" }] },
+      }),
+      ev({ event_type: "turn.plan.updated", timestamp: ts(10), payload: { items: [] } }), // removed
+      ev({
+        event_type: "turn.plan.updated",
+        timestamp: ts(15),
+        payload: { items: [{ step: "x", status: "completed" }] },
+      }), // 再出現
+    ]);
+    expect(p.items.filter((i) => i.id_scheme === "plan")).toHaveLength(1);
+    const it = itemById(p, deriveId("plan", "x"))!;
+    expect(it.status).toBe("completed");
+    expect(it.claimed_at).toBe(claimTs); // 初 claim を継承。
   });
 });
 
