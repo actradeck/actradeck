@@ -133,6 +133,15 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
   non-actionable when the sidecar epoch changed.
 
 **Phase 5 — Adapter capability manifest + UI.**
+**Absorbed by ADR 0015 (§D7).** The closed vocabulary {`authoritative`, `observed`, `inferred`,
+`unsupported`, `unverified`} maps onto ADR 0015's three observation-evidence axes
+(availability × method × fidelity); the per-adapter `adapter.manifest.json` file is retired in
+favor of in-band declaration (a `session.started` capability snapshot plus per-observation
+stamps), which satisfies the same audit requirement — the session records its guarantee level
+even if the adapter wiring later changes. Acceptance test #9 below transposes to: an adapter
+whose fixtures contradict its declared `observation_evidence` fails CI. Phase 4 (approval
+restart reconciliation) remains in this ADR, unaffected. Original phase text kept for the
+record:
 - `adapter.manifest.json` per adapter declaring capabilities over a closed vocabulary
   {`authoritative`, `observed`, `inferred`, `unsupported`, `unverified`} (session_start,
   session_end, resume, restart_recovery, approval_observation, approval_relay,
