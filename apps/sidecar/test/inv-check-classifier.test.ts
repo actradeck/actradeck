@@ -69,6 +69,74 @@ describe("受入 11: mutating 変種は非認定 (§D6・fingerprint を無効�
   it("npm run lint:fix → undefined (script 名の fix)", () => {
     expect(classifyCheck("npm run lint:fix")).toBeUndefined();
   });
+  it("prettier -w → undefined (formatter 文脈の -w = --write)", () => {
+    expect(classifyCheck("prettier -w .")).toBeUndefined();
+    // --check と併記でも -w があれば書き換えるので非認定 (矛盾指定の安全側)。
+    expect(classifyCheck("prettier --check -w .")).toBeUndefined();
+  });
+});
+
+describe("QA-B1-3: `-w` は workspace フラグ文脈では mutating でない", () => {
+  it("pnpm -w test → (test, script)", () => {
+    expect(classifyCheck("pnpm -w test")).toEqual({ check_kind: "test", check_match: "script" });
+  });
+  it("npm test -w pkg → (test, script)", () => {
+    expect(classifyCheck("npm test -w pkg")).toEqual({ check_kind: "test", check_match: "script" });
+  });
+  it("pnpm -w run lint → (lint, script)", () => {
+    expect(classifyCheck("pnpm -w run lint")).toEqual({
+      check_kind: "lint",
+      check_match: "script",
+    });
+  });
+});
+
+describe("QA-B1-2: exec-runner (npx/pnpx/pnpm exec) を貫通して内側 program を分類する", () => {
+  it("npx vitest run → (test, program)", () => {
+    expect(classifyCheck("npx vitest run")).toEqual({ check_kind: "test", check_match: "program" });
+  });
+  it("npx eslint . → (lint, program)", () => {
+    expect(classifyCheck("npx eslint .")).toEqual({ check_kind: "lint", check_match: "program" });
+  });
+  it("npx -y tsc --noEmit → (typecheck, program) [runner フラグ -y を剥がす]", () => {
+    expect(classifyCheck("npx -y tsc --noEmit")).toEqual({
+      check_kind: "typecheck",
+      check_match: "program",
+    });
+  });
+  it("npx -p typescript tsc --noEmit → (typecheck, program) [値付き -p pkg を剥がす]", () => {
+    expect(classifyCheck("npx -p typescript tsc --noEmit")).toEqual({
+      check_kind: "typecheck",
+      check_match: "program",
+    });
+  });
+  it("pnpm exec eslint . → (lint, program)", () => {
+    expect(classifyCheck("pnpm exec eslint .")).toEqual({
+      check_kind: "lint",
+      check_match: "program",
+    });
+  });
+  it("pnpm dlx prettier --check . → (format, program)", () => {
+    expect(classifyCheck("pnpm dlx prettier --check .")).toEqual({
+      check_kind: "format",
+      check_match: "program",
+    });
+  });
+  it("yarn exec vitest → (test, program)", () => {
+    expect(classifyCheck("yarn exec vitest")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+  });
+  it("pnpx eslint . → (lint, program)", () => {
+    expect(classifyCheck("pnpx eslint .")).toEqual({ check_kind: "lint", check_match: "program" });
+  });
+  it("npx eslint --fix → undefined (内側 mutating を貫通後に検出)", () => {
+    expect(classifyCheck("npx eslint --fix")).toBeUndefined();
+  });
+  it("npx tsx script.ts → undefined (内側が非チェック program)", () => {
+    expect(classifyCheck("npx tsx script.ts")).toBeUndefined();
+  });
 });
 
 describe("受入 11: subcommand program", () => {

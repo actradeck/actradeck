@@ -7,7 +7,7 @@
  *  - tree fingerprint = treeFingerprint(head_sha, diff_hash) が head_sha を反映する。
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -102,6 +102,24 @@ describe("§D5 未追跡ファイル内容変更 (受入 10): stat 行で diff_h
     // porcelain の changed_files は名前ベースゆえ 1 のまま (内容変化は名前列挙に出ない)。
     expect(s1.changedFiles).toBe(1);
     expect(s2.changedFiles).toBe(1);
+  });
+
+  it("QA-B1-4: 同一バイト長の内容編集 (mtime のみ変化) が diff_hash を動かす (mtime 成分の回帰固定)", async () => {
+    const dir = initRepo();
+    const f = join(dir, "untracked.txt");
+    writeFileSync(f, "aaaa\n"); // 5 bytes。
+    // mtime を確定値へ固定して baseline を取る (flake 防止のため明示 utimes)。
+    const t0 = new Date("2026-01-01T00:00:00Z");
+    utimesSync(f, t0, t0);
+    const s1 = await snapshotDiff(dir);
+    // 同一バイト長の別内容へ書換え、mtime を別値へ進める (size 不変・porcelain 名も不変)。
+    writeFileSync(f, "bbbb\n"); // 5 bytes = 5 bytes。
+    const t1 = new Date("2026-01-01T00:00:05Z");
+    utimesSync(f, t1, t1);
+    const s2 = await snapshotDiff(dir);
+    // digest は path/size/mtime のみゆえ、size 不変では **mtime 成分** だけが hash を動かす。
+    //   mtime 成分を除去する mutation はこの assert を赤化させる (QA-B1-4)。
+    expect(s2.hash).not.toBe(s1.hash);
   });
 
   it("未追跡ファイル追加/削除も diff_hash を動かす", async () => {

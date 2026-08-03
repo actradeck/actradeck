@@ -68,7 +68,26 @@ export interface RolloutCallInfo {
   readonly name: string | undefined;
   readonly checkKind?: CheckKind | undefined;
   readonly checkMatch?: CheckMatch | undefined;
+  /** SEC-B1-1 item3: この call が実 shell exec tool 由来か (exit 抽出を shell 経路へ gate するため)。 */
+  readonly isShellExec?: boolean | undefined;
 }
+
+/**
+ * 実 shell exec tool 名 (SEC-B1-1 item3)。check 分類 + exit 抽出はこの集合に gate する。
+ *
+ * 現状 `normalizeResponseItem` は update_plan / mcp__ 以外の **全** function_call を command.started として
+ * 分類していた。多数の非 shell tool (note_search / task_bulk_create / spawn_agent 等) が args.query 等に
+ * check 語彙を持つと誤って check 認定され、偽の検証遷移を誘発しうる (二次面)。実 corpus で観測される shell
+ * 実行 tool は `exec_command` (48338) / `shell_command` (1906)。SEC 指定の `shell` / `local_shell`
+ * (codex 系の別世代/OpenAI local shell) も将来対応として含める。これ以外の function_call は check 非分類・
+ * exit 非抽出 (安全側)。
+ */
+const SHELL_EXEC_TOOLS: ReadonlySet<string> = new Set([
+  "exec_command",
+  "shell_command",
+  "shell",
+  "local_shell",
+]);
 
 /** call_id ごとの記録上限 (DoS 境界)。超過は最古 FIFO 破棄 = 相関喪失 → bare/no-flip の安全側縮退。 */
 const MAX_CORRELATION_ENTRIES = 4096;
@@ -106,35 +125,43 @@ export class RolloutCallCorrelation {
   }
 }
 
-const EXIT_TEXT_RE = /[Pp]rocess exited with code (-?\d+)/;
+// SEC-B1-1: 行頭〜行末アンカー付き multiline global。実 2026 harness は header 最上部に `Command:` で
+//   コマンド文字列を verbatim echo するため、非アンカー first-substring だと command 内の偽 exit フレーズを
+//   先に拾い spoof される (実再現)。アンカー + last-match で「実 exit 行 (header 最下部・Output: 直前)」を採る。
+const EXIT_TEXT_RE = /^[Pp]rocess exited with code (-?\d+)$/gm;
 
 /**
- * function_call_output.output から exit code を抽出する (§D6/B1・real-data 照合済・decision 019fc7d8)。
+ * function_call_output.output から exit code を抽出する (§D6/B1・real-data 照合済・decision 019fc7d8/019fc807)。
  *
  * 2 形態 (両方 real):
  *  (1) **構造化** — output が JSON object へ parse でき `metadata.exit_code` が整数 (legacy 2025 rollout +
- *      structured output を出す外部 adapter)。非 spoofable。
+ *      structured output を出す外部 adapter)。非 spoofable ゆえ最優先。
  *  (2) **harness テキスト** — current codex (2026) は output を平文で書き、harness header
- *      (`Chunk ID:.. / Wall time:.. / Process exited with code N / .. / Output:\n<stdout>`) の
- *      **最初の "Output:" マーカーより前**に exit を書く。header 限定で照合するのが **spoof 耐性の要**:
- *      コマンド stdout は "Output:" の**後**に出るため header を偽装できない (real-data 5075/5075 で
- *      exit は必ず header 側・body のみ出現ゼロ)。
+ *      (`Command: <cmd> / Chunk ID:.. / Wall time:.. / Process exited with code N / .. / Output:\n<stdout>`)
+ *      の **最初の "Output:" マーカーより前**に exit を書く。header 限定 + **行頭〜行末アンカー付きの最後の
+ *      マッチ行**で照合するのが **spoof 耐性の要**:
+ *        - コマンド stdout は "Output:" の**後**に出る (body 偽装不能・real-data 5075/5075 で exit は header 側)。
+ *        - header 内の `Command:` echo (SEC-B1-1) は被観測エージェントが制御できるが header **最上部**に載る。
+ *          実 exit 行は header 最下部 (Output: 直前) ゆえ **last-match** が常に実 exit を採る。実 corpus で
+ *          header 内 exit 行が 2 本以上のケースは 0 件 (47869/47869 で単一)。単一行/複数行注入の双方を defeat。
  *  (3) どちらでもない → undefined (= 結果不明・fold は verification_state を動かさない・受入 12)。
  *
- * 戻り値は整数のみ (NO-RAW: 生テキストを保持しない)。ReDoS 安全 (固定パターン + header slice で有界)。
+ * 戻り値は整数のみ (NO-RAW: 生テキストを保持しない)。ReDoS 安全 (アンカー付き固定パターン + header slice で有界)。
  */
 export function extractRolloutExitCode(output: string | undefined): number | undefined {
   if (typeof output !== "string" || output.length === 0) return undefined;
-  // (1) 構造化 metadata.exit_code (非 spoofable)。
+  // (1) 構造化 metadata.exit_code (非 spoofable・最優先)。
   const structured = asNumber(asParams(parseJsonObject(output).metadata).exit_code);
   if (structured !== undefined && Number.isInteger(structured)) return structured;
-  // (2) harness header の "Process exited with code N" ("Output:" マーカー前のみ)。
+  // (2) harness header の "Process exited with code N" ("Output:" マーカー前・行頭行末アンカーの最後の行)。
   const nlIdx = output.indexOf("\nOutput:");
   const markerIdx = nlIdx >= 0 ? nlIdx : output.startsWith("Output:") ? 0 : -1;
   if (markerIdx < 0) return undefined; // マーカー無し → header 特定不能 → 抽出しない (安全側・非捏造)。
-  const m = EXIT_TEXT_RE.exec(output.slice(0, markerIdx));
-  if (m === null) return undefined;
-  const n = Number.parseInt(m[1]!, 10);
+  const header = output.slice(0, markerIdx);
+  let last: RegExpMatchArray | undefined;
+  for (const m of header.matchAll(EXIT_TEXT_RE)) last = m; // 最後のアンカー一致 = 実 exit 行 (spoof 耐性)。
+  if (last === undefined) return undefined;
+  const n = Number.parseInt(last[1]!, 10);
   return Number.isInteger(n) ? n : undefined;
 }
 
@@ -476,9 +503,13 @@ function normalizeResponseItem(
       // ADR 0015 §D6 (B1): check 分類 (raw command・closed enum のみ)。started 側に載せ run_dirty 窓を開く。
       //   command 文字列は function_call_output 側に無いため、completed へ check_kind を引き継ぐには
       //   call_id 相関で記録する (実データ照合済・decision 019fc7d8)。
-      const check = classifyCheck(command);
+      // SEC-B1-1 item3: check 分類は **実 shell exec tool** に gate する。非 shell tool (MCP 様) の
+      //   args.query 等に check 語彙が入っても検証証拠として扱わない (誤分類→偽検証を構造的に排除)。
+      const isShellExec = name !== undefined && SHELL_EXEC_TOOLS.has(name);
+      const check = isShellExec ? classifyCheck(command) : undefined;
       ctx.callCorrelation?.record(callId, {
         name,
+        isShellExec,
         ...(check !== undefined
           ? { checkKind: check.check_kind, checkMatch: check.check_match }
           : {}),
@@ -519,10 +550,16 @@ function normalizeResponseItem(
           }),
         );
       }
-      // §D6 (B1): exit code を harness 出力から抽出 (非 spoofable・§extractRolloutExitCode)。
+      // §D6 (B1): exit code を harness 出力から抽出 (spoof 耐性・§extractRolloutExitCode)。
       //   check_kind/check_match は対応 function_call (started) で分類した結果を call_id 相関で引き継ぐ。
       //   欠落時 (exit 抽出不能 or 相関喪失) は当該 field を載せない → fold は verification_state 不動 (受入 12)。
-      const exitCode = extractRolloutExitCode(output);
+      // SEC-B1-1 item3: 相関がある **かつ** 非 shell exec と判っている call の output からは exit を抽出しない
+      //   (非 shell tool の output に紛れる exit フレーズを検証信号にしない)。相関喪失 (info===undefined) は
+      //   従来どおり抽出する (spoof 耐性は last-anchor 抽出側が担保・観測性優先の安全側)。
+      const exitCode =
+        info === undefined || info.isShellExec === true
+          ? extractRolloutExitCode(output)
+          : undefined;
       events.push(
         makeEvent(ctx, line, p, "command.completed", "running.model_wait", {
           eventIndex: events.length,

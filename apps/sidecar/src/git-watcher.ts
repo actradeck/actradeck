@@ -134,7 +134,14 @@ export async function snapshotDiff(repoRoot: string): Promise<DiffSnapshot> {
   const combined = `${diff}\n${cached}`;
   // hash input gains untracked stat (D5): captures untracked-file content edits invisible to porcelain names.
   //   diff_hash is compared only to the in-memory previous value; at-rest history is opaque, so this is safe.
-  const hash = createHash("sha256").update(`${status} ${combined} ${untracked}`).digest("hex");
+  // SEC-B1-2 / QA-B1-5 / TDA-B1-3: separate the three fields with a NUL byte (the 6-char escape written
+  //   below, never a raw NUL), not a space, for unambiguous field boundaries (domain separation). Space
+  //   joining lets content straddling a boundary collide (a status line running into where the diff begins),
+  //   masking a real change and defeating staleness detection. NUL never appears in git's text output, so it
+  //   is an unforgeable separator.
+  const hash = createHash("sha256")
+    .update(`${status}\u0000${combined}\u0000${untracked}`)
+    .digest("hex");
 
   const changedFiles = status.split("\n").filter((l) => l.trim().length > 0).length;
   let addedLines = 0;

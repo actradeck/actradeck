@@ -43,13 +43,21 @@ export interface CheckClassification {
 /**
  * ツリーを書き換える (= 検証証拠でない) フラグ。§D6 が明示する `--fix` / `--write` を core とし、
  * よくある同義形を保守的に追加する。いずれかがコマンドに現れたらそのセグメントはチェック非認定。
+ *
+ * QA-B1-3: `-w` は **含めない**。`prettier -w` (=--write) では mutating だが、`pnpm -w test` /
+ *   `npm test -w pkg` では workspace 選択フラグであり mutating でない。program 横断で `-w` を mutating
+ *   扱いすると workspace runner を軒並みチェック非認定にする実バグ (実 replay で判明)。`-w` の mutating
+ *   判定は formatter 文脈 (FORMAT_REQUIRE_FLAG_PROGRAMS) に限定する (下記 classifyStrippedTokens 参照)。
+ *   `--fix` / `--write` は語形衝突が無いため無条件で維持する。
  */
 const MUTATING_FLAGS: ReadonlySet<string> = new Set([
   "--fix",
   "--write",
   "--fix-dry-run", // eslint: dry だがゲート意味論を持たせない (保守的に除外)
-  "-w", // prettier -w = --write
 ]);
+
+/** formatter 文脈でのみ mutating とみなす短縮フラグ (`prettier -w` = --write)。 */
+const FORMATTER_WRITE_FLAG = "-w";
 
 /** program basename → check_kind (直接ツール・mutating フラグが無い限りチェック認定)。match=program。 */
 const PROGRAM_KIND: ReadonlyMap<string, CheckKind> = new Map([
@@ -138,7 +146,12 @@ const SUBCOMMAND_KIND: ReadonlyMap<string, ReadonlyMap<string, CheckKind>> = new
 
 /**
  * script runner (pnpm/npm/yarn/make/…)。script/target 名をチェック語彙へ写す (match=script・弱い証拠)。
- * npx/pnpx 等の exec-runner は含めない (それは program 直起動であり canonical chain が扱う対象)。
+ *
+ * QA-B1-2 (comment 整合): npx/pnpx 等の exec-runner は canonical chain (stripRunnerWrappers) が **剥がさない**
+ *   (RUNNER_WRAPPERS 非収録)。以前の「canonical chain が扱う対象」というコメントは誤記で、実際は分類器が
+ *   `npx vitest run` を undefined にしていた。exec-runner (`npx` / `pnpx` / `bunx` / `pnpm exec|dlx` 等) は
+ *   下記 `unwrapExecRunner` で **check-classifier 局所に** 貫通させ、内側 program を program-match で再分類する
+ *   (RUNNER_WRAPPERS を触らない = 危険コマンド分類器の挙動を変えない)。
  */
 const SCRIPT_RUNNERS: ReadonlySet<string> = new Set([
   "npm",
@@ -149,6 +162,21 @@ const SCRIPT_RUNNERS: ReadonlySet<string> = new Set([
   "just",
   "task",
 ]);
+
+/**
+ * exec-runner (QA-B1-2): 後続を **program 直起動**として実行するラッパ。canonical chain は剥がさないため
+ * check-classifier 局所で貫通し、内側 program を再分類する (`npx vitest run` → vitest → test/program)。
+ *  - 前置形: `npx <prog>` / `pnpx <prog>` / `bunx <prog>`。
+ *  - subcommand 形: `pnpm exec <prog>` / `pnpm dlx <prog>` / `yarn exec|dlx <prog>` / `npm exec <prog>` /
+ *    `bun x <prog>`。
+ */
+const EXEC_RUNNERS: ReadonlySet<string> = new Set(["npx", "pnpx", "bunx"]);
+const EXEC_SUBCOMMAND_RUNNERS: ReadonlySet<string> = new Set(["pnpm", "yarn", "npm", "bun"]);
+const EXEC_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "dlx", "x"]);
+/** exec-runner 貫通の最大反復 (`npx npx eslint` 様の多重も有界に止める)。 */
+const MAX_EXEC_UNWRAP = 3;
+/** exec-runner 自身の値付きフラグ (次トークンが値・スキップ対象)。`npx -p pkg eslint` 等。 */
+const EXEC_VALUE_FLAGS: ReadonlySet<string> = new Set(["-p", "--package", "-c", "--call"]);
 
 /** prettier / black 等「明示チェックフラグがある時だけ format チェック」の program。 */
 const FORMAT_CHECK_FLAGS: ReadonlySet<string> = new Set(["--check", "-c", "--list-different"]);
@@ -195,17 +223,69 @@ function firstSubcommand(args: readonly string[]): string | undefined {
   return undefined;
 }
 
-/** 1 セグメントを分類する。undefined = このセグメントはチェックでない。 */
-function classifySegment(segment: string): CheckClassification | undefined {
-  const rawTokens = tokenize(segment);
-  if (rawTokens.length === 0) return undefined;
-  const deassigned = rawTokens.slice(skipLeadingAssignments(rawTokens));
-  const { tokens } = stripRunnerWrappers(deassigned);
+/**
+ * exec-runner (QA-B1-2) を検出し、内側 program 起動のトークン列を返す。exec-runner でなければ undefined。
+ * `npx <flags> prog args` / `pnpm exec <flags> prog args` 等の runner + そのフラグを剥がす。
+ */
+function unwrapExecRunner(name: string, args: readonly string[]): string[] | undefined {
+  if (EXEC_RUNNERS.has(name)) {
+    return stripExecRunnerFlags(args);
+  }
+  if (EXEC_SUBCOMMAND_RUNNERS.has(name)) {
+    // 先頭フラグ (`pnpm --silent exec ...`) をスキップして subcommand を見る。
+    let i = 0;
+    while (i < args.length && args[i]!.startsWith("-")) i++;
+    const sub = args[i];
+    if (sub !== undefined && EXEC_SUBCOMMANDS.has(sub)) {
+      return stripExecRunnerFlags(args.slice(i + 1));
+    }
+  }
+  return undefined;
+}
+
+/** exec-runner 自身のオプション (`-y` / `--yes` / `-p pkg` 等) を剥がし、内側 program 以降を返す。 */
+function stripExecRunnerFlags(args: readonly string[]): string[] {
+  let i = 0;
+  while (i < args.length) {
+    const t = args[i]!;
+    if (t === "--") {
+      i++;
+      break;
+    }
+    if (!t.startsWith("-")) break; // 内側 program。
+    if (EXEC_VALUE_FLAGS.has(t)) {
+      i += 2; // 値付きフラグ (`-p pkg`)。
+      continue;
+    }
+    i++; // 単独フラグ (`-y` / `--yes` / `--package=pkg`)。
+  }
+  return args.slice(i);
+}
+
+/**
+ * 正準チェーンで前処理済みのトークン列を分類する。undefined = チェックでない。
+ * exec-runner (`npx` 等) は内側 program を再帰的に再分類する (QA-B1-2・有界 depth)。
+ */
+function classifyStrippedTokens(
+  tokens: readonly string[],
+  depth: number,
+): CheckClassification | undefined {
   if (tokens.length === 0) return undefined;
-  const name = normalizeCommandName(commandName(tokens));
+  const name = normalizeCommandName(commandName(tokens as string[]));
   const args = tokens.slice(1);
 
-  // mutating 変種 (--fix / --write / -w) は無条件で非認定 (§D6・fingerprint を無効化する)。
+  // 0. exec-runner 貫通 (npx/pnpx/bunx/pnpm exec/…)。内側 program を program-match で再分類する。
+  if (depth < MAX_EXEC_UNWRAP) {
+    const inner = unwrapExecRunner(name, args);
+    if (inner !== undefined) {
+      if (inner.length === 0) return undefined;
+      // 内側にラッパが積まれている稀な形も正準チェーンで剥がしてから再分類する。
+      const { tokens: stripped } = stripRunnerWrappers([...inner]);
+      return classifyStrippedTokens(stripped, depth + 1);
+    }
+  }
+
+  // mutating 変種 (--fix / --write) は無条件で非認定 (§D6・fingerprint を無効化する)。
   if (hasMutatingFlag(args)) return undefined;
 
   // 1. program 直接 (vitest / eslint / tsc / …)。
@@ -225,6 +305,8 @@ function classifySegment(segment: string): CheckClassification | undefined {
 
   // 3. format-require-flag program (prettier --check / black --check)。
   if (FORMAT_REQUIRE_FLAG_PROGRAMS.has(name)) {
+    // QA-B1-3: `-w` (=--write) は formatter 文脈でのみ mutating。ここで非認定にする。
+    if (args.includes(FORMATTER_WRITE_FLAG)) return undefined;
     if (args.some((t) => FORMAT_CHECK_FLAGS.has(t))) {
       return { check_kind: "format", check_match: "program" };
     }
@@ -232,6 +314,7 @@ function classifySegment(segment: string): CheckClassification | undefined {
   }
 
   // 4. script runner (pnpm test / npm run lint / make typecheck)。match=script (弱い証拠)。
+  //    QA-B1-3: `-w` は workspace フラグゆえここでは mutating 扱いしない (`pnpm -w test` を貫通させる)。
   if (SCRIPT_RUNNERS.has(name)) {
     const target = scriptTargetName(args);
     if (target === undefined) return undefined;
@@ -241,6 +324,15 @@ function classifySegment(segment: string): CheckClassification | undefined {
   }
 
   return undefined;
+}
+
+/** 1 セグメントを分類する。undefined = このセグメントはチェックでない。 */
+function classifySegment(segment: string): CheckClassification | undefined {
+  const rawTokens = tokenize(segment);
+  if (rawTokens.length === 0) return undefined;
+  const deassigned = rawTokens.slice(skipLeadingAssignments(rawTokens));
+  const { tokens } = stripRunnerWrappers(deassigned);
+  return classifyStrippedTokens(tokens, 0);
 }
 
 /**

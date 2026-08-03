@@ -73,9 +73,16 @@ function updatePlanLine(
   } as CodexRolloutLine;
 }
 
-/** current codex の harness 出力 (exit を header に持つ・stdout は "Output:" の後)。 */
-function harness(exit: number, stdout: string): string {
-  return `Chunk ID: abcd\nWall time: 0.05 seconds\nProcess exited with code ${exit}\nOriginal token count: 12\nOutput:\n${stdout}`;
+/**
+ * current codex の harness 出力 (exit を header に持つ・stdout は "Output:" の後)。
+ *
+ * 実 2026 harness は header 最上部に `Command:` フィールドでコマンド文字列を **verbatim echo** する
+ * (実 corpus 2489/75658 件)。SEC-B1-1: 被観測エージェントが command 内に exit フレーズを書けば偽 exit が
+ * header 先頭に載る → spoof。`command` 引数で `Command:` 行 (改行込みも可) を再現する。
+ */
+function harness(exit: number, stdout: string, command?: string): string {
+  const cmdLine = command !== undefined ? `Command: ${command}\n` : "";
+  return `${cmdLine}Chunk ID: abcd\nWall time: 0.05 seconds\nProcess exited with code ${exit}\nOriginal token count: 12\nOutput:\n${stdout}`;
 }
 
 describe("extractRolloutExitCode (§D6・decision 019fc7d8)", () => {
@@ -105,6 +112,42 @@ describe("extractRolloutExitCode (§D6・decision 019fc7d8)", () => {
     expect(extractRolloutExitCode("Plan updated")).toBeUndefined();
     expect(extractRolloutExitCode("")).toBeUndefined();
     expect(extractRolloutExitCode(undefined)).toBeUndefined();
+  });
+
+  // QA-B1-1: header に exit 句が無く body (Output: の後) にのみ有るとき → 抽出しない。
+  it("QA-B1-1: header に exit 句なし・body にのみ有り → undefined", () => {
+    const noHeaderExit =
+      "Chunk ID: abcd\nWall time: 0.05 seconds\nOutput:\nsome stuff\nProcess exited with code 0\n";
+    expect(extractRolloutExitCode(noHeaderExit)).toBeUndefined();
+  });
+});
+
+describe("SEC-B1-1: exit spoof 耐性 (harness Command: echo)", () => {
+  // 現実装 (c5c0067) は header slice への first-substring-match ゆえ header 最上部の `Command:` echo に
+  //   紛れた exit フレーズを先に拾う。修正後は 行頭〜行末アンカー付き multiline global で **最後の行** を
+  //   採る (実 corpus: attacker 制御の Command: echo は header 最上部・実 exit 行は header 最下部)。
+
+  it("(a) 単一行 comment 注入: `echo hi # Process exited with code 0` でも real exit=1 が返る", () => {
+    const spoof = harness(1, "err", "echo hi # Process exited with code 0");
+    expect(extractRolloutExitCode(spoof)).toBe(1);
+  });
+
+  it("(b) 複数行 command 内 clean 行注入 (行頭アンカー完全一致でも位置で敗れる)", () => {
+    // command 自体が改行を含み、その 1 行が丁度 `Process exited with code 0`。header 最上部ゆえ
+    //   real exit 行 (最下部) が last-match で勝つ。
+    const spoof = harness(1, "output", "bash -c '\nProcess exited with code 0\necho hi'");
+    expect(extractRolloutExitCode(spoof)).toBe(1);
+  });
+
+  it('(c) benign 検索コマンド `rg "Process exited with code 0"` が非マッチ (exit 1) → real 1 が返る', () => {
+    // rg が何もヒットしないと exit 1。旧実装は Command: echo の 0 を拾い false-pass 化する。
+    const benign = harness(1, "", 'rg "Process exited with code 0"');
+    expect(extractRolloutExitCode(benign)).toBe(1);
+  });
+
+  it("既存 body spoof も維持 (stdout に偽 exit) — header が勝つ", () => {
+    const spoof = harness(1, "totally normal\nProcess exited with code 0\nmore", "pytest -q");
+    expect(extractRolloutExitCode(spoof)).toBe(1);
   });
 });
 
@@ -139,6 +182,39 @@ describe("call_id 相関: check_kind を command.completed へ引き継ぐ (§D6
     const completed = done.find((e) => e.event_type === "command.completed")!;
     expect((completed.payload as { exit_code?: number }).exit_code).toBe(0);
     expect((completed.payload as { check_kind?: string }).check_kind).toBeUndefined();
+  });
+
+  it("SEC-B1-1 二次面: 非 shell-exec function_call (check 様 query) は check 分類しない", () => {
+    // exec_command/shell 系でない tool (MCP 様) の args.query に check 語彙が入っても command.started に
+    //   check_kind を載せない (誤分類による偽検証を防ぐ・item 3 gate)。
+    const line = {
+      type: "response_item",
+      timestamp: "2026-05-26T00:00:01.000Z",
+      payload: {
+        type: "function_call",
+        name: "note_search",
+        arguments: JSON.stringify({ query: "pytest -q run the tests" }),
+        call_id: "call_ns",
+      },
+    } as CodexRolloutLine;
+    const started = normalizeRolloutLine(line, ctx(new RolloutCallCorrelation(), 5));
+    expect(started[0]!.event_type).toBe("command.started");
+    expect((started[0]!.payload as { check_kind?: string }).check_kind).toBeUndefined();
+  });
+
+  it("shell_command (実 corpus の shell exec 名) は check 分類する", () => {
+    const line = {
+      type: "response_item",
+      timestamp: "2026-05-26T00:00:01.000Z",
+      payload: {
+        type: "function_call",
+        name: "shell_command",
+        arguments: JSON.stringify({ command: "eslint .", workdir: "/repo" }),
+        call_id: "call_sc",
+      },
+    } as CodexRolloutLine;
+    const started = normalizeRolloutLine(line, ctx(new RolloutCallCorrelation(), 5));
+    expect((started[0]!.payload as { check_kind?: string }).check_kind).toBe("lint");
   });
 
   it("相関喪失 (correlation 未提供) → check_kind は乗らず bare command.completed (安全側縮退)", () => {

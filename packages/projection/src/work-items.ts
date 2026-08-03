@@ -56,7 +56,7 @@ export const MAX_WORK_ITEMS = 200;
  * 側で `|| isTerminalStateValue(ev.state)` と OR 合成する。
  *
  * ⚠️ 本集合と switch の乖離 (反応 case を足して本配列を忘れる) は INV-WORKITEM-REACTIVE-SET-COMPLETE
- *    (test/inv-work-items-verification.test.ts) が全 EventType 走査で回帰固定する。
+ *    (packages/projection/src/inv-work-items-reactive-set.test.ts) が全 EventType 走査で回帰固定する。
  */
 export const WORK_ITEM_REACTIVE_EVENT_TYPES: readonly string[] = [
   "work.item.updated",

@@ -57,7 +57,16 @@ function seededProjection(): WorkItemsProjection {
   ]);
 }
 
-/** 全ハンドラを起動しうる rich payload の合成イベント (event_type だけ差し替える)。 */
+/**
+ * 全ハンドラを起動しうる rich payload の合成イベント (event_type だけ差し替える)。
+ *
+ * ⚠️ TDA-B1-5 規律: この payload は **全反応ハンドラ (applyWorkItemsEvent の各 case) が読む field の
+ *   superset** を維持しなければならない。ある case が新 field で反応するようになったのに、ここへ足し忘れると
+ *   その case が本テスト内で「反応しない」ように見え、`gate ⊇ reactive-set` の走査から漏れて silent
+ *   under-count drift を通してしまう。fold に新反応 field を足したら **必ず** ここへも足すこと (下の各 field
+ *   は provider_task_id=work.item.updated / items=turn.plan.updated / check_kind+exit_code+request_id=
+ *   command.started/completed / diff_hash+head_sha=diff.updated に対応)。
+ */
 function richEvent(eventType: string): NormalizedEvent {
   return ev({
     event_type: eventType,

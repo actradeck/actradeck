@@ -72,8 +72,12 @@ verified / verification failed / changed after verification.
   for a _sticky orthogonal axis_; `deriveActionSubject` reads only redacted-payload allowlist
   fields. `pending_approvals` (bounded jsonb, cap 64) is the bounded-fold precedent.
 - Managed Codex `command.completed` carries `exit_code` (`item.exitCode`); the CC hook path
-  carries `exit_code` when numeric; the rollout `function_call_output` path currently extracts
-  **no** exit code (§D6 honesty fallback).
+  carries `exit_code` when numeric; the rollout `function_call_output` path extracts the exit
+  code in **two forms** (§D6): (1) structured `metadata.exit_code` (legacy 2025 shape,
+  preferred, non-spoofable) and (2) the current 2026 harness header text `Process exited with
+  code N` (matched only in the header before the `Output:` marker, via a line-anchored
+  last-match so a `Command:` echo cannot spoof it); when neither is present the outcome is
+  unknown and `verification_state` does not move (§D6 honesty fallback).
 - Rollout event ids are deterministic (`stableRolloutEventId`: session + file basename + offset
   - eventIndex) → typed plan emission stays idempotent across re-tails.
 - Migrations live in `db/migrations/` (11 so far, all additive after init; TEXT columns, no
@@ -291,10 +295,28 @@ passed|failed` (newer bound check re-runs); `* → unverified` only via claim re
   - No `other_check` backstop: this is not a security gate; a false negative just means "no
     evidence", which is the honest default.
 - Exit codes: CC hook path — present (verified); managed Codex — present (`item.exitCode`);
-  rollout — P0-B extracts `exit_code` from `function_call_output` metadata where present
-  (verified against real rollouts during implementation); when absent, the check is observed
-  but its outcome is unknown → it does **not** flip `verification_state` (no fabricated green
-  or red).
+  rollout — `extractRolloutExitCode` reads `function_call_output` in two real forms, in
+  priority order (verified against real rollouts; decision 019fc7d8 / 019fc807):
+  1. **structured** `metadata.exit_code` — legacy 2025 rollout shape (and external adapters
+     emitting structured output); non-spoofable, so it wins when present.
+  2. **harness header text** `Process exited with code N` — the current 2026 codex writes the
+     output as plain text with a harness header (`Command: <cmd>` / `Chunk ID:` / `Wall time:` /
+     `Process exited with code N` / … / `Output:\n<stdout>`). Extraction is confined to the
+     slice **before the first `Output:` marker** (command stdout comes after, so the body cannot
+     forge it) and, within that header, uses a **line-anchored (`^…$`, multiline) last-match**.
+     This is the SEC-B1-1 spoof defense: the harness verbatim-echoes the command in a `Command:`
+     field at the **top** of the header (real corpus: 2489/75658 outputs), so an agent that
+     writes `Process exited with code 0` inside its command lands **above** the real exit line;
+     last-match therefore always takes the genuine exit (real corpus: 47869/47869 headers carry
+     the exit line, 0 headers ever have two exit lines). A non-anchored first-substring match
+     (the prior implementation) was spoofable and is replaced.
+
+  Data proportions in the local corpus: structured `metadata.exit_code` = 3,506; header-text
+  exit = 47,869; header side carries the exit in 5,075/5,075 sampled cases. Extraction and check
+  classification are additionally gated to real shell-exec tool names (`exec_command` /
+  `shell_command` / `shell` / `local_shell`) so a non-shell tool's args cannot be misread as a
+  check. When no exit is extractable the check is observed but its outcome is unknown → it does
+  **not** flip `verification_state` (no fabricated green or red).
 - External adapters MAY self-declare `check_kind` on their command events (open ingest
   contract); their fidelity is whatever their evidence declaration claims (§D7).
 
