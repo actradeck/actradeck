@@ -135,6 +135,10 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
     enabled: boardEmpty || postDemoOnly,
     refreshKey: connectedCount,
   });
+  // per-agent 取得済みならそれを (count + Claude/Codex ✓/✗)、未取得なら daemonIds.length を count
+  // フォールバック (2a coarse 形・後方互換)。空状態パネルと post-demo 案内の両方が共有する単一定義
+  // (TDA-1: 縮退意味論の二重定義を作らない)。
+  const readinessData = agentReadiness ?? { daemonCount: daemonIds.length };
   // ADR 019f4cdb 後続 UI: board 表示中は per-provider 監査カバレッジ (最終受信 + gap 候補) を pull する。
   // 「欠落を検知できない audit は弱い」— 稼働 provider の受信 gap を可視化する。read-only 集約 endpoint
   // (/realtime/audit/coverage・BFF 経由 Bearer)。connected 数変化で nudge (adapter 増減を早めに反映)。
@@ -503,9 +507,7 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
                     {...(emptyLabel !== undefined ? { emptyLabel } : {})}
                     {...(showReadiness
                       ? {
-                          // per-agent 取得済みならそれを (count + Claude/Codex ✓/✗)、未取得なら daemonIds.length を
-                          // count フォールバック (2a coarse 形・後方互換)。
-                          readiness: agentReadiness ?? { daemonCount: daemonIds.length },
+                          readiness: readinessData,
                           // ADR 019f22a7 P1: 空状態の安全性訴求 + 30秒セーフティデモ CTA (BFF 経由起動)。
                           safety: { phase: safetyDemo.phase, onLaunch: safetyDemo.launch },
                           // ADR 019f4206 A段: spawn 可能 daemon への Codex Managed 起動導線 (spawn_capable のみ)。
@@ -514,11 +516,8 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
                       : {})}
                     {...(postDemoOnly && filteredSessions.length > 0
                       ? {
-                          // task 019f41ec: デモ完走後の段階案内 (テーブル上部)。readiness 未取得の間は
-                          // daemonIds.length を count フォールバックに使う (空状態パネルと同じ縮退)。
-                          postDemo: {
-                            readiness: agentReadiness ?? { daemonCount: daemonIds.length },
-                          },
+                          // task 019f41ec: デモ完走後の段階案内 (テーブル上部)。
+                          postDemo: { readiness: readinessData },
                         }
                       : {})}
                     {...(canSearchHistory
