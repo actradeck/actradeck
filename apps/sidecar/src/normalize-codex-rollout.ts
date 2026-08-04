@@ -16,7 +16,7 @@ import type {
   State,
   WorkItemStatus as WorkItemStatusT,
 } from "@actradeck/event-model";
-import { parseEvent, WorkItemStatus } from "@actradeck/event-model";
+import { coerceWorkItemStatus, parseEvent } from "@actradeck/event-model";
 
 import { classifyCheck } from "./check-classifier.js";
 import { assertPayloadConsistency } from "./event-factory.js";
@@ -433,12 +433,6 @@ function toolNameFromNamespace(
   return { server: ns ?? "unknown", tool: name ?? "unknown" };
 }
 
-/** WorkItemStatus の closed-enum gate (§D2)。未知/非文字列は "unknown" (forward-compat 安全側)。 */
-function gateWorkItemStatus(v: unknown): WorkItemStatusT {
-  const r = WorkItemStatus.safeParse(v);
-  return r.success ? r.data : "unknown";
-}
-
 /**
  * update_plan function_call の arguments から typed plan items + legacy steps を導出する (§D2/A2)。
  * `{"plan":[{"step":str,"status":str}]}` を parse し、status を WorkItemStatus へ gate する。
@@ -456,7 +450,7 @@ function planFromUpdatePlan(
     const o = asParams(raw);
     const step = asString(o.step);
     if (step === undefined) continue;
-    items.push({ step, status: gateWorkItemStatus(asString(o.status)) });
+    items.push({ step, status: coerceWorkItemStatus(asString(o.status)) });
     steps.push(step);
   }
   return { items, steps };

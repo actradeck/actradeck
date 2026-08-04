@@ -19,6 +19,8 @@ import {
   type RiskLevel,
   type StartKind,
   type State,
+  WorkItemStatus,
+  coerceWorkItemStatus,
   terminalContinuation,
 } from "@actradeck/event-model";
 
@@ -1360,6 +1362,51 @@ function summarize(s: string, max = 120): string {
   return oneLine.length > max ? oneLine.slice(0, max) + "…" : oneLine;
 }
 
+/** work item の subject/description 表示上限。projection の boundTurnSummary が更に display bound する。 */
+const MAX_WORK_ITEM_TEXT = 200;
+
+/**
+ * work item の自由文 (task subject/description) を **redact-first で 1 行・上限化**する (ADR 0015 §D10)。
+ *
+ * summarize (redactString → 1 行 → slice) を通すため、切り詰めが値をマスクした後に起きる
+ * (INV-REDACTION-SUMMARY-STRADDLE と同じ順序で境界跨ぎ secret 断片を残さない)。加えて全候補は
+ * EventSink.emit の redactDeep choke も通る (defense-in-depth・新経路で choke を迂回しない)。
+ * 空/非文字列は undefined (欠落は載せない = fold が既存値を消さない・NO-RAW)。
+ */
+function workItemText(v: unknown): string | undefined {
+  const s = nonEmptyString(v);
+  return s !== undefined ? summarize(s, MAX_WORK_ITEM_TEXT) : undefined;
+}
+
+// CC task 観測の raw status → `WorkItemStatus` gate は event-model の正準 `coerceWorkItemStatus` を使う
+// (TDA-B2-1: 4 site 手書きコピー廃止・単一出所)。live 検証 (2026-08-04) の TaskUpdate status
+// (pending/in_progress/completed) は全て有効値・未知は "unknown" へ安全側。
+
+/**
+ * `work.item.updated` payload を組む (ADR 0015 §D2/§D7・carriage point 2)。
+ *
+ * method は CC の全 task 観測経路で `official_hook` (専用 hook も PostToolUse 記録も CC 公式 hook 経由)。
+ * fidelity のみ経路で分岐する (専用 hook=observed / PostToolUse parse=parsed)。fold (work-items.ts) が
+ * 最高 fidelity へ claim を昇格し二重ソースを 1 claim に畳む (§D5・受入 6)。
+ * id は sidecar で採番しない — provider_task_id を載せ、projection の fold が deriveWorkItemId で導出する
+ * (§D3: raw を id/DOM へ持ち込まない)。subject/description は workItemText で redact-first 済。
+ */
+function workItemPayload(
+  providerTaskId: string,
+  status: WorkItemStatus,
+  subject: string | undefined,
+  description: string | undefined,
+  fidelity: "observed" | "parsed",
+): Record<string, unknown> {
+  return {
+    provider_task_id: providerTaskId,
+    status,
+    ...(subject !== undefined ? { subject } : {}),
+    ...(description !== undefined ? { description } : {}),
+    observation: { method: "official_hook", fidelity },
+  };
+}
+
 /**
  * 1 件の hook 入力を 0..N 件の NormalizedEvent 候補へ正規化する。
  * 多くは 1 件だが、将来 batch hook 等で複数化しうるため配列で返す。
@@ -1634,6 +1681,60 @@ export function normalizeHook(
 
     case "PostToolUse": {
       const toolName = asString(input.tool_name) ?? "unknown";
+
+      // ADR 0015 §D2 (B2): CC の task tool 記録を work.item.updated へ parse する (fidelity=parsed)。
+      //   TaskUpdated hook は存在しない (live 検証 2026-08-04) ため、中間遷移 (in_progress / 内容編集 /
+      //   cancel) は PostToolUse(TaskCreate/TaskUpdate) の tool 記録でのみ観測できる。**live 検証済み
+      //   field のみ** parse する (未検証 field は parse しない契約・ADR 未解決論点 2):
+      //   - TaskCreate: tool_input={subject,description,activeForm} (id は無い)・生成 id は
+      //     tool_response.task.id・status は生成ゆえ pending。
+      //   - TaskUpdate: tool_input={taskId(camelCase),status} (subject は無い)。
+      //   専用 hook (TaskCreated/TaskCompleted・observed) と同一 provider_task_id を載せるため、fold が
+      //   deriveWorkItemId で同一 work item に畳み二重ソースを 1 claim に統合する (§D5・受入 6)。
+      //   generic tool.completed も**併せて** emit し tool.started↔completed の均衡を保つ (非退行)。
+      if (toolName === "TaskCreate" || toolName === "TaskUpdate") {
+        const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+        let providerTaskId: string | undefined;
+        let status: WorkItemStatus;
+        let subject: string | undefined;
+        let description: string | undefined;
+        if (toolName === "TaskCreate") {
+          const toolResponse = (input.tool_response ?? {}) as Record<string, unknown>;
+          const task = toolResponse.task;
+          providerTaskId =
+            typeof task === "object" && task !== null
+              ? nonEmptyString((task as Record<string, unknown>).id)
+              : undefined;
+          status = "pending";
+          subject = workItemText(toolInput.subject);
+          description = workItemText(toolInput.description);
+        } else {
+          providerTaskId = nonEmptyString(toolInput.taskId);
+          status = coerceWorkItemStatus(toolInput.status);
+          // TaskUpdate tool_input は subject/description を載せない (live 検証) → 捏造せず欠落のまま
+          //   (fold が既存 subject を保持する)。
+          subject = undefined;
+          description = undefined;
+        }
+        const events: ReturnType<typeof buildEvent>[] = [];
+        // id 不明 (tool_response.task.id / taskId 欠落) は同定不能ゆえ work item を emit しない。
+        if (providerTaskId !== undefined) {
+          events.push(
+            make("work.item.updated", undefined, {
+              summary: `作業項目 ${status}: ${subject ?? providerTaskId}`,
+              payload: workItemPayload(providerTaskId, status, subject, description, "parsed"),
+            }),
+          );
+        }
+        events.push(
+          make("tool.completed", "running.model_wait", {
+            summary: `ツール完了: ${toolName}`,
+            payload: { tool_name: toolName },
+          }),
+        );
+        return events;
+      }
+
       const kind = classifyTool(toolName);
       if (kind === "bash") {
         // 実観測 (code.claude.com/docs hooks + live probe 2026-06):
@@ -1852,6 +1953,54 @@ export function normalizeHook(
           payload: { reason },
           endKind,
           ...(recoverability !== undefined ? { recoverability } : {}),
+        }),
+      ];
+    }
+
+    // ADR 0015 §D2 (B2): CC の task-list 専用 semantic hook → work.item.updated (fidelity=observed)。
+    //   live 検証 (2026-08-04・CC 2.1.220) の 8 field payload から parse する (未検証 field は parse しない):
+    //     {session_id, transcript_path, cwd, prompt_id, hook_event_name, task_id, task_subject,
+    //      task_description}。TaskCreated は生成 (status=pending)、TaskCompleted は完了 (status=completed)。
+    //   provider_task_id = task_id (session-scoped serial "1"・fold が key=(session_id, work_item_id))。
+    //   PostToolUse parse と同一 provider_task_id ゆえ fold が 1 work item に畳む (§D5・受入 6)。
+    //   state は載せない (INV-WORKITEM-NO-STATE・§D1: 純観測で session 状態機械を動かさない)。
+    case "TaskCreated": {
+      const taskId = nonEmptyString(input.task_id);
+      if (taskId === undefined) {
+        // task_id 欠落 = 同定不能。落とさず観測事実のみ heartbeat 化 (work item は作らない)。
+        return [
+          make("heartbeat", undefined, {
+            summary: "通知: TaskCreated (task_id 無し)",
+            payload: { process_alive: true },
+          }),
+        ];
+      }
+      const subject = workItemText(input.task_subject);
+      const description = workItemText(input.task_description);
+      return [
+        make("work.item.updated", undefined, {
+          summary: `作業項目 作成: ${subject ?? taskId}`,
+          payload: workItemPayload(taskId, "pending", subject, description, "observed"),
+        }),
+      ];
+    }
+
+    case "TaskCompleted": {
+      const taskId = nonEmptyString(input.task_id);
+      if (taskId === undefined) {
+        return [
+          make("heartbeat", undefined, {
+            summary: "通知: TaskCompleted (task_id 無し)",
+            payload: { process_alive: true },
+          }),
+        ];
+      }
+      const subject = workItemText(input.task_subject);
+      const description = workItemText(input.task_description);
+      return [
+        make("work.item.updated", undefined, {
+          summary: `作業項目 完了: ${subject ?? taskId}`,
+          payload: workItemPayload(taskId, "completed", subject, description, "observed"),
         }),
       ];
     }

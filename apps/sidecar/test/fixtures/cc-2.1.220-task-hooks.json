@@ -1,0 +1,143 @@
+{
+  "_meta": {
+    "source": "live CC 2.1.220 (isolated HOME/CLAUDE_CONFIG_DIR probe, 2026-08-04)",
+    "task": "single task: create -> in_progress -> completed",
+    "sanitized": "session_id/cwd/transcript_path/prompt_id/tool_use_id replaced with fixed dummies; no real secrets/paths",
+    "id_equivalence": "all channels emit id value '1' for the same task"
+  },
+  "events": [
+    {
+      "session_id": "00000000-0000-4000-8000-000000000000",
+      "transcript_path": "/work/repo/.claude/projects/repo/00000000-0000-4000-8000-000000000000.jsonl",
+      "cwd": "/work/repo",
+      "prompt_id": "00000000-0000-4000-8000-0000000000pp",
+      "hook_event_name": "TaskCreated",
+      "task_id": "1",
+      "task_subject": "probe alpha task",
+      "task_description": "probe alpha task"
+    },
+    {
+      "session_id": "00000000-0000-4000-8000-000000000000",
+      "transcript_path": "/work/repo/.claude/projects/repo/00000000-0000-4000-8000-000000000000.jsonl",
+      "cwd": "/work/repo",
+      "prompt_id": "00000000-0000-4000-8000-0000000000pp",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PostToolUse",
+      "tool_name": "TaskCreate",
+      "tool_input": {
+        "subject": "probe alpha task",
+        "description": "probe alpha task",
+        "activeForm": "Running probe alpha task"
+      },
+      "tool_response": {
+        "task": {
+          "id": "1",
+          "subject": "probe alpha task"
+        }
+      },
+      "tool_use_id": "toolu_FIXTURExxxxxxxxxxxxxxxx",
+      "duration_ms": 7
+    },
+    {
+      "session_id": "00000000-0000-4000-8000-000000000000",
+      "transcript_path": "/work/repo/.claude/projects/repo/00000000-0000-4000-8000-000000000000.jsonl",
+      "cwd": "/work/repo",
+      "prompt_id": "00000000-0000-4000-8000-0000000000pp",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PreToolUse",
+      "tool_name": "TaskUpdate",
+      "tool_input": {
+        "taskId": "1",
+        "status": "in_progress"
+      },
+      "tool_use_id": "toolu_FIXTURExxxxxxxxxxxxxxxx"
+    },
+    {
+      "session_id": "00000000-0000-4000-8000-000000000000",
+      "transcript_path": "/work/repo/.claude/projects/repo/00000000-0000-4000-8000-000000000000.jsonl",
+      "cwd": "/work/repo",
+      "prompt_id": "00000000-0000-4000-8000-0000000000pp",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PostToolUse",
+      "tool_name": "TaskUpdate",
+      "tool_input": {
+        "taskId": "1",
+        "status": "in_progress"
+      },
+      "tool_response": {
+        "success": true,
+        "taskId": "1",
+        "updatedFields": ["status"],
+        "statusChange": {
+          "from": "pending",
+          "to": "in_progress"
+        }
+      },
+      "tool_use_id": "toolu_FIXTURExxxxxxxxxxxxxxxx",
+      "duration_ms": 1
+    },
+    {
+      "session_id": "00000000-0000-4000-8000-000000000000",
+      "transcript_path": "/work/repo/.claude/projects/repo/00000000-0000-4000-8000-000000000000.jsonl",
+      "cwd": "/work/repo",
+      "prompt_id": "00000000-0000-4000-8000-0000000000pp",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PreToolUse",
+      "tool_name": "TaskUpdate",
+      "tool_input": {
+        "taskId": "1",
+        "status": "completed"
+      },
+      "tool_use_id": "toolu_FIXTURExxxxxxxxxxxxxxxx"
+    },
+    {
+      "session_id": "00000000-0000-4000-8000-000000000000",
+      "transcript_path": "/work/repo/.claude/projects/repo/00000000-0000-4000-8000-000000000000.jsonl",
+      "cwd": "/work/repo",
+      "prompt_id": "00000000-0000-4000-8000-0000000000pp",
+      "hook_event_name": "TaskCompleted",
+      "task_id": "1",
+      "task_subject": "probe alpha task",
+      "task_description": "probe alpha task"
+    },
+    {
+      "session_id": "00000000-0000-4000-8000-000000000000",
+      "transcript_path": "/work/repo/.claude/projects/repo/00000000-0000-4000-8000-000000000000.jsonl",
+      "cwd": "/work/repo",
+      "prompt_id": "00000000-0000-4000-8000-0000000000pp",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PostToolUse",
+      "tool_name": "TaskUpdate",
+      "tool_input": {
+        "taskId": "1",
+        "status": "completed"
+      },
+      "tool_response": {
+        "success": true,
+        "taskId": "1",
+        "updatedFields": ["status"],
+        "statusChange": {
+          "from": "in_progress",
+          "to": "completed"
+        }
+      },
+      "tool_use_id": "toolu_FIXTURExxxxxxxxxxxxxxxx",
+      "duration_ms": 5
+    }
+  ]
+}

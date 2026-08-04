@@ -22,7 +22,7 @@ import type {
   State,
   WorkItemStatus as WorkItemStatusT,
 } from "@actradeck/event-model";
-import { terminalContinuation, WorkItemStatus } from "@actradeck/event-model";
+import { coerceWorkItemStatus, terminalContinuation } from "@actradeck/event-model";
 
 import { checkFields } from "./check-classifier.js";
 import { buildEvent } from "./event-factory.js";
@@ -286,8 +286,7 @@ export function normalizeCodexNotification(
         const step = asString(o.step);
         if (step === undefined) continue;
         steps.push(step);
-        const parsed = WorkItemStatus.safeParse(asString(o.status));
-        items.push({ step, status: parsed.success ? parsed.data : "unknown" });
+        items.push({ step, status: coerceWorkItemStatus(asString(o.status)) });
       }
       return [
         make(ctx, p, "turn.plan.updated", "running.planning", {

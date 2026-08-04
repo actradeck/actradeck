@@ -34,6 +34,21 @@ verified / verification failed / changed after verification.
   edits) are not observable via task hooks. However the sidecar already observes `PostToolUse`
   for the `TaskCreate` / `TaskUpdate` **tool calls** (tool_input / tool_response), which covers
   all transitions at lower fidelity (§D2, §D7).
+- **Cross-channel task-id value equivalence (live-observed, CC 2.1.220, 2026-08-04)** — the
+  dual-source dedup contract (受入 6) requires that the four channels that carry a task id emit
+  the **same value** for the same task, because the fold folds on
+  `deriveWorkItemId("task", provider_task_id)`. A live probe (isolated HOME/`CLAUDE_CONFIG_DIR`,
+  one task: create → in_progress → completed) observed **all four channels emit the identical
+  value `"1"`** for that task:
+  (a) `TaskCreated` hook `task_id` = `"1"`,
+  (b) `PostToolUse(TaskCreate)` `tool_response.task.id` = `"1"`,
+  (c) `PostToolUse(TaskUpdate)` `tool_input.taskId` (camelCase) = `"1"`,
+  (d) `TaskCompleted` hook `task_id` = `"1"`.
+  Therefore the create-stage dual source (`TaskCreated` observed + `TaskCreate` parsed) folds to
+  **one** pending work item (no permanent split), and update/complete converge onto the same
+  item. This value equivalence is pinned by `inv-work-items-b2.test.ts` (create-path fold, both
+  orders) and by a sanitized captured-payload contract test `inv-cc-task-fixture-b2.test.ts`
+  (field-name drift detection: `task_id` snake / `taskId` camel / `tool_response.task.id`).
 - `InstructionsLoaded` fires but its real fields (`file_path`, `memory_type`, `load_reason`)
   diverge from docs. P1 material only; not registered in P0.
 - The current hook injection (`settings-injection.ts` `MANAGED_HOOK_EVENTS`) does **not**

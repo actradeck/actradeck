@@ -31,6 +31,19 @@ export const WorkItemStatus = z.enum([
 export type WorkItemStatus = z.infer<typeof WorkItemStatus>;
 
 /**
+ * raw な観測 status を `WorkItemStatus` closed-enum へ gate する**単一正準関数** (§D2)。
+ *
+ * `work.item.updated` / `turn.plan.updated` の status は必須 closed enum ゆえ、未知/非文字列を素通しすると
+ * sink の discriminated-union parse が失敗しイベントが drop される。未知は `"unknown"` へ安全側に倒す
+ * (forward-compat)。**sidecar 3 normalizer (CC hook / codex managed / codex rollout) と projection fold が
+ * これを共有する** — 手書きコピーを置かない (TDA-B2-1・consolidation-invariant-sweep-all-copies)。
+ */
+export function coerceWorkItemStatus(v: unknown): WorkItemStatus {
+  const r = WorkItemStatus.safeParse(v);
+  return r.success ? r.data : "unknown";
+}
+
+/**
  * 検証状態 (§D5・closed)。**永続 verified boolean は存在しない**: `passed` は常に
  * `verified_tree_fp` 相対で、fingerprint 変化で `stale` へ自動縮退する。
  * `waived` は operator mutation 面 (P1) のための予約語 (今は enum を完成させ churn を防ぐ)。

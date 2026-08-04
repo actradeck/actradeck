@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   ACTRADECK_MARKER,
+  ATTACH_HOOK_EVENTS,
   computeDetachedSettings,
   computeMergedSettings,
   detachAttachHooks,
@@ -26,7 +27,7 @@ import {
   previewAttachHooks,
   type MergeOptions,
 } from "../src/settings-merge.js";
-import { HOOK_TOKEN_HEADER } from "../src/settings-injection.js";
+import { HOOK_TOKEN_HEADER, MANAGED_HOOK_EVENTS } from "../src/settings-injection.js";
 
 let dir: string;
 let settingsPath: string;
@@ -219,5 +220,58 @@ describe("INV-ATTACH-DETACH-REVERSIBLE: マーカー entry のみ除去しユー
 
   it("marker key is the stable ACTRADECK_MARKER constant", () => {
     expect(ACTRADECK_MARKER).toBe("__actradeck");
+  });
+});
+
+// ADR 0015 §D2 (B2): TaskCreated/TaskCompleted を単一出所リストへ配線した回帰固定。
+describe("INV-WORKITEM-HOOK-INJECTION (B2): task hooks を非破壊 merge / 可逆 detach で配線する", () => {
+  it("MANAGED_HOOK_EVENTS 単一出所に TaskCreated/TaskCompleted があり ATTACH と同一 (managed+attach 両モード)", () => {
+    expect(MANAGED_HOOK_EVENTS).toContain("TaskCreated");
+    expect(MANAGED_HOOK_EVENTS).toContain("TaskCompleted");
+    // 単一出所: attach は managed と同一集合を参照する (drift 不能)。
+    expect(ATTACH_HOOK_EVENTS).toBe(MANAGED_HOOK_EVENTS);
+  });
+
+  it("既定 events (ATTACH_HOOK_EVENTS) で TaskCreated の既存ユーザー hook を保持し ActraDeck entry を append", () => {
+    const userHook = { type: "command", command: "echo user-task-hook" };
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ hooks: { TaskCreated: [{ hooks: [userHook] }] } }),
+    );
+    // events を渡さない = ATTACH_HOOK_EVENTS (TaskCreated/TaskCompleted 含む) を配線。
+    const res = mergeAttachHooks({
+      settingsPath,
+      endpoint: ENDPOINT,
+      tokenMode: "literal",
+      token: "n",
+    });
+    expect(res.wired).toBe(true);
+    const after = readJson(settingsPath);
+    const hooks = after.hooks as Record<string, Array<{ hooks: unknown[] }>>;
+    // 既存ユーザー hook 温存 (非破壊)。
+    expect(hooks.TaskCreated!.flatMap((g) => g.hooks)).toContainEqual(userHook);
+    // TaskCreated / TaskCompleted 両方に ActraDeck entry が配線される。
+    for (const ev of ["TaskCreated", "TaskCompleted"]) {
+      expect(hooks[ev]!.flatMap((g) => g.hooks).some(isActradeckEntry)).toBe(true);
+    }
+  });
+
+  it("detach は task hook の ActraDeck entry のみ除去しユーザー hook を温存する (可逆)", () => {
+    const userHook = { type: "command", command: "echo user-task-hook" };
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ hooks: { TaskCreated: [{ hooks: [userHook] }] } }),
+    );
+    mergeAttachHooks({ settingsPath, endpoint: ENDPOINT, tokenMode: "literal", token: "n" });
+    const det = detachAttachHooks(settingsPath);
+    expect(det.removed).toBe(true);
+    const after = readJson(settingsPath);
+    const hooks = (after.hooks ?? {}) as Record<string, Array<{ hooks: unknown[] }>>;
+    // ユーザー hook は残り、ActraDeck entry は消える (完全復元)。
+    const taskCreated = hooks.TaskCreated?.flatMap((g) => g.hooks) ?? [];
+    expect(taskCreated).toContainEqual(userHook);
+    expect(taskCreated.some(isActradeckEntry)).toBe(false);
+    // ユーザー hook を持たない TaskCompleted は detach で event キーごと消える。
+    expect(hooks.TaskCompleted).toBeUndefined();
   });
 });
