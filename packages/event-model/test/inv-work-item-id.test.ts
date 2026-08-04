@@ -19,6 +19,7 @@ import {
   ObservedCapability,
   VerificationState,
   WorkItemStatus,
+  coerceWorkItemStatus,
   deriveWorkItemId,
   sha256Hex,
   treeFingerprint,
@@ -175,6 +176,19 @@ describe("INV-WORKITEM-ID: 契約 enum は closed (§D2/§D5/§D7)", () => {
   it("未知 status/method は reject する (enum 外は parse 境界で構造的に落ちる)", () => {
     expect(WorkItemStatus.safeParse("done").success).toBe(false);
     expect(ObservationFidelity.safeParse("official").success).toBe(false); // official≠authoritative
+  });
+
+  it("coerceWorkItemStatus は正準値を通し、未知値は 'unknown' へ安全側に倒す (単一出所 gate・TDA-B2-1)", () => {
+    // 成功枝: 全 closed-enum 値はそのまま返る (sidecar 3 normalizer / projection fold が共有)。
+    for (const s of WorkItemStatus.options) {
+      expect(coerceWorkItemStatus(s)).toBe(s);
+    }
+    // fallback 枝: enum 外・非文字列は 'unknown' (forward-compat・discriminated-union parse-drop を防ぐ)。
+    expect(coerceWorkItemStatus("done")).toBe("unknown"); // 近い綴りでも正準でなければ unknown
+    expect(coerceWorkItemStatus("frobnicated")).toBe("unknown");
+    expect(coerceWorkItemStatus(123)).toBe("unknown");
+    expect(coerceWorkItemStatus(undefined)).toBe("unknown");
+    expect(coerceWorkItemStatus(null)).toBe("unknown");
   });
 });
 
