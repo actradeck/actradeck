@@ -14,6 +14,7 @@
  * 表示専用: mutation / approve / policy / live gate に一切触れない。NO-RAW: work_item_id は hash 表示、
  * subject は projection が redacted+bounded 済の値を写すのみ (生 task id / 生パス / secret を DOM へ出さない)。
  */
+import { deriveWorkItemBadge } from "@actradeck/projection";
 import { useMemo } from "react";
 
 import { Button, Tag } from "./kit";
@@ -185,10 +186,10 @@ export function WorkItemsPanel({ sessionId, events, onJumpToEvent }: WorkItemsPa
   const { t } = useLocale();
   const projection = useMemo(() => foldWorkItems(sessionId, events), [sessionId, events]);
   const items = projection.items;
-  // パネル内 claimed-unverified 件数 (Wall バッジと同一意味論: completed かつ unverified)。
-  const claimedUnverified = items.filter(
-    (it) => it.status === "completed" && it.verification_state === "unverified",
-  ).length;
+  // パネル内 claimed-unverified 件数 (TDA-B3-1: 述語を手書きせず canonical badge `deriveWorkItemBadge`
+  //   由来に統一する — self_claimed = completed かつ unverified。バッジ 4 状態の単一正準と drift しない)。
+  //   Wall の claimed_unverified_count (realtime-store.ts SQL) と同一意味論・別集計 (needs_attention と分離)。
+  const claimedUnverified = items.filter((it) => deriveWorkItemBadge(it) === "self_claimed").length;
 
   return (
     <section

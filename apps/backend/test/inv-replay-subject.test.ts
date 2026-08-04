@@ -60,6 +60,17 @@ function makeRow(over: {
     auto_allowed: null,
     exit_code: null,
     elapsed_ms: null,
+    // ADR 0015 §D4/§D8 work-items carriage 列 (本テストは subject 導出のみ検証ゆえ全 null)。
+    provider_task_id: null,
+    work_item_status: null,
+    work_item_subject: null,
+    observation_method: null,
+    observation_fidelity: null,
+    check_kind: null,
+    check_match: null,
+    head_sha: null,
+    diff_hash: null,
+    plan_items: null,
   };
 }
 

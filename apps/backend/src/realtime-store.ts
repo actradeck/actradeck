@@ -74,6 +74,9 @@ const JOIN_SELECT = `
          ss.secret_detected, ss.secret_redaction_count, ss.secret_redaction_count_by_kind,
          -- ADR 0015 §D4/§D8: 自己申告完了だが未検証な work item 数 (query-derived 集約)。
          -- needs_attention とは分離 (reducer の deriveNeedsAttention は不変・approvals + waiting のみ)。
+         -- 述語 status='completed' AND verification_state='unverified' は projection の canonical badge
+         -- deriveWorkItemBadge の self_claimed 分岐を **cross-tier で mirror** する (TDA-B3-1: webui panel は
+         -- badge 由来へ統一済・SQL は同意味論の別集計。両者の drift は work-items-fold の 4 状態 assert が固定)。
          COALESCE((
            SELECT count(*) FROM work_items wi
             WHERE wi.session_id = ss.session_id

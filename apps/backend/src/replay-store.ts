@@ -252,6 +252,14 @@ const EVENT_COLUMNS = `event_id,
           AS work_item_status,
         CASE WHEN event_type = 'work.item.updated' THEN payload->>'subject' ELSE NULL END
           AS work_item_subject,
+        -- SEC-B3-1 (accepted-risk・裁定 R1): 以下 6 field は work_item_status/provider_task_id/subject と違い
+        --   event_type-gate していない。これは安全: いずれも **namespace 済みキー** (observation.method/fidelity /
+        --   check_kind / check_match / head_sha / diff_hash) ゆえ specific-by-construction (共通名 status と
+        --   違い他 event_type の top-level と衝突しない)。全値が at-rest redacted + closed-enum gate (fold の
+        --   CheckKind/CheckMatch/ObservationMethod/ObservationFidelity 検証) を通り、fold は非 home event_type
+        --   では読まない (§D4 反応集合 = 5 種のみ) ため **DOM-inert** (無関係イベントに載っても描画に出ない)。
+        --   将来 event_type-gate 化 (minimality) は tech-debt sweep の follow-up。SQL 自体は本 slice で変えない
+        --   (scan scope を変えると監査が full 昇格するため・targeted 維持)。
         payload->'observation'->>'method' AS observation_method,
         payload->'observation'->>'fidelity' AS observation_fidelity,
         payload->>'check_kind' AS check_kind,

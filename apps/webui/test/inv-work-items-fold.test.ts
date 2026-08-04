@@ -3,9 +3,17 @@
  *
  * webui の client-side fold (`foldWorkItems` = ReplayEventDTO → replayDtoToEvent → projection
  * `reduceWorkItems`) が、同一イベント列に対する projection の `reduceWorkItems` と **完全一致**する
- * ことを pin する。これが load-bearing なのは、ReplayEventDTO の allow-list carriage
- * (backend `EVENT_COLUMNS` / wire `parseReplayEvent` / `dtoPayload`) が fold 入力フィールドを 1 つでも
- * 落とすと、この等式が破れて RED になるため (本番で panel が常に空になる回帰を構造的に検出する)。
+ * ことを pin する。
+ *
+ * ⚠️ **本テストが守る層 (正確な scope・裁定 R1 QA-B3-1 で訂正)**: ここは wire (ReplayEventsPage JSON) を
+ *    **手作り** (`wireDto`) して `parseReplayEvent` → DTO → fold を通す。ゆえに本テストが load-bearing な
+ *    のは **wire→DTO→fold** 経路 (`parseReplayEvent` / `parseWorkItemFields` / `replayDtoToEvent` の
+ *    `dtoPayload`) が fold 入力フィールドを 1 つでも落とす回帰に対してのみ (該当時この等式が破れ RED)。
+ *    **backend の `EVENT_COLUMNS` SQL carriage 層 (DB→EventRow→DTO) は本テストの走査外**であり、それは
+ *    実 PG round-trip テスト `apps/backend/test/inv-work-items-wiring.test.ts` の "carriage round-trip"
+ *    (ingest → `ReplayStore.eventsPage` → DTO fold parity + 非 home CASE gate) が守る。両テストの合成で
+ *    「観測イベント → panel の work_items」全経路が回帰固定される (本番で panel が silent-empty になる退行を
+ *    構造的に検出する)。
  *
  * 併せて deriveWorkItemBadge 単一出所 (webui で 4 状態を再実装しない) と plan_items の NO-RAW
  * 再射影 (余剰フィールドを wire parse で落とす) を固定する。
@@ -197,7 +205,7 @@ describe("deriveWorkItemBadge 単一出所 (webui で 4 状態を再実装しな
   }
 
   it("self_claimed: completed + unverified", () => {
-    const { fold, display } = badgeOf([
+    const { item, fold, display } = badgeOf([
       {
         event_type: "work.item.updated",
         ts: ts(1),
@@ -206,6 +214,7 @@ describe("deriveWorkItemBadge 単一出所 (webui で 4 状態を再実装しな
     ]);
     expect(fold).toBe("self_claimed");
     expect(display?.badge).toBe("self_claimed"); // display は deriveWorkItemBadge を単一出所に使う。
+    expect(display?.badge).toBe(deriveWorkItemBadge(item)); // QA-B3-3: 単一出所等価 (4 状態で固定)。
     expect(display?.labelKey).toBe("workitem.badge.self_claimed");
   });
 
@@ -225,6 +234,7 @@ describe("deriveWorkItemBadge 単一出所 (webui で 4 状態を再実装しな
     ]);
     expect(verified.fold).toBe("verified");
     expect(verified.display?.badge).toBe("verified");
+    expect(verified.display?.badge).toBe(deriveWorkItemBadge(verified.item)); // QA-B3-3: 単一出所等価。
 
     const stale = badgeOf([
       { event_type: "diff.updated", ts: ts(1), wi: { head_sha: "h1", diff_hash: "d1" } },
@@ -241,6 +251,9 @@ describe("deriveWorkItemBadge 単一出所 (webui で 4 状態を再実装しな
       { event_type: "diff.updated", ts: ts(4), wi: { head_sha: "h2", diff_hash: "d2" } },
     ]);
     expect(stale.fold).toBe("changed_after_verification");
+    // QA-B3-3: stale (changed_after_verification) も display?.badge == deriveWorkItemBadge(item)。
+    expect(stale.display?.badge).toBe("changed_after_verification");
+    expect(stale.display?.badge).toBe(deriveWorkItemBadge(stale.item));
 
     const failed = badgeOf([
       {
@@ -255,6 +268,9 @@ describe("deriveWorkItemBadge 単一出所 (webui で 4 状態を再実装しな
       },
     ]);
     expect(failed.fold).toBe("verification_failed");
+    // QA-B3-3: failed (verification_failed) も display?.badge == deriveWorkItemBadge(item)。
+    expect(failed.display?.badge).toBe("verification_failed");
+    expect(failed.display?.badge).toBe(deriveWorkItemBadge(failed.item));
   });
 
   it("非 completed はバッジ無し (badgeDisplay undefined)", () => {
