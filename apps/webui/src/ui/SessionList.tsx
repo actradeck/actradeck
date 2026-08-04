@@ -120,6 +120,16 @@ export function SessionRow({ item, selected, nowMs, onSelect }: SessionRowProps)
   );
 }
 
+/**
+ * readiness データ (観測 daemon 数 + per-agent 配線 boolean・NO-RAW)。真の空状態パネルと post-demo
+ * 段階案内 (task 019f41ec) が共有する。
+ */
+export interface ReadinessData {
+  readonly daemonCount: number;
+  readonly claude?: AgentVisibilityWire["claude"];
+  readonly codex?: AgentVisibilityWire["codex"];
+}
+
 export interface SessionListProps {
   readonly sessions: readonly SessionListItem[];
   readonly selectedId: string | null;
@@ -141,11 +151,13 @@ export interface SessionListProps {
    * されているか)。**2a 後方互換**: 省略 (daemonCount のみ) なら従来の doctor ヒント文言へフォールバックする。
    * すべて NO-RAW (boolean のみ・観測された配線状態であり「リアルタイム」ではない=hello 時点値)。
    */
-  readonly readiness?: {
-    readonly daemonCount: number;
-    readonly claude?: AgentVisibilityWire["claude"];
-    readonly codex?: AgentVisibilityWire["codex"];
-  };
+  readonly readiness?: ReadinessData;
+  /**
+   * task 019f41ec / decision 019fcdaf: デモ完走後の「実エージェント接続」段階案内。board の表示 session が
+   * すべて使い捨てデモ (`demo-safety-*`) かつ 1 件以上 terminal のときのみ親が渡す (実データ駆動・
+   * `isPostDemoBoardState`)。一覧テーブルの上に描画し、実 session が観測されると自然に消える。
+   */
+  readonly postDemo?: { readonly readiness: ReadinessData };
   /**
    * ADR 019f22a7 P1: 空状態の「この端末で守られている」セクション + 30秒セーフティデモ CTA。
    * 指定時のみ readiness パネル下に描画する (readiness が出る真の空状態でのみ有効)。CTA 押下は親が握る
@@ -237,6 +249,87 @@ function readinessMark(state: ClaudeState | CodexState): string {
   return "—";
 }
 
+/**
+ * per-agent ✓/✗/— 行 (ADR 019f1972 §2b)。真の空状態パネルと post-demo 段階案内 (task 019f41ec) で共有する
+ * 単一出所 (両所で JSX を二重保守しない)。Managed 導線 hint (ADR 019f3960 C) も同梱: codex が
+ * observable/detected のときのみ表示 (missing は非表示)。すべて静的リテラル + boolean 由来 (NO-RAW)。
+ */
+function ReadinessAgentList({
+  claude,
+  codex,
+}: {
+  claude: AgentVisibilityWire["claude"];
+  codex: AgentVisibilityWire["codex"];
+}) {
+  const { t } = useLocale();
+  const cl = claudeState(claude);
+  const cd = codexState(codex);
+  return (
+    <ul className="ad-readiness__agents" data-testid="readiness-agents">
+      <li data-testid="readiness-agent-claude" data-state={cl}>
+        <span className="ad-readiness__mark" aria-hidden="true">
+          {readinessMark(cl)}
+        </span>
+        <span>{t(`readiness.agent.claude.${cl}` as const)}</span>
+      </li>
+      <li data-testid="readiness-agent-codex" data-state={cd}>
+        <span className="ad-readiness__mark" aria-hidden="true">
+          {readinessMark(cd)}
+        </span>
+        <span>{t(`readiness.agent.codex.${cd}` as const)}</span>
+      </li>
+      {/* ADR 019f3960 C: codex が observable/detected の時のみ Managed 導線 hint を出す
+          (missing は非表示)。承認 relay + 予防は Managed 起動でのみ有効・rollout は検知のみ。
+          command は静的リテラル (MANAGED_CODEX_CMD)・ユーザーデータ非注入 (NO-RAW 自明)。 */}
+      {cd === "observable" || cd === "detected" ? (
+        <li
+          className="ad-readiness__managed-hint"
+          data-testid="readiness-codex-managed-hint"
+          data-state={cd}
+        >
+          <span>{t("readiness.agent.codex.managedHint")}</span> <code>{MANAGED_CODEX_CMD}</code>
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
+/**
+ * task 019f41ec / decision 019fcdaf: デモ完走後の段階案内 (一覧テーブル上部)。デモは使い捨ての教材
+ * セッション — 「次は自分の実エージェントを接続する」への橋渡しを、実測 readiness (観測 daemon 数 +
+ * per-agent 配線) で段階表示する。NO-RAW: 静的リテラル + boolean/非負整数のみ。外部リンクは張らず
+ * docs パスをテキストで示す (webui に外部リンク面を新設しない)。
+ */
+function PostDemoNextSteps({ readiness }: { readiness: ReadinessData }) {
+  const { t } = useLocale();
+  const connected = readiness.daemonCount > 0;
+  return (
+    <section className="ad-postdemo" data-testid="post-demo-next" data-connected={connected}>
+      <h3 className="ad-postdemo__title">{t("postDemo.title")}</h3>
+      <p className="ad-postdemo__lead">{t("postDemo.lead")}</p>
+      {connected ? (
+        <>
+          <p className="ad-postdemo__step" data-testid="post-demo-connected">
+            {t("readiness.connected", { count: readiness.daemonCount })}
+          </p>
+          {readiness.claude !== undefined && readiness.codex !== undefined ? (
+            <ReadinessAgentList claude={readiness.claude} codex={readiness.codex} />
+          ) : null}
+        </>
+      ) : (
+        <>
+          <p className="ad-postdemo__step" data-testid="post-demo-disconnected">
+            {t("readiness.disconnected")}
+          </p>
+          <p className="ad-postdemo__step" data-testid="post-demo-docker-hint">
+            {t("readiness.disconnectedDockerHint")}
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
 // Managed Codex 起動コマンド (ADR 019f3960 C)。docs/README の呼び出し規約 (`./scripts/actradeck up`)
 // command は locale 非依存の静的リテラル (i18n 文言は散文のみ・NO-RAW)。TDA-3 sweep 019f397c:
 // rename-sensitive な prefix は managed-codex.ts へ単一出所化し、SessionDetail の codexHint と共有する
@@ -250,6 +343,7 @@ export function SessionList({
   emptyLabel,
   emptyAction,
   readiness,
+  postDemo,
   safety,
   codexSpawn,
 }: SessionListProps) {
@@ -262,8 +356,7 @@ export function SessionList({
       // フォールバック (後方互換・架空状態を出さない)。
       const claude = readiness.claude;
       const codex = readiness.codex;
-      const hasPerAgent = claude !== undefined && codex !== undefined;
-      const cl = claude ? claudeState(claude) : null;
+      // cd は codexSpawn の env opt-in hint 判定にのみ使用 (agent 行の描画は ReadinessAgentList が内部計算)。
       const cd = codex ? codexState(codex) : null;
       return (
         <div className="ad-empty" data-testid="readiness" data-connected={connected}>
@@ -272,34 +365,8 @@ export function SessionList({
               <span data-testid="readiness-connected">
                 {t("readiness.connected", { count: readiness.daemonCount })}
               </span>
-              {hasPerAgent && cl !== null && cd !== null ? (
-                <ul className="ad-readiness__agents" data-testid="readiness-agents">
-                  <li data-testid="readiness-agent-claude" data-state={cl}>
-                    <span className="ad-readiness__mark" aria-hidden="true">
-                      {readinessMark(cl)}
-                    </span>
-                    <span>{t(`readiness.agent.claude.${cl}` as const)}</span>
-                  </li>
-                  <li data-testid="readiness-agent-codex" data-state={cd}>
-                    <span className="ad-readiness__mark" aria-hidden="true">
-                      {readinessMark(cd)}
-                    </span>
-                    <span>{t(`readiness.agent.codex.${cd}` as const)}</span>
-                  </li>
-                  {/* ADR 019f3960 C: codex が observable/detected の時のみ Managed 導線 hint を出す
-                      (missing は非表示)。承認 relay + 予防は Managed 起動でのみ有効・rollout は検知のみ。
-                      command は静的リテラル (MANAGED_CODEX_CMD)・ユーザーデータ非注入 (NO-RAW 自明)。 */}
-                  {cd === "observable" || cd === "detected" ? (
-                    <li
-                      className="ad-readiness__managed-hint"
-                      data-testid="readiness-codex-managed-hint"
-                      data-state={cd}
-                    >
-                      <span>{t("readiness.agent.codex.managedHint")}</span>{" "}
-                      <code>{MANAGED_CODEX_CMD}</code>
-                    </li>
-                  ) : null}
-                </ul>
+              {claude !== undefined && codex !== undefined ? (
+                <ReadinessAgentList claude={claude} codex={codex} />
               ) : (
                 <span className="ad-readiness__hint">{t("readiness.connected.hint")}</span>
               )}
@@ -316,7 +383,14 @@ export function SessionList({
               ) : null}
             </>
           ) : (
-            <span data-testid="readiness-disconnected">{t("readiness.disconnected")}</span>
+            <>
+              <span data-testid="readiness-disconnected">{t("readiness.disconnected")}</span>
+              {/* task 019f41ec: Docker (cockpit-only) 経路の橋渡し。native コマンドが無い環境でも
+                  次の一手 (host 側 sidecar 接続) へ辿り着けるよう docs パスをテキストで示す。 */}
+              <span className="ad-readiness__hint" data-testid="readiness-docker-hint">
+                {t("readiness.disconnectedDockerHint")}
+              </span>
+            </>
           )}
           {safety ? <SafetyDemoPanel phase={safety.phase} onLaunch={safety.onLaunch} /> : null}
         </div>
@@ -340,28 +414,32 @@ export function SessionList({
     );
   }
   return (
-    <Table data-testid="session-list" className="ad-session-table" caption={t("list.caption")}>
-      <THead>
-        <Tr>
-          <Th>{t("list.col.liveness")}</Th>
-          <Th>{t("list.col.action")}</Th>
-          <Th>{t("list.col.attention")}</Th>
-          <Th>{t("list.col.repo")}</Th>
-          <Th>{t("list.col.age")}</Th>
-          <Th>{t("list.col.provider")}</Th>
-        </Tr>
-      </THead>
-      <TBody>
-        {sessions.map((s) => (
-          <SessionRow
-            key={s.session_id}
-            item={s}
-            selected={s.session_id === selectedId}
-            nowMs={nowMs}
-            onSelect={onSelect}
-          />
-        ))}
-      </TBody>
-    </Table>
+    <>
+      {/* task 019f41ec: デモ完走後の段階案内。表示 session が全部使い捨てデモのときだけ親が渡す。 */}
+      {postDemo ? <PostDemoNextSteps readiness={postDemo.readiness} /> : null}
+      <Table data-testid="session-list" className="ad-session-table" caption={t("list.caption")}>
+        <THead>
+          <Tr>
+            <Th>{t("list.col.liveness")}</Th>
+            <Th>{t("list.col.action")}</Th>
+            <Th>{t("list.col.attention")}</Th>
+            <Th>{t("list.col.repo")}</Th>
+            <Th>{t("list.col.age")}</Th>
+            <Th>{t("list.col.provider")}</Th>
+          </Tr>
+        </THead>
+        <TBody>
+          {sessions.map((s) => (
+            <SessionRow
+              key={s.session_id}
+              item={s}
+              selected={s.session_id === selectedId}
+              nowMs={nowMs}
+              onSelect={onSelect}
+            />
+          ))}
+        </TBody>
+      </Table>
+    </>
   );
 }

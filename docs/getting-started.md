@@ -4,6 +4,12 @@ From a fresh clone to a running cockpit. There are two paths: a one-command
 quickstart, and the manual steps it automates (use the manual steps if the
 quickstart fails on your machine).
 
+> **Just want to look first?** The prebuilt Docker image runs the cockpit with zero host
+> wiring and includes a built-in 30-second safety demo — see [`docker.md`](./docker.md).
+> When you are ready to observe your own agents, come back here, or wire a host-side
+> sidecar to the container
+> (["Observing a host agent"](./docker.md#observing-a-host-agent-wire-the-sidecar)).
+
 ## Prerequisites
 
 - **Node.js** v22.16+ and **pnpm** (`npm i -g pnpm`).
@@ -222,20 +228,20 @@ The embedded database lives in `~/.actradeck/pgdata` — delete that directory t
 > **(external Postgres only)** apply **only** if you opted in via `ACTRADECK_DB_MODE=postgres`
 > or an uncommented `DATABASE_URL` in `.env`; on the embedded default they cannot occur.
 
-| Symptom                                                                  | Fix                                                                                                                                                       |
-| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `doctor`: `:55400`/`:55410` not listening                                | A tier failed to start. Check `./scripts/actradeck logs backend` / `logs webui`.                                                                          |
-| Postgres never becomes healthy **(external Postgres only)**              | `docker compose ps` / `docker compose logs postgres`. Ensure `POSTGRES_PASSWORD` is set in `.env`.                                                        |
-| `pnpm db:migrate` fails to connect **(external Postgres only)**          | `DATABASE_URL` must match `POSTGRES_PASSWORD` and `ACTRADECK_PG_PORT` (default `55432`).                                                                  |
-| Port already in use (`:55400` / `:55410`; `:55432` external PG only)     | Change `ACTRADECK_WEBUI_PORT` / `ACTRADECK_BACKEND_PORT` / `ACTRADECK_PG_PORT` in `.env`, then re-run.                                                    |
-| Sessions never appear in the cockpit                                     | `./scripts/ad-attach status-all`; ensure the daemon is active and you started `claude`/`codex` after install.                                             |
-| `203/EXEC` after a Node upgrade (nvm)                                    | `node` path changed; re-run `./scripts/actradeck up` to regenerate the unit files.                                                                        |
-| Want it to survive logout                                                | `loginctl enable-linger "$USER"`.                                                                                                                         |
-| `quickstart` aborts: Node too old                                        | It enforces `package.json` `engines.node` (≥ 22.16). `nvm install 22 && nvm use 22`, then re-run.                                                         |
+| Symptom                                                                       | Fix                                                                                                                                                                                               |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `doctor`: `:55400`/`:55410` not listening                                     | A tier failed to start. Check `./scripts/actradeck logs backend` / `logs webui`.                                                                                                                  |
+| Postgres never becomes healthy **(external Postgres only)**                   | `docker compose ps` / `docker compose logs postgres`. Ensure `POSTGRES_PASSWORD` is set in `.env`.                                                                                                |
+| `pnpm db:migrate` fails to connect **(external Postgres only)**               | `DATABASE_URL` must match `POSTGRES_PASSWORD` and `ACTRADECK_PG_PORT` (default `55432`).                                                                                                          |
+| Port already in use (`:55400` / `:55410`; `:55432` external PG only)          | Change `ACTRADECK_WEBUI_PORT` / `ACTRADECK_BACKEND_PORT` / `ACTRADECK_PG_PORT` in `.env`, then re-run.                                                                                            |
+| Sessions never appear in the cockpit                                          | `./scripts/ad-attach status-all`; ensure the daemon is active and you started `claude`/`codex` after install.                                                                                     |
+| `203/EXEC` after a Node upgrade (nvm)                                         | `node` path changed; re-run `./scripts/actradeck up` to regenerate the unit files.                                                                                                                |
+| Want it to survive logout                                                     | `loginctl enable-linger "$USER"`.                                                                                                                                                                 |
+| `quickstart` aborts: Node too old                                             | It enforces `package.json` `engines.node` (≥ 22.16). `nvm install 22 && nvm use 22`, then re-run.                                                                                                 |
 | `quickstart` aborts: Docker daemon not reachable **(external Postgres only)** | Only the opt-in Docker path checks Docker. Start Docker (Docker Desktop / `sudo systemctl start docker`) and ensure your user can run `docker` — or drop the opt-in and use the embedded default. |
-| macOS: tiers don't survive logout                       | LaunchAgents run in your login session (auto-start on next login). A survives-logout headless daemon needs a root `LaunchDaemon` (out of scope).          |
-| macOS: `203/EXEC` / tier won't start after Node upgrade | `node` path changed; re-run `./scripts/actradeck up` to regenerate the LaunchAgent plists, or inspect one with `./scripts/actradeck print-plist backend`. |
-| Neither systemd nor launchctl: `up` stays attached      | `up` runs the tiers in the foreground (Ctrl-C stops them); `down`/`status` need a supervisor.                                                             |
+| macOS: tiers don't survive logout                                             | LaunchAgents run in your login session (auto-start on next login). A survives-logout headless daemon needs a root `LaunchDaemon` (out of scope).                                                  |
+| macOS: `203/EXEC` / tier won't start after Node upgrade                       | `node` path changed; re-run `./scripts/actradeck up` to regenerate the LaunchAgent plists, or inspect one with `./scripts/actradeck print-plist backend`.                                         |
+| Neither systemd nor launchctl: `up` stays attached                            | `up` runs the tiers in the foreground (Ctrl-C stops them); `down`/`status` need a supervisor.                                                                                                     |
 
 ## Security note
 

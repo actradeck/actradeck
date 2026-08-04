@@ -110,6 +110,11 @@ stack against the real ingestion → event-store → projection pipeline.
   disables the demo: the CTA fails loud with `503` (never a silent no-op), while the rest
   of the cockpit keeps working.
 
+**Next step — wire your own agents.** After the demo finishes, the cockpit still observes
+nothing on your machine (the board shows the same staged guidance above the finished demo
+session). To see your real `claude` / `codex` runs, connect a host-side sidecar:
+[Observing a host agent](#observing-a-host-agent-wire-the-sidecar).
+
 ### Build it yourself
 
 The image is built from the repository root `Dockerfile` (the same one the release
