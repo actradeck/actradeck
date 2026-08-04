@@ -49,6 +49,16 @@ else
   bad "tripwire missed a removed step (rc=$rc): $out"
 fi
 
+# Falsifiability C (TDA-1): add a whole NEW job -> tripwire must go RED naming the job
+# (gates grow job-wise in practice; a new unclassified job must not pass silently).
+{ cat .github/workflows/ci.yml; printf '\n  perfprobe:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Injected new-job step\n        run: echo probe\n'; } > "$TMPDIR_TCP/ci-newjob.yml"
+out="$(PREFLIGHT_CI_YML="$TMPDIR_TCP/ci-newjob.yml" bash scripts/ci-preflight.sh --drift-check 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "perfprobe"; then
+  ok "tripwire RED on an injected new ci.yml job (named in the output)"
+else
+  bad "tripwire missed an injected new job (rc=$rc): $out"
+fi
+
 echo "[test-ci-preflight] 2. assert-inv-ran.mjs fixtures"
 
 fixture() { printf '%s' "$1" > "$TMPDIR_TCP/report.json"; }
@@ -88,12 +98,67 @@ else
   bad "failed+rc fixture mishandled (rc=$rc): $out"
 fi
 
+# failed + rc=1 (QA-1): vitest's REAL failure code is 1 — the boundary a weakened rc guard
+# (e.g. rc > 1) would wave through. Must exit 1 and name the failed test.
+out="$(RC=1 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" "probe" "INV-PROBE-X" 2>&1)"; rc=$?
+if [ $rc -eq 1 ] && printf '%s' "$out" | grep -q "INV-PROBE-X broke"; then
+  ok "failed+rc=1 fixture -> exit 1 + failed test named (real vitest failure code)"
+else
+  bad "failed+rc=1 fixture mishandled (rc=$rc): $out"
+fi
+
+# todo (SEC-3): an INV demoted to .todo (vitest status "todo") must not count as ran.
+fixture '{"testResults":[{"name":"f.test.ts","assertionResults":[{"fullName":"INV-PROBE-X holds","status":"todo"}]}]}'
+out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" "probe" "INV-PROBE-X" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "SKIPPED"; then
+  ok "todo fixture -> non-zero + SKIPPED (demoted INV never reads as ran)"
+else
+  bad "todo fixture mishandled (rc=$rc): $out"
+fi
+
+# --suite form (TDA-2): the gate's semantic core (which INV must run) lives in the script.
+fixture '{"testResults":[{"name":"f.test.ts","assertionResults":[{"fullName":"INV-EVENT-DB-INTEGRITY holds","status":"passed"}]}]}'
+out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" --suite db 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "ran for real"; then
+  ok "--suite db -> exit 0 against a matching report"
+else
+  bad "--suite db mishandled (rc=$rc): $out"
+fi
+out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" --suite nonsense 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "unknown suite"; then
+  ok "--suite nonsense -> non-zero + unknown-suite error"
+else
+  bad "unknown suite mishandled (rc=$rc): $out"
+fi
+
 # unreadable report -> exit 1 + "missing/unparseable" (a lost report must never pass).
 out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/absent.json" "probe" "INV-PROBE-X" 2>&1)"; rc=$?
 if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "missing/unparseable"; then
   ok "unreadable-report fixture -> non-zero + missing/unparseable"
 else
   bad "unreadable-report fixture mishandled (rc=$rc): $out"
+fi
+
+echo "[test-ci-preflight] 3. db guard (SEC-1: refuse production-port DSNs before any migrate)"
+
+# The guard reuses the canonical event-model test-db-guard from its dist; build it if the
+# checkout is fresh (cheap, and the metatest must not silently skip a security check).
+if [ ! -f packages/event-model/dist/test-db-guard.js ]; then
+  pnpm --filter @actradeck/event-model run build >/dev/null
+fi
+
+out="$(bash scripts/ci-preflight.sh --db-guard "postgresql://actradeck@127.0.0.1:55432/actradeck" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "refusing"; then
+  ok "db guard RED on a production-port (:55432) DSN"
+else
+  bad "db guard passed a production-port DSN (rc=$rc): $out"
+fi
+
+out="$(bash scripts/ci-preflight.sh --db-guard "postgresql://actradeck@127.0.0.1:5456/actradeck" 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "not a production-port"; then
+  ok "db guard GREEN on a disposable-port (:5456) DSN"
+else
+  bad "db guard rejected a disposable DSN (rc=$rc): $out"
 fi
 
 echo

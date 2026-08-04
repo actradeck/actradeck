@@ -89,11 +89,15 @@ must always use a disposable database.
 `e2e`, `migrations`) locally, in the same order and with the same env posture — audit,
 lint, format, build, type-check, every coverage gate, the real-DB invariant "actually
 ran" assertions, the hook-replay e2e, and migration up/down/up. It provisions its own
-disposable Postgres on `127.0.0.1:5456` (or uses your `ACTRADECK_TEST_DATABASE_URL` /
-`DATABASE_URL` if set) and removes it on exit. A drift tripwire aborts loudly if
-`ci.yml` gained a step this mirror doesn't know about, so the script cannot go silently
-stale. Expect a full run to take on the order of 15–30 minutes; it is the closest local
-answer to "will CI be green?".
+disposable Postgres on `127.0.0.1:5456` — which needs Docker unless you point
+`ACTRADECK_TEST_DATABASE_URL` / `DATABASE_URL` at a disposable database yourself — and
+removes it on exit; a production-port DSN is refused before the first migrate. A drift
+tripwire aborts loudly if the mirrored jobs gained a step or `ci.yml` gained a new job
+this mirror doesn't know about (it pins step names and the job set, not step bodies —
+those are thin wiring around scripts both sides share). The conditional
+`docker-image-scan` job is not mirrored; for image-content changes run
+`bash scripts/lib/scan-image-fs.sh` yourself. Expect a full run to take on the order of
+15–30 minutes; it is the closest local answer to "will CI be green?".
 
 ## Pull request guidelines
 

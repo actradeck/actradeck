@@ -2,27 +2,33 @@
 # CI preflight — run the ci.yml gates locally, in the same order, before pushing.
 #
 # decision 019fcdf4. Faithful local mirror of .github/workflows/ci.yml (jobs: verify, e2e,
-# migrations). Every gate command a job step runs is run here with the same env posture
+# migrations). Every gate command of the mirrored jobs runs here with the same env posture
 # (CI=true, ACTRADECK_SKIP_REAL_BIN_E2E=1, DATABASE_URL reaching the real-DB INV tests), so
-# a push that would fail CI fails on your machine first.
+# a push that would fail CI fails on your machine first. (Install/build steps duplicated
+# across CI jobs run once here — same machine — and runner toolchain pins are not mirrored.)
 #
 # Drift tripwire (fail-loud): before running anything, the step names of the mirrored jobs
 # are extracted from ci.yml and compared against the MIRRORED_STEPS list below. A step added
 # to ci.yml without updating this script aborts the preflight with instructions — the mirror
 # can go stale, but never silently.
 #
-# HONEST SCOPE: the tripwire pins step *names*, not step *bodies*. If a ci.yml step's run
-# block changes without renaming the step, this mirror can lag until the next reconciliation
+# HONEST SCOPE: the tripwire pins step *names* of the mirrored jobs plus the ci.yml *job
+# set* (an unknown new job aborts — TDA-1), not step *bodies*: if a step's run block
+# changes without renaming the step, this mirror can lag until the next reconciliation
 # (the inline bodies here are deliberately small; the heavy logic lives in shared scripts —
 # scripts/ci/assert-inv-ran.mjs, scripts/test-*.sh, pnpm scripts — which both sides call, so
-# body drift is confined to the thin wiring below). The docker-image-scan job is not
-# mirrored (conditional, slow); run `bash scripts/lib/scan-image-fs.sh` manually for image
-# content changes.
+# body drift is confined to the thin wiring below). Steps written name-second (after
+# `uses:`) or unnamed are also invisible to the name extractor (QA-2) — the current ci.yml
+# has none in the mirrored jobs; keep new steps name-first. The docker-image-scan and
+# changes jobs are known and deliberately not mirrored (conditional, slow); run
+# `bash scripts/lib/scan-image-fs.sh` manually for image content changes.
 #
 # Database: uses ACTRADECK_TEST_DATABASE_URL or DATABASE_URL if set; otherwise provisions a
 # disposable Postgres container on 127.0.0.1:5456 (removed on exit; keep with
-# PREFLIGHT_KEEP_PG=1). Never points at the production Postgres (:55432) — the test harness
-# guard (packages/event-model test-db-guard) refuses it anyway.
+# PREFLIGHT_KEEP_PG=1). A preset URL is refused BEFORE the first migrate if it targets the
+# production Postgres port (55432 / ACTRADECK_PG_PORT) — the check reuses the canonical
+# test-harness guard (packages/event-model test-db-guard, SEC-1); the harness guard itself
+# then protects the test steps a second time.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -72,15 +78,23 @@ migrations:Migrate up again (idempotent re-apply)
 EOF
 )
 
+# Jobs this mirror knows about: mirrored ones run here; the rest are deliberately not
+# mirrored (documented in the header). Any job outside BOTH sets trips the drift check.
+MIRRORED_JOBS="verify e2e migrations"
+KNOWN_NOT_MIRRORED_JOBS="changes docker-image-scan"
+
 extract_ci_steps() {
   # Print "job:step name" for every named step of the mirrored jobs, in file order.
-  # ci.yml layout contract: jobs are 2-space-indented keys; step names are `- name:` at
-  # 6-space indent. `name: CI` (column 0) never matches the 2-space job pattern.
+  # ci.yml layout contract: job keys are 2-space-indented under the top-level `jobs:` map
+  # (the in_jobs gate keeps 2-space keys under `on:` etc. from being taken for jobs); step
+  # names are `- name:` at 6-space indent. `name: CI` (column 0) never matches.
   awk '
-    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+    /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+    /^[A-Za-z0-9_-]+:/    { in_jobs = 0 }
+    in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
       job = $1; sub(/:$/, "", job); next
     }
-    /^      - name: / {
+    in_jobs && /^      - name: / {
       if (job == "verify" || job == "e2e" || job == "migrations") {
         line = $0; sub(/^      - name: /, "", line); print job ":" line
       }
@@ -88,7 +102,36 @@ extract_ci_steps() {
   ' "$CI_YML"
 }
 
+extract_ci_jobs() {
+  # Print every job key of the top-level `jobs:` map, in file order (TDA-1: a NEW job is
+  # how gates actually grow — docker-image-scan was one — so the job set is pinned too).
+  awk '
+    /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+    /^[A-Za-z0-9_-]+:/    { in_jobs = 0 }
+    in_jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+      job = $1; sub(/:$/, "", job); print job
+    }
+  ' "$CI_YML"
+}
+
 drift_check() {
+  # 1. Job-set pin (TDA-1): every ci.yml job must be either mirrored or known-not-mirrored.
+  local job known unknown=""
+  for job in $(extract_ci_jobs); do
+    known=0
+    for k in $MIRRORED_JOBS $KNOWN_NOT_MIRRORED_JOBS; do
+      [ "$job" = "$k" ] && known=1 && break
+    done
+    [ $known -eq 0 ] && unknown="$unknown $job"
+  done
+  if [ -n "$unknown" ]; then
+    echo "DRIFT TRIPWIRE: new CI job(s) not classified by scripts/ci-preflight.sh:$unknown" >&2
+    echo "Mirror each new job here (MIRRORED_JOBS + MIRRORED_STEPS + a runner) or, if it is" >&2
+    echo "deliberately local-unmirrorable, add it to KNOWN_NOT_MIRRORED_JOBS with a header note." >&2
+    exit 1
+  fi
+
+  # 2. Step-name pin for the mirrored jobs (order-sensitive full match).
   local actual expected
   actual="$(extract_ci_steps)"
   expected="$MIRRORED_STEPS"
@@ -101,7 +144,7 @@ drift_check() {
     echo "Update MIRRORED_STEPS and the runner in scripts/ci-preflight.sh to match ci.yml." >&2
     exit 1
   fi
-  echo "drift tripwire: ci.yml mirrored-job steps match ($(printf '%s\n' "$expected" | wc -l) steps)."
+  echo "drift tripwire: ci.yml job set + mirrored-job steps match ($(printf '%s\n' "$expected" | wc -l) steps)."
 }
 
 # ---------------------------------------------------------------------------
@@ -116,14 +159,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# SEC-1: refuse a production-port DSN BEFORE anything (the first migrate above all) touches
+# the database. Reuses the canonical test-harness guard from the event-model dist — a second
+# hand-written port parser here would be exactly the drift the canonical one exists to
+# prevent. Called after the workspace build (dist present); a missing/broken dist fails
+# CLOSED (a guard that cannot load must not wave traffic through).
+preflight_db_guard() {
+  local url="$1"
+  node -e '
+    const url = process.argv[1];
+    import("./packages/event-model/dist/test-db-guard.js")
+      .then((g) => {
+        g.applyTestDatabaseGuard({ ...process.env, DATABASE_URL: url });
+        console.log("db guard: DATABASE_URL is not a production-port DSN.");
+      })
+      .catch((e) => {
+        console.error("preflight db guard: " + e.message);
+        process.exit(1);
+      });
+  ' "$url"
+}
+
 provision_db() {
   if [ -n "${ACTRADECK_TEST_DATABASE_URL:-}" ]; then
     export DATABASE_URL="$ACTRADECK_TEST_DATABASE_URL"
     echo "db: using ACTRADECK_TEST_DATABASE_URL"
+    preflight_db_guard "$DATABASE_URL"
     return
   fi
   if [ -n "${DATABASE_URL:-}" ]; then
     echo "db: using preset DATABASE_URL"
+    preflight_db_guard "$DATABASE_URL"
     return
   fi
   echo "db: starting disposable Postgres container on 127.0.0.1:5456 ($PREFLIGHT_PG_CONTAINER)"
@@ -201,6 +267,11 @@ run_verify_job() {
   step "verify: Release prep gate"
   bash scripts/test-release-prep.sh
 
+  # DB comes online only now: the guard needs the event-model dist (built above), and no
+  # earlier step touches a database. provision_db refuses production-port preset DSNs
+  # (SEC-1) before the migrate below can apply branch migrations anywhere real.
+  provision_db
+
   step "verify: Migrate up"
   pnpm --filter @actradeck/db run migrate:up
 
@@ -211,13 +282,13 @@ run_verify_job() {
   rm -f /tmp/db-test.json
   rc=0
   pnpm --filter @actradeck/db exec vitest run --reporter=json --outputFile=/tmp/db-test.json || rc=$?
-  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/db-test.json "db real-DB INV" "INV-EVENT-DB-INTEGRITY"
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/db-test.json --suite db
 
   step "verify: Assert backend real-DB INV actually RAN"
   rm -f /tmp/backend-test.json
   rc=0
   pnpm --filter @actradeck/backend exec vitest run --reporter=json --outputFile=/tmp/backend-test.json || rc=$?
-  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/backend-test.json "backend real-DB INV" "INV-IDEMPOTENCY|INV-EVENT-ORDER|INV-EVENT-CONTRACT|INV-LIVENESS-PARITY|Ingestion server WS\\+HTTP|INV-GEMINI-OBSERVABILITY|INV-REDACTION-SUMMARY-STRADDLE|INV-REDACTION-PEM-STRADDLE|INV-REDACTION-JWT-STRADDLE|INV-REDACTION-OCCURRENCE|INV-REDACTION-BACKFILL|INV-LAST-TURN-OUTCOME-PERSIST|INV-SESSIONS-LINEAGE-PERSIST|INV-RUN-LINEAGE|INV-TERMINAL-IMMUTABLE-ACROSS-RESUME"
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/backend-test.json --suite backend
 
   step "verify: Test (backend coverage gate)"
   pnpm --filter @actradeck/backend run test:coverage
@@ -238,7 +309,7 @@ run_verify_job() {
   rm -f /tmp/sidecar-e2e.json
   rc=0
   pnpm --filter @actradeck/sidecar exec vitest run --reporter=json --outputFile=/tmp/sidecar-e2e.json || rc=$?
-  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json "sidecar egress e2e (INV-EGRESS-E2E)" "INV-EGRESS-E2E"
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-egress
 
   step "verify: Test (webui coverage gate)"
   pnpm --filter @actradeck/webui run test:coverage
@@ -275,6 +346,14 @@ run_migrations_job() {
 if [ "${1:-}" = "--drift-check" ]; then
   CI_YML="${PREFLIGHT_CI_YML:-$CI_YML}"
   drift_check
+  exit 0
+fi
+
+# --db-guard <url>: run only the SEC-1 production-port refusal (used by the metatest to
+# prove the guard is falsifiable without running a full preflight). Needs the event-model
+# dist, like the in-flow call.
+if [ "${1:-}" = "--db-guard" ]; then
+  preflight_db_guard "${2:?usage: ci-preflight.sh --db-guard <url>}"
   exit 0
 fi
 

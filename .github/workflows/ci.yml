@@ -181,12 +181,14 @@ jobs:
       #   の歯を維持。vitest は grep へパイプせず一時ファイル経由 (pipefail×SIGPIPE 非該当)。
       #   decision 019fcdf4: 解析 node は inline から scripts/ci/assert-inv-ran.mjs へ抽出
       #   (db/backend/sidecar の 3 step + scripts/ci-preflight.sh の単一出所・挙動等価)。
+      #   TDA-2: 「どの INV が実走必須か」の pattern も --suite preset として script 内に置く
+      #   (呼び出し側に raw pattern を書かない = ci.yml↔preflight の意味的中核の非 pin 2 コピー排除)。
       - name: Assert real-DB INV actually RAN (not skipped)
         run: |
           rm -f /tmp/db-test.json
           rc=0
           pnpm --filter @actradeck/db exec vitest run --reporter=json --outputFile=/tmp/db-test.json || rc=$?
-          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/db-test.json "db real-DB INV" "INV-EVENT-DB-INTEGRITY"
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/db-test.json --suite db
 
       # Phase3 ingestion: backend の実 PG INV (INV-IDEMPOTENCY / INV-EVENT-ORDER / WS server)
       #   が DATABASE_URL 到達時に **実走** する (skip ではなく pass) ことを保証する。
@@ -207,7 +209,7 @@ jobs:
           rm -f /tmp/backend-test.json
           rc=0
           pnpm --filter @actradeck/backend exec vitest run --reporter=json --outputFile=/tmp/backend-test.json || rc=$?
-          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/backend-test.json "backend real-DB INV" "INV-IDEMPOTENCY|INV-EVENT-ORDER|INV-EVENT-CONTRACT|INV-LIVENESS-PARITY|Ingestion server WS\\+HTTP|INV-GEMINI-OBSERVABILITY|INV-REDACTION-SUMMARY-STRADDLE|INV-REDACTION-PEM-STRADDLE|INV-REDACTION-JWT-STRADDLE|INV-REDACTION-OCCURRENCE|INV-REDACTION-BACKFILL|INV-LAST-TURN-OUTCOME-PERSIST|INV-SESSIONS-LINEAGE-PERSIST|INV-RUN-LINEAGE|INV-TERMINAL-IMMUTABLE-ACROSS-RESUME"
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/backend-test.json --suite backend
 
       # QA-2: backend もカバレッジ閾値ゲート付きで実行 (testing.md 目標。閾値割れで赤)。
       #   network 例外 (index.ts の listen / db.ts の pool 接続) は明示除外。コア
@@ -257,7 +259,7 @@ jobs:
           rm -f /tmp/sidecar-e2e.json
           rc=0
           pnpm --filter @actradeck/sidecar exec vitest run --reporter=json --outputFile=/tmp/sidecar-e2e.json || rc=$?
-          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json "sidecar egress e2e (INV-EGRESS-E2E)" "INV-EGRESS-E2E"
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-egress
 
       # 再#QA-4 (再監査 a547b9f2): webui の coverage 閾値 (vitest.config.ts: realtime core +
       #   liveness-display) を CI で実評価する。plain `vitest run` は閾値を見ないため dormant
