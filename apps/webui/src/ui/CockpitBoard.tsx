@@ -31,7 +31,7 @@ import { ThemeToggle } from "./ThemeToggle";
 import { useAuditCoverage } from "./use-audit-coverage";
 import { useDaemons } from "./use-daemons";
 import { useReadiness } from "./use-readiness";
-import { useSafetyDemo } from "./use-safety-demo";
+import { isPostDemoBoardState, useSafetyDemo } from "./use-safety-demo";
 import type { PolicyRelayTarget } from "./use-policy-admin";
 import { useRealtime } from "./use-realtime";
 import { useSessionEvents } from "./use-session-events";
@@ -115,19 +115,24 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
   // 初回 readiness パネル (board の真の空状態) でも接続中 observer daemon 数を出すため pull する。
   // 既出 /realtime/daemons の再利用 (新 endpoint なし)。session が 1 つでも観測されれば不要。
   const boardEmpty = topView === "board" && sessions.length === 0;
+  // task 019f41ec / decision 019fcdaf: 「デモだけを体験し終えた board」— 表示 session がすべて使い捨て
+  // demo-safety-* かつ ≥1 が terminal (実データのみから導出・reload 後も再現・実 session 観測で自然消滅)。
+  // このとき一覧上部に「実エージェント接続」段階案内を出すため readiness/daemons も pull する。
+  const postDemoOnly = topView === "board" && isPostDemoBoardState(sessions);
   // sweep 019f15a9 (TDA-2 副): session が relay-target のとき daemon 一覧は不要 (firstDaemonId 不使用)。
-  // policy タブ表示中 **かつ session 未接続**、または board 空状態のときだけ /realtime/daemons を pull し、
-  // 接続中の無駄 pull を抑える。
+  // policy タブ表示中 **かつ session 未接続**、または board 空状態/post-demo のときだけ /realtime/daemons を
+  // pull し、接続中の無駄 pull を抑える。
   const { daemonIds, spawnDaemonIds } = useDaemons({
-    enabled: (policyActive && connectedSessionId === null) || boardEmpty,
+    enabled: (policyActive && connectedSessionId === null) || boardEmpty || postDemoOnly,
     refreshKey: connectedCount,
   });
   const firstDaemonId = daemonIds[0];
-  // ADR 019f1972 §2b: board 空状態のとき per-agent 観測可能性 (Claude/Codex が配線されているか) を pull する。
+  // ADR 019f1972 §2b: board 空状態 (+ post-demo 段階案内) のとき per-agent 観測可能性 (Claude/Codex が
+  // 配線されているか) を pull する。
   // /realtime/readiness は全 open daemon の OR 集約 (観測 daemon 数 + per-agent boolean)。取得前は use-daemons の
   // daemonIds.length を count フォールバックに使う (どちらか取れた方で connected gate を満たす)。
   const { readiness: agentReadiness } = useReadiness({
-    enabled: boardEmpty,
+    enabled: boardEmpty || postDemoOnly,
     refreshKey: connectedCount,
   });
   // ADR 019f4cdb 後続 UI: board 表示中は per-provider 監査カバレッジ (最終受信 + gap 候補) を pull する。
@@ -505,6 +510,15 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
                           safety: { phase: safetyDemo.phase, onLaunch: safetyDemo.launch },
                           // ADR 019f4206 A段: spawn 可能 daemon への Codex Managed 起動導線 (spawn_capable のみ)。
                           codexSpawn: { spawnDaemonIds },
+                        }
+                      : {})}
+                    {...(postDemoOnly && filteredSessions.length > 0
+                      ? {
+                          // task 019f41ec: デモ完走後の段階案内 (テーブル上部)。readiness 未取得の間は
+                          // daemonIds.length を count フォールバックに使う (空状態パネルと同じ縮退)。
+                          postDemo: {
+                            readiness: agentReadiness ?? { daemonCount: daemonIds.length },
+                          },
                         }
                       : {})}
                     {...(canSearchHistory

@@ -22,6 +22,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { isTerminalStateValue } from "@actradeck/event-model";
+
 const DEMO_PATH = "/realtime/demo/safety";
 /**
  * 使い捨てデモ session_id の prefix (backend safety-demo-script.ts の正典と一致)。
@@ -40,6 +42,23 @@ export const SAFETY_DEMO_APPEARANCE_WATCHDOG_MS = 15_000;
 
 /** 起動フェーズ: 未起動 / 起動要求送信中 / 起動済み (session 掴んだ) / 失敗。 */
 export type SafetyDemoPhase = "idle" | "launching" | "running" | "error";
+
+/**
+ * task 019f41ec / decision 019fcdaf: 「デモだけを体験し終えた board」判定 (post-demo 段階案内の表示条件)。
+ * 実データのみから導出する純関数 — 表示中の session が 1 件以上あり、その **すべて** が使い捨て
+ * `demo-safety-` prefix で、かつ 1 件以上が terminal state (event-model 正典 `isTerminalStateValue`) に
+ * 達したとき true。実 session が 1 件でも観測されれば false (案内は自然消滅)。ephemeral な起動 phase に
+ * 依存しない (reload 後も観測状態から再導出できる)。
+ */
+export function isPostDemoBoardState(
+  sessions: readonly { readonly session_id: string; readonly state: string | undefined }[],
+): boolean {
+  return (
+    sessions.length > 0 &&
+    sessions.every((s) => s.session_id.startsWith(SAFETY_DEMO_SESSION_PREFIX)) &&
+    sessions.some((s) => isTerminalStateValue(s.state))
+  );
+}
 
 export interface UseSafetyDemoOptions {
   /**

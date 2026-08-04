@@ -714,6 +714,34 @@ textarea {
   color: var(--ad-status-danger-fg, var(--ad-status-warn-fg));
 }
 
+// task 019f41ec / decision 019fcdaf: デモ完走後の「実エージェント接続」段階案内 (一覧テーブル上部)。
+// 実測 readiness のみで段階表示する (架空状態を出さない)。ad-safety と同じ控えめな枠・token のみ。
+.ad-postdemo {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.5rem 0.75rem;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--ad-border-subtle);
+  border-radius: 0.5rem;
+  background: var(--ad-bg-subtle, transparent);
+  text-align: left;
+}
+
+.ad-postdemo__title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ad-fg);
+}
+
+.ad-postdemo__lead,
+.ad-postdemo__step {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  color: var(--ad-fg-muted);
+}
+
 // ADR 019f4cdb 後続 UI: Audit coverage パネル (board overview 直下・compact な per-provider gap 監視)。
 // 「監査できていない時間」を 1 行で読める密度に保つ。gap severity は色 + 語ラベルの二重符号 (a11y)。
 .ad-coverage {

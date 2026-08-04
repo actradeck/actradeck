@@ -79,7 +79,9 @@ vi.mock("../src/ui/use-daemons", () => ({
 vi.mock("../src/ui/use-readiness", () => ({
   useReadiness: () => ({ readiness: null, refresh: () => {} }),
 }));
-vi.mock("../src/ui/use-safety-demo", () => ({
+vi.mock("../src/ui/use-safety-demo", async (importOriginal) => ({
+  // isPostDemoBoardState / SAFETY_DEMO_SESSION_PREFIX は純関数/定数なので実物を使う (hook のみ差し替え)。
+  ...(await importOriginal<typeof import("../src/ui/use-safety-demo.js")>()),
   useSafetyDemo: () => ({ phase: "idle", sessionId: null, launch: () => {} }),
 }));
 vi.mock("../src/ui/use-session-events", () => ({

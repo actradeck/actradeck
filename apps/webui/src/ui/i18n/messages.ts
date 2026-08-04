@@ -173,6 +173,10 @@ const ja = {
     "エージェントごとの配線（hook 注入・rollout 検出）は `actradeck doctor` で確認できます。",
   "readiness.disconnected":
     "観測デーモンが未接続です。`./scripts/actradeck up`（または `./scripts/ad-attach install-all`）を実行してください。",
+  // task 019f41ec: Docker (cockpit-only) 経路の橋渡し — native scripts が手元に無い環境向けに、host 側
+  // sidecar を接続する docs 節をテキストで示す (外部リンク面は新設しない)。
+  "readiness.disconnectedDockerHint":
+    "Docker イメージで cockpit を動かしている場合は、host 側で sidecar を接続します（docs/docker.md の「Observing a host agent」参照）。",
   // ── per-agent 配線状態 (ADR 019f1972 §2b・観測値であり「リアルタイム」ではない) ─────────
   "readiness.agent.claude.wired": "Claude Code: 配線済み（セッションが表示されます）",
   "readiness.agent.claude.detected":
@@ -250,6 +254,13 @@ const ja = {
   "safetyDemo.launching": "デモを起動しています…",
   "safetyDemo.running": "デモ実行中：承認カードが表示されたら Deny で止めてください。",
   "safetyDemo.error": "デモを起動できませんでした。少し待って再度お試しください。",
+
+  // ── post-demo 段階案内 (task 019f41ec / decision 019fcdaf・デモ完走後の実エージェント接続への橋渡し) ──
+  // 表示条件は実データ駆動 (表示 session が全部 demo-safety-* かつ ≥1 terminal)。段階の本文は既存
+  // readiness.* キーを再利用する (文言の単一出所・二重保守しない)。
+  "postDemo.title": "セーフティデモを体験しました",
+  "postDemo.lead":
+    "いま見たのは使い捨ての教材セッションです。次は自分の実エージェントを接続すると、実際の作業がここに表示されます。",
 
   // ── liveness バッジ (liveness-display) ──────────────────────────────────
   "liveness.live": "LIVE",
@@ -994,6 +1005,10 @@ const en: Record<MessageKey, string> = {
     "Check per-agent wiring (hook injection, rollout detection) with `actradeck doctor`.",
   "readiness.disconnected":
     "No observer daemon is connected. Run `./scripts/actradeck up` (or `./scripts/ad-attach install-all`).",
+  // task 019f41ec: bridge for the Docker (cockpit-only) path — no native scripts on hand, so point at
+  // the docs section that wires a host-side sidecar (plain text, no external link surface).
+  "readiness.disconnectedDockerHint":
+    'Running the cockpit from the Docker image? Wire a host-side sidecar — see "Observing a host agent" in docs/docker.md.',
   // ── per-agent wiring state (ADR 019f1972 §2b; observed value, not "real-time") ──
   "readiness.agent.claude.wired": "Claude Code: wired up (sessions will appear here)",
   "readiness.agent.claude.detected":
@@ -1072,6 +1087,13 @@ const en: Record<MessageKey, string> = {
   "safetyDemo.launching": "Starting the demo…",
   "safetyDemo.running": "Demo running: when the approval card appears, press Deny to stop it.",
   "safetyDemo.error": "Could not start the demo. Please wait a moment and try again.",
+
+  // ── post-demo next steps (task 019f41ec / decision 019fcdaf; bridge from the demo to real agents) ──
+  // Shown only when every displayed session is a throwaway demo-safety-* session with ≥1 terminal.
+  // Step bodies reuse the existing readiness.* keys (single source of copy).
+  "postDemo.title": "You've seen the safety demo",
+  "postDemo.lead":
+    "That was a throwaway teaching session. Next, connect your own agents and your real work will show up here.",
 
   // ── liveness ──
   "liveness.live": "LIVE",
