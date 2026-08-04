@@ -17,6 +17,8 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    // SEC-2 (裁定 019fc4c6): production-DB ガード (event-model test-db-guard の単一出所)。
+    setupFiles: ["./test/setup-env.ts"],
     include: ["src/**/*.{test,spec}.ts", "test/**/*.{test,spec}.ts"],
     coverage: {
       provider: "v8",

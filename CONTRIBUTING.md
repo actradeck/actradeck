@@ -67,6 +67,24 @@ pnpm build          # production build of all tiers (incl. Next.js web UI)
 
 A change is not ready if any of these fail. CI runs the same checks on every PR.
 
+**Real-PostgreSQL invariant tests.** Suites gated on a reachable database (backend
+real-PG `INV-*`, `db` integrity, sidecar e2e) skip when no database is configured, and
+CI always runs them against a throwaway container. To run them locally, start a
+disposable PostgreSQL and pass it via `ACTRADECK_TEST_DATABASE_URL` (preferred) or
+`DATABASE_URL`:
+
+```bash
+docker run --rm -d -p 127.0.0.1:5455:5432 -e POSTGRES_USER=actradeck \
+  -e POSTGRES_PASSWORD=test_local_only -e POSTGRES_DB=actradeck postgres:17-alpine
+export PGPASSWORD=test_local_only   # keep credentials out of the URL
+DATABASE_URL=postgresql://actradeck@127.0.0.1:5455/actradeck pnpm db:migrate
+ACTRADECK_TEST_DATABASE_URL=postgresql://actradeck@127.0.0.1:5455/actradeck pnpm test
+```
+
+The test harness never adopts `DATABASE_URL` from your `.env`, and it refuses to run
+against the production PostgreSQL port (`55432`, or your `ACTRADECK_PG_PORT`) — tests
+must always use a disposable database.
+
 ## Pull request guidelines
 
 - **Conventional Commits.** Subject in English (e.g. `fix(sidecar): …`). A short
