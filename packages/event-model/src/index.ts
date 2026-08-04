@@ -207,15 +207,12 @@ export type {
 } from "./conformance.js";
 
 // test harness の production-DB 接続ガード (SEC-2・裁定 019fc4c6)。backend/webui/db/sidecar の
-// vitest setup が共有する単一出所 (runtime コードからは import しない)。
-export {
-  applyDotenvForTests,
-  applyTestDatabaseGuard,
-  forbiddenTestDbPorts,
-  isForbiddenTestDatabaseUrl,
-  DEFAULT_PROD_PG_PORT,
-  TEST_DB_URL_ENV_KEY,
-} from "./test-db-guard.js";
+// vitest setup + webui boot-smoke が共有する単一出所 (runtime コードからは import しない)。
+// barrel には cross-package 消費される 2 入口のみ載せる — 補助 (forbiddenTestDbPorts /
+// isForbiddenTestDatabaseUrl / 定数) は module 内部 + 境界テスト専用で、テストは
+// ./test-db-guard.js から直接 import する (seq-drop の computeSeqMissingLowerBound と同じ規範・
+// TDA-1・裁定 019fcd5f)。
+export { applyDotenvForTests, applyTestDatabaseGuard } from "./test-db-guard.js";
 
 /** package メタ。 */
 export const EVENT_MODEL_PACKAGE = "@actradeck/event-model" as const;

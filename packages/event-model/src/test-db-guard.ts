@@ -20,6 +20,13 @@
  * 配置: backend / webui / db / sidecar の 4 harness が共有する security gate ゆえ event-model に
  * 単一出所化する (security-gate-reuse-canonical-parser・手書きコピーは 3 面 drift の実績あり)。
  * イベント契約そのものではない (test harness 専用・runtime コードからは import しない)。
+ *
+ * HONEST SCOPE (TDA-2/QA-4・裁定 019fcd5f): 本ガードは「事故防止の床」であり敵対者境界ではない。
+ * 被覆 = 接続文字列内の port token (leading-zero 許容) + libpq fallback の PGPORT。対象外 =
+ * PGSERVICE / pg_service.conf / PGPASSFILE 等 (node-pg が port 解決に使わないことを確認済み) と、
+ * DATABASE_URL を一切設定せず PGHOST/PGPORT 等の純 PG* env だけで接続する将来の suite
+ * (現行の全 real-PG suite は DATABASE_URL gate + 明示 connectionString で接続する — この設計を
+ * 変える追加は本ガードの走査範囲変更にあたり full 監査を要する)。
  */
 
 /** 明示 opt-in のテスト用 DB URL。設定時は DATABASE_URL より優先してテストへ渡す。 */
@@ -44,10 +51,14 @@ export function forbiddenTestDbPorts(env: Record<string, string | undefined>): r
   return [...ports];
 }
 
-/** 数字境界で port token を検出 (":55432" / "port=55432" / multi-host のどこに現れても一致)。 */
+/**
+ * 数字境界で port token を検出 (":55432" / "port=55432" / multi-host のどこに現れても一致)。
+ * leading zero (":055432") も一致させる — pg-connection-string は "055432" を port 55432 に
+ * 正規化して接続するため、境界照合だけでは under-match になる (SEC-2・裁定 019fcd5f)。
+ */
 function containsPortToken(url: string, port: string): boolean {
   // port は forbiddenTestDbPorts で数字列に検証済み (regex injection 不能)。
-  const re = new RegExp(`(^|[^0-9])${port}([^0-9]|$)`);
+  const re = new RegExp(`(^|[^0-9])0*${port}([^0-9]|$)`);
   return re.test(url);
 }
 
@@ -98,8 +109,9 @@ export function applyTestDatabaseGuard(env: Record<string, string | undefined>):
   }
   const pgPort = env["PGPORT"]?.trim();
   if (pgPort !== undefined && NUMERIC_PORT_RE.test(pgPort)) {
-    const forbidden = forbiddenTestDbPorts(env);
-    if (forbidden.includes(pgPort)) {
+    // 数値比較: node-pg は PGPORT を parseInt で読むため "055432" も 55432 (SEC-2・leading zero)。
+    const forbidden = forbiddenTestDbPorts(env).map((p) => Number.parseInt(p, 10));
+    if (forbidden.includes(Number.parseInt(pgPort, 10))) {
       throw new Error(
         `Refusing to run tests: PGPORT targets port ${pgPort} (the production PostgreSQL port ` +
           `on this machine), and node-pg falls back to PGPORT when the connection string omits ` +

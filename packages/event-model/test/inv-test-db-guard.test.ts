@@ -13,14 +13,15 @@
  */
 import { describe, expect, it } from "vitest";
 
+// cross-package 入口 2 つは barrel 経由で import し「公開されていること」も同時に検証する。
+import { applyDotenvForTests, applyTestDatabaseGuard } from "../src/index.js";
+// 補助関数・定数は module 内部 + 境界テスト専用 (barrel 非公開・TDA-1)。
 import {
-  applyDotenvForTests,
-  applyTestDatabaseGuard,
   forbiddenTestDbPorts,
   isForbiddenTestDatabaseUrl,
   DEFAULT_PROD_PG_PORT,
   TEST_DB_URL_ENV_KEY,
-} from "../src/index.js";
+} from "../src/test-db-guard.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -62,6 +63,21 @@ describe("INV-TEST-DB-GUARD: applyDotenvForTests", () => {
     applyDotenvForTests("INGEST_TOKEN=from-dotenv\n", env);
     expect(env.INGEST_TOKEN).toBe("from-ci");
   });
+
+  it("pins parser boundaries: CRLF trim, one-sided quotes kept, value-embedded '=' kept (QA-3)", () => {
+    const env: Env = {};
+    applyDotenvForTests(
+      // CRLF file: split("\n") leaves "\r" — trim() must remove it from keys AND values.
+      ["CRLF_KEY=crlf-value\r", "ONE_SIDED=\"abc'", "CONNINFO=host=x port=5433\r", ""].join("\n"),
+      env,
+    );
+    // CRLF: no trailing \r may survive into the value (would corrupt later URL/port use).
+    expect(env.CRLF_KEY).toBe("crlf-value");
+    // 片側 quote は同種 start+end が揃わない限り剥がさない (防御的に原文保持)。
+    expect(env.ONE_SIDED).toBe("\"abc'");
+    // 値内の '=' は最初の '=' でのみ分割し保持する (indexOf → lastIndexOf 退行の検出)。
+    expect(env.CONNINFO).toBe("host=x port=5433");
+  });
 });
 
 describe("INV-TEST-DB-GUARD: forbidden port detection", () => {
@@ -98,6 +114,17 @@ describe("INV-TEST-DB-GUARD: forbidden port detection", () => {
   it("over-matches toward safety: the digit-bounded token matches even outside a port position", () => {
     // 文書化された安全側挙動: DB 名等に数字列が現れても拒否する (false positive は安全方向)。
     expect(isForbiddenTestDatabaseUrl("postgresql://u:p@h:5433/db_55432_x", {})).toBe("55432");
+  });
+
+  it("catches leading-zero port spellings that node-pg normalizes to the forbidden port (SEC-2)", () => {
+    // pg-connection-string は ":055432" を port 55432 に正規化して接続する — 境界照合だけだと
+    //   先行文字 '0' (数字) で境界不成立になり under-match だった (裁定 019fcd5f SEC-2)。
+    expect(isForbiddenTestDatabaseUrl("postgresql://u:p@127.0.0.1:055432/actradeck", {})).toBe(
+      "55432",
+    );
+    expect(isForbiddenTestDatabaseUrl("postgresql://u:p@127.0.0.1:0055432/actradeck", {})).toBe(
+      "55432",
+    );
   });
 });
 
@@ -165,6 +192,16 @@ describe("INV-TEST-DB-GUARD: applyTestDatabaseGuard", () => {
     };
     applyTestDatabaseGuard(env);
     expect(env.DATABASE_URL).toBe("postgresql://u:p@localhost:5432/actradeck");
+  });
+
+  it("rejects a leading-zero PGPORT via numeric comparison (SEC-2)", () => {
+    // node-pg は PGPORT を parseInt で読むため "055432" は 55432。文字列完全一致だと不一致で
+    //   すり抜けた (裁定 019fcd5f SEC-2)。
+    const env: Env = {
+      DATABASE_URL: "postgresql://actradeck@127.0.0.1/actradeck",
+      PGPORT: "055432",
+    };
+    expect(() => applyTestDatabaseGuard(env)).toThrow(/PGPORT/);
   });
 
   it("closes the libpq PGPORT fallback: port-less URL + production PGPORT throws", () => {

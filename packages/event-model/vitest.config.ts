@@ -35,6 +35,11 @@ export default defineConfig({
         //   INV-SEQ-DROP が全境界を網羅する worst 100/100/100/100 → floor 95/90/90/95 は worst の下
         //   (per-file-coverage-floor-below-worst-not-best・erosion tripwire であって target ではない)。
         "src/seq-drop.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
+        // test-db-guard.ts (production-DB 接続拒否の security gate・SEC-2/裁定 019fcd5f QA-2) =
+        //   小ファイル tripwire。純同期関数で決定的・INV-TEST-DB-GUARD が worst 100/100/100/100 まで
+        //   網羅 → floor 95/90/90/95 は worst の下 (per-file-coverage-floor-below-worst-not-best・
+        //   erosion tripwire)。PGPORT/境界分岐のテスト削除が global 集約に吸収されるのを防ぐ。
+        "src/test-db-guard.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
         // state.ts (T1 状態機械 + ADR 0014 直交軸マップ/helper・コア領域) = 小ファイル tripwire。
         //   純同期関数/写像で決定的。inv-terminal-axes + inv-event-transition が worst 100/100/100/100
         //   まで網羅 → floor 95/90/90/95 は worst の下 (per-file-coverage-floor-below-worst-not-best・
