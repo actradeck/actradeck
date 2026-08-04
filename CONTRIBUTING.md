@@ -85,6 +85,16 @@ The test harness never adopts `DATABASE_URL` from your `.env`, and it refuses to
 against the production PostgreSQL port (`55432`, or your `ACTRADECK_PG_PORT`) — tests
 must always use a disposable database.
 
+**One-command CI mirror.** `./scripts/ci-preflight.sh` runs the CI jobs (`verify`,
+`e2e`, `migrations`) locally, in the same order and with the same env posture — audit,
+lint, format, build, type-check, every coverage gate, the real-DB invariant "actually
+ran" assertions, the hook-replay e2e, and migration up/down/up. It provisions its own
+disposable Postgres on `127.0.0.1:5456` (or uses your `ACTRADECK_TEST_DATABASE_URL` /
+`DATABASE_URL` if set) and removes it on exit. A drift tripwire aborts loudly if
+`ci.yml` gained a step this mirror doesn't know about, so the script cannot go silently
+stale. Expect a full run to take on the order of 15–30 minutes; it is the closest local
+answer to "will CI be green?".
+
 ## Pull request guidelines
 
 - **Conventional Commits.** Subject in English (e.g. `fix(sidecar): …`). A short
