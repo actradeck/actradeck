@@ -71,6 +71,11 @@ export function isForbiddenTestDatabaseUrl(
  * 1. ACTRADECK_TEST_DATABASE_URL が設定されていれば DATABASE_URL へ写す (明示 test URL が優先)。
  * 2. 最終的な DATABASE_URL が forbidden port を指すなら throw (fail-loud)。未設定/空なら何もしない
  *    (real-PG テストは従来どおり describe.skipIf の skip 経路へ)。
+ * 3. DATABASE_URL が有効なとき、libpq 互換 fallback の PGPORT が forbidden port を指すなら
+ *    同様に throw する — node-pg は接続文字列に port が無いと env PGPORT へフォールバックするため、
+ *    「port なし URL + shell の PGPORT=55432」が (2) をすり抜けて production へ届きうる。
+ *    URL 側に明示 port があるケースでは PGPORT は実際には使われないが、判定を URL parse に
+ *    依存させない方針を保ち、その組合せも安全側 (拒否) に倒す。
  *
  * throw メッセージに接続文字列は含めない (credential NO-RAW)。
  */
@@ -90,6 +95,17 @@ export function applyTestDatabaseGuard(env: Record<string, string | undefined>):
         `${TEST_DB_URL_ENV_KEY} (preferred) or DATABASE_URL. ` +
         `The connection string is not echoed here because it may contain credentials.`,
     );
+  }
+  const pgPort = env["PGPORT"]?.trim();
+  if (pgPort !== undefined && NUMERIC_PORT_RE.test(pgPort)) {
+    const forbidden = forbiddenTestDbPorts(env);
+    if (forbidden.includes(pgPort)) {
+      throw new Error(
+        `Refusing to run tests: PGPORT targets port ${pgPort} (the production PostgreSQL port ` +
+          `on this machine), and node-pg falls back to PGPORT when the connection string omits ` +
+          `a port. Unset PGPORT or point it at a disposable database port.`,
+      );
+    }
   }
 }
 

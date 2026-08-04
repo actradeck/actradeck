@@ -166,4 +166,42 @@ describe("INV-TEST-DB-GUARD: applyTestDatabaseGuard", () => {
     applyTestDatabaseGuard(env);
     expect(env.DATABASE_URL).toBe("postgresql://u:p@localhost:5432/actradeck");
   });
+
+  it("closes the libpq PGPORT fallback: port-less URL + production PGPORT throws", () => {
+    // node-pg は接続文字列に port が無いと env PGPORT へフォールバックする — URL だけ見る
+    //   ガードの死角になるため、PGPORT も forbidden port 照合の対象。
+    const env: Env = {
+      DATABASE_URL: "postgresql://actradeck@127.0.0.1/actradeck",
+      PGPORT: "55432",
+    };
+    expect(() => applyTestDatabaseGuard(env)).toThrow(/PGPORT/);
+  });
+
+  it("rejects a forbidden PGPORT even when the URL carries an explicit safe port (safe-side)", () => {
+    const env: Env = {
+      DATABASE_URL: "postgresql://actradeck@127.0.0.1:5455/actradeck",
+      PGPORT: "55432",
+    };
+    expect(() => applyTestDatabaseGuard(env)).toThrow(/PGPORT/);
+  });
+
+  it("accepts a disposable PGPORT and ignores a non-numeric one", () => {
+    const ok: Env = {
+      DATABASE_URL: "postgresql://actradeck@127.0.0.1/actradeck",
+      PGPORT: "5455",
+    };
+    expect(() => applyTestDatabaseGuard(ok)).not.toThrow();
+    const junk: Env = {
+      DATABASE_URL: "postgresql://actradeck@127.0.0.1/actradeck",
+      PGPORT: "not-a-port",
+    };
+    expect(() => applyTestDatabaseGuard(junk)).not.toThrow();
+  });
+
+  it("does not evaluate PGPORT when no DATABASE_URL is set (skip path stays quiet)", () => {
+    // DATABASE_URL 不在なら real-PG suites は接続自体を試みない (describe.skipIf)。
+    //   PGPORT だけが production を指していても throw せず従来の skip 経路を保つ。
+    const env: Env = { PGPORT: "55432" };
+    expect(() => applyTestDatabaseGuard(env)).not.toThrow();
+  });
 });
