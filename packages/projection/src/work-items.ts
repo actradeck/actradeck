@@ -29,7 +29,7 @@ import {
   CheckMatch,
   ObservationFidelity,
   ObservationMethod,
-  WorkItemStatus as WorkItemStatusSchema,
+  coerceWorkItemStatus,
   deriveWorkItemId,
   isTerminalStateValue,
   toEpochMs,
@@ -169,11 +169,8 @@ function payloadString(payload: unknown, key: string): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-/** WorkItemStatus の closed-enum gate。未知/非文字列は "unknown" (forward-compat の安全側)。 */
-function gateStatus(v: unknown): WorkItemStatus {
-  const r = WorkItemStatusSchema.safeParse(v);
-  return r.success ? r.data : "unknown";
-}
+// WorkItemStatus の closed-enum gate は event-model の正準 `coerceWorkItemStatus` を使う
+// (TDA-B2-1: sidecar 3 normalizer と手書きコピーを共有・単一出所。未知/非文字列は "unknown")。
 
 function gateCheckKind(v: unknown): string | undefined {
   const r = CheckKind.safeParse(v);
@@ -323,7 +320,7 @@ function applyWorkItemUpdated(prev: WorkItemsProjection, ev: NormalizedEvent): W
     {
       id: deriveWorkItemId("task", providerTaskId),
       id_scheme: "task",
-      status: gateStatus(payloadValue(ev.payload, "status")),
+      status: coerceWorkItemStatus(payloadValue(ev.payload, "status")),
       subject: boundTurnSummary(payloadString(ev.payload, "subject")),
       ordinal: undefined,
       method: obs.method,
@@ -351,7 +348,7 @@ function applyPlanSnapshot(prev: WorkItemsProjection, ev: NormalizedEvent): Work
       {
         id,
         id_scheme: "plan",
-        status: gateStatus(payloadValue(raw, "status")),
+        status: coerceWorkItemStatus(payloadValue(raw, "status")),
         subject: boundTurnSummary(step),
         ordinal: i,
         method: undefined,

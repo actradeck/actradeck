@@ -174,6 +174,114 @@ describe("INV-WORKITEMS-B2: PostToolUse(TaskCreate/TaskUpdate) parse → work.it
   });
 });
 
+describe("INV-WORKITEMS-B2: create 二重ソース単一 work item (受入 6・create 段・TDA-B2-2 unblock)", () => {
+  /**
+   * 中核契約 (裁定 019fca13 unblock 1): create 段で同一 task が **専用 hook (TaskCreated・observed) と
+   * PostToolUse(TaskCreate・parsed) の二重ソース**で観測されても、fold は 1 pending work item へ畳む
+   * (2 pending へ**永久分裂しない**)。これは create-path の id **値**一致
+   * (TaskCreated hook `task_id` === PostToolUse(TaskCreate) `tool_response.task.id`) に依存する。
+   *
+   * **live 検証 (REAL DATA・CC 2.1.220・2026-08-04・隔離 HOME/CLAUDE_CONFIG_DIR で実 claude 起動・
+   *   1 task を作成→in_progress→完了)**: 同一 task に対し 4 チャネルの id 値が**全て "1" で一致**した:
+   *     (a) TaskCreated hook `task_id` = "1"
+   *     (b) PostToolUse(TaskCreate) `tool_response.task.id` = "1"
+   *     (c) PostToolUse(TaskUpdate) `tool_input.taskId` = "1"
+   *     (d) TaskCompleted hook `task_id` = "1"
+   *   ゆえ deriveWorkItemId("task", "1") が全チャネルで同一 → create 段の二重ソースは 1 work item に畳む。
+   *   既存 dual-source test (下) は **完了収束** (TaskUpdate↔TaskCompleted) のみ pin していたため、
+   *   create 段 (TaskCreate tool_response.task.id ↔ TaskCreated hook task_id) の等価は本 describe で pin する
+   *   (inv-redaction-workitem は意図的に別 id "1"/"2" を流すため create 一致を pin しない)。
+   */
+  function at(ev: ReturnType<typeof normalizeHook>[number], iso: string) {
+    return { ...ev, timestamp: iso };
+  }
+
+  /** live 観測形の TaskCreated hook (observed・status pending・task_id を宣言)。 */
+  function createdHook(taskId: string) {
+    return normalizeHook(
+      hook({
+        hook_event_name: "TaskCreated",
+        task_id: taskId,
+        task_subject: "probe alpha task",
+      }),
+    ).find((e) => e.event_type === "work.item.updated")!;
+  }
+
+  /** live 観測形の PostToolUse(TaskCreate) (parsed・生成 id は tool_response.task.id・status pending)。 */
+  function createTool(createdId: string) {
+    return normalizeHook(
+      hook({
+        hook_event_name: "PostToolUse",
+        tool_name: "TaskCreate",
+        tool_input: { subject: "probe alpha task", description: "probe alpha task" },
+        tool_response: { task: { id: createdId, subject: "probe alpha task" } },
+      }),
+    ).find((e) => e.event_type === "work.item.updated")!;
+  }
+
+  it("id 値一致 (live 観測 '1'): create の二重ソースが同一 provider_task_id を出す", () => {
+    const observed = createdHook("1").payload as WorkItemPayload;
+    const parsed = createTool("1").payload as WorkItemPayload;
+    // 別 field 経路 (hook task_id vs tool_response.task.id) だが同一値 (live 検証)。
+    expect(observed.provider_task_id).toBe("1");
+    expect(parsed.provider_task_id).toBe("1");
+    expect(deriveWorkItemId("task", observed.provider_task_id!)).toBe(
+      deriveWorkItemId("task", parsed.provider_task_id!),
+    );
+  });
+
+  it("observed 先着 → parsed 後着: create 二重ソースは 1 pending work item へ畳む (分裂しない)", () => {
+    const observed = createdHook("1");
+    const parsed = createTool("1");
+    const proj = reduceWorkItems(SID, [
+      at(observed, "2026-08-04T00:00:01.000Z"),
+      at(parsed, "2026-08-04T00:00:02.000Z"),
+    ]);
+    expect(proj.items).toHaveLength(1); // ← 別 id なら 2 に分裂し RED (受入 6 破綻)。
+    expect(proj.items[0]!.status).toBe("pending");
+    expect(proj.items[0]!.claimed_at).toBeUndefined(); // pending ゆえ未 claim。
+  });
+
+  it("parsed 先着 → observed 後着 (逆順) でも 1 pending work item へ畳む", () => {
+    const parsed = createTool("1");
+    const observed = createdHook("1");
+    const proj = reduceWorkItems(SID, [
+      at(parsed, "2026-08-04T00:00:01.000Z"),
+      at(observed, "2026-08-04T00:00:02.000Z"),
+    ]);
+    expect(proj.items).toHaveLength(1);
+    expect(proj.items[0]!.status).toBe("pending");
+  });
+
+  it("create→update→complete 全ライフサイクルが単一 work item に収束 (4 チャネル id 一致・live)", () => {
+    // (a) TaskCreated hook → (b) PostToolUse(TaskCreate) → (c) PostToolUse(TaskUpdate completed)
+    //   → (d) TaskCompleted hook。live で 4 チャネル id="1" ゆえ全て同一 work item。
+    const createdH = createdHook("1");
+    const createT = createTool("1");
+    const updateT = normalizeHook(
+      hook({
+        hook_event_name: "PostToolUse",
+        tool_name: "TaskUpdate",
+        tool_input: { taskId: "1", status: "completed" },
+      }),
+    ).find((e) => e.event_type === "work.item.updated")!;
+    const completedH = normalizeHook(hook({ hook_event_name: "TaskCompleted", task_id: "1" }))[0]!;
+
+    const proj = reduceWorkItems(SID, [
+      at(createdH, "2026-08-04T00:00:01.000Z"),
+      at(createT, "2026-08-04T00:00:02.000Z"),
+      at(updateT, "2026-08-04T00:00:03.000Z"),
+      at(completedH, "2026-08-04T00:00:04.000Z"),
+    ]);
+    expect(proj.items).toHaveLength(1);
+    const item = proj.items[0]!;
+    expect(item.status).toBe("completed");
+    // 単一 claim: 初 completed 観測 (t3) で claim・fidelity は最高 (observed) へ昇格。
+    expect(item.claimed_at).toBe("2026-08-04T00:00:03.000Z");
+    expect(item.claim_fidelity).toBe("observed");
+  });
+});
+
 describe("INV-WORKITEMS-B2: 二重ソース単一 claim (受入 6・fold end-to-end)", () => {
   /** normalizeHook の 1 イベントに決定的 timestamp を差す (claimed_at=初観測を検証するため)。 */
   function at(ev: ReturnType<typeof normalizeHook>[number], iso: string) {

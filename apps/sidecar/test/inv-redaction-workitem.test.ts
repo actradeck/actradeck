@@ -204,3 +204,141 @@ describe("INV-REDACTION-WORKITEM: work.item.updated subject/description が漏�
     expect(sqlJoined).toContain("provider_task_id");
   });
 });
+
+// ── SEC-B2-1 (裁定 019fca13 unblock 2・redaction 隣接) ──────────────────────────────────────────
+// provider_task_id / summary(`${subject ?? providerTaskId}`) / TaskUpdate 経路 (taskId / status) は
+// subject/description と違い **redact-first されず sink choke (redactDeep) のみに依存**する。SEC が
+// probe で安全性を実証済みだが secret 形の回帰ベクタで pin されていなかった。以下を追加する:
+//   (a) secret 形 provider_task_id (TaskCreated task_id が secret 様)  → at-rest/WS masked
+//   (b) TaskUpdate の secret 形 taskId                                 → masked
+//   (c) secret 形 status                                              → closed-enum gate で "unknown"
+//   (d) 非文字列 subject                                              → drop (workItemText が undefined)
+// (a)(b) は redactString no-op で RED (sink choke 依存)。(c)(d) は構造 gate/drop ゆえ redactString 非依存。
+const SEC_CREATE_ID = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0Kk1Ll2Mm3Nn"; // high-entropy-secret
+const SEC_UPDATE_ID = "Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1Qq0Pp9Oo8Nn7Mm"; // high-entropy-secret
+const SEC_STATUS = "Ss5Ta7Tu9Sv1Sw3Sx5Sy7Sz9Sa1Sb3Sc5Sd7Se9Sf"; // high-entropy-secret
+const SEC_SUBJECT = "Su8Bj7Ec6Tt5Se4Cr3Et2Va1Lu0Ee9Xy8Zw7Vu6Ts"; // high-entropy-secret (非文字列内)
+const SECFORM_SESSION = "redaction_workitem_secform_1";
+const SECFORM_SECRETS = [SEC_CREATE_ID, SEC_UPDATE_ID, SEC_STATUS, SEC_SUBJECT];
+
+/**
+ * 実 hook 列。secret を **redact-first されない経路** へ混入する:
+ *  - TaskCreated.task_id = secret 様 (provider_task_id + summary へ載る・subject 無しゆえ summary=providerTaskId)。
+ *  - TaskCreated.task_subject = 非文字列 (配列に secret) → drop されるべき (別 task_id は benign)。
+ *  - PostToolUse(TaskUpdate).tool_input.taskId = secret 様 / status = secret 様。
+ */
+function secformHookSequence(cwd: string): Array<Record<string, unknown>> {
+  return [
+    { session_id: SECFORM_SESSION, hook_event_name: "SessionStart", cwd, source: "startup" },
+    // (a): secret 形 provider_task_id (subject 無し → summary が providerTaskId を carry)。
+    { session_id: SECFORM_SESSION, hook_event_name: "TaskCreated", cwd, task_id: SEC_CREATE_ID },
+    // (d): 非文字列 subject (配列に secret) は drop されるべき (task_id は benign)。
+    {
+      session_id: SECFORM_SESSION,
+      hook_event_name: "TaskCreated",
+      cwd,
+      task_id: "nsub1",
+      task_subject: [SEC_SUBJECT],
+    },
+    // (b)+(c): secret 形 taskId + secret 形 status。
+    {
+      session_id: SECFORM_SESSION,
+      hook_event_name: "PostToolUse",
+      cwd,
+      tool_name: "TaskUpdate",
+      tool_input: { taskId: SEC_UPDATE_ID, status: SEC_STATUS },
+      tool_use_id: "toolu_sec",
+    },
+    { session_id: SECFORM_SESSION, hook_event_name: "SessionEnd", cwd, reason: "other" },
+  ];
+}
+
+interface WorkItemPayloadJson {
+  provider_task_id?: string;
+  status?: string;
+  subject?: string;
+}
+
+describe("INV-REDACTION-WORKITEM SEC-B2-1: provider_task_id/summary/taskId/status/非文字列 subject の secret 形", () => {
+  let sink: VerificationWsSink;
+  let sidecar: Sidecar;
+  let dbDir: string;
+  let sentJoined: string;
+  let storedRows: { event_type: string; event_json: string }[];
+
+  beforeAll(async () => {
+    sink = new VerificationWsSink();
+    await sink.listen();
+    dbDir = mkdtempSync(join(tmpdir(), "actradeck-redaction-secform-"));
+    sidecar = new Sidecar({
+      sessionId: SECFORM_SESSION,
+      wsUrl: sink.url,
+      dbPath: join(dbDir, "sidecar.db"),
+      cwd: process.cwd(),
+      approvalTimeoutMs: 50,
+    });
+    const { hookEndpoint } = await sidecar.start();
+    for (const h of secformHookSequence(process.cwd())) {
+      await postHook(hookEndpoint, h, sidecar.hookAuthToken);
+    }
+    await waitFor(() => {
+      const types = sink.received.map((r) => String(r.event.event_type));
+      return (
+        types.includes("session.ended") &&
+        types.filter((t) => t === "work.item.updated").length >= 3
+      );
+    });
+    storedRows = sidecar.store
+      .allRows()
+      .map((r) => ({ event_type: r.event_type, event_json: r.event_json }));
+    await sidecar.shutdown();
+    sentJoined = sink.received.map((r) => r.raw).join("\n");
+  }, 30_000);
+
+  afterAll(async () => {
+    await sink.close();
+    rmSync(dbDir, { recursive: true, force: true });
+  });
+
+  /** 全 work.item.updated 行の payload を parse して返す。 */
+  function workItemPayloads(): WorkItemPayloadJson[] {
+    return storedRows
+      .filter((r) => r.event_type === "work.item.updated")
+      .map((r) => (JSON.parse(r.event_json).payload ?? {}) as WorkItemPayloadJson);
+  }
+
+  it("work.item.updated が 3 件以上永続 (trivial-pass 防止)", () => {
+    expect(workItemPayloads().length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("(a)(b) secret 形 provider_task_id / taskId / summary が SQLite・WS に原文で出ない (漏れゼロ)", () => {
+    for (const raw of SECFORM_SECRETS) {
+      for (const row of storedRows) {
+        expect(row.event_json.includes(raw), `LEAK to SQLite (${raw.slice(0, 6)}…)`).toBe(false);
+      }
+      expect(sentJoined.includes(raw), `LEAK to WS (${raw.slice(0, 6)}…)`).toBe(false);
+    }
+  });
+
+  it("(a)(b) secret 形 id は [REDACTED:high-entropy-secret] へ化ける (sink choke で masked)", () => {
+    const sqlJoined = storedRows.map((r) => r.event_json).join("\n");
+    const marker = "[REDACTED:high-entropy-secret]";
+    expect(sqlJoined.includes(marker), "missing marker in SQLite").toBe(true);
+    expect(sentJoined.includes(marker), "missing marker in WS").toBe(true);
+    // provider_task_id フィールド自体が masked marker を持つ (raw serial でない)。
+    const masked = workItemPayloads().filter((p) => p.provider_task_id === marker);
+    expect(masked.length).toBeGreaterThanOrEqual(2); // TaskCreated(a) + TaskUpdate(b)。
+  });
+
+  it("(c) secret 形 status は closed-enum gate で 'unknown' へ (原文は payload に入らない・構造 drop)", () => {
+    const statuses = workItemPayloads().map((p) => p.status);
+    expect(statuses).not.toContain(SEC_STATUS);
+    expect(statuses).toContain("unknown"); // TaskUpdate の secret status が gate された結果。
+  });
+
+  it("(d) 非文字列 subject は drop される (benign task の item に subject 無し・secret 非到達)", () => {
+    const nsub = workItemPayloads().find((p) => p.provider_task_id === "nsub1");
+    expect(nsub).toBeDefined();
+    expect(nsub!.subject).toBeUndefined(); // 配列は workItemText で undefined → 載らない。
+  });
+});

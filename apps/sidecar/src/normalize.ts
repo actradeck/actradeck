@@ -20,6 +20,7 @@ import {
   type StartKind,
   type State,
   WorkItemStatus,
+  coerceWorkItemStatus,
   terminalContinuation,
 } from "@actradeck/event-model";
 
@@ -1377,17 +1378,9 @@ function workItemText(v: unknown): string | undefined {
   return s !== undefined ? summarize(s, MAX_WORK_ITEM_TEXT) : undefined;
 }
 
-/**
- * CC task 観測の raw status を `WorkItemStatus` closed-enum へ gate する (ADR 0015 §D2)。
- *
- * `work.item.updated` payload の `status` は **必須 closed enum** ゆえ、未知/非文字列を素通しすると
- * sink の discriminated-union parse が失敗しイベントが drop される。live 検証 (2026-08-04) で観測した
- * TaskUpdate の status (pending/in_progress/completed) は全て有効値。未知は "unknown" へ安全側に倒す。
- */
-function gateWorkItemStatus(v: unknown): WorkItemStatus {
-  const r = WorkItemStatus.safeParse(v);
-  return r.success ? r.data : "unknown";
-}
+// CC task 観測の raw status → `WorkItemStatus` gate は event-model の正準 `coerceWorkItemStatus` を使う
+// (TDA-B2-1: 4 site 手書きコピー廃止・単一出所)。live 検証 (2026-08-04) の TaskUpdate status
+// (pending/in_progress/completed) は全て有効値・未知は "unknown" へ安全側。
 
 /**
  * `work.item.updated` payload を組む (ADR 0015 §D2/§D7・carriage point 2)。
@@ -1717,7 +1710,7 @@ export function normalizeHook(
           description = workItemText(toolInput.description);
         } else {
           providerTaskId = nonEmptyString(toolInput.taskId);
-          status = gateWorkItemStatus(toolInput.status);
+          status = coerceWorkItemStatus(toolInput.status);
           // TaskUpdate tool_input は subject/description を載せない (live 検証) → 捏造せず欠落のまま
           //   (fold が既存 subject を保持する)。
           subject = undefined;

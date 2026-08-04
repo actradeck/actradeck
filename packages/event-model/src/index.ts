@@ -176,6 +176,7 @@ export {
   ObservationStamp,
   CapabilityEvidence,
   WorkItemIdScheme,
+  coerceWorkItemStatus,
   deriveWorkItemId,
   treeFingerprint,
 } from "./work-item.js";
