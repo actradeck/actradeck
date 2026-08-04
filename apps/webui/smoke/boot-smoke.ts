@@ -23,7 +23,9 @@
  * DB 不在: silent skip 禁止 (偽緑回避)。CI (CI=true) では明示 throw、ローカルは到達不能なら
  * 明示 throw して理由を出す (db/backend の既存 CI guard と同流儀: 走らせると決めたら実走させる)。
  *
- * teardown: backend/webui child を確実に kill しポートを解放する。DB は破壊しない (読み取りのみ)。
+ * teardown: backend/webui child を確実に kill しポートを解放する。smoke 自身の検証は読み取りのみ
+ * だが、起動した backend は listen 前に demo セッションの startup reap (prefix + TTL 有界の
+ * DELETE) を実行する — だからこそ下の production-DB ガードが必須 (SEC-1・裁定 019fcd5f)。
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -33,6 +35,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { applyTestDatabaseGuard } from "@actradeck/event-model";
 import { WebSocket } from "ws";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -40,12 +43,18 @@ const webuiDir = resolve(here, ".."); // apps/webui
 const repoRoot = resolve(webuiDir, "../.."); // repo root
 const backendDir = resolve(repoRoot, "apps/backend");
 
+// SEC-1 (裁定 019fcd5f): boot-smoke は vitest 非経由の直接 node harness ゆえ setupFiles の
+// guard が掛からない。子 backend が startup reap (DELETE) を実行するため、spawn 前にここで
+// production-port DB を fail-loud に拒否する (単一出所 = event-model test-db-guard)。
+applyTestDatabaseGuard(process.env);
+
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
   // silent skip 禁止: DB が無ければ smoke は意味を成さない。明示 throw で可視化する。
   throw new Error(
     "[boot-smoke] DATABASE_URL is required (real PostgreSQL). " +
-      "Set it (CI provides it; locally use repo .env). Refusing to silently skip a runtime gate.",
+      "Set it (CI provides it; locally start a disposable PostgreSQL — see CONTRIBUTING). " +
+      "Refusing to silently skip a runtime gate.",
   );
 }
 
