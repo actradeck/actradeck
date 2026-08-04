@@ -359,7 +359,10 @@ fi
 
 step "drift tripwire (ci.yml step-name parity)"
 drift_check
-provision_db
+# provision_db is NOT called here (SEC-R1-1): it runs inside run_verify_job, after the
+# workspace build and right before the first DB touch (Migrate up), so the canonical db
+# guard always has its dist — an early call would fail-closed on preset URLs in a fresh
+# clone and start the container long before anything needs it.
 run_verify_job
 run_e2e_job
 run_migrations_job
