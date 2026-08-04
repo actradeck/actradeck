@@ -28,6 +28,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
 const read = (rel: string): string => readFileSync(resolve(repoRoot, rel), "utf8");
 
+// TDA-R2-2 (裁定 019fcd8d): 本テストは列挙 allowlist であって discovery ではない — 5 個目の
+//   real-PG harness (新 app/package の vitest + DB 接続) を追加するときは、setup-env 配線に加えて
+//   下の ALL_SETUP_FILES / VITEST_CONFIGS へ必ず追記すること (追記を忘れても RED にならない)。
+
 /** dotenv も読む 3 harness (旧 inline ループの単一出所化元)。 */
 const DOTENV_SETUP_FILES = [
   "apps/backend/test/setup-env.ts",
