@@ -81,6 +81,14 @@ export interface SessionListItem {
    * projection key には使わない (presence/liveness は既存経路)。
    */
   readonly capture_mode?: "managed" | "attach" | "codex_rollout";
+  /**
+   * ADR 0015 §D4/§D8: この session の **自己申告完了だが未検証** な work item 数
+   * (status='completed' ∧ verification_state='unverified')。work_items 投影の query-derived 集約。
+   * **needs_attention とは分離**する (approvals + liveness の警報疲れと結合しない・§D4)。Wall/一覧は
+   * これを独立バッジで出す。**optional**(後方互換): 0 または未観測はキーを落とす (バッジ非表示)。
+   * 表示専用・projection key 非使用・秘匿値を含まない (非負整数のみ)。
+   */
+  readonly claimed_unverified_count?: number;
 }
 
 /** session 詳細 DTO (一覧 + liveness evidence 分解 + 不正遷移カウント + 承認待ち)。 */

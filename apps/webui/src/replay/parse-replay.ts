@@ -37,6 +37,65 @@ function optNumber(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+/**
+ * ADR 0015 §D4/§D8 work-items carriage を wire から DTO へ復元する (client-side fold の入力)。
+ * additive optional: 定義された値のキーだけ含める (exactOptionalPropertyTypes)。
+ * plan_items は {step, status} だけへ再射影し余剰フィールドを構造的に落とす (NO-RAW by construction)。
+ * 生 payload を独自取得せず、backend allow-list 投影の値を検証して写すのみ (security.md)。
+ */
+function parsePlanItems(
+  v: unknown,
+): readonly { readonly step: string; readonly status: string }[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: { step: string; status: string }[] = [];
+  for (const el of v) {
+    if (!isRecord(el) || typeof el.step !== "string") continue;
+    out.push({ step: el.step, status: typeof el.status === "string" ? el.status : "" });
+  }
+  return out;
+}
+
+function parseWorkItemFields(
+  v: Record<string, unknown>,
+): Partial<
+  Pick<
+    ReplayEventDTO,
+    | "provider_task_id"
+    | "work_item_status"
+    | "work_item_subject"
+    | "observation_method"
+    | "observation_fidelity"
+    | "check_kind"
+    | "check_match"
+    | "head_sha"
+    | "diff_hash"
+    | "plan_items"
+  >
+> {
+  const providerTaskId = optString(v.provider_task_id);
+  const workItemStatus = optString(v.work_item_status);
+  const workItemSubject = optString(v.work_item_subject);
+  const observationMethod = optString(v.observation_method);
+  const observationFidelity = optString(v.observation_fidelity);
+  const checkKind = optString(v.check_kind);
+  const checkMatch = optString(v.check_match);
+  const headSha = optString(v.head_sha);
+  const diffHash = optString(v.diff_hash);
+  const planItems = parsePlanItems(v.plan_items);
+  return {
+    ...(providerTaskId !== undefined ? { provider_task_id: providerTaskId } : {}),
+    ...(workItemStatus !== undefined ? { work_item_status: workItemStatus } : {}),
+    ...(workItemSubject !== undefined ? { work_item_subject: workItemSubject } : {}),
+    ...(observationMethod !== undefined ? { observation_method: observationMethod } : {}),
+    ...(observationFidelity !== undefined ? { observation_fidelity: observationFidelity } : {}),
+    ...(checkKind !== undefined ? { check_kind: checkKind } : {}),
+    ...(checkMatch !== undefined ? { check_match: checkMatch } : {}),
+    ...(headSha !== undefined ? { head_sha: headSha } : {}),
+    ...(diffHash !== undefined ? { diff_hash: diffHash } : {}),
+    ...(planItems !== undefined ? { plan_items: planItems } : {}),
+  };
+}
+
 export function parseReplayEvent(v: unknown): ReplayEventDTO | null {
   if (!isRecord(v)) return null;
   if (
@@ -78,6 +137,8 @@ export function parseReplayEvent(v: unknown): ReplayEventDTO | null {
     auto_allowed: optBool(v.auto_allowed),
     exit_code: optNumber(v.exit_code),
     elapsed_ms: optNumber(v.elapsed_ms),
+    // ADR 0015 §D4/§D8 work-items carriage (additive optional・fold 入力)。
+    ...parseWorkItemFields(v),
   };
 }
 

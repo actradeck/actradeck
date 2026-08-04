@@ -267,6 +267,20 @@ export function WallLaneRow({
               {t("wall.lane.attention")}
             </Tag>
           ) : null}
+          {/* ADR 0015 §D4/§D8: 自己申告完了だが未検証な work item 数 (query-derived)。
+              **needs_attention とは別カウント・別バッジ**で出す (警報疲れと結合しない・§D4)。
+              info トーン (danger でない) で「要監視だが承認/停止の要対応ではない」を表す。0/未観測は非表示。 */}
+          {item.claimed_unverified_count !== undefined && item.claimed_unverified_count > 0 ? (
+            <Tag
+              tone="info"
+              size="sm"
+              data-testid="wall-lane-claimed-unverified"
+              data-count={item.claimed_unverified_count}
+              title={t("wall.lane.claimedUnverified.title")}
+            >
+              {t("wall.lane.claimedUnverified", { count: item.claimed_unverified_count })}
+            </Tag>
+          ) : null}
           {/* capture provenance (ADR 019f41ec-c549): 非 managed のみバッジ。managed/欠落=無し=既定。
               detail pill と同一意味論 (observe-only とは呼ばない)・単一出所 CaptureModeBadge。 */}
           <CaptureModeBadge

@@ -65,6 +65,43 @@ export interface ReplayEventDTO {
   readonly auto_allowed: boolean | undefined;
   readonly exit_code: number | undefined;
   readonly elapsed_ms: number | undefined;
+  /**
+   * ADR 0015 §D4/§D8 work-items carriage (additive・all `| undefined`・JSON は undefined を落とす
+   * ため非 work イベントでは wire に載らない). webui は既存イベントフィードを **client-side fold**
+   * (`@actradeck/projection` `reduceWorkItems`) で work_items へ畳む。ReplayEventDTO の allow-list は
+   * fold 入力フィールドを剥がすため、fold が本番で常に空にならないよう **fold が読む payload フィールドを
+   * additive 露出**する (per-event redaction_count follow-up 019ec841 / additive subject 019eeb1d と同機構)。
+   *
+   * すべて **at-rest redacted payload** (`payload->>` 由来) の closed-enum / hash / content-free id /
+   * redacted+bounded 自由文のみ。生 provider text / 生パス / secret は載せない (NO-RAW・§D10)。
+   */
+  /**
+   * additive optional (後方互換・`capture_mode?` と同じ欠落=キー落とし方式)。非 work イベントでは
+   * キーごと落ちるため wire にも載らない。旧 backend/DTO は欠落で degrade する。
+   */
+  /** work.item.updated: provider の task id (CC serial 等・§D3 で非 secret・fold が hash 化して id 導出)。 */
+  readonly provider_task_id?: string;
+  /** work.item.updated: WorkItemStatus (closed enum・fold が coerce)。 */
+  readonly work_item_status?: string;
+  /** work.item.updated: task subject (redacted+bounded・boundTurnSummary で post-floor 有界化)。 */
+  readonly work_item_subject?: string;
+  /** work.item.updated: ObservationStamp.method (closed enum・§D7)。 */
+  readonly observation_method?: string;
+  /** work.item.updated: ObservationStamp.fidelity (closed enum・§D7)。 */
+  readonly observation_fidelity?: string;
+  /** command.*: check 分類 (CheckKind closed enum・§D6)。 */
+  readonly check_kind?: string;
+  /** command.completed: check_match (CheckMatch closed enum・§D6)。 */
+  readonly check_match?: string;
+  /** diff.updated: HEAD commit id (content-free・§D5 tree fingerprint 素材)。 */
+  readonly head_sha?: string;
+  /** diff.updated: working-tree dirty fingerprint hash (§D5)。 */
+  readonly diff_hash?: string;
+  /**
+   * turn.plan.updated: typed plan items ({step, status} のみへ再射影・§D2)。step は redacted+bounded、
+   * status は WorkItemStatus。他フィールドは backend で構造的に落とす (NO-RAW by construction)。
+   */
+  readonly plan_items?: readonly { readonly step: string; readonly status: string }[];
 }
 
 export interface ReplayEventsPage {

@@ -39,6 +39,13 @@ export default defineConfig({
         // QA-1: セーフティデモ起動フックの runtime (二度押し抑止 / NO-RAW parse 統合 / error 縮退 /
         //   TDA-2 出現 watchdog) を無検証化させないため gate に含める (safety-demo-hook.test.tsx が駆動)。
         "src/ui/use-safety-demo.ts",
+        // ADR 0015 B3 (QA-B3-2): work-items の差別化不変条件を司る純ロジックを floor 保護する。
+        //   work-items-fold (client fold == projection reduce の locale 写像・badge 単一出所) /
+        //   parse-replay (wire→DTO の NO-RAW carriage 検証) / replay-state (DTO→NormalizedEvent 復元・
+        //   fold 入力の payload 再構成) は React 非依存の pure logic ゆえ liveness-display と同カテゴリ。
+        "src/ui/work-items-fold.ts",
+        "src/replay/parse-replay.ts",
+        "src/replay/replay-state.ts",
         "src/server/**",
       ],
       exclude: ["src/**/*.{test,spec}.{ts,tsx}", "src/realtime/contract.ts"],

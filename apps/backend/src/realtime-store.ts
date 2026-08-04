@@ -61,6 +61,8 @@ interface JoinedRow {
   secret_detected: boolean | null;
   secret_redaction_count: number | null;
   secret_redaction_count_by_kind: unknown;
+  /** ADR 0015 §D4/§D8: work_items の claimed(completed) かつ unverified 件数 (query-derived・needs_attention と分離)。 */
+  claimed_unverified_count: number | null;
 }
 
 const JOIN_SELECT = `
@@ -69,7 +71,18 @@ const JOIN_SELECT = `
          ss.state, ss.current_action, ss.current_action_kind, ss.current_action_subject,
          ss.last_event_id, ss.last_event_at,
          ss.needs_attention, ss.liveness, ss.pending_approvals,
-         ss.secret_detected, ss.secret_redaction_count, ss.secret_redaction_count_by_kind
+         ss.secret_detected, ss.secret_redaction_count, ss.secret_redaction_count_by_kind,
+         -- ADR 0015 §D4/§D8: 自己申告完了だが未検証な work item 数 (query-derived 集約)。
+         -- needs_attention とは分離 (reducer の deriveNeedsAttention は不変・approvals + waiting のみ)。
+         -- 述語 status='completed' AND verification_state='unverified' は projection の canonical badge
+         -- deriveWorkItemBadge の self_claimed 分岐を **cross-tier で mirror** する (TDA-B3-1: webui panel は
+         -- badge 由来へ統一済・SQL は同意味論の別集計。両者の drift は work-items-fold の 4 状態 assert が固定)。
+         COALESCE((
+           SELECT count(*) FROM work_items wi
+            WHERE wi.session_id = ss.session_id
+              AND wi.status = 'completed'
+              AND wi.verification_state = 'unverified'
+         ), 0)::int AS claimed_unverified_count
     FROM session_state ss
     JOIN sessions s ON s.session_id = ss.session_id`;
 
@@ -152,6 +165,14 @@ function rowToListItem(r: JoinedRow): Omit<SessionListItem, "connected"> {
   // session_state に at-rest 永続済。backend はそれを **写すのみ** で再 redaction しない
   // (INV-CURRENT-ACTION-NO-LEAK は sidecar の sink choke に帰着・redactor は sidecar 専有)。
   const currentActionSubject = r.current_action_subject ?? undefined;
+  // ADR 0015 §D4/§D8: claimed-unverified 件数は **> 0 のときだけ**キーを載せる (0/未観測はバッジ非表示)。
+  //   非負整数のみ採用。needs_attention とは独立 (この値は needs_attention を一切左右しない)。
+  const claimedUnverified =
+    typeof r.claimed_unverified_count === "number" &&
+    Number.isInteger(r.claimed_unverified_count) &&
+    r.claimed_unverified_count > 0
+      ? r.claimed_unverified_count
+      : undefined;
   return {
     session_id: r.session_id,
     provider: r.provider,
@@ -171,6 +192,7 @@ function rowToListItem(r: JoinedRow): Omit<SessionListItem, "connected"> {
     // current_action_kind/subject も欠落時キーごと落とす (optional・後方互換; 表示時ローカライズ)。
     ...(currentActionKind !== undefined ? { current_action_kind: currentActionKind } : {}),
     ...(currentActionSubject !== undefined ? { current_action_subject: currentActionSubject } : {}),
+    ...(claimedUnverified !== undefined ? { claimed_unverified_count: claimedUnverified } : {}),
   };
 }
 

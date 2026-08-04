@@ -94,6 +94,19 @@ interface EventRow {
   auto_allowed: boolean | null;
   exit_code: number | null;
   elapsed_ms: number | null;
+  // ADR 0015 §D4/§D8 work-items carriage。すべて `payload->>` 由来 = at-rest redacted (sidecar choke
+  // 済) で backend は再 redaction しない。closed-enum / hash / content-free id / redacted+bounded 自由文。
+  provider_task_id: string | null;
+  work_item_status: string | null;
+  work_item_subject: string | null;
+  observation_method: string | null;
+  observation_fidelity: string | null;
+  check_kind: string | null;
+  check_match: string | null;
+  head_sha: string | null;
+  diff_hash: string | null;
+  /** turn.plan.updated の typed items (jsonb)。pg が JS 配列へ parse 済。rowToReplayEvent が {step,status} へ再射影。 */
+  plan_items: unknown;
 }
 
 export function normalizeReplayLimit(raw: unknown): number {
@@ -229,7 +242,33 @@ const EVENT_COLUMNS = `event_id,
           WHEN jsonb_typeof(metrics->'elapsed_ms') = 'number'
           THEN (metrics->>'elapsed_ms')::double precision
           ELSE NULL
-        END AS elapsed_ms`;
+        END AS elapsed_ms,
+        -- ADR 0015 §D4/§D8 work-items carriage (additive allow-list・at-rest redacted payload 由来のみ)。
+        -- work.item.updated 固有 (provider_task_id / status / subject) は当該 event_type に限定投影する
+        -- (他イベントの top-level status を work_item_status として誤搬送しない)。
+        CASE WHEN event_type = 'work.item.updated' THEN payload->>'provider_task_id' ELSE NULL END
+          AS provider_task_id,
+        CASE WHEN event_type = 'work.item.updated' THEN payload->>'status' ELSE NULL END
+          AS work_item_status,
+        CASE WHEN event_type = 'work.item.updated' THEN payload->>'subject' ELSE NULL END
+          AS work_item_subject,
+        -- SEC-B3-1 (accepted-risk・裁定 R1): 以下 6 field は work_item_status/provider_task_id/subject と違い
+        --   event_type-gate していない。これは安全: いずれも **namespace 済みキー** (observation.method/fidelity /
+        --   check_kind / check_match / head_sha / diff_hash) ゆえ specific-by-construction (共通名 status と
+        --   違い他 event_type の top-level と衝突しない)。全値が at-rest redacted + closed-enum gate (fold の
+        --   CheckKind/CheckMatch/ObservationMethod/ObservationFidelity 検証) を通り、fold は非 home event_type
+        --   では読まない (§D4 反応集合 = 5 種のみ) ため **DOM-inert** (無関係イベントに載っても描画に出ない)。
+        --   将来 event_type-gate 化 (minimality) は tech-debt sweep の follow-up。SQL 自体は本 slice で変えない
+        --   (scan scope を変えると監査が full 昇格するため・targeted 維持)。
+        payload->'observation'->>'method' AS observation_method,
+        payload->'observation'->>'fidelity' AS observation_fidelity,
+        payload->>'check_kind' AS check_kind,
+        payload->>'check_match' AS check_match,
+        payload->>'head_sha' AS head_sha,
+        payload->>'diff_hash' AS diff_hash,
+        -- typed plan items は jsonb のまま取り出し JS 側で {step,status} へ再射影する (NO-RAW by
+        -- construction: 余剰フィールドを構造的に落とす)。turn.plan.updated 以外は NULL。
+        CASE WHEN event_type = 'turn.plan.updated' THEN payload->'items' ELSE NULL END AS plan_items`;
 
 /**
  * turn.started / turn.completed の DTO 搬送有界化 (gemini-obs SEC-3=TDA-3・防御的 bound)。
@@ -244,6 +283,67 @@ const EVENT_COLUMNS = `event_id,
  */
 function isTurnSummaryEventType(eventType: string): boolean {
   return eventType === "turn.started" || eventType === "turn.completed";
+}
+
+/**
+ * ADR 0015 §D2/§D8/§D10: turn.plan.updated の jsonb items を **{step, status} だけへ再射影**する
+ * (NO-RAW by construction: 余剰フィールドを構造的に落とす)。step は redacted+bounded (projection 正典
+ * `boundTurnSummary` で post-floor 有界化・redact→bound 順)。非配列 / step 非文字列は skip。
+ * status は closed-enum の生値を素通しし、webui fold 側 (`coerceWorkItemStatus`) が gate する。
+ */
+function projectPlanItems(
+  raw: unknown,
+): readonly { readonly step: string; readonly status: string }[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: { step: string; status: string }[] = [];
+  for (const el of raw) {
+    if (typeof el !== "object" || el === null) continue;
+    const o = el as Record<string, unknown>;
+    if (typeof o.step !== "string") continue;
+    const step = boundTurnSummary(o.step);
+    if (step === undefined) continue;
+    out.push({ step, status: typeof o.status === "string" ? o.status : "" });
+  }
+  return out;
+}
+
+/**
+ * ADR 0015 §D4/§D8 work-items carriage を **定義された値のキーだけ** の部分オブジェクトへ組む
+ * (exactOptionalPropertyTypes: undefined を明示代入しない・欠落=キー落とし=wire 非搬送)。
+ * closed-enum / hash / content-free id は素通し (webui fold が gate)。work_item_subject と plan step は
+ * 防御的に post-floor 有界化 (redact→bound 順)。
+ */
+function workItemCarriage(
+  row: EventRow,
+): Pick<
+  ReplayEventDTO,
+  | "provider_task_id"
+  | "work_item_status"
+  | "work_item_subject"
+  | "observation_method"
+  | "observation_fidelity"
+  | "check_kind"
+  | "check_match"
+  | "head_sha"
+  | "diff_hash"
+  | "plan_items"
+> {
+  const subject = boundTurnSummary(row.work_item_subject ?? undefined);
+  const planItems = projectPlanItems(row.plan_items);
+  return {
+    ...(row.provider_task_id !== null ? { provider_task_id: row.provider_task_id } : {}),
+    ...(row.work_item_status !== null ? { work_item_status: row.work_item_status } : {}),
+    ...(subject !== undefined ? { work_item_subject: subject } : {}),
+    ...(row.observation_method !== null ? { observation_method: row.observation_method } : {}),
+    ...(row.observation_fidelity !== null
+      ? { observation_fidelity: row.observation_fidelity }
+      : {}),
+    ...(row.check_kind !== null ? { check_kind: row.check_kind } : {}),
+    ...(row.check_match !== null ? { check_match: row.check_match } : {}),
+    ...(row.head_sha !== null ? { head_sha: row.head_sha } : {}),
+    ...(row.diff_hash !== null ? { diff_hash: row.diff_hash } : {}),
+    ...(planItems !== undefined ? { plan_items: planItems } : {}),
+  };
 }
 
 export function rowToReplayEvent(row: EventRow): ReplayEventDTO {
@@ -275,6 +375,8 @@ export function rowToReplayEvent(row: EventRow): ReplayEventDTO {
     auto_allowed: value(row.auto_allowed),
     exit_code: value(row.exit_code),
     elapsed_ms: value(row.elapsed_ms),
+    // ADR 0015 §D4/§D8 work-items carriage (定義済みキーだけ additive)。
+    ...workItemCarriage(row),
   };
 }
 

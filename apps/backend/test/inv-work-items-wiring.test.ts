@@ -15,11 +15,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { reduceWorkItems, type WorkItem } from "@actradeck/projection";
-import type { NormalizedEvent } from "@actradeck/event-model";
+import { parseEvent, type NormalizedEvent } from "@actradeck/event-model";
 import { Pool } from "pg";
 
 import { IngestStore } from "../src/ingest-store.js";
+import { RealtimeStore } from "../src/realtime-store.js";
+import { MAX_REPLAY_LIMIT, ReplayStore } from "../src/replay-store.js";
 import { cleanupSessions, dbReachable, iso, makeEvent } from "./helpers.js";
+
+import type { ReplayEventDTO } from "../src/replay-contract.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const reachable = DATABASE_URL ? await dbReachable(DATABASE_URL) : false;
@@ -46,6 +50,49 @@ function msOrNull(d: Date | null): number | null {
 }
 function isoMsOrNull(s: string | undefined): number | null {
   return s === undefined ? null : new Date(s).getTime();
+}
+
+/**
+ * QA-B3-1 = SEC-B3-2 = TDA-B3-3 (carriage round-trip): 読み戻した ReplayEventDTO を **本番 webui と同一
+ * 経路で** NormalizedEvent へ復元する。webui の `replayDtoToEvent` (apps/webui/src/replay/replay-state.ts
+ * `dtoPayload`) を backend test から import せず等価コピーする (パッケージ跨ぎ import を避ける・別ツリー)。
+ * fold 入力へ写す payload 形は projection `reduceWorkItems` が読む形と同一で、これで
+ * EVENT_COLUMNS → DTO → fold の**貫通**を検証する (手作り EventRow ではなく実 SQL を通す)。
+ */
+function dtoToEvent(dto: ReplayEventDTO): NormalizedEvent {
+  const payload: Record<string, unknown> = {
+    ...(dto.request_id !== undefined ? { request_id: dto.request_id } : {}),
+    ...(dto.command !== undefined ? { command: dto.command } : {}),
+    ...(dto.exit_code !== undefined ? { exit_code: dto.exit_code } : {}),
+    ...(dto.provider_task_id !== undefined ? { provider_task_id: dto.provider_task_id } : {}),
+    ...(dto.work_item_status !== undefined ? { status: dto.work_item_status } : {}),
+    ...(dto.work_item_subject !== undefined ? { subject: dto.work_item_subject } : {}),
+    ...(dto.observation_method !== undefined || dto.observation_fidelity !== undefined
+      ? {
+          observation: {
+            ...(dto.observation_method !== undefined ? { method: dto.observation_method } : {}),
+            ...(dto.observation_fidelity !== undefined
+              ? { fidelity: dto.observation_fidelity }
+              : {}),
+          },
+        }
+      : {}),
+    ...(dto.check_kind !== undefined ? { check_kind: dto.check_kind } : {}),
+    ...(dto.check_match !== undefined ? { check_match: dto.check_match } : {}),
+    ...(dto.head_sha !== undefined ? { head_sha: dto.head_sha } : {}),
+    ...(dto.diff_hash !== undefined ? { diff_hash: dto.diff_hash } : {}),
+    ...(dto.plan_items !== undefined ? { items: dto.plan_items } : {}),
+  };
+  return parseEvent({
+    event_id: dto.event_id,
+    provider: dto.provider,
+    source: dto.source,
+    session_id: dto.session_id,
+    event_type: dto.event_type,
+    ...(dto.state !== undefined ? { state: dto.state } : {}),
+    timestamp: dto.timestamp,
+    payload,
+  });
 }
 
 describe.skipIf(!reachable)("INV-WORKITEMS-WIRING (real Postgres)", () => {
@@ -181,6 +228,56 @@ describe.skipIf(!reachable)("INV-WORKITEMS-WIRING (real Postgres)", () => {
     expect(item.verified_tree_fp).toBeDefined();
 
     assertParity(await fetchRows(sid), expected.items);
+  });
+
+  it("§D4/§D8: claimed_unverified_count は query-derived で needs_attention と分離 (Wall バッジ源)", async () => {
+    const store = new IngestStore({ pool });
+    const rstore = new RealtimeStore(pool, []);
+    const sid = newSession("wi_wallcount");
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        state: "starting",
+        event_type: "session.started",
+        timestamp: iso(base, 0),
+      }),
+    );
+    // completed だが check 無し = unverified な work item を 1 件。
+    await store.ingest(planCompleted(sid, 10));
+
+    const claimed = await rstore.listItem(sid);
+    expect(claimed?.claimed_unverified_count).toBe(1);
+    // 分離の核: 未検証件数は needs_attention を **一切立てない** (承認/待ちのみが要対応)。
+    expect(claimed?.needs_attention).toBe(false);
+
+    // 合格 check で passed になると unverified 集合から外れ、count は 0 (キー落ち)。
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "diff.updated",
+        state: "running.file_editing",
+        timestamp: iso(base, 20),
+        payload: { kind: "diff.updated", diff_hash: "h1", head_sha: "sha1" },
+      }),
+    );
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "command.completed",
+        state: "running.model_wait",
+        timestamp: iso(base, 30),
+        payload: {
+          kind: "command.completed",
+          exit_code: 0,
+          check_kind: "test",
+          check_match: "program",
+          request_id: "r1",
+        },
+      }),
+    );
+    const verified = await rstore.listItem(sid);
+    expect(verified?.claimed_unverified_count).toBeUndefined(); // 0 はキー落とし (バッジ非表示)。
+    expect(verified?.needs_attention).toBe(false);
   });
 
   it("冪等: re-ingesting the same event_id does not double-fold work_items", async () => {
@@ -634,5 +731,231 @@ describe.skipIf(!reachable)("INV-WORKITEMS-WIRING (real Postgres)", () => {
       [sid],
     );
     expect(rows[0]!.n).toBe(0);
+  });
+
+  // ── QA-B3-1 = SEC-B3-2 = TDA-B3-3 (3 lane 収束・裁定 R1 unblock): EVENT_COLUMNS SQL carriage 貫通 ──
+  //
+  // 背景: fold-parity INV (受入14・B3 差別化不変条件) は「webui client fold == projection reduceWorkItems」
+  //   だが、既存テストは wire DTO / EventRow を **手作り** し backend SQL (replay-store.ts の EVENT_COLUMNS)
+  //   を通らなかった。EVENT_COLUMNS から carriage カラムや CASE gate を落としても既存テストは全緑になり、
+  //   本番 WorkItemsPanel が silent-empty になる回帰を CI が捕まえられなかった (guard が偽)。
+  //   ここは **実 PG へ ingest → ReplayStore.eventsPage で読み戻し → DTO の carriage を実 SQL 経由で検証**
+  //   する。falsify: EVENT_COLUMNS からカラムを 1 個削ると full-fold parity が RED、CASE gate を外すと
+  //   非 home gate テストが RED (report 参照)。
+  describe("carriage round-trip (real ingest → ReplayStore.eventsPage → DTO)", () => {
+    let replay: ReplayStore;
+    beforeAll(() => {
+      replay = new ReplayStore(pool);
+    });
+
+    /** eventsPage で当該 session の全 DTO を timestamp ASC で読み戻す。 */
+    async function readDtos(sid: string): Promise<readonly ReplayEventDTO[]> {
+      const page = await replay.eventsPage({ sessionId: sid, limit: MAX_REPLAY_LIMIT });
+      expect(page.has_more).toBe(false); // 本テストは 1 ページに収まる規模。
+      return page.events;
+    }
+
+    it("QA-B3-1: full fold parity — reduceWorkItems(EVENT_COLUMNS DTOs) == reduceWorkItems(ingested events)", async () => {
+      const store = new IngestStore({ pool });
+      const sid = newSession("wi_carriage_parity");
+      // work.item.updated (provider_task_id/status/subject/observation) + turn.plan.updated (plan item) +
+      //   command.started/completed (check_kind/check_match) + diff.updated (head_sha/diff_hash) を貫く。
+      const events: NormalizedEvent[] = [
+        makeEvent({
+          session_id: sid,
+          state: "starting",
+          event_type: "session.started",
+          timestamp: iso(base, 0),
+        }),
+        makeEvent({
+          session_id: sid,
+          event_type: "work.item.updated",
+          state: "running.model_streaming",
+          timestamp: iso(base, 10),
+          payload: {
+            kind: "work.item.updated",
+            provider_task_id: "task-7",
+            status: "completed",
+            subject: "wire up the parser",
+            observation: { method: "official_hook", fidelity: "observed" },
+          },
+        }),
+        // TDA-B3-3: plan item を必ず 1 件通す (projectPlanItems が fold の読む step+status を運ぶ coupling)。
+        makeEvent({
+          session_id: sid,
+          event_type: "turn.plan.updated",
+          state: "running.planning",
+          timestamp: iso(base, 20),
+          payload: {
+            kind: "turn.plan.updated",
+            items: [{ step: "ship the feature", status: "in_progress" }],
+            steps: ["ship the feature"],
+          },
+        }),
+        makeEvent({
+          session_id: sid,
+          event_type: "diff.updated",
+          state: "running.file_editing",
+          timestamp: iso(base, 30),
+          payload: { kind: "diff.updated", diff_hash: "dh1", head_sha: "hs1" },
+        }),
+        makeEvent({
+          session_id: sid,
+          event_type: "command.started",
+          state: "running.command_executing",
+          timestamp: iso(base, 40),
+          payload: {
+            kind: "command.started",
+            command: "vitest run",
+            check_kind: "test",
+            check_match: "program",
+            request_id: "rq1",
+          },
+        }),
+        makeEvent({
+          session_id: sid,
+          event_type: "command.completed",
+          state: "running.model_wait",
+          timestamp: iso(base, 50),
+          payload: {
+            kind: "command.completed",
+            exit_code: 0,
+            check_kind: "test",
+            check_match: "program",
+            request_id: "rq1",
+          },
+        }),
+      ];
+      for (const ev of events) await store.ingest(ev);
+
+      const dtos = await readDtos(sid);
+      // 本番 webui と同一の DTO→event 復元で fold し、ingest した canonical 列の fold と **完全一致**。
+      //   EVENT_COLUMNS が carriage カラムを 1 個でも落とすと DTO からその値が欠け fold が乖離し RED。
+      const reconstructed = dtos.map(dtoToEvent);
+      expect(reduceWorkItems(sid, reconstructed)).toEqual(reduceWorkItems(sid, events));
+
+      // 中身の健全性 (silent-empty でない): task item は completed かつ passed (検証済) に畳まれる。
+      const proj = reduceWorkItems(sid, reconstructed);
+      const task = proj.items.find((i) => i.id_scheme === "task");
+      expect(task?.status).toBe("completed");
+      expect(task?.verification_state).toBe("passed");
+      expect(task?.subject).toBe("wire up the parser");
+      const plan = proj.items.find((i) => i.id_scheme === "plan");
+      expect(plan?.status).toBe("in_progress"); // plan item carriage (step+status) 貫通。
+    });
+
+    it("QA-B3-1: each carriage field survives DB→DTO (per-field pin)", async () => {
+      const store = new IngestStore({ pool });
+      const sid = newSession("wi_carriage_fields");
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          event_type: "work.item.updated",
+          state: "running.model_streaming",
+          timestamp: iso(base, 10),
+          payload: {
+            kind: "work.item.updated",
+            provider_task_id: "task-9",
+            status: "completed",
+            subject: "carry the subject",
+            observation: { method: "official_api", fidelity: "authoritative" },
+          },
+        }),
+      );
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          event_type: "turn.plan.updated",
+          state: "running.planning",
+          timestamp: iso(base, 20),
+          payload: {
+            kind: "turn.plan.updated",
+            items: [{ step: "do the thing", status: "pending" }],
+          },
+        }),
+      );
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          event_type: "diff.updated",
+          state: "running.file_editing",
+          timestamp: iso(base, 30),
+          payload: { kind: "diff.updated", diff_hash: "dh2", head_sha: "hs2" },
+        }),
+      );
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          event_type: "command.completed",
+          state: "running.model_wait",
+          timestamp: iso(base, 40),
+          payload: {
+            kind: "command.completed",
+            exit_code: 0,
+            check_kind: "lint",
+            check_match: "script",
+            request_id: "rq2",
+          },
+        }),
+      );
+
+      const byType = new Map<string, ReplayEventDTO>();
+      for (const dto of await readDtos(sid)) byType.set(dto.event_type, dto);
+
+      const wi = byType.get("work.item.updated")!;
+      expect(wi.provider_task_id).toBe("task-9"); // §D3 content-free id 素材。
+      expect(wi.work_item_status).toBe("completed"); // closed enum (fold が coerce)。
+      expect(wi.work_item_subject).toBe("carry the subject"); // redacted+bounded 自由文。
+      expect(wi.observation_method).toBe("official_api"); // §D7 closed enum。
+      expect(wi.observation_fidelity).toBe("authoritative");
+
+      const plan = byType.get("turn.plan.updated")!;
+      expect(plan.plan_items).toEqual([{ step: "do the thing", status: "pending" }]); // §D2 {step,status}。
+
+      const diff = byType.get("diff.updated")!;
+      expect(diff.head_sha).toBe("hs2"); // §D5 tree fingerprint 素材。
+      expect(diff.diff_hash).toBe("dh2");
+
+      const cmd = byType.get("command.completed")!;
+      expect(cmd.check_kind).toBe("lint"); // §D6 closed enum。
+      expect(cmd.check_match).toBe("script");
+    });
+
+    it("SEC-B3-2: non-home event_type gate — command.completed の top-level status/provider_task_id/subject は work_item_* に載らない (CASE gate)", async () => {
+      const store = new IngestStore({ pool });
+      const sid = newSession("wi_carriage_gate");
+      // command.completed に **共通名の top-level payload** (status/provider_task_id/subject) を持たせる。
+      //   payload は looseObject ゆえ余剰キーは at-rest に載る。EVENT_COLUMNS の CASE gate
+      //   (`WHEN event_type='work.item.updated'`) が効いていれば、これらは work_item_* へ搬送されない。
+      await store.ingest(
+        makeEvent({
+          session_id: sid,
+          event_type: "command.completed",
+          state: "running.model_wait",
+          timestamp: iso(base, 10),
+          payload: {
+            kind: "command.completed",
+            exit_code: 0,
+            check_kind: "test",
+            check_match: "program",
+            request_id: "rq3",
+            // 非 home event_type の top-level 共通名 (誤搬送してはならない)。
+            status: "completed",
+            provider_task_id: "not-a-task",
+            subject: "should-not-carry",
+          },
+        }),
+      );
+
+      const dtos = await readDtos(sid);
+      const cmd = dtos.find((d) => d.event_type === "command.completed")!;
+      // CASE gate が効く: work.item.updated 固有 3 フィールドは非 home では undefined。
+      expect(cmd.work_item_status).toBeUndefined();
+      expect(cmd.provider_task_id).toBeUndefined();
+      expect(cmd.work_item_subject).toBeUndefined();
+      // 非 gate の check 分類は当該 command で正当に載る (gate 対象外・§D6)。
+      expect(cmd.check_kind).toBe("test");
+      expect(cmd.check_match).toBe("program");
+    });
   });
 });

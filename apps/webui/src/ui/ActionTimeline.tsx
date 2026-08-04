@@ -13,7 +13,7 @@
  *
  * SEC: 表示する値は ActionUnit (= ReplayEventDTO allow-list 由来) のみ。生 payload 不参照。
  */
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { ActionDetailModal } from "./ActionDetailModal";
 import {
@@ -106,7 +106,13 @@ function ActionRow({ unit, onOpen }: { readonly unit: ActionUnit; readonly onOpe
 }
 
 /** raw イベント行 (従来表示・トグル時)。 */
-function RawRow({ event }: { readonly event: ReplayEventDTO }) {
+function RawRow({
+  event,
+  focused,
+}: {
+  readonly event: ReplayEventDTO;
+  readonly focused?: boolean;
+}) {
   const { locale } = useLocale();
   // 表示時ローカライズ (P2・ADR 019eeac6): 日本語焼き込みの display_text を直表示せず、
   // kind (述語テンプレート) + subject (言語非依存な構造値) から viewer locale で組み立てる。
@@ -120,6 +126,8 @@ function RawRow({ event }: { readonly event: ReplayEventDTO }) {
     <li
       className="ad-action-row ad-action-row--raw"
       data-testid={`raw-row-${event.event_id}`}
+      data-event-id={event.event_id}
+      data-focused={focused || undefined}
       data-kind={event.kind}
     >
       <div className="ad-action-row__btn ad-action-row__btn--static">
@@ -141,6 +149,12 @@ export interface ActionTimelineProps {
   readonly ariaLabel: string;
   readonly className?: string;
   readonly emptyLabel: string;
+  /**
+   * ADR 0015 §D8 evidence-ref ジャンプ先。指定されると **raw ビューへ切替え** 当該 event_id の行へ
+   * scrollIntoView する (work-items パネルの claim/check/diff 参照から呼ばれる)。undefined は無効
+   * (後方互換・既存呼び出しは不変)。
+   */
+  readonly focusEventId?: string;
 }
 
 /**
@@ -153,13 +167,31 @@ export function ActionTimeline({
   ariaLabel,
   className,
   emptyLabel,
+  focusEventId,
 }: ActionTimelineProps) {
   const { t } = useLocale();
   const [showRaw, setShowRaw] = useState(false);
   const [selected, setSelected] = useState<ActionUnit | null>(null);
   const toggleId = useId();
+  const listRef = useRef<HTMLOListElement>(null);
 
   const units = useMemo(() => foldActionUnits(events), [events]);
+
+  // evidence-ref ジャンプ (§D8): focusEventId が来たら raw ビューへ切替え当該行へスクロールする。
+  //   raw 行 (event_id 直付け) を対象にするのは、アクション単位ビューでは 1 event が畳まれて
+  //   個々の event_id 行が存在しない場合があるため (claim/diff 等は raw で確実に指せる)。
+  useEffect(() => {
+    if (focusEventId === undefined) return;
+    setShowRaw(true);
+    // 描画反映後にスクロール (raw ビュー切替の再レンダを待つ)。
+    const id = requestAnimationFrame(() => {
+      const el = listRef.current?.querySelector<HTMLElement>(
+        `[data-event-id="${CSS.escape(focusEventId)}"]`,
+      );
+      el?.scrollIntoView({ block: "center" });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [focusEventId]);
 
   return (
     <div className={["ad-action-timeline", className].filter(Boolean).join(" ")}>
@@ -190,6 +222,7 @@ export function ActionTimeline({
       </div>
 
       <ol
+        ref={listRef}
         className="ad-action-timeline__list"
         data-testid="action-timeline"
         data-view={showRaw ? "raw" : "units"}
@@ -202,7 +235,9 @@ export function ActionTimeline({
             {emptyLabel}
           </li>
         ) : showRaw ? (
-          events.map((e) => <RawRow key={e.event_id} event={e} />)
+          events.map((e) => (
+            <RawRow key={e.event_id} event={e} focused={e.event_id === focusEventId} />
+          ))
         ) : (
           units.map((u) => <ActionRow key={u.id} unit={u} onOpen={() => setSelected(u)} />)
         )}

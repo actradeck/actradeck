@@ -20,6 +20,28 @@ function dtoPayload(dto: ReplayEventDTO): Record<string, unknown> {
     ...(dto.decision !== undefined ? { decision: dto.decision } : {}),
     ...(dto.auto_allowed !== undefined ? { auto_allowed: dto.auto_allowed } : {}),
     ...(dto.exit_code !== undefined ? { exit_code: dto.exit_code } : {}),
+    // ADR 0015 §D4/§D8: work-items fold 入力を DTO carriage から payload へ復元する
+    //   (`@actradeck/projection` reduceWorkItems が読む形へ写す)。session reducer は未知フィールドを
+    //   無視するため共有しても無害 (単一 DTO→event 変換を保つ・DRY)。fold の gate (coerceWorkItemStatus /
+    //   gateObservation / gateCheckKind) が closed-enum 検証を担うため、ここは値の写しに徹する。
+    ...(dto.provider_task_id !== undefined ? { provider_task_id: dto.provider_task_id } : {}),
+    ...(dto.work_item_status !== undefined ? { status: dto.work_item_status } : {}),
+    ...(dto.work_item_subject !== undefined ? { subject: dto.work_item_subject } : {}),
+    ...(dto.observation_method !== undefined || dto.observation_fidelity !== undefined
+      ? {
+          observation: {
+            ...(dto.observation_method !== undefined ? { method: dto.observation_method } : {}),
+            ...(dto.observation_fidelity !== undefined
+              ? { fidelity: dto.observation_fidelity }
+              : {}),
+          },
+        }
+      : {}),
+    ...(dto.check_kind !== undefined ? { check_kind: dto.check_kind } : {}),
+    ...(dto.check_match !== undefined ? { check_match: dto.check_match } : {}),
+    ...(dto.head_sha !== undefined ? { head_sha: dto.head_sha } : {}),
+    ...(dto.diff_hash !== undefined ? { diff_hash: dto.diff_hash } : {}),
+    ...(dto.plan_items !== undefined ? { items: dto.plan_items } : {}),
   };
 }
 
