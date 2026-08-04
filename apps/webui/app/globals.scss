@@ -1215,6 +1215,64 @@ textarea {
   text-transform: uppercase;
 }
 
+/* ADR 0015 §D8: work-items パネル (自己申告完了 vs 検証の可視化・表示専用)。 */
+.ad-workitems {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--ad-border);
+  border-radius: var(--ad-radius, 6px);
+  background: var(--ad-surface, transparent);
+}
+.ad-workitems__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.ad-workitems__empty {
+  margin: 0;
+  color: var(--ad-fg-muted);
+  font-size: 0.85rem;
+}
+.ad-workitems__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.ad-workitem {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.5rem;
+  border: 1px solid var(--ad-border);
+  border-radius: var(--ad-radius, 6px);
+}
+.ad-workitem__head,
+.ad-workitem__evidence,
+.ad-workitem__refs {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.ad-workitem__subject {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ad-workitem__id {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+.ad-workitem__stale,
+.ad-workitem__refs-label {
+  color: var(--ad-fg-muted);
+  font-size: 0.75rem;
+}
+
 /* ADR 019f0c3e Phase 2: 承認ポリシー設定パネル (machine-global・YOLO 時のカテゴリゲート)。 */
 .ad-policy {
   display: grid;

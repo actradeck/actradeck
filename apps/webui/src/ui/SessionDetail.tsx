@@ -31,6 +31,7 @@ import { Button, Icon, InlineAlert, Table, TBody, Tag, Td, Th, THead, Tr, type T
 import { useLocale } from "./LocaleProvider";
 import { PersistedApprovalsPanel } from "./PersistedApprovalsPanel";
 import { PolicySettingsPanel } from "./PolicySettingsPanel";
+import { WorkItemsPanel } from "./WorkItemsPanel";
 import {
   effectiveLivenessState,
   heartbeatRows,
@@ -253,9 +254,11 @@ function CurrentActionPane({
 function TimelinePane({
   sessionId,
   events,
+  focusEventId,
 }: {
   readonly sessionId: string;
   readonly events: readonly ReplayEventDTO[];
+  readonly focusEventId?: string;
 }) {
   const { t } = useLocale();
   return (
@@ -266,6 +269,7 @@ function TimelinePane({
         events={events}
         ariaLabel={t("timeline.aria")}
         emptyLabel={t("timeline.empty")}
+        {...(focusEventId !== undefined ? { focusEventId } : {})}
       />
     </section>
   );
@@ -590,6 +594,9 @@ export function SessionDetailView({
   body,
 }: SessionDetailProps) {
   const { locale, t } = useLocale();
+  // ADR 0015 §D8 evidence-ref: work-items パネルの claim/check/diff 参照が指す timeline event_id。
+  //   TimelinePane → ActionTimeline へ橋渡しし raw ビューへスクロールさせる (表示専用・live gate 不変)。
+  const [focusEventId, setFocusEventId] = useState<string | undefined>(undefined);
   if (!detail) {
     return (
       <section className="ad-empty" data-testid="detail-empty">
@@ -784,9 +791,24 @@ export function SessionDetailView({
             onInterrupt={onInterrupt}
             {...(body !== undefined ? { body } : {})}
           />
-          <TimelinePane sessionId={detail.session_id} events={events} />
+          <TimelinePane
+            sessionId={detail.session_id}
+            events={events}
+            {...(focusEventId !== undefined ? { focusEventId } : {})}
+          />
           <RiskPane detail={detail} events={events} {...(body !== undefined ? { body } : {})} />
         </div>
+      ) : null}
+
+      {/* ADR 0015 §D8 work-items パネル (additive・差別化ゲート)。events を client-side fold し、
+          自己申告完了/検証済/検証失敗/検証後変更あり の 4 状態 + 観測証拠を出す。evidence-ref は
+          timeline event へジャンプする (focusEventId 経由)。events 未指定 (既存呼び出し) では出さない。 */}
+      {events !== undefined ? (
+        <WorkItemsPanel
+          sessionId={detail.session_id}
+          events={events}
+          onJumpToEvent={setFocusEventId}
+        />
       ) : null}
 
       {/* PAL-v2 (ADR 019ee147): 永続承認 allowlist の in-UI 一覧 + 失効 (machine-global・lazy pull)。 */}

@@ -19,6 +19,7 @@ import type { NormalizedEvent } from "@actradeck/event-model";
 import { Pool } from "pg";
 
 import { IngestStore } from "../src/ingest-store.js";
+import { RealtimeStore } from "../src/realtime-store.js";
 import { cleanupSessions, dbReachable, iso, makeEvent } from "./helpers.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -181,6 +182,56 @@ describe.skipIf(!reachable)("INV-WORKITEMS-WIRING (real Postgres)", () => {
     expect(item.verified_tree_fp).toBeDefined();
 
     assertParity(await fetchRows(sid), expected.items);
+  });
+
+  it("§D4/§D8: claimed_unverified_count は query-derived で needs_attention と分離 (Wall バッジ源)", async () => {
+    const store = new IngestStore({ pool });
+    const rstore = new RealtimeStore(pool, []);
+    const sid = newSession("wi_wallcount");
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        state: "starting",
+        event_type: "session.started",
+        timestamp: iso(base, 0),
+      }),
+    );
+    // completed だが check 無し = unverified な work item を 1 件。
+    await store.ingest(planCompleted(sid, 10));
+
+    const claimed = await rstore.listItem(sid);
+    expect(claimed?.claimed_unverified_count).toBe(1);
+    // 分離の核: 未検証件数は needs_attention を **一切立てない** (承認/待ちのみが要対応)。
+    expect(claimed?.needs_attention).toBe(false);
+
+    // 合格 check で passed になると unverified 集合から外れ、count は 0 (キー落ち)。
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "diff.updated",
+        state: "running.file_editing",
+        timestamp: iso(base, 20),
+        payload: { kind: "diff.updated", diff_hash: "h1", head_sha: "sha1" },
+      }),
+    );
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "command.completed",
+        state: "running.model_wait",
+        timestamp: iso(base, 30),
+        payload: {
+          kind: "command.completed",
+          exit_code: 0,
+          check_kind: "test",
+          check_match: "program",
+          request_id: "r1",
+        },
+      }),
+    );
+    const verified = await rstore.listItem(sid);
+    expect(verified?.claimed_unverified_count).toBeUndefined(); // 0 はキー落とし (バッジ非表示)。
+    expect(verified?.needs_attention).toBe(false);
   });
 
   it("冪等: re-ingesting the same event_id does not double-fold work_items", async () => {
