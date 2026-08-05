@@ -339,7 +339,7 @@ export function approvalTimeRemainingMs(
  * interrupt ボタンを **出してよい state か** (ADR 019e9999 段階③ / 段階② QA-2 配線)。
  *
  * D5: interrupt は managed claude への SIGINT 協調停止であり「実行中ツールの巻き戻し」ではない。
- * terminal (completed/failed/interrupted) では無意味なので false。それ以外の非 terminal
+ * terminal (completed/failed/interrupted/suspended・ADR 0014) では無意味なので false。それ以外の非 terminal
  * (live / running.x / waiting.x / compacting / starting / stalled / idle 等) では sidecar が
  * 安全に処理 (managed でなければ no-op) するため true。state 不明 (undefined) は安全側で false。
  *

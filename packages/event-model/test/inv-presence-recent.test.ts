@@ -8,8 +8,8 @@
  *  - external は 0<=age<=WALL_RECENT_MS のとき true・両境界含む・超過/欠落/不正 ts は false。
  *  - external の未来日時 (age<0) は下限クランプで false (SEC-1: 120s 窓超えの居座り防止)。
  *  - INV-WALL-ENDED-EXTERNAL (ADR 019f4c19 wall-ended-badge): external ∧ terminal state
- *    (completed/failed/interrupted) は age が窓内でも false(session.ended 済みは「直近 active」でない・
- *    ✓LIVE で残さない)。terminal 除外を撤去する mutation で赤。
+ *    (completed/failed/interrupted/suspended) は age が窓内でも false(session.ended 済みは「直近
+ *    active」でない・✓LIVE で残さない)。terminal 除外を撤去する mutation で赤。
  *  - 同入力同出力 (決定的)。
  */
 import { describe, expect, it } from "vitest";
@@ -93,10 +93,12 @@ describe("isPresentOrRecentlyActive (INV-PRESENCE-OR-RECENT-DETERMINISM)", () =>
     ).toBe(false);
   });
 
-  it("INV-WALL-ENDED-EXTERNAL: external ∧ terminal state (completed/failed/interrupted) は age 窓内でも false", () => {
+  it("INV-WALL-ENDED-EXTERNAL: external ∧ terminal state (completed/failed/interrupted/suspended) は age 窓内でも false", () => {
     // recency 窓内 (直近 active に見える) でも、正規化状態が terminal なら「終了済み=活動中でない」
     // ゆえ LiveWall から落とす。session.ended→completed を発火した external の ✓LIVE 誤表示を塞ぐ。
-    for (const terminal of ["completed", "failed", "interrupted"]) {
+    // suspended (ADR 0014 Phase 1 の第 4 の terminal・unload 再開可) も loop に含め、TERMINAL_STATES
+    // 全メンバの除外を固定する (Phase1 sweep QA-3)。
+    for (const terminal of ["completed", "failed", "interrupted", "suspended"]) {
       expect(
         isPresentOrRecentlyActive(
           inp({ source: "external", state: terminal, last_event_at: isoAgo(1_000) }),

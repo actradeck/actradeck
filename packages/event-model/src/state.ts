@@ -203,6 +203,11 @@ export function isFailureTerminalStateValue(state: string | undefined): boolean 
  *   gate が許容値集合を手写し (ローカル Set コピー) する drift 源を消し、runtime を単一出所へ
  *   再利用させるため (`.safeParse`/`.options` を共有・security-gate-reuse-canonical-parser)。
  *   **値は不変**: completed / failed / interrupted。`LastTurnOutcome` 型は infer に統一する。
+ *
+ * `"interrupted"` は **forward-compat メンバで現在生成経路なし** (Phase1 sweep TDA-4):
+ *   reducer (projection/index.ts) は event_type turn.completed→completed / turn.failed→failed
+ *   のみ導出し、turn 中断を outcome へ写す producer はまだ無い (将来 turn 中断シグナルを
+ *   得たときの予約値。enum から落とすと既存 DB 値の parse が壊れるため温存)。
  */
 export const LastTurnOutcome = z.enum(["completed", "failed", "interrupted"]);
 export type LastTurnOutcome = z.infer<typeof LastTurnOutcome>;

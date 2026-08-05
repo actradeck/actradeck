@@ -340,7 +340,9 @@ describe("startManagedCodex: SESSION-ID + REDACTION-TRANSPARENCY", () => {
   it("AGG-2: thread/closed before child exit → session.ended emitted once (idempotent)", async () => {
     const rig = makeRig();
     await waitHandshake(rig.identity);
-    // thread/closed 先着 → session.ended (completed)。
+    // thread/closed 先着 → session.ended (state=suspended・unload 再開可。ADR 0014 Phase 1:
+    // 旧実装の completed 写像は「正常終了」誤表示だった。Phase1 sweep QA-4 で stale comment 修正
+    // + state/end_kind を直接 assert)。
     rig.child.emitLine({ method: "thread/closed", params: { threadId: THREAD_ID } });
     await new Promise((r) => setTimeout(r, 10));
     // その後 child exit が来ても二重に出さない (sessionEnded ガード)。
@@ -348,6 +350,14 @@ describe("startManagedCodex: SESSION-ID + REDACTION-TRANSPARENCY", () => {
     await new Promise((r) => setTimeout(r, 20));
     const ended = rig.store.allRows().filter((r) => r.event_type === "session.ended");
     expect(ended.length).toBe(1);
+    const endedEv = JSON.parse(ended[0]!.event_json) as {
+      state?: string;
+      end_kind?: string;
+      recoverability?: string;
+    };
+    expect(endedEv.state).toBe("suspended");
+    expect(endedEv.end_kind).toBe("unloaded");
+    expect(endedEv.recoverability).toBe("resumable");
   });
 
   it("REDACTION-TRANSPARENCY: secret in diff/command payload is masked in SQLite (no raw leak)", async () => {

@@ -664,6 +664,56 @@ describe.skipIf(!reachable)("INV-IDEMPOTENCY / INV-EVENT-ORDER (real Postgres)",
     expect(after!.needs_attention).toBe(false);
   });
 
+  it("ADR 0014 SEC-2/QA-5 (real PG): suspended (unload terminal) clears persisted pending_approvals — no orphan approval survives re-derivation", async () => {
+    // Phase1 sweep の残余: 「suspended が pending をクリアする」は projection unit で pin 済みだが、
+    // backend の永続 round-trip (reducer 適用 → session_state upsert → RealtimeStore 読み出し) に
+    // 観測差テストが無かった。承認待ちのまま provider unload (thread/closed→suspended) した session が
+    // DB/DTO に承認カードを残さない (押しても宛先のない orphan card を出さない) ことを実 PG で固定する。
+    const sid = newSession("sess_appr_susp");
+    const base = Date.now();
+    const store = new IngestStore({ pool, livenessOptions: { nowMs: base } });
+    const rt = new RealtimeStore(pool);
+    const reqId = `${sid}:apr-susp`;
+
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "tool.permission.requested",
+        state: "waiting.approval",
+        timestamp: iso(base, -1000),
+        payload: { request_id: reqId, tool_name: "Bash", command: "npm publish" },
+      }),
+    );
+    const before = await rt.detail(sid);
+    expect(before!.pending_approvals).toHaveLength(1);
+
+    // provider unload: sidecar normalize-codex が emit する形 (state=suspended・end_kind=unloaded)。
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "session.ended",
+        state: "suspended",
+        timestamp: iso(base, -500),
+        end_kind: "unloaded",
+        recoverability: "resumable",
+        payload: { kind: "session.ended" },
+      }),
+    );
+
+    // 永続列そのもの (session_state.pending_approvals) が空 jsonb であること (DTO 整形でなく at-rest)。
+    const row = await pool.query(
+      `SELECT state, pending_approvals FROM session_state WHERE session_id = $1`,
+      [sid],
+    );
+    expect(row.rows[0].state).toBe("suspended");
+    expect(row.rows[0].pending_approvals).toEqual([]);
+
+    const after = await rt.detail(sid);
+    expect(after!.state).toBe("suspended");
+    expect(after!.pending_approvals).toHaveLength(0);
+    expect(after!.needs_attention).toBe(false);
+  });
+
   it("structural confinement (real PG): only allow-listed PendingApproval fields persist — rogue payload keys never leak", async () => {
     const sid = newSession("sess_appr_confine");
     const base = Date.now();
