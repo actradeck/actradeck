@@ -340,23 +340,29 @@ describe("INV-CONFORMANCE: adapter stream conformance checker", () => {
     expect(r.findings.map((f) => f.rule)).toContain("event-after-terminal");
   });
 
-  it("ERRORS on a re-start (created/starting) after terminal — resume must use a NEW session_id", () => {
-    const stream = [
-      ev({ session_id: "s1", seq: 0, event_type: "session.ended", state: "completed" }),
-      ev({
-        session_id: "s1",
-        seq: 1,
-        event_type: "session.started",
-        state: "starting",
-        timestamp: "2026-07-18T00:00:01.000Z",
-      }),
-    ];
-    const r = checkConformance(stream);
-    expect(r.ok).toBe(false);
-    expect(r.findings.map((f) => f.rule)).toContain("restart-after-terminal");
-    // it is the lineage-specific rule, not the generic post-terminal one
-    expect(r.findings.map((f) => f.rule)).not.toContain("event-after-terminal");
-  });
+  // Parametrized over BOTH members of INITIAL_STATES (sweep QA-1): dropping either "created" or
+  // "starting" from the canonical set silently degrades the finding to the generic
+  // event-after-terminal rule — each member needs its own red test to pin the rule label.
+  it.each(["created", "starting"] as const)(
+    "ERRORS on a re-start (%s) after terminal — resume must use a NEW session_id",
+    (initialState) => {
+      const stream = [
+        ev({ session_id: "s1", seq: 0, event_type: "session.ended", state: "completed" }),
+        ev({
+          session_id: "s1",
+          seq: 1,
+          event_type: "session.started",
+          state: initialState,
+          timestamp: "2026-07-18T00:00:01.000Z",
+        }),
+      ];
+      const r = checkConformance(stream);
+      expect(r.ok).toBe(false);
+      expect(r.findings.map((f) => f.rule)).toContain("restart-after-terminal");
+      // it is the lineage-specific rule, not the generic post-terminal one
+      expect(r.findings.map((f) => f.rule)).not.toContain("event-after-terminal");
+    },
+  );
 
   it("suspended (ADR 0014 terminal) makes a later new event a post-terminal error too", () => {
     const stream = [
