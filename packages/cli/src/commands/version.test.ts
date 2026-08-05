@@ -39,6 +39,8 @@ describe("cmdVersion", () => {
   // GFI #21: fetchOk bounds every request with AbortSignal.timeout(8000); when the timer fires,
   // fetch rejects with an AbortError-shaped error. Pin that this rejection takes the SAME
   // offline path as a DNS failure (local version printed, exit 0 — never a crash).
+  // NOTE (QA-1): today cmdVersion's catch is shape-blind, so this overlaps the ENOTFOUND test —
+  // it is an INTENT pin: if the catch ever becomes selective, "timeout == offline" must survive.
   it("an AbortError-shaped timeout rejection takes the offline path (local version, exit 0)", async () => {
     const abortErr = Object.assign(new Error("This operation was aborted"), {
       name: "AbortError",
