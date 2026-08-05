@@ -151,3 +151,40 @@ describe("PendingRoundTrips (envelope 単一出所)", () => {
     }
   });
 });
+
+describe("QA-1: timer.unref の pin (shutdown 衛生・mutation survivor の閉塞)", () => {
+  it("register が武装する timer は unref される (dispose 忘れでも event loop を掴まない)", () => {
+    // fake timers では unref の有無が観測不能 (event loop 保持を元々バイパスする) ため、
+    // real timer + globalThis.setTimeout wrap で返り timer の unref 呼び出しを spy する。
+    const realSetTimeout = globalThis.setTimeout;
+    const unrefSpies: Array<ReturnType<typeof vi.fn>> = [];
+    const wrapped = ((fn: () => void, ms?: number) => {
+      const timer = realSetTimeout(fn, ms);
+      const spy = vi.fn(() => timer.unref());
+      unrefSpies.push(spy);
+      return new Proxy(timer, {
+        get(target, prop, receiver) {
+          if (prop === "unref") return spy;
+          const v = Reflect.get(target, prop, receiver);
+          return typeof v === "function" ? v.bind(target) : v;
+        },
+      });
+    }) as typeof globalThis.setTimeout;
+    globalThis.setTimeout = wrapped;
+    try {
+      const p = new PendingRoundTrips<R>(5_000);
+      p.register(
+        "r1",
+        () => undefined,
+        () => ({ ok: false }),
+      );
+      expect(unrefSpies.length).toBe(1);
+      expect(unrefSpies[0]).toHaveBeenCalledTimes(1);
+      // armed な real timer を掃く (テストプロセスを保持させない)。
+      p.rejectAll(() => ({ ok: false }));
+      expect(p.size).toBe(0);
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+  });
+});

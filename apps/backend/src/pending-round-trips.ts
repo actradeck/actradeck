@@ -18,8 +18,10 @@
  *  - `abort`: send 失敗経路。既知なら clearTimeout + delete + resolve(result)。
  *  - `rejectAll`: dispose 経路。全 pending を clearTimeout + resolve(shutdownResult())
  *    して clear する (shutdown 後に resolver が宙吊りにならない)。
- *  - request_id は呼び出し側が randomUUID で採番する (重複 register は想定外 —
- *    既存 Map.set と同じく後勝ちで、旧エントリのタイマは満了時に no-op 化する)。
+ *  - request_id は呼び出し側が randomUUID で採番する (重複 register は想定外・本番到達不能)。
+ *    万一重複させると挙動は抽出前 4 実装と同じ「後勝ち + 旧タイマ orphan 化」だが、orphan
+ *    タイマは満了時に **後勝ち側の live エントリを delete し旧 resolver を timeout 値で解決**
+ *    する (QA-2 実測・no-op ではない)。採番方式を randomUUID から変える場合はこの端を塞ぐこと。
  */
 export class PendingRoundTrips<T> {
   private readonly pending = new Map<
@@ -45,8 +47,12 @@ export class PendingRoundTrips<T> {
 
   /**
    * 応答到達: 該当 pending を破棄して resolver を返す。未知 (タイムアウト済 / 二重応答) は
-   * undefined (呼び出し側は黙殺する)。呼び出し側は返った resolver を**即時**呼ぶこと
-   * (保持すると応答が at-rest 化する)。
+   * undefined (呼び出し側は黙殺する)。
+   *
+   * ⚠️ 呼び出し側の契約 (TDA-1 L): settle が返った時点で **timeout backstop は消えている**
+   * (clearTimeout + delete 済み)。呼び出し側は**全経路で必ず** resolver を即時呼ぶこと —
+   * 途中 return / throw で呼び損ねると該当 Promise は永久 hang する (timeout 救済なし)。
+   * また resolver を保持し続けると応答が at-rest 化する (即時呼びで両方を守る)。
    */
   settle(requestId: string): ((r: T) => void) | undefined {
     const p = this.pending.get(requestId);

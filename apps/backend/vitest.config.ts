@@ -141,6 +141,11 @@ export default defineConfig({
         "src/realtime-server.ts": { statements: 94, branches: 88, functions: 90, lines: 95 },
         "src/realtime-store.ts": { statements: 87, branches: 72, functions: 95, lines: 95 },
         "src/sidecar-registry.ts": { statements: 88, branches: 72, functions: 95, lines: 95 },
+        // TDA-2 (decision 019f4241 TDA-1 の抽出着地監査): relay 安全側 deny 意味論の単一出所
+        //   (timeout/未知 id 黙殺/rejectAll) ゆえ erosion tripwire を張る。実測 100/100/100/100
+        //   (unit + relay INV 経由) → floor は worst-observed の 5-10pt 下 (per-file-coverage-floor-
+        //   below-worst-not-best・branches は unref?.() 型分岐の環境揺れを見込み広めに)。
+        "src/pending-round-trips.ts": { statements: 95, branches: 90, functions: 95, lines: 95 },
         // QA-2 (ADR 019f280c 監査): INV-SAFETY-DEMO + INV-DEMO-SPAWN-PATH-INDEPENDENT を担う
         //   INV-bearing ファイルに erosion tripwire を張る (global 90/78/92/92 だけでは silent erode)。
         //   実測 98.36/87.09/100/100。floor は WORST-observed の下 (per-file-coverage-floor-below-worst-
