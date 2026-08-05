@@ -31,7 +31,7 @@ import { newEventId } from "@actradeck/event-model";
 
 import { runAgentDoctorCli } from "./agent-visibility.js";
 import { ApprovalAllowlistStore } from "./approval-allowlist-store.js";
-import { mintSyntheticSessionId } from "./session-identity.js";
+import { mintSyntheticSessionId, type LaunchLineage } from "./session-identity.js";
 import { runApprovalsCli } from "./approvals-cli.js";
 import { Sidecar } from "./sidecar.js";
 import { AttachDaemon } from "./attach-daemon.js";
@@ -182,6 +182,43 @@ export function resolveManagedSession(idFactory: () => string = newEventId): {
   // fallback id は mintSyntheticSessionId 単一出所 (3b-1 sweep TDA-2・独立リテラル 2 箇所を統合)。
   const sessionId = env !== undefined && env.length > 0 ? env : mintSyntheticSessionId(idFactory);
   return { sessionId, explicitSession: false };
+}
+
+/** Claude Code の session id 形 (UUID)。--resume の明示値をこの shape gate で検証する。 */
+const CLAUDE_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * managed launch argv から run 起点 lineage を権威導出する (ADR 0014 follow-up・decision 019fd2ac ②)。
+ *
+ * `-c` / `--continue` / `-r` / `--resume[=<id>]` / `--resume <id>` を **positive detect したときのみ**
+ * `{ startKind: "resume", resumedFrom? }` を返す。それ以外は undefined = hook source 由来に委ねる
+ * (fresh の断定はしない — 別 flag の値が偶然 resume flag と衝突する pathological ケースで
+ * over-claim しない安全側)。resumedFrom は UUID shape gate を通った値のみ採用し、任意文字列を
+ * id 列へ載せない (NO-RAW 規律)。`--continue` / 値なし `--resume` (対話 picker) は id 不明のため
+ * startKind=resume のみ。
+ */
+export function deriveLaunchLineage(claudeArgs: readonly string[]): LaunchLineage | undefined {
+  for (let i = 0; i < claudeArgs.length; i++) {
+    const arg = claudeArgs[i]!;
+    if (arg === "-c" || arg === "--continue") {
+      return { startKind: "resume" };
+    }
+    if (arg === "-r" || arg === "--resume") {
+      const next = claudeArgs[i + 1];
+      if (next !== undefined && CLAUDE_SESSION_ID_RE.test(next)) {
+        return { startKind: "resume", resumedFrom: next.toLowerCase() };
+      }
+      return { startKind: "resume" };
+    }
+    if (arg.startsWith("--resume=")) {
+      const value = arg.slice("--resume=".length);
+      if (CLAUDE_SESSION_ID_RE.test(value)) {
+        return { startKind: "resume", resumedFrom: value.toLowerCase() };
+      }
+      return { startKind: "resume" };
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -386,12 +423,17 @@ async function main(): Promise<void> {
     );
   }
 
+  // decision 019fd2ac ②: launch argv (--resume/--continue) から gen0 lineage を権威導出する
+  // (claude provider のみ・codex は app-server 経路で argv resume を持たない)。
+  const launchLineage = provider === "claude" ? deriveLaunchLineage(claudeArgs) : undefined;
+
   const sidecar = new Sidecar({
     sessionId,
     explicitSession,
     wsUrl,
     dbPath,
     cwd: process.cwd(),
+    ...(launchLineage !== undefined ? { launchLineage } : {}),
     // 値はログに出さない。未設定時は warning 済 (上)。
     ...(ingestToken !== undefined && ingestToken.length > 0 ? { ingestToken } : {}),
     onHook: (name) => process.stderr.write(`[hook] ${name}\n`),

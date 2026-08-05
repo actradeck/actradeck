@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { resolveManagedSession } from "../src/cli.js";
+import { deriveLaunchLineage, resolveManagedSession } from "../src/cli.js";
 
 /**
  * managed mode の session 構成 (live-found 修正 / task 019e948f) の回帰固定。
@@ -39,5 +39,59 @@ describe("resolveManagedSession (managed mode は常に learn-wait)", () => {
     const r = resolveManagedSession(() => "GEN2");
     expect(r.sessionId).toBe("sess_GEN2");
     expect(r.explicitSession).toBe(false);
+  });
+});
+
+/**
+ * deriveLaunchLineage (decision 019fd2ac ②): managed launch argv からの gen0 lineage 権威導出。
+ * positive detect 時のみ返す (非検出 = undefined = hook 由来へ委ねる・fresh を断定しない)。
+ */
+describe("deriveLaunchLineage (managed argv 権威 override)", () => {
+  const UUID = "0199aabb-ccdd-7eef-8001-223344556677";
+
+  it("--continue / -c → startKind=resume (id なし)", () => {
+    expect(deriveLaunchLineage(["--continue"])).toEqual({ startKind: "resume" });
+    expect(deriveLaunchLineage(["-c"])).toEqual({ startKind: "resume" });
+  });
+
+  it("--resume <uuid> / -r <uuid> → resumedFrom を UUID shape gate 通過で採用 (小文字化)", () => {
+    expect(deriveLaunchLineage(["--resume", UUID])).toEqual({
+      startKind: "resume",
+      resumedFrom: UUID,
+    });
+    expect(deriveLaunchLineage(["-r", UUID.toUpperCase()])).toEqual({
+      startKind: "resume",
+      resumedFrom: UUID,
+    });
+  });
+
+  it("--resume=<uuid> 形も採用する", () => {
+    expect(deriveLaunchLineage([`--resume=${UUID}`])).toEqual({
+      startKind: "resume",
+      resumedFrom: UUID,
+    });
+  });
+
+  it("値なし --resume (対話 picker) / 非 UUID 値は startKind=resume のみ (任意文字列を id に載せない)", () => {
+    expect(deriveLaunchLineage(["--resume"])).toEqual({ startKind: "resume" });
+    expect(deriveLaunchLineage(["--resume", "--model"])).toEqual({ startKind: "resume" });
+    expect(deriveLaunchLineage(["--resume", "not-a-uuid"])).toEqual({ startKind: "resume" });
+    expect(deriveLaunchLineage(["--resume=evil$(rm)"])).toEqual({ startKind: "resume" });
+  });
+
+  it("resume/continue 非検出 → undefined (fresh を断定しない・hook source に委ねる)", () => {
+    expect(deriveLaunchLineage([])).toBeUndefined();
+    expect(deriveLaunchLineage(["-p", "hello"])).toBeUndefined();
+    expect(deriveLaunchLineage(["--model", "opus"])).toBeUndefined();
+    // 類似だが別 flag は誤検出しない。
+    expect(deriveLaunchLineage(["--resumex"])).toBeUndefined();
+    expect(deriveLaunchLineage(["--fork-session"])).toBeUndefined();
+  });
+
+  it("他 flag と併用でも検出する (位置非依存)", () => {
+    expect(deriveLaunchLineage(["--model", "opus", "--resume", UUID, "--verbose"])).toEqual({
+      startKind: "resume",
+      resumedFrom: UUID,
+    });
   });
 });

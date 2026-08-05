@@ -50,6 +50,32 @@ export interface OnHookSessionOptions {
   readonly source?: string;
 }
 
+/**
+ * managed launch の argv 由来 lineage (ADR 0014 follow-up・decision 019fd2ac ②)。
+ * `--resume`/`--continue` を **positive detect したときのみ** 生成し、gen0 run 起点の
+ * start_kind/resumed_from を hook source (advisory・版依存) 非依存に権威決定する。
+ * 非検出時は undefined (= hook 由来に委ねる。fresh の断定はしない = over-claim 回避)。
+ */
+export interface LaunchLineage {
+  /** launch argv から確定した run 起点の開始種別 (現状 resume のみ生成される)。 */
+  readonly startKind: StartKind;
+  /** `--resume <uuid>` の明示値 (UUID shape gate 通過分のみ)。宣言参照 = 未観測なら UI は linked-unknown。 */
+  readonly resumedFrom?: string;
+}
+
+/**
+ * attach reap 跨ぎの親相関 seed (ADR 0014 follow-up・decision 019fd2ac ①)。
+ * registry が terminal reap 時に退避した「旧 run」を新 identity に seed し、最初の
+ * `onHookSession(同一 provider id)` が既存 case (B) terminal-reopen をそのまま踏む
+ * (synthetic run mint + resumedFrom=旧 runId)。新しい状態機械分岐を作らない。
+ */
+export interface PriorTerminalRun {
+  /** reap 済み旧 run の canonical run id (= resumedFrom の出所)。 */
+  readonly runId: string;
+  /** 旧 run の provider raw id (= 再来を terminal-reopen と判定するキー)。 */
+  readonly providerSessionId: string;
+}
+
 /** run 境界判定の結果。hook-receiver がこの値を NormalizeContext へ載せる。 */
 export interface RunBoundaryResult {
   /** 本 hook イベントを ingest する canonical run id (= session_id)。 */
@@ -100,6 +126,23 @@ export interface SessionIdentityOptions {
     canonicalSessionId: string,
     source: "hook" | "fallback" | "explicit",
   ) => void;
+  /**
+   * attach reap 跨ぎ親相関 (decision 019fd2ac ①): terminal reap 済み旧 run を seed する。
+   * canonical=旧 runId・provider=旧 provider id・terminal=true で開始し、最初の
+   * `onHookSession(同一 provider id)` が case (B) terminal-reopen として新 run を synthetic mint
+   * + `resumedFrom=旧 runId` を返す。explicitSessionId と同時指定不可 (こちらが優先)。
+   *
+   * 安全性: seed された旧 terminal run id が監視 emit に載る窓は無い — attach では identity 生成
+   * (observeHook) と onHookSession が同一同期フレームで連続し、GitWatcher の初期 captureAndEmit は
+   * await 継続 (同期スタック巻き戻し後) でしか走らない (event-loop 意味論で構造保証)。
+   */
+  readonly priorTerminalRun?: PriorTerminalRun;
+  /**
+   * managed launch の argv 由来 lineage (decision 019fd2ac ②)。gen0 run 起点 (case A) でのみ適用し、
+   * startKind は hook source より優先、resumedFrom は self-loop (自 run id と同値) を除いて載せる。
+   * 以降の run 境界 (provider id 変化 / terminal-reopen) は launch と別 run のため適用しない。
+   */
+  readonly launchLineage?: LaunchLineage;
 }
 
 export class SessionIdentity {
@@ -108,6 +151,7 @@ export class SessionIdentity {
   private readonly flushTimeoutMs: number;
   private readonly onHoldDropped: SessionIdentityOptions["onHoldDropped"];
   private readonly onResolved: SessionIdentityOptions["onResolved"];
+  private readonly launchLineage: SessionIdentityOptions["launchLineage"];
 
   /** 確定済み canonical session_id (= currentRunId)。undefined = 未確定(hold 中)。 */
   private canonical: string | undefined;
@@ -141,8 +185,21 @@ export class SessionIdentity {
     this.flushTimeoutMs = opts.flushTimeoutMs ?? 0;
     this.onHoldDropped = opts.onHoldDropped;
     this.onResolved = opts.onResolved;
+    this.launchLineage = opts.launchLineage;
 
-    if (opts.explicitSessionId !== undefined && opts.explicitSessionId.length > 0) {
+    if (
+      opts.priorTerminalRun !== undefined &&
+      opts.priorTerminalRun.runId.length > 0 &&
+      opts.priorTerminalRun.providerSessionId.length > 0
+    ) {
+      // attach reap 跨ぎ seed (decision 019fd2ac ①): 旧 terminal run を復元し、最初の
+      // onHookSession(同一 provider id) を case (B) terminal-reopen に踏ませる。held は空のまま
+      // (attach は hook 到達時に identity 生成 = hold する監視イベントが先行しない)。
+      this.canonical = opts.priorTerminalRun.runId;
+      this.providerSessionId = opts.priorTerminalRun.providerSessionId;
+      this.currentRunTerminal = true;
+      this.onResolved?.(this.canonical, "explicit");
+    } else if (opts.explicitSessionId !== undefined && opts.explicitSessionId.length > 0) {
       // 後方互換: 外部指定された canonical を即確定(learn 不要)。generation 0・provider id は
       // canonical と同値 (Attach では explicitSessionId = hook session_id = provider id)。
       this.canonical = opts.explicitSessionId;
@@ -260,8 +317,22 @@ export class SessionIdentity {
     // (A) generation 0: 初回確定 (fresh identity・managed)。learn と同じく resolve で held を flush する。
     if (this.canonical === undefined) {
       this.resolve(providerSessionId, "hook");
-      const startKind = deriveStartKind(src, /*hasParent*/ false);
-      return { runId: providerSessionId, boundary: false, startKind };
+      // decision 019fd2ac ②: launch argv の positive detect (--resume/--continue) は advisory な
+      // hook source より強い第一級 evidence として gen0 起点の startKind を権威決定する。
+      // resumedFrom は self-loop guard 付き (CC --resume は同一 session_id を保つ common case で
+      // 自己参照 edge を作らない。--fork-session 等で新 id のときのみ宣言参照として残る)。
+      const startKind = this.launchLineage?.startKind ?? deriveStartKind(src, /*hasParent*/ false);
+      const launchResumedFrom =
+        this.launchLineage?.resumedFrom !== undefined &&
+        this.launchLineage.resumedFrom !== providerSessionId
+          ? this.launchLineage.resumedFrom
+          : undefined;
+      return {
+        runId: providerSessionId,
+        boundary: false,
+        startKind,
+        ...(launchResumedFrom !== undefined ? { resumedFrom: launchResumedFrom } : {}),
+      };
     }
 
     // 現在 run あり。

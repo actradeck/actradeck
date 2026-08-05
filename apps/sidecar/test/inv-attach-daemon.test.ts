@@ -334,3 +334,54 @@ describe("SEC-2/QA-2: async policy handler の crash-safety + graceful-error", (
     }
   });
 });
+
+describe("INV-RUN-LINEAGE-EDGE: reap 跨ぎ resume の親相関 (decision 019fd2ac ①・実 HTTP + 実 SQLite)", () => {
+  it("SessionEnd → 同一 id の SessionStart(resume) は新 synthetic run + resumed_from=旧 run で ingest される", async () => {
+    const m = makeDaemon();
+    daemon = m.daemon;
+    await daemon.start();
+    const p = port(daemon);
+
+    // run1: 開始 → 終了 (SessionEnd で terminal 化 + reap)。
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionStart",
+      cwd: "/tmp/a",
+      source: "startup",
+    });
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionEnd",
+      cwd: "/tmp/a",
+      reason: "prompt_input_exit",
+    });
+    expect(daemon.observedSessionCount).toBe(0); // reap 済み
+
+    // run2: 同一 provider id の resume 再来。
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionStart",
+      cwd: "/tmp/a",
+      source: "resume",
+    });
+
+    const events = readEvents(m.dbPath);
+    const run1 = events.filter((e) => e.session_id === "sessA");
+    const run2 = events.filter(
+      (e) => typeof e.session_id === "string" && (e.session_id as string).startsWith("sess_"),
+    );
+    // run1 のイベントは旧 id のまま不変 (terminal 不変性)。
+    expect(run1.length).toBeGreaterThan(0);
+    // run2 は synthetic run id + provider raw id + lineage を持つ。
+    expect(run2.length).toBeGreaterThan(0);
+    const run2Ids = new Set(run2.map((e) => e.session_id));
+    expect(run2Ids.size).toBe(1); // 分裂しない
+    for (const e of run2) {
+      expect(e.provider_session_id).toBe("sessA");
+      expect(e.start_kind).toBe("resume");
+      expect(e.resumed_from_session_id).toBe("sessA"); // 旧 run の canonical
+    }
+    // hello は新 run id のみ広告する (旧 terminal run を再広告しない)。
+    expect(daemon.registry.sessionIds()).toEqual([...run2Ids]);
+  });
+});

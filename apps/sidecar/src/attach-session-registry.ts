@@ -14,6 +14,8 @@
  * canonical 確定 (D6): hook session_id を **explicitSessionId で即確定** (hold 最小)。
  * Attach は ActraDeck が採番しないため fallback 採番経路は無効 (hook 駆動 = hook 皆無は観測対象外)。
  */
+import { BoundedLruMap } from "@actradeck/event-model";
+
 import { findRepoRoot, GitWatcher } from "./git-watcher.js";
 import { SessionIdentity } from "./session-identity.js";
 import type { buildEvent } from "./event-factory.js";
@@ -33,6 +35,15 @@ type BuiltEvent = ReturnType<typeof buildEvent>;
 export const DEFAULT_ATTACH_IDLE_TTL_MS = 30 * 60_000;
 /** idle sweep の既定間隔 (ms)。 */
 export const DEFAULT_ATTACH_REAPER_INTERVAL_MS = 60_000;
+
+/**
+ * terminal reap 跨ぎ親相関 tombstone の上限 (decision 019fd2ac ①)。
+ * SessionEnd で reap した run の (provider id → 旧 run id) を bounded LRU で退避し、同一 provider id
+ * の SessionStart 再来 (resume) に resumed_from を張れるようにする。TTL は持たない — session id は
+ * UUID で再利用されず「id 一致 ⇒ 真の親」ゆえ正しさは経時劣化しない。短命性は bounded + in-memory
+ * (プロセス寿命内) で担保する。
+ */
+export const TERMINAL_TOMBSTONE_MAX_ENTRIES = 256;
 
 /** 1 attach session が保持する状態。 */
 export interface AttachSession {
@@ -78,6 +89,14 @@ export interface AttachSessionRegistryOptions {
 
 export class AttachSessionRegistry {
   private readonly sessions = new Map<string, AttachSession>();
+  /**
+   * terminal reap 済み run の親相関 tombstone (provider id → 旧 canonical run id)。
+   * SessionEnd 経由の reap (isRunTerminal) でのみ記録し、idle reap (非 terminal・self-heal 意味論)
+   * では記録しない。consume-once: SessionStart の初出で seed に使ったら削除する。
+   */
+  private readonly terminalTombstones = new BoundedLruMap<string, { runId: string }>(
+    TERMINAL_TOMBSTONE_MAX_ENTRIES,
+  );
   private readonly onGitEvent: (event: BuiltEvent) => void;
   private readonly resolveRepoRoot: (cwd: string) => Promise<string | undefined>;
   private readonly makeGitWatcher: NonNullable<AttachSessionRegistryOptions["makeGitWatcher"]>;
@@ -117,6 +136,11 @@ export class AttachSessionRegistry {
     return this.sessions.size;
   }
 
+  /** terminal tombstone の保持数 (テスト・観測用。常に TERMINAL_TOMBSTONE_MAX_ENTRIES 以下)。 */
+  get terminalTombstoneCount(): number {
+    return this.terminalTombstones.size;
+  }
+
   /** session を取得 (テスト・status 用)。 */
   get(sessionId: string): AttachSession | undefined {
     return this.sessions.get(sessionId);
@@ -128,8 +152,12 @@ export class AttachSessionRegistry {
    *
    * @param sessionId canonical = hook の session_id (即確定)。
    * @param cwd hook payload の cwd (GitWatcher の repo root 特定に使う)。初出時のみ反映。
+   * @param isSessionStart SessionStart hook か (decision 019fd2ac ①)。true の初出でのみ terminal
+   *   tombstone を consume し、reap 跨ぎ resume を terminal-reopen (synthetic run + resumed_from)
+   *   として seed する。非 SessionStart の straggler (SessionEnd 後の遅延 hook) は consume せず
+   *   従来どおり同一 id へ fold する (3b-1 sanction 済挙動を不変に保つ)。
    */
-  observeHook(sessionId: string, cwd?: string): AttachSession {
+  observeHook(sessionId: string, cwd?: string, isSessionStart?: boolean): AttachSession {
     if (this.disposed) {
       // dispose 後の遅延 hook: 新規 entry を作らず ephemeral identity を返す (副作用なし)。
       const identity = new SessionIdentity({
@@ -143,10 +171,17 @@ export class AttachSessionRegistry {
       existing.lastHookAt = Date.now();
       return existing;
     }
+    // reap 跨ぎ親相関 (decision 019fd2ac ①): SessionStart の初出で terminal tombstone が有れば
+    // consume-once で seed し、直後の onHookSession が case (B) terminal-reopen を踏む。
+    const tombstone = isSessionStart === true ? this.terminalTombstones.get(sessionId) : undefined;
+    if (tombstone !== undefined) this.terminalTombstones.delete(sessionId);
     // 初出: canonical を即確定する SessionIdentity を生成 (D6: hold 最小, fallback 採番無効)。
+    // tombstone hit 時は explicit でなく priorTerminalRun seed (canonical=旧 runId・terminal=true)。
     const identity = new SessionIdentity({
       fallbackSessionId: sessionId,
-      explicitSessionId: sessionId,
+      ...(tombstone !== undefined
+        ? { priorTerminalRun: { runId: tombstone.runId, providerSessionId: sessionId } }
+        : { explicitSessionId: sessionId }),
     });
     const session: AttachSession = {
       sessionId,
@@ -188,6 +223,12 @@ export class AttachSessionRegistry {
   private reapOne(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
     if (session === undefined) return false;
+    // decision 019fd2ac ①: terminal 化済み run (SessionEnd 経由) のみ tombstone 退避。
+    // idle reap (非 terminal) は記録しない — 同一 id の次 hook は self-heal (同一 run 継続) が正しい。
+    if (session.identity.isRunTerminal()) {
+      const providerId = session.identity.currentProviderSessionId() ?? sessionId;
+      this.terminalTombstones.set(providerId, { runId: session.identity.currentRunId() });
+    }
     session.identity.dispose();
     if (session.gitWatcher) void session.gitWatcher.stop();
     this.sessions.delete(sessionId);
