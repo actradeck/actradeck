@@ -18,6 +18,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PolicyCategory } from "@actradeck/event-model";
 
 import { AttachDaemon } from "../src/attach-daemon.js";
+import { AttachSessionRegistry } from "../src/attach-session-registry.js";
+import type { GitWatcher } from "../src/git-watcher.js";
 import { normalizeHook } from "../src/normalize.js";
 import { EventStore } from "../src/store.js";
 import { HOOK_TOKEN_HEADER } from "../src/settings-injection.js";
@@ -332,5 +334,126 @@ describe("SEC-2/QA-2: async policy handler の crash-safety + graceful-error", (
     } finally {
       process.off("unhandledRejection", onRej);
     }
+  });
+});
+
+describe("INV-RUN-LINEAGE-EDGE: reap 跨ぎ resume の親相関 (decision 019fd2ac ①・実 HTTP + 実 SQLite)", () => {
+  it("SessionEnd → 同一 id の SessionStart(resume) は新 synthetic run + resumed_from=旧 run で ingest される", async () => {
+    const m = makeDaemon();
+    daemon = m.daemon;
+    await daemon.start();
+    const p = port(daemon);
+
+    // run1: 開始 → 終了 (SessionEnd で terminal 化 + reap)。
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionStart",
+      cwd: "/tmp/a",
+      source: "startup",
+    });
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionEnd",
+      cwd: "/tmp/a",
+      reason: "prompt_input_exit",
+    });
+    expect(daemon.observedSessionCount).toBe(0); // reap 済み
+
+    // run2: 同一 provider id の resume 再来。
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionStart",
+      cwd: "/tmp/a",
+      source: "resume",
+    });
+
+    const events = readEvents(m.dbPath);
+    const run1 = events.filter((e) => e.session_id === "sessA");
+    const run2 = events.filter(
+      (e) => typeof e.session_id === "string" && (e.session_id as string).startsWith("sess_"),
+    );
+    // run1 のイベントは旧 id のまま不変 (terminal 不変性)。
+    expect(run1.length).toBeGreaterThan(0);
+    // run2 は synthetic run id + provider raw id + lineage を持つ。
+    expect(run2.length).toBeGreaterThan(0);
+    const run2Ids = new Set(run2.map((e) => e.session_id));
+    expect(run2Ids.size).toBe(1); // 分裂しない
+    for (const e of run2) {
+      expect(e.provider_session_id).toBe("sessA");
+      expect(e.start_kind).toBe("resume");
+      expect(e.resumed_from_session_id).toBe("sessA"); // 旧 run の canonical
+    }
+    // hello は新 run id のみ広告する (旧 terminal run を再広告しない)。
+    expect(daemon.registry.sessionIds()).toEqual([...run2Ids]);
+  });
+});
+
+describe("QA-1 guard: reopen 後の監視 emit が旧 terminal run id を載せない (実 hook-receiver 順序で固定)", () => {
+  it("reap → SessionStart(resume) 後、GitWatcher 経由の監視 emit は synthetic 新 run のみを運ぶ", async () => {
+    const dbPath = join(dir, "sidecar-qa1.db");
+    // fake GitWatcher: captureAndEmit で identity.emitMonitoring を実発火し canonical を記録する。
+    // これで「seed された旧 terminal run id が監視 emit に載る窓は無い」という構造主張
+    // (observeHook→onHookSession 同一同期フレーム + watcher 初期 emit は await 継続後) を
+    // 実 hook-receiver の処理順序で falsifiable に固定する。rotate が遅延する将来リファクタでは
+    // 2 個目 watcher の emit が旧 id を運び、本テストが赤くなる。
+    const emitted: Array<{ canonical: string; provider: string | undefined }> = [];
+    const d = new AttachDaemon({
+      wsUrl: "ws://127.0.0.1:1/ingest/ws",
+      dbPath,
+      hookToken: "tok-fixed",
+      host: "127.0.0.1",
+      approvalTimeoutMs: 30,
+      registryFactory: (onGitEvent) =>
+        new AttachSessionRegistry({
+          onGitEvent,
+          reaperIntervalMs: 0,
+          resolveRepoRoot: async (cwd) => cwd,
+          makeGitWatcher: ({ identity }) =>
+            ({
+              start: () => undefined,
+              stop: async () => undefined,
+              captureAndEmit: async () => {
+                identity.emitMonitoring("diff", (canonical, provider) =>
+                  emitted.push({ canonical, provider }),
+                );
+              },
+            }) as unknown as GitWatcher,
+        }),
+    });
+    daemon = d;
+    await d.start();
+    const p = port(d);
+
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionStart",
+      cwd: "/tmp/a",
+      source: "startup",
+    });
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionEnd",
+      cwd: "/tmp/a",
+      reason: "prompt_input_exit",
+    });
+    await postHook(p, {
+      session_id: "sessA",
+      hook_event_name: "SessionStart",
+      cwd: "/tmp/a",
+      source: "resume",
+    });
+    // startGitWatcher の await 継続 (resolveRepoRoot → captureAndEmit) を確実に走らせる。
+    await new Promise((r) => setTimeout(r, 20));
+
+    // run1 の初期 capture は旧 run id (正当・terminal 化前) — ちょうど 1 回まで。
+    const priorEmits = emitted.filter((e) => e.canonical === "sessA");
+    expect(priorEmits.length).toBeLessThanOrEqual(1);
+    // reopen 後 (2 個目 watcher) の emit は synthetic 新 run のみ (旧 terminal run id を再放送しない)。
+    const last = emitted[emitted.length - 1]!;
+    expect(last.canonical).toMatch(/^sess_/);
+    expect(last.canonical).not.toBe("sessA");
+    expect(last.provider).toBe("sessA");
+    // hello 広告も synthetic のみ。
+    expect(d.registry.sessionIds()).toEqual([last.canonical]);
   });
 });

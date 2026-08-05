@@ -17,7 +17,7 @@ import { buildApprovalPersistConfig } from "./approval-persist-config.js";
 import { buildBridgePolicyOptions } from "./approval-policy-store.js";
 import { buildAllowlistResponse } from "./allowlist-relay.js";
 import { buildPolicyResponse } from "./policy-relay.js";
-import { SessionIdentity } from "./session-identity.js";
+import { SessionIdentity, type LaunchLineage } from "./session-identity.js";
 import { generateHookToken } from "./settings-injection.js";
 import { EventSink, type OutOfOrderObservation } from "./sink.js";
 import { EventStore } from "./store.js";
@@ -44,6 +44,12 @@ export interface SidecarOptions {
    * fallback id で flush し永久 hold を避ける。既定 30s。explicitSession 時は無視 (即確定)。
    */
   readonly sessionResolveTimeoutMs?: number;
+  /**
+   * decision 019fd2ac ②: managed launch argv (--resume/--continue) 由来の gen0 lineage。
+   * positive detect 時のみ CLI が渡し、SessionIdentity が gen0 起点の start_kind/resumed_from を
+   * hook source 非依存に権威決定する。
+   */
+  readonly launchLineage?: LaunchLineage;
   readonly wsUrl: string;
   readonly dbPath: string;
   readonly cwd?: string;
@@ -104,6 +110,8 @@ export class Sidecar {
       ...(opts.explicitSession === true
         ? {}
         : { flushTimeoutMs: opts.sessionResolveTimeoutMs ?? 30_000 }),
+      // decision 019fd2ac ②: managed launch argv 由来 lineage (gen0 起点でのみ適用)。
+      ...(opts.launchLineage !== undefined ? { launchLineage: opts.launchLineage } : {}),
     });
 
     this.wsClient = new WsClient({

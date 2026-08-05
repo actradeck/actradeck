@@ -187,3 +187,114 @@ describe("start_kind 導出 (D4・source→細別)", () => {
     expect(id.currentGeneration()).toBe(0);
   });
 });
+
+describe("INV-RUN-LINEAGE-EDGE: priorTerminalRun seed (attach reap 跨ぎ親相関・decision 019fd2ac ①)", () => {
+  it("seed した同一 provider id の初回 hook は case (B) terminal-reopen を踏む (synthetic mint + resumedFrom=旧 runId)", () => {
+    const id = new SessionIdentity({
+      fallbackSessionId: P1,
+      priorTerminalRun: { runId: "sess_prior-run", providerSessionId: P1 },
+    });
+    // seed 状態: canonical=旧 runId・terminal=true (旧 run を復元)。
+    expect(id.currentRunId()).toBe("sess_prior-run");
+    expect(id.isRunTerminal()).toBe(true);
+    const r = id.onHookSession(P1, { isSessionStart: true, source: "resume" });
+    expect(r.boundary).toBe(true);
+    expect(r.runId).toMatch(/^sess_/); // synthetic mint (provider id は terminal 旧 run と衝突し採用不可)
+    expect(r.runId).not.toBe("sess_prior-run");
+    expect(r.runId).not.toBe(P1);
+    expect(r.startKind).toBe("resume");
+    expect(r.resumedFrom).toBe("sess_prior-run"); // 親 = 旧 run の canonical
+    expect(id.currentRunId()).toBe(r.runId);
+    expect(id.currentProviderSessionId()).toBe(P1);
+    expect(id.isRunTerminal()).toBe(false); // 新 run は非 terminal
+  });
+
+  it("seed 後 source 無しでも startKind=resume (観測済 lineage は positive evidence)", () => {
+    const id = new SessionIdentity({
+      fallbackSessionId: P1,
+      priorTerminalRun: { runId: "sess_prior-run", providerSessionId: P1 },
+    });
+    const r = id.onHookSession(P1, {});
+    expect(r.boundary).toBe(true);
+    expect(r.startKind).toBe("resume");
+    expect(r.resumedFrom).toBe("sess_prior-run");
+  });
+
+  it("mint 後の監視 emit は新 run id で行われ、旧 terminal run id へは載らない", () => {
+    const id = new SessionIdentity({
+      fallbackSessionId: P1,
+      priorTerminalRun: { runId: "sess_prior-run", providerSessionId: P1 },
+    });
+    const r = id.onHookSession(P1, { isSessionStart: true, source: "resume" });
+    const seen = capture(id);
+    expect(seen).toEqual([{ canonical: r.runId, provider: P1 }]);
+  });
+
+  it("空値 priorTerminalRun は無視され通常 gen0 挙動 (fail-safe・両フィールド対称に検証)", () => {
+    // QA-4: runId="" と providerSessionId="" の両アームを独立に検証する。
+    for (const prior of [
+      { runId: "", providerSessionId: P1 },
+      { runId: "sess_prior-run", providerSessionId: "" },
+    ]) {
+      const id = new SessionIdentity({ fallbackSessionId: "f", priorTerminalRun: prior });
+      const r = id.onHookSession(P1, { isSessionStart: true, source: "startup" });
+      expect(r.boundary).toBe(false);
+      expect(r.runId).toBe(P1);
+      expect(r.startKind).toBe("fresh");
+      expect(r.resumedFrom).toBeUndefined();
+    }
+  });
+});
+
+describe("launchLineage: managed argv 権威 override (gen0 限定・decision 019fd2ac ②)", () => {
+  it("gen0: launch startKind=resume は hook source (startup) より優先される", () => {
+    const id = new SessionIdentity({
+      fallbackSessionId: "f",
+      launchLineage: { startKind: "resume" },
+    });
+    const r = id.onHookSession(P1, { isSessionStart: true, source: "startup" });
+    expect(r.boundary).toBe(false);
+    expect(r.startKind).toBe("resume");
+    expect(r.resumedFrom).toBeUndefined(); // 明示 id 無し
+  });
+
+  it("gen0: launch resumedFrom (別 id) は宣言参照として載る", () => {
+    const id = new SessionIdentity({
+      fallbackSessionId: "f",
+      launchLineage: { startKind: "resume", resumedFrom: P2 },
+    });
+    const r = id.onHookSession(P1, { isSessionStart: true, source: "resume" });
+    expect(r.startKind).toBe("resume");
+    expect(r.resumedFrom).toBe(P2);
+  });
+
+  it("gen0: self-loop guard — resumedFrom === 自 run id なら edge を落とす (startKind は保持)", () => {
+    const id = new SessionIdentity({
+      fallbackSessionId: "f",
+      launchLineage: { startKind: "resume", resumedFrom: P1 },
+    });
+    const r = id.onHookSession(P1, { isSessionStart: true, source: "resume" });
+    expect(r.startKind).toBe("resume");
+    expect(r.resumedFrom).toBeUndefined();
+  });
+
+  // QA-2 注記: gen0 限定は構造的保証 (launchLineage 参照が case (A) 分岐にのみ存在) であり、
+  // 本テストは単行 mutation で赤化する guard ではなく契約の文書化として置く。
+  it("gen0 以降の run 境界 (provider id 変化) には launchLineage を適用しない", () => {
+    const id = new SessionIdentity({
+      fallbackSessionId: "f",
+      launchLineage: { startKind: "resume", resumedFrom: "99999999-9999-7999-8999-999999999999" },
+    });
+    id.onHookSession(P1, { isSessionStart: true, source: "resume" });
+    const r = id.onHookSession(P2, { isSessionStart: true, source: "clear" });
+    expect(r.boundary).toBe(true);
+    expect(r.startKind).toBe("clear"); // launch でなく境界 source 由来
+    expect(r.resumedFrom).toBe(P1); // launch の宣言 id でなく観測済み親
+  });
+
+  it("launchLineage 無し (非検出) は従来どおり hook source 由来 (回帰なし)", () => {
+    const id = new SessionIdentity({ fallbackSessionId: "f" });
+    const r = id.onHookSession(P1, { isSessionStart: true, source: "startup" });
+    expect(r.startKind).toBe("fresh");
+  });
+});

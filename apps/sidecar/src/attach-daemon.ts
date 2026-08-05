@@ -187,7 +187,9 @@ export class AttachDaemon {
       // ADR D8: 全 emit に capture_mode="attach"。
       captureMode: "attach",
       // ADR D6: per-session identity を registry から解決 (初出で entry/GitWatcher 起動)。
-      resolveIdentity: (sessionId, cwd) => this.registry.observeHook(sessionId, cwd).identity,
+      // decision 019fd2ac ①: SessionStart フラグを渡し reap 跨ぎ resume の親相関 seed を可能にする。
+      resolveIdentity: (sessionId, cwd, isSessionStart) =>
+        this.registry.observeHook(sessionId, cwd, isSessionStart).identity,
       // ADR 019eb365: SessionEnd で当該 session を即時 reap (GitWatcher 停止 + hello 再送)。
       onSessionEnd: (sessionId) => this.registry.reap(sessionId),
       ...(opts.host !== undefined ? { host: opts.host } : {}),

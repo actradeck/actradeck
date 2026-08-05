@@ -262,3 +262,98 @@ describe("INV-ATTACH-MULTIPLEX (registry)", () => {
     for (const w of watchers) expect(w.stop).toHaveBeenCalled();
   });
 });
+
+describe("INV-RUN-LINEAGE-EDGE: terminal tombstone (reap 跨ぎ親相関・decision 019fd2ac ①)", () => {
+  /** terminal 化した session を作って reap するヘルパ。 */
+  function observeTerminalAndReap(reg: AttachSessionRegistry, sid: string): string {
+    const s = reg.observeHook(sid, undefined, true);
+    s.identity.onHookSession(sid, { isSessionStart: true, source: "startup" });
+    s.identity.markRunTerminal();
+    const runId = s.identity.currentRunId();
+    reg.reap(sid);
+    return runId;
+  }
+
+  it("SessionEnd reap → 同一 id の SessionStart 再来は terminal-reopen (synthetic run + resumed_from=旧 run)", () => {
+    const reg = new AttachSessionRegistry({ onGitEvent: () => undefined, reaperIntervalMs: 0 });
+    const priorRunId = observeTerminalAndReap(reg, "sessA");
+    expect(reg.terminalTombstoneCount).toBe(1);
+
+    const revived = reg.observeHook("sessA", undefined, true);
+    const r = revived.identity.onHookSession("sessA", { isSessionStart: true, source: "resume" });
+    expect(r.boundary).toBe(true);
+    expect(r.runId).toMatch(/^sess_/);
+    expect(r.runId).not.toBe(priorRunId);
+    expect(r.startKind).toBe("resume");
+    expect(r.resumedFrom).toBe(priorRunId);
+    // consume-once: tombstone は消費済み。
+    expect(reg.terminalTombstoneCount).toBe(0);
+    // hello は新 run id を広告する (旧 terminal run id を再広告しない)。
+    expect(reg.sessionIds()).toEqual([r.runId]);
+  });
+
+  it("非 SessionStart の straggler hook は tombstone を consume せず従来どおり同一 id へ fold する", () => {
+    const reg = new AttachSessionRegistry({ onGitEvent: () => undefined, reaperIntervalMs: 0 });
+    observeTerminalAndReap(reg, "sessA");
+
+    // straggler (PostToolUse 等): isSessionStart=false → 通常の explicit gen0 (同一 id fold・sanction 済)。
+    const straggler = reg.observeHook("sessA", undefined, false);
+    const r = straggler.identity.onHookSession("sessA", {});
+    expect(r.boundary).toBe(false);
+    expect(r.runId).toBe("sessA");
+    expect(r.resumedFrom).toBeUndefined();
+    // tombstone は温存 (consume していない)。
+    expect(reg.terminalTombstoneCount).toBe(1);
+  });
+
+  it("idle reap (非 terminal) は tombstone を記録しない (self-heal 意味論を不変に保つ)", () => {
+    const reg = new AttachSessionRegistry({
+      onGitEvent: () => undefined,
+      reaperIntervalMs: 0,
+      idleTtlMs: 10,
+    });
+    const s = reg.observeHook("sessA", undefined, true);
+    s.identity.onHookSession("sessA", { isSessionStart: true, source: "startup" });
+    reg.reapIdle(Date.now() + 60_000);
+    expect(reg.size).toBe(0);
+    expect(reg.terminalTombstoneCount).toBe(0);
+
+    // 再来は self-heal: 同一 id で同一 run 継続 (lineage を主張しない)。
+    const healed = reg.observeHook("sessA", undefined, true);
+    const r = healed.identity.onHookSession("sessA", { isSessionStart: true, source: "startup" });
+    expect(r.boundary).toBe(false);
+    expect(r.runId).toBe("sessA");
+    expect(r.resumedFrom).toBeUndefined();
+  });
+
+  it("tombstone は bounded LRU (上限超過で最古を evict・無界に積まない)", async () => {
+    const { TERMINAL_TOMBSTONE_MAX_ENTRIES } = await import("../src/attach-session-registry.js");
+    const reg = new AttachSessionRegistry({ onGitEvent: () => undefined, reaperIntervalMs: 0 });
+    for (let i = 0; i < TERMINAL_TOMBSTONE_MAX_ENTRIES + 10; i++) {
+      observeTerminalAndReap(reg, `sess-${i}`);
+    }
+    expect(reg.terminalTombstoneCount).toBe(TERMINAL_TOMBSTONE_MAX_ENTRIES);
+    // 最古 (sess-0) は evict 済み → 再来しても lineage を主張しない (gen0 fold)。
+    const oldest = reg.observeHook("sess-0", undefined, true);
+    const r = oldest.identity.onHookSession("sess-0", { isSessionStart: true, source: "resume" });
+    expect(r.resumedFrom).toBeUndefined();
+  });
+
+  it("多重 reopen はチェーンを張る (run1 → run2 → run3・tombstone は最新 run を指す)", () => {
+    const reg = new AttachSessionRegistry({ onGitEvent: () => undefined, reaperIntervalMs: 0 });
+    const run1 = observeTerminalAndReap(reg, "sessA");
+
+    // 1 回目の reopen: run2 (synthetic) が run1 を親に持つ。
+    const second = reg.observeHook("sessA", undefined, true);
+    const r2 = second.identity.onHookSession("sessA", { isSessionStart: true, source: "resume" });
+    expect(r2.resumedFrom).toBe(run1);
+    second.identity.markRunTerminal();
+    reg.reap("sessA");
+
+    // 2 回目の reopen: run3 は run2 (最新) を親に持つ (run1 でなく)。
+    const third = reg.observeHook("sessA", undefined, true);
+    const r3 = third.identity.onHookSession("sessA", { isSessionStart: true, source: "resume" });
+    expect(r3.resumedFrom).toBe(r2.runId);
+    expect(r3.runId).not.toBe(r2.runId);
+  });
+});
