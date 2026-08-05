@@ -155,6 +155,27 @@ describe("computeNotifications — edges", () => {
     expect(specs.map((s) => s.category)).toEqual(["approval"]);
   });
 
+  // Phase1 sweep QA-1: failed カテゴリの初回観測 (prev=undefined) 立ち上がり。prevFailed が
+  // 「prev 不在=既に失敗扱い」に化ける mutation で最初の failed 通知が黙って消えるのを塞ぐ。
+  it("prev=undefined(初回) で curr=failed なら failed 通知を出す", () => {
+    const specs = computeNotifications(undefined, item({ state: "failed" }), {
+      categories: ALL_CATS,
+    });
+    expect(specs.map((s) => s.category)).toEqual(["failed"]);
+  });
+
+  // Phase1 sweep QA-2: failed 判定の非該当クラス (state 欠落 / 未知トークン) は spec を出さない。
+  it("state=undefined / 未知文字列は failed 通知を出さない (fail-safe)", () => {
+    for (const state of [undefined, "garbage"] as const) {
+      const specs = computeNotifications(
+        item({ state: "running.command_executing" }),
+        item({ state }),
+        { categories: ALL_CATS },
+      );
+      expect(specs, `state=${String(state)} must not notify`).toEqual([]);
+    }
+  });
+
   it("INV-NOTIFY-EDGE-ONLY: true→true は発火しない", () => {
     const specs = computeNotifications(
       item({ needs_attention: true }),
