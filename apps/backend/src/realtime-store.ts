@@ -7,9 +7,17 @@
  * REAL DATA ONLY: 実 PostgreSQL の永続 projection からのみ DTO を作る。生 payload には触れず
  * (backend は再 redaction しない / 新規露出させない)、redaction 済の projection/liveness のみ写す。
  */
-import { CaptureMode, gateRedactionCountByKind, isActionKind } from "@actradeck/event-model";
+import {
+  CaptureMode,
+  EndKind,
+  LastTurnOutcome,
+  Recoverability,
+  StartKind,
+  gateRedactionCountByKind,
+  isActionKind,
+} from "@actradeck/event-model";
 
-import type { ActionKind } from "@actradeck/event-model";
+import type { ActionKind, Continuation } from "@actradeck/event-model";
 
 import type {
   LivenessEvidence,
@@ -19,7 +27,12 @@ import type {
 } from "./liveness.js";
 import { cwdScopeClause, parseProjectScope } from "./project-scope.js";
 import { parsePendingApprovals } from "./reducer.js";
-import type { SessionApprovals, SessionDetail, SessionListItem } from "./realtime-hub.js";
+import type {
+  LineageRun,
+  SessionApprovals,
+  SessionDetail,
+  SessionListItem,
+} from "./realtime-hub.js";
 import type { Pool } from "pg";
 
 /**
@@ -65,7 +78,28 @@ interface JoinedRow {
   claimed_unverified_count: number | null;
 }
 
-const JOIN_SELECT = `
+/**
+ * ADR 0014 Phase 3c: detail 専用の追加素材 (run lineage + last_turn_outcome)。
+ * list 経路の hot path (snapshot 500 行 / delta 毎行) に EXISTS を載せないため detail SELECT のみ拡張。
+ * enum 列は CHECK 無し TEXT — read 時に closed-enum gate する (SEC-2)。
+ */
+interface DetailRow extends JoinedRow {
+  provider_session_id: string | null;
+  start_kind: string | null;
+  resumed_from_session_id: string | null;
+  end_kind: string | null;
+  recoverability: string | null;
+  last_turn_outcome: string | null;
+  resumed_from_observed: boolean | null;
+}
+
+/**
+ * SELECT 本体の単一出所 (list/detail で列集合だけが違う)。extraCols は detail 専用列を
+ * カンマ始まりで受け取る (既定 = 追加なし)。文字列連結は **このモジュール内の固定リテラルのみ**
+ * (ユーザー入力は一切混ぜない・SQLi 面なし)。
+ */
+function joinSelect(extraCols = ""): string {
+  return `
   SELECT ss.session_id, s.provider, s.source, s.agent_id, s.repo, s.branch, s.cwd,
          s.capture_mode, s.permission_mode,
          ss.state, ss.current_action, ss.current_action_kind, ss.current_action_subject,
@@ -85,9 +119,27 @@ const JOIN_SELECT = `
             WHERE wi.session_id = ss.session_id
               AND wi.status = 'completed'
               AND wi.verification_state = 'unverified'
-         ), 0)::int AS claimed_unverified_count
+         ), 0)::int AS claimed_unverified_count${extraCols}
     FROM session_state ss
     JOIN sessions s ON s.session_id = ss.session_id`;
+}
+
+const JOIN_SELECT = joinSelect();
+
+/**
+ * ADR 0014 Phase 3c: detail 専用の lineage 列 (decision 019fd250)。
+ * resumed_from_observed = 参照先が観測済み session として実在するか (UI の resolved /
+ * linked-unknown 分岐の根拠。rollout の宣言エッジは未観測でありうる)。
+ */
+const DETAIL_SELECT = joinSelect(`,
+         s.provider_session_id, s.start_kind, s.resumed_from_session_id,
+         s.end_kind, s.recoverability, ss.last_turn_outcome,
+         (s.resumed_from_session_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM sessions p WHERE p.session_id = s.resumed_from_session_id
+         )) AS resumed_from_observed`);
+
+/** lineage_runs の上限 (有界・単一 provider 会話の run 数として十分大きい)。 */
+const LINEAGE_RUNS_LIMIT = 20;
 
 /**
  * capture_mode を型安全に写す (未知/欠落は undefined = managed 既定扱い・projection key 非使用)。
@@ -105,6 +157,37 @@ function toCaptureMode(v: unknown): CaptureMode | undefined {
  */
 function toActionKind(v: string | null): ActionKind | undefined {
   return typeof v === "string" && isActionKind(v) ? v : undefined;
+}
+
+/**
+ * ADR 0014 Phase 3c (SEC-2・裁定 019f8051): lineage enum 列の read gate 群。
+ * sessions の CHECK 無し TEXT を event-model zod enum (T1 単一出所) で safeParse し、
+ * out-of-enum / NULL (non-ingest writer・backfill・手編集 DB) は undefined = DTO キー落とし。
+ * toCaptureMode / ingest-store の toLastTurnOutcome と同型 (手写し Set コピーを置かない)。
+ */
+function toStartKind(v: unknown): StartKind | undefined {
+  const p = StartKind.safeParse(v);
+  return p.success ? p.data : undefined;
+}
+
+function toEndKind(v: unknown): EndKind | undefined {
+  const p = EndKind.safeParse(v);
+  return p.success ? p.data : undefined;
+}
+
+function toRecoverability(v: unknown): Continuation | undefined {
+  const p = Recoverability.safeParse(v);
+  return p.success ? p.data : undefined;
+}
+
+function toLastTurnOutcomeGate(v: unknown): LastTurnOutcome | undefined {
+  const p = LastTurnOutcome.safeParse(v);
+  return p.success ? p.data : undefined;
+}
+
+/** 空文字/NULL を undefined へ (id 列用・enum gate 対象外の識別子)。 */
+function nonEmptyText(v: string | null): string | undefined {
+  return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
 const VALID_LIVENESS_STATES = new Set<LivenessState>(["live", "idle", "stalled", "unknown"]);
@@ -203,9 +286,17 @@ function rowToListItem(r: JoinedRow): Omit<SessionListItem, "connected"> {
   };
 }
 
-function rowToDetail(r: JoinedRow): Omit<SessionDetail, "connected"> {
+function rowToDetail(r: DetailRow): Omit<SessionDetail, "connected" | "lineage_runs"> {
   const base = rowToListItem(r);
   const lv = r.liveness ?? {};
+  // ADR 0014 Phase 3c (decision 019fd250): run lineage + last_turn_outcome。enum 列は
+  // closed-enum gate (SEC-2)・id 列は非空 gate のみ。欠落はキー落とし (UI は何も主張しない)。
+  const providerSessionId = nonEmptyText(r.provider_session_id);
+  const startKind = toStartKind(r.start_kind);
+  const resumedFrom = nonEmptyText(r.resumed_from_session_id);
+  const endKind = toEndKind(r.end_kind);
+  const recoverability = toRecoverability(r.recoverability);
+  const lastTurnOutcome = toLastTurnOutcomeGate(r.last_turn_outcome);
   // 段階2: permission_mode は欠落時キーごと落とす (optional・後方互換; 表示専用)。
   const permissionMode =
     typeof r.permission_mode === "string" && r.permission_mode.length > 0
@@ -236,6 +327,18 @@ function rowToDetail(r: JoinedRow): Omit<SessionDetail, "connected"> {
     ...(secretRedactionCountByKind !== undefined
       ? { secret_redaction_count_by_kind: secretRedactionCountByKind }
       : {}),
+    ...(providerSessionId !== undefined ? { provider_session_id: providerSessionId } : {}),
+    ...(startKind !== undefined ? { start_kind: startKind } : {}),
+    // resumed_from_observed は resumed_from が載るときだけ意味を持つ (単独では載せない)。
+    ...(resumedFrom !== undefined
+      ? {
+          resumed_from_session_id: resumedFrom,
+          resumed_from_observed: r.resumed_from_observed === true,
+        }
+      : {}),
+    ...(endKind !== undefined ? { end_kind: endKind } : {}),
+    ...(recoverability !== undefined ? { recoverability } : {}),
+    ...(lastTurnOutcome !== undefined ? { last_turn_outcome: lastTurnOutcome } : {}),
   };
 }
 
@@ -311,9 +414,56 @@ export class RealtimeStore {
     sessionId: string,
     isLive: IsLivePredicate = PRESENCE_UNKNOWN,
   ): Promise<SessionDetail | undefined> {
-    const { rows } = await this.pool.query(`${JOIN_SELECT} WHERE ss.session_id = $1`, [sessionId]);
-    const r = (rows as JoinedRow[])[0];
-    return r ? { ...rowToDetail(r), connected: isLive(r.session_id) } : undefined;
+    const { rows } = await this.pool.query(`${DETAIL_SELECT} WHERE ss.session_id = $1`, [
+      sessionId,
+    ]);
+    const r = (rows as DetailRow[])[0];
+    if (!r) return undefined;
+    // ADR 0014 Phase 3c: 同一 provider_session_id の run 系譜 (自分含む)。2 run 以上のときだけ
+    // 載せる (単独 run は連結情報が無い = キー落とし・UI は何も主張しない)。
+    const providerSessionId = nonEmptyText(r.provider_session_id);
+    const lineage =
+      providerSessionId !== undefined ? await this.lineageRuns(providerSessionId) : [];
+    return {
+      ...rowToDetail(r),
+      ...(lineage.length >= 2 ? { lineage_runs: lineage } : {}),
+      connected: isLive(r.session_id),
+    };
+  }
+
+  /**
+   * 同一 provider_session_id を共有する run 兄弟 (started_at 昇順・有界)。provider_session_id は
+   * index 済み (migration 1781312800000)。start_kind は closed-enum gate (SEC-2)。
+   *
+   * scope 非適用 (3c SEC-1・accepted-risk): 本クエリと DETAIL_SELECT の resumed_from_observed
+   * EXISTS は by-id detail 経路の一部として project-scope を意図的に適用しない (single-operator・
+   * ADR 019e92ae)。返却は session_id/enum/ISO のみで scope が守る cwd を含まない。将来 by-id 経路を
+   * transitive-scope 化する際は、session_id と**別軸** (provider_session_id) の本クエリを個別に
+   * scope へ含めること (project-scope.ts の境界コメント参照)。
+   */
+  private async lineageRuns(providerSessionId: string): Promise<LineageRun[]> {
+    // 並び: started_at (session.started 観測時のみ設定) → last_event_at → session_id。
+    // 3c QA-1: 途中観測 run (turn.started 初観測・rollout tail 等) は started_at NULL のため、
+    // COALESCE で last_event_at へ縮退させ時系列を保つ (辞書順縮退を防ぐ)。
+    const { rows } = await this.pool.query(
+      `SELECT s.session_id, s.start_kind, ss.last_event_at
+         FROM sessions s
+         LEFT JOIN session_state ss ON ss.session_id = s.session_id
+        WHERE s.provider_session_id = $1
+        ORDER BY COALESCE(s.started_at, ss.last_event_at) ASC NULLS LAST, s.session_id ASC
+        LIMIT $2`,
+      [providerSessionId, LINEAGE_RUNS_LIMIT],
+    );
+    return (
+      rows as { session_id: string; start_kind: string | null; last_event_at: Date | null }[]
+    ).map((row) => {
+      const startKind = toStartKind(row.start_kind);
+      return {
+        session_id: row.session_id,
+        ...(startKind !== undefined ? { start_kind: startKind } : {}),
+        ...(row.last_event_at ? { last_event_at: row.last_event_at.toISOString() } : {}),
+      };
+    });
   }
 
   /**

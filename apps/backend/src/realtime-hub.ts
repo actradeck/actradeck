@@ -15,7 +15,14 @@
  * transport (WS) は realtime-server.ts が握り、socket を本 hub に登録する。hub は socket を
  * 「send(string) を持つ最小インタフェース」としてしか知らない (テストで偽 socket を注入可能)。
  */
-import type { ActionKind, CaptureMode } from "@actradeck/event-model";
+import type {
+  ActionKind,
+  CaptureMode,
+  Continuation,
+  EndKind,
+  LastTurnOutcome,
+  StartKind,
+} from "@actradeck/event-model";
 
 import type { LivenessEvidence, LivenessState } from "./liveness.js";
 import type { PendingApproval } from "./reducer.js";
@@ -91,6 +98,19 @@ export interface SessionListItem {
   readonly claimed_unverified_count?: number;
 }
 
+/**
+ * run lineage の兄弟 run 1 件 (ADR 0014 Phase 3c)。同一 provider_session_id を共有する
+ * 観測 run。表示専用の非秘匿メタ (session_id / 開始種別 / 最終活動) のみで、
+ * command/payload/secret は載らない。
+ */
+export interface LineageRun {
+  readonly session_id: string;
+  /** 開始種別 (closed-enum gate 済・out-of-enum/NULL はキー落とし)。 */
+  readonly start_kind?: StartKind;
+  /** 最終活動 (ISO)。projection 未着の run は欠落。 */
+  readonly last_event_at?: string;
+}
+
 /** session 詳細 DTO (一覧 + liveness evidence 分解 + 不正遷移カウント + 承認待ち)。 */
 export interface SessionDetail extends SessionListItem {
   readonly last_event_id: string | undefined;
@@ -133,6 +153,43 @@ export interface SessionDetail extends SessionListItem {
    * **optional**(後方互換): 欠落 (NULL = 旧行) はキーを落とす (UI は表示を控える)。表示専用。
    */
   readonly secret_redaction_count_by_kind?: Record<string, number>;
+  /**
+   * ADR 0014 Phase 3c (run lineage・decision 019fd250): 以下はすべて **optional**(後方互換・
+   * 欠落時キー落とし = UI は何も主張しない・attach 大半 NULL は正当)。enum 列は sessions の
+   * CHECK 無し TEXT を read 時に closed-enum safeParse で gate 済み (SEC-2: out-of-enum の
+   * non-ingest writer/backfill/手編集 DB 値を UI へ通さない)。表示専用・projection key 非使用・
+   * 秘匿値を含まない (id/enum/ISO のみ)。
+   */
+  /** provider 発行の raw session id (run lineage の束ねキー)。 */
+  readonly provider_session_id?: string;
+  /** run の開始種別 (StartKind gate 済)。 */
+  readonly start_kind?: StartKind;
+  /**
+   * この run が継続した元 run の id (lineage エッジ)。**宣言値でありうる** (Codex rollout の
+   * forked_from_id): 参照先は未観測・安定会話 id でありうる。UI は session_id で解決し、
+   * 未解決は linked-unknown 表示・self-loop 非表示 (ADR 0014 Phase 3 消費者要件)。
+   */
+  readonly resumed_from_session_id?: string;
+  /**
+   * resumed_from_session_id が観測済み session として実在するか (EXISTS)。UI の
+   * resolved / linked-unknown 分岐の根拠。resumed_from 欠落時はキーごと欠落。
+   */
+  readonly resumed_from_observed?: boolean;
+  /** run の終了種別 (EndKind gate 済)。lifecycle 表示は state が権威で、end_kind から合成しない。 */
+  readonly end_kind?: EndKind;
+  /**
+   * 再開可能性 (stored = provider/process 実証跡・Recoverability gate 済)。表示は
+   * event-model `resolveContinuation(stored, state)` (stored-first) の resolved 値 1 つのみ
+   * (矛盾値禁止則・decision 019fd250)。
+   */
+  readonly recoverability?: Continuation;
+  /** 直近 turn の結果 (LastTurnOutcome gate 済・session の結果ではない)。 */
+  readonly last_turn_outcome?: LastTurnOutcome;
+  /**
+   * 同一 provider_session_id を共有する run 系譜 (自分含む・started_at 昇順・有界)。
+   * 2 run 以上あるときのみ載せる (単独 run は連結情報が無いためキー落とし)。
+   */
+  readonly lineage_runs?: readonly LineageRun[];
 }
 
 /**

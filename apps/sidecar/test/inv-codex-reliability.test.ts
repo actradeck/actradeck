@@ -166,7 +166,13 @@ describe("INV-CODEX-RELIABILITY: transport/lifecycle hardening", () => {
       .filter((r) => r.event_type === "session.ended")
       .map(
         (r) =>
-          JSON.parse(r.event_json) as { state?: string; session_id: string; payload?: unknown },
+          JSON.parse(r.event_json) as {
+            state?: string;
+            session_id: string;
+            payload?: unknown;
+            end_kind?: string;
+            recoverability?: string;
+          },
       );
   }
   function endedReason(row: { payload?: unknown }): string | undefined {
@@ -192,6 +198,10 @@ describe("INV-CODEX-RELIABILITY: transport/lifecycle hardening", () => {
     expect(ended.length).toBe(1);
     expect(ended[0]!.state).toBe("failed");
     expect(endedReason(ended[0]!)).toBe("handshake_timeout");
+    // ADR 0014 Phase 3c (decision 019fd250): handshake/接続失敗経路も child-exit 経路と
+    // uniform に end_kind/recoverability を明示する (経路により continuation 表示が揺れない)。
+    expect(ended[0]!.end_kind).toBe("failed");
+    expect(ended[0]!.recoverability).toBe("not_resumable");
     // canonical 未確定でも fallback id で観測される (silent hang でない)。
     expect(ended[0]!.session_id).toBe(FALLBACK);
     // un-enforceable zombie を残さない: child を停止した。

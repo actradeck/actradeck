@@ -24,6 +24,8 @@ export type {
   ReplayEventsPage,
   // PAL-v2 (ADR 019ee147): 永続承認 allowlist エントリ (NO-RAW)。
   AllowlistEntry,
+  // ADR 0014 Phase 3c: run lineage の兄弟 run (continued-from 表示素材)。
+  LineageRun,
 } from "@actradeck/backend";
 
 // liveness 型も backend 正典を再利用 (UI の heartbeat 分解表示が依存する)。

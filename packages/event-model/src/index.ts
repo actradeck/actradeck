@@ -42,6 +42,7 @@ export {
   TERMINAL_CONTINUATION,
   TERMINAL_EVIDENCE_DEFAULT,
   terminalContinuation,
+  resolveContinuation,
   terminalEvidenceFor,
   // ADR 0014 Phase 3 (run lineage) — recoverability は Continuation を再利用した zod enum。
   Recoverability,

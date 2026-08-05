@@ -474,6 +474,14 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
           ...(threadId !== undefined ? { thread_id: threadId } : {}),
           event_type: "session.ended",
           state: "failed",
+          // ADR 0014 Phase 3c precedence (decision 019fd250): managed の end_kind を uniform 化。
+          //   この経路は handleConnectionLoss が stopChild で子を終端しており「プロセス消滅 +
+          //   thread 未確立/接続喪失」= 再開対象が無い。child-exit 経路 (emitSessionEndedOnce)
+          //   と同じく end_kind=state 整合 / recoverability は process_exit 同性質の証跡として
+          //   not_resumable を明示する (NULL のままだと同じ managed failed でも経路により
+          //   continuation 表示が揺れる非一様を解消)。
+          end_kind: "failed",
+          recoverability: "not_resumable",
           timestamp: ts,
           summary: `Codex 接続失敗 (${reason})`,
           payload: { kind: "session.ended", reason },
