@@ -16,7 +16,12 @@ import { Button } from "./kit";
 import { useLocale } from "./LocaleProvider";
 import { useCodexSpawn } from "./use-codex-spawn";
 
-/** daemonId を人間可読な短縮ラベルへ (先頭 8 hex・NO-RAW: credential でない per-connection id)。 */
+/**
+ * daemonId を人間可読な短縮ラベルへ (先頭 8 hex = UUID 第1グループ・NO-RAW: credential でない
+ * per-connection id)。**session_id ではない**ため wall-display の正準 `shortSessionId` (12 桁・
+ * session_id 専用) は経由しない — id 種別ごとの短縮契約を混同しない (cockpit sweep 裁定:
+ * daemon 短縮は webui でここ 1 箇所のみ・2 箇所目が出たら単一出所化する)。
+ */
 function shortDaemon(id: string): string {
   return id.slice(0, 8);
 }
