@@ -13,6 +13,7 @@
  */
 import { useRef, useState } from "react";
 
+import { repoBranchLabel } from "./action-rail";
 import { formatCurrentAction } from "./action-units-display";
 import { ApprovalCard } from "./ApprovalCard";
 import { CaptureModeBadge } from "./CaptureModeBadge";
@@ -374,9 +375,10 @@ export function WallLaneRow({
             </code>
           ) : null}
           {item.repo ? (
+            // repo@branch 合成は正準 repoBranchLabel (cockpit sweep TDA-1: guard 済みゆえ
+            // dash-fallback を持つ SessionList/SessionDetail と異なり単一出所へ移行可能)。
             <span className="ad-session-meta" data-testid="wall-lane-repo">
-              {item.repo}
-              {item.branch ? `@${item.branch}` : ""}
+              {repoBranchLabel(item.repo, item.branch)}
             </span>
           ) : null}
           {liveElapsedMs !== null ? (

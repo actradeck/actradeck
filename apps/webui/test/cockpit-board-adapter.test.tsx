@@ -115,21 +115,15 @@ vi.mock("../src/ui/use-approval-inbox", () => ({
     refresh: () => {},
   }),
 }));
-vi.mock("../src/ui/use-notifications", () => ({
-  useNotifications: () => ({
-    settings: { enabled: false, categories: {} },
-    permission: "default",
-    notify: () => {},
-    requestEnable: () => {},
-    disable: () => {},
-    setCategory: () => {},
-  }),
+// 周辺 hook の中立 mock は _support/cockpit-hook-mocks の単一出所 (cockpit sweep TDA-2)。
+vi.mock("../src/ui/use-notifications", async () => ({
+  useNotifications: (await import("./_support/cockpit-hook-mocks.js")).notificationsHookMock,
 }));
-vi.mock("../src/ui/use-daemons", () => ({
-  useDaemons: () => ({ daemonIds: [], spawnDaemonIds: [], refresh: () => {} }),
+vi.mock("../src/ui/use-daemons", async () => ({
+  useDaemons: (await import("./_support/cockpit-hook-mocks.js")).daemonsHookMock,
 }));
-vi.mock("../src/ui/use-readiness", () => ({
-  useReadiness: () => ({ readiness: null, refresh: () => {} }),
+vi.mock("../src/ui/use-readiness", async () => ({
+  useReadiness: (await import("./_support/cockpit-hook-mocks.js")).readinessHookMock,
 }));
 vi.mock("../src/ui/use-audit-coverage", () => ({
   useAuditCoverage: () => ({
@@ -139,26 +133,14 @@ vi.mock("../src/ui/use-audit-coverage", () => ({
     unreachable: false,
   }),
 }));
-vi.mock("../src/ui/use-safety-demo", async (importOriginal) => ({
-  // isPostDemoBoardState / SAFETY_DEMO_SESSION_PREFIX は純関数/定数なので実物を使う (hook のみ差し替え)。
-  ...(await importOriginal<typeof import("../src/ui/use-safety-demo.js")>()),
-  useSafetyDemo: () => ({ phase: "idle", sessionId: null, launch: () => {} }),
+vi.mock("../src/ui/use-safety-demo", async (importOriginal) =>
+  (await import("./_support/cockpit-hook-mocks.js")).safetyDemoModuleMock(importOriginal),
+);
+vi.mock("../src/ui/use-session-events", async () => ({
+  useSessionEvents: (await import("./_support/cockpit-hook-mocks.js")).sessionEventsHookMock,
 }));
-vi.mock("../src/ui/use-session-events", () => ({
-  useSessionEvents: () => ({ events: [], loading: false, error: null, reload: () => {} }),
-}));
-vi.mock("../src/ui/use-session-body", () => ({
-  useSessionBody: () => ({
-    diff: null,
-    diffLoading: false,
-    diffError: null,
-    loadDiff: () => {},
-    output: null,
-    outputLoading: false,
-    outputError: null,
-    loadOutput: () => {},
-    clear: () => {},
-  }),
+vi.mock("../src/ui/use-session-body", async () => ({
+  useSessionBody: (await import("./_support/cockpit-hook-mocks.js")).sessionBodyHookMock,
 }));
 
 let CockpitBoard: typeof import("../src/ui/CockpitBoard.js").CockpitBoard;
