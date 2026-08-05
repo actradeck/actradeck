@@ -115,6 +115,42 @@ describe.skipIf(!reachable)("INV-LINEAGE-DTO (real Postgres)", () => {
     expect(detail!.lineage_runs?.[1]?.start_kind).toBe("resume");
   });
 
+  it("QA-1: started_at 欠落 run 同士でも系譜順は時系列 (last_event_at 縮退・辞書順にしない)", async () => {
+    const psid = `conv_nostart_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const base = Date.now();
+    // 辞書順 (zz < ... は偽) と時系列が食い違うよう、後発 run に辞書順で先行する id を与える。
+    const older = newSession("sess_lin_zz_older");
+    const newer = newSession("sess_lin_aa_newer");
+    // どちらも session.started を観測しない (turn.started 初観測 = started_at NULL)。
+    await ingest.ingest(
+      makeEvent({
+        session_id: older,
+        state: "running.model_wait",
+        event_type: "turn.started",
+        provider_session_id: psid,
+        timestamp: iso(base, 0),
+      }),
+    );
+    await ingest.ingest(
+      makeEvent({
+        session_id: newer,
+        state: "running.model_wait",
+        event_type: "turn.started",
+        provider_session_id: psid,
+        timestamp: iso(base, 60_000),
+      }),
+    );
+    const { rows } = await pool.query(
+      `SELECT started_at FROM sessions WHERE session_id = ANY($1::text[])`,
+      [[older, newer]],
+    );
+    // 前提の実測: 両 run とも started_at 未設定 (縮退経路が実際に踏まれる)。
+    for (const r of rows as { started_at: Date | null }[]) expect(r.started_at).toBeNull();
+    const detail = await store.detail(newer);
+    // 辞書順なら [newer(aa), older(zz)]。last_event_at 縮退で時系列 [older, newer] を保つ。
+    expect(detail!.lineage_runs?.map((r) => r.session_id)).toEqual([older, newer]);
+  });
+
   it("宣言エッジの参照先が未観測 → resumed_from_observed=false (linked-unknown 根拠)", async () => {
     const sid = newSession("sess_lin_declared");
     await ingest.ingest(

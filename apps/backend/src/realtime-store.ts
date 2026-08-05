@@ -442,12 +442,15 @@ export class RealtimeStore {
    * scope へ含めること (project-scope.ts の境界コメント参照)。
    */
   private async lineageRuns(providerSessionId: string): Promise<LineageRun[]> {
+    // 並び: started_at (session.started 観測時のみ設定) → last_event_at → session_id。
+    // 3c QA-1: 途中観測 run (turn.started 初観測・rollout tail 等) は started_at NULL のため、
+    // COALESCE で last_event_at へ縮退させ時系列を保つ (辞書順縮退を防ぐ)。
     const { rows } = await this.pool.query(
       `SELECT s.session_id, s.start_kind, ss.last_event_at
          FROM sessions s
          LEFT JOIN session_state ss ON ss.session_id = s.session_id
         WHERE s.provider_session_id = $1
-        ORDER BY s.started_at ASC NULLS LAST, s.session_id ASC
+        ORDER BY COALESCE(s.started_at, ss.last_event_at) ASC NULLS LAST, s.session_id ASC
         LIMIT $2`,
       [providerSessionId, LINEAGE_RUNS_LIMIT],
     );
