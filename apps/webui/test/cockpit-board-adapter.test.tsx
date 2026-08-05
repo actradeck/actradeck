@@ -12,8 +12,10 @@
  * まま不変であることを固定する (表示集合 sessions の再計算へ戻す回帰は ON 遷移で 3 になり RED)。
  *
  * 手法: hook 群を mock し createRoot + act で interactive 描画 (REAL DATA: 実 wire 型
- * SessionListItem / SessionApprovals)。mock は mutable な state を返し、遷移は state 差し替え +
- * 再 render で駆動する。
+ * SessionListItem / SessionApprovals)。QA-3 の遷移は toggle click を起点に因果駆動する —
+ * `setShowHistory` mock が実 hook 同様に state へ書き戻し (showHistory 反転 + 表示集合の
+ * 拡張/縮小)、再 render で反映する (監査 QA-1: 手動 state 差し替えでは click→反転の因果が
+ * 張られない)。再 render の手動呼び出しは残る (mock hook は subscription を持たないため)。
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -238,49 +240,46 @@ describe("CockpitBoard adapter 配線 (QA-5)", () => {
 });
 
 describe("CockpitBoard showHistory 遷移不変性 (QA-3 / Running KPI 019f6bf2)", () => {
-  it("OFF→ON→OFF 遷移で Running/Live は hook の presence 値のまま不変 (表示集合を再計算しない)", () => {
+  it("toggle click 起点の OFF→ON→OFF 遷移で Running/Live は hook の presence 値のまま不変 (表示集合を再計算しない)", () => {
     boardApprovals = [];
-    realtimeState = {
-      sessions: [CONNECTED, HISTORY_STALE],
-      showHistory: false,
+    // 実 hook の意味論を mock に写す: showHistory ON で表示集合に固着履歴 (running.* のまま) が
+    // 2 件加わるが、presence 由来の counts は不変。setShowHistory は state へ書き戻す (実 feedback)。
+    const displaySets: Record<"off" | "on", readonly SessionListItem[]> = {
+      off: [CONNECTED, HISTORY_STALE],
+      on: [CONNECTED, HISTORY_STALE, { ...HISTORY_STALE, session_id: "sess-history0002" }],
+    };
+    const stateFor = (show: boolean): RealtimeState => ({
+      sessions: displaySets[show ? "on" : "off"],
+      showHistory: show,
       connectedCount: 1,
       runningCount: 1,
       totalCount: 3,
-    };
+    });
+    setShowHistory.mockImplementation((v: boolean) => {
+      realtimeState = stateFor(v);
+    });
+    realtimeState = stateFor(false);
     render();
     expect(q("running-count")?.textContent).toBe("1");
     expect(q("connected-count")?.textContent).toBe("1");
 
-    // トグル ON: ボタンが hook の setShowHistory(true) を呼ぶ (描画層からの遷移駆動)。
+    // トグル ON: click → setShowHistory(true) → mock feedback が state を反転・表示集合を拡張。
+    // 再 render の手動呼び出しのみ残る (mock hook は subscription を持たない)。
     const toggle = q("toggle-history");
     expect(toggle).not.toBeNull();
     act(() => (toggle as HTMLButtonElement).click());
     expect(setShowHistory).toHaveBeenLastCalledWith(true);
-
-    // ON 反映: 表示集合に固着履歴 (running.* のまま) が 2 件加わるが、presence 値は不変。
-    realtimeState = {
-      sessions: [CONNECTED, HISTORY_STALE, { ...HISTORY_STALE, session_id: "sess-history0002" }],
-      showHistory: true,
-      connectedCount: 1,
-      runningCount: 1,
-      totalCount: 3,
-    };
     render();
     // 表示集合再計算 (旧バグ) なら Running=3。hook の presence 値 1 を描画し続けることを固定。
+    expect(q("toggle-history")?.getAttribute("aria-pressed")).toBe("true");
     expect(q("running-count")?.textContent).toBe("1");
     expect(q("connected-count")?.textContent).toBe("1");
 
-    // トグル OFF: 表示集合が戻っても値は 1 のまま (トグル非依存)。
+    // トグル OFF: click 起点で表示集合が戻っても値は 1 のまま (トグル非依存)。
     act(() => (q("toggle-history") as HTMLButtonElement).click());
     expect(setShowHistory).toHaveBeenLastCalledWith(false);
-    realtimeState = {
-      sessions: [CONNECTED, HISTORY_STALE],
-      showHistory: false,
-      connectedCount: 1,
-      runningCount: 1,
-      totalCount: 3,
-    };
     render();
+    expect(q("toggle-history")?.getAttribute("aria-pressed")).toBe("false");
     expect(q("running-count")?.textContent).toBe("1");
     expect(q("connected-count")?.textContent).toBe("1");
   });
