@@ -434,6 +434,12 @@ export class RealtimeStore {
   /**
    * 同一 provider_session_id を共有する run 兄弟 (started_at 昇順・有界)。provider_session_id は
    * index 済み (migration 1781312800000)。start_kind は closed-enum gate (SEC-2)。
+   *
+   * scope 非適用 (3c SEC-1・accepted-risk): 本クエリと DETAIL_SELECT の resumed_from_observed
+   * EXISTS は by-id detail 経路の一部として project-scope を意図的に適用しない (single-operator・
+   * ADR 019e92ae)。返却は session_id/enum/ISO のみで scope が守る cwd を含まない。将来 by-id 経路を
+   * transitive-scope 化する際は、session_id と**別軸** (provider_session_id) の本クエリを個別に
+   * scope へ含めること (project-scope.ts の境界コメント参照)。
    */
   private async lineageRuns(providerSessionId: string): Promise<LineageRun[]> {
     const { rows } = await this.pool.query(

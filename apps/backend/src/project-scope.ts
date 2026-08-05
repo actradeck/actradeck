@@ -18,13 +18,18 @@
  * 境界 — これは **display hygiene であって authz 境界ではない** (SEC-1 / ADR 019e92ae):
  * - 適用先は **list 経路のみ** (listSnapshot / approvalsSnapshot / rangeReport)。目的は「画面共有時に
  *   一覧へ他プロジェクトが**偶発的に列挙**されるのを防ぐ」こと。
- * - by-id 直接取得 (detail / replay events / command output / diff / audit sessionSummary) は **意図的に
- *   gate しない**。ActraDeck の authz は単一信頼オペレータ前提 (REALTIME_TOKEN = full trust・ADR 019e92ae、
- *   per-session ACL は延期) ゆえ、token 保持者が out-of-scope な session_id を直接渡せば scope 外の
- *   cwd/repo/承認履歴を取得できる。**現行の脅威モデル (自分の画面を自分で共有・token は本人のみ保持) では
- *   leak ではない**。
+ * - by-id 直接取得 (detail / replay events / command output / diff / audit sessionSummary、および
+ *   detail 経由の **lineage_runs 兄弟列挙 + resumed_from_observed EXISTS**・ADR 0014 Phase 3c) は
+ *   **意図的に gate しない**。ActraDeck の authz は単一信頼オペレータ前提 (REALTIME_TOKEN = full trust・
+ *   ADR 019e92ae、per-session ACL は延期) ゆえ、token 保持者が out-of-scope な session_id を直接渡せば
+ *   scope 外の cwd/repo/承認履歴を取得できる。**現行の脅威モデル (自分の画面を自分で共有・token は
+ *   本人のみ保持) では leak ではない**。
  * - ⚠ 共有先が **非信頼の第三者** になる (閲覧者へ REALTIME_TOKEN や by-id URL を渡す) 運用へ変えるなら、
  *   by-id 経路にも scope を transitive 適用し、本件 severity を H へ昇格させること (reachability 走査必須)。
+ *   その走査は `WHERE ss.session_id = $1` の scope 化だけでは足りない (3c SEC-1): detail が発行する
+ *   `lineageRuns` (realtime-store.ts) は **provider_session_id という別軸**で sessions を join して
+ *   out-of-scope 兄弟の session_id/start_kind/時刻を列挙し、`resumed_from_observed` EXISTS も sessions
+ *   全体を存在照合する。transitive 化ではこの 2 クエリを個別に scope へ含めること。
  */
 import { isPathWithinScope, normalizeScopePath } from "@actradeck/event-model";
 
