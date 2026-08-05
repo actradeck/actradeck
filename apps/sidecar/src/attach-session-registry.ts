@@ -93,6 +93,11 @@ export class AttachSessionRegistry {
    * terminal reap 済み run の親相関 tombstone (provider id → 旧 canonical run id)。
    * SessionEnd 経由の reap (isRunTerminal) でのみ記録し、idle reap (非 terminal・self-heal 意味論)
    * では記録しない。consume-once: SessionStart の初出で seed に使ったら削除する。
+   *
+   * best-effort の sanctioned 縮退 (QA-3・ADR 0014 matrix に開示): straggler hook が resume の
+   * SessionStart より先に entry を再生成した場合、および SessionEnd の reap より先に resume が
+   * 観測された場合は tombstone が未消費のまま fresh fold へ落ちる (edge を張らないだけで
+   * false edge は作らない安全側)。
    */
   private readonly terminalTombstones = new BoundedLruMap<string, { runId: string }>(
     TERMINAL_TOMBSTONE_MAX_ENTRIES,

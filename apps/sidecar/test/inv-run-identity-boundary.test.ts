@@ -230,16 +230,19 @@ describe("INV-RUN-LINEAGE-EDGE: priorTerminalRun seed (attach reap 跨ぎ親相�
     expect(seen).toEqual([{ canonical: r.runId, provider: P1 }]);
   });
 
-  it("空値 priorTerminalRun は無視され通常 gen0 挙動 (fail-safe)", () => {
-    const id = new SessionIdentity({
-      fallbackSessionId: "f",
-      priorTerminalRun: { runId: "", providerSessionId: P1 },
-    });
-    const r = id.onHookSession(P1, { isSessionStart: true, source: "startup" });
-    expect(r.boundary).toBe(false);
-    expect(r.runId).toBe(P1);
-    expect(r.startKind).toBe("fresh");
-    expect(r.resumedFrom).toBeUndefined();
+  it("空値 priorTerminalRun は無視され通常 gen0 挙動 (fail-safe・両フィールド対称に検証)", () => {
+    // QA-4: runId="" と providerSessionId="" の両アームを独立に検証する。
+    for (const prior of [
+      { runId: "", providerSessionId: P1 },
+      { runId: "sess_prior-run", providerSessionId: "" },
+    ]) {
+      const id = new SessionIdentity({ fallbackSessionId: "f", priorTerminalRun: prior });
+      const r = id.onHookSession(P1, { isSessionStart: true, source: "startup" });
+      expect(r.boundary).toBe(false);
+      expect(r.runId).toBe(P1);
+      expect(r.startKind).toBe("fresh");
+      expect(r.resumedFrom).toBeUndefined();
+    }
   });
 });
 
@@ -275,6 +278,8 @@ describe("launchLineage: managed argv 権威 override (gen0 限定・decision 01
     expect(r.resumedFrom).toBeUndefined();
   });
 
+  // QA-2 注記: gen0 限定は構造的保証 (launchLineage 参照が case (A) 分岐にのみ存在) であり、
+  // 本テストは単行 mutation で赤化する guard ではなく契約の文書化として置く。
   it("gen0 以降の run 境界 (provider id 変化) には launchLineage を適用しない", () => {
     const id = new SessionIdentity({
       fallbackSessionId: "f",

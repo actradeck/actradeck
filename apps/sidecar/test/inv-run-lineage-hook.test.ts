@@ -16,6 +16,8 @@ import { HookReceiver } from "../src/hook-receiver.js";
 import { SessionIdentity } from "../src/session-identity.js";
 import { EventSink } from "../src/sink.js";
 import { EventStore } from "../src/store.js";
+import { Sidecar } from "../src/sidecar.js";
+import { HOOK_TOKEN_HEADER } from "../src/settings-injection.js";
 import type { WsClient } from "../src/ws-client.js";
 
 const noopWs = { notifyAppended: () => {} } as unknown as WsClient;
@@ -201,5 +203,48 @@ describe("INV-ATTACH-CANONICAL-ADVERTISED", () => {
     expect(new Set(registry.sessionIds())).toEqual(new Set([boundary.runId, P2]));
     expect(registry.sessionIds()).not.toContain(P1); // canonical rotate 後は provider id を広告しない
     await registry.dispose();
+  });
+});
+
+describe("launchLineage seam (decision 019fd2ac ②・Sidecar pass-through e2e・TDA-4)", () => {
+  it("Sidecar オプションの launchLineage が初 hook イベントの start_kind/resumed_from に載る", async () => {
+    // cli.deriveLaunchLineage (unit 済) と SessionIdentity gen0 適用 (unit 済) の間の
+    // Sidecar pass-through seam を実 HTTP + 実 SQLite で pin する。
+    const sidecar = new Sidecar({
+      sessionId: "sess_fallback-seam",
+      explicitSession: false,
+      wsUrl: "ws://127.0.0.1:1/ingest/ws",
+      dbPath: ":memory:",
+      cwd: "/tmp", // repo 外 (GitWatcher の自動 emit ノイズを避ける)
+      launchLineage: { startKind: "resume", resumedFrom: P2 },
+    });
+    try {
+      const { hookEndpoint } = await sidecar.start();
+      await fetch(hookEndpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [HOOK_TOKEN_HEADER]: sidecar.hookAuthToken,
+        },
+        // source=startup (advisory) でも launch argv (権威) の resume が勝つ。
+        body: JSON.stringify({
+          session_id: P1,
+          hook_event_name: "SessionStart",
+          source: "startup",
+        }),
+      });
+      const started = sidecar.store
+        .allRows()
+        .map((r) => JSON.parse(r.event_json) as Record<string, unknown>)
+        .filter((e) => e.event_type === "session.started");
+      expect(started.length).toBeGreaterThan(0);
+      for (const e of started) {
+        expect(e.session_id).toBe(P1);
+        expect(e.start_kind).toBe("resume");
+        expect(e.resumed_from_session_id).toBe(P2);
+      }
+    } finally {
+      await sidecar.shutdown();
+    }
   });
 });
