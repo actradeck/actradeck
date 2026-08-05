@@ -83,6 +83,13 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
 - `thread/closed` → a new terminal state **`suspended`** (`end_kind="unloaded"`,
   `recoverability="resumable"`), NOT `completed`.
 - Add minimal projections: `last_turn_outcome`, `continuation`, `terminal_evidence`.
+- Implemented (Phase 1 sweep note): beyond the three sites verified in Context, a FOURTH
+  poisoning site landed in this phase — the Codex app-server `error` notification with
+  `willRetry=false` previously fell to terminal `failed`; it now maps to the non-terminal
+  diagnostic `stalled` (recoverable; `willRetry=true` leaves the state unchanged). The
+  `last_turn_outcome` value `interrupted` has no producer path today (the reducer derives
+  only `turn.completed`→completed and `turn.failed`→failed); it is a forward-compatible enum
+  member, documented as such on the type.
 
 **Phase 2 — Conformance false-green fixes + semantic extensions (absorbs prior P2).**
 

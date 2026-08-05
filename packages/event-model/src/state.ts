@@ -109,7 +109,7 @@ export const WAITING_STATES: readonly State[] = [
  * 設計方針:
  * - created → starting → (running.* | waiting.* | idle) のライフサイクル。
  * - running.* 同士は自由に遷移できる (モデル待ち → コマンド実行 → ファイル編集 …)。
- * - running.* / waiting.* / compacting からはいつでも終端 (completed/failed/interrupted) へ。
+ * - running.* / waiting.* / compacting からはいつでも終端 (completed/failed/interrupted/suspended) へ。
  * - waiting.* は承認/入力/認証が解決すれば running.* へ戻れる。
  * - stalled / disconnected は「アクティブだった状態」からの診断的遷移であり、
  *   復帰 (running.* へ) または終端へ抜けられる (停止を断定しない: plan.md §5)。
@@ -174,8 +174,8 @@ export function isTerminalState(state: State): boolean {
  *
  * DTO / DB 由来の state は `string | undefined` (SessionListItem.state / detail.state 等) で届き、
  * `State` へ narrow せずに terminal 判定したい消費面 (presence recency proxy / webui interrupt 可否)
- * がここを共有する。手書きの `new Set(["completed","failed","interrupted"])` 列挙コピーを各層に
- * 置かないための単一出所 (consolidation-invariant-sweep-all-copies / wall-ended-badge TDA-1)。
+ * がここを共有する。手書きの `new Set(["completed","failed","interrupted","suspended"])` 列挙コピーを
+ * 各層に置かないための単一出所 (consolidation-invariant-sweep-all-copies / wall-ended-badge TDA-1)。
  * 未知値 / 未提供 (undefined) は非 terminal = false。
  */
 export function isTerminalStateValue(state: string | undefined): boolean {
@@ -185,8 +185,9 @@ export function isTerminalStateValue(state: string | undefined): boolean {
 /**
  * `state` が **失敗を表す** terminal（`FAILURE_TERMINAL_STATES`）か。`isTerminalStateValue` の
  * 失敗限定版（string 緩包含・DTO 由来 `string | undefined` を narrow せず判定）。webui 通知の
- * 失敗分類の単一出所（減算派生 FAILED_STATES を置換・ADR 0014 SEC-1/TDA-1）。completed / suspended /
- * 未知値 / undefined は false（＝失敗でない・安全側）。
+ * 失敗分類の単一出所（歴史: 原型は減算派生 FAILED_STATES・その後 `new Set(FAILURE_TERMINAL_STATES)`
+ * 中継を経て、Phase1 sweep TDA-2 で notifications が本 helper を直接呼ぶ形に統一・ADR 0014
+ * SEC-1/TDA-1）。completed / suspended / 未知値 / undefined は false（＝失敗でない・安全側）。
  */
 export function isFailureTerminalStateValue(state: string | undefined): boolean {
   return (
@@ -203,6 +204,11 @@ export function isFailureTerminalStateValue(state: string | undefined): boolean 
  *   gate が許容値集合を手写し (ローカル Set コピー) する drift 源を消し、runtime を単一出所へ
  *   再利用させるため (`.safeParse`/`.options` を共有・security-gate-reuse-canonical-parser)。
  *   **値は不変**: completed / failed / interrupted。`LastTurnOutcome` 型は infer に統一する。
+ *
+ * `"interrupted"` は **forward-compat メンバで現在生成経路なし** (Phase1 sweep TDA-4):
+ *   reducer (projection/index.ts) は event_type turn.completed→completed / turn.failed→failed
+ *   のみ導出し、turn 中断を outcome へ写す producer はまだ無い (将来 turn 中断シグナルを
+ *   得たときの予約値。enum から落とすと既存 DB 値の parse が壊れるため温存)。
  */
 export const LastTurnOutcome = z.enum(["completed", "failed", "interrupted"]);
 export type LastTurnOutcome = z.infer<typeof LastTurnOutcome>;

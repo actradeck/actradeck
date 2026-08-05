@@ -67,7 +67,7 @@ export function currentActionView(state: string | undefined): CurrentActionView 
       return "waiting";
     default:
       // created / starting / compacting / idle / stalled / completed / failed / interrupted /
-      // disconnected / 未知値 → 控えめな既定ビュー (現在「アクティブ作業」を断定しない)。
+      // suspended / disconnected / 未知値 → 控えめな既定ビュー (現在「アクティブ作業」を断定しない)。
       return "idle";
   }
 }

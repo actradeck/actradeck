@@ -13,11 +13,12 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
+import { isFailureTerminalStateValue } from "@actradeck/event-model";
+
 import { t } from "../src/ui/i18n/messages.js";
 import {
   computeNotifications,
   createNotificationEngine,
-  FAILED_STATES,
   type NotificationCategory,
   type Notifier,
   type NotifyContext,
@@ -104,13 +105,16 @@ describe("computeNotifications — edges", () => {
   });
 
   // ADR 0014 SEC-1/TDA-1 回帰防止: 失敗集合を **リテラルで membership-pin** する。以前は
-  //   `for (const st of FAILED_STATES)` と判定集合そのものを oracle にしていたため、TERMINAL_STATES
-  //   への非失敗 terminal (`suspended`) 混入を原理的に検出できず誤挙動を緑固定していた (tautology)。
-  //   FAILED_STATES は正典 FAILURE_TERMINAL_STATES 由来＝failed/interrupted のみであることを固定する。
-  it("INV-NOTIFY-FAILED-SET: FAILED_STATES は failed/interrupted のみ (completed/suspended を含まない)", () => {
-    expect(FAILED_STATES).toEqual(new Set(["failed", "interrupted"]));
-    expect(FAILED_STATES.has("completed")).toBe(false);
-    expect(FAILED_STATES.has("suspended")).toBe(false);
+  //   判定集合そのものを oracle にしていたため、TERMINAL_STATES への非失敗 terminal (`suspended`)
+  //   混入を原理的に検出できず誤挙動を緑固定していた (tautology)。Phase1 sweep TDA-2 でローカル
+  //   FAILED_STATES Set を廃し、notifications の失敗判定は event-model 正典 helper
+  //   `isFailureTerminalStateValue` を直接使う — その membership をここでリテラル pin する
+  //   (通知挙動レベルの pin は下の INV-NOTIFY-ON-TRANSITION / completed / suspended テストが担う)。
+  it("INV-NOTIFY-FAILED-SET: 失敗判定 helper は failed/interrupted のみ true (completed/suspended は false)", () => {
+    expect(isFailureTerminalStateValue("failed")).toBe(true);
+    expect(isFailureTerminalStateValue("interrupted")).toBe(true);
+    expect(isFailureTerminalStateValue("completed")).toBe(false);
+    expect(isFailureTerminalStateValue("suspended")).toBe(false);
   });
 
   it("INV-NOTIFY-ON-TRANSITION: state→failed/interrupted で failed spec (リテラル駆動)", () => {
@@ -134,7 +138,7 @@ describe("computeNotifications — edges", () => {
   });
 
   // ADR 0014 SEC-1/TDA-1 の落ちる回帰テスト: suspended (provider unload・再開可) は失敗ではない。
-  //   減算派生に戻すと FAILED_STATES に suspended が混入し、この assert が赤くなる。
+  //   失敗判定を減算派生 (TERMINAL_STATES から引く形) に戻すと suspended が混入し、この assert が赤くなる。
   it("suspended(unload・再開可) は failed 通知を出さない (誤『異常終了』通知の回帰防止)", () => {
     const specs = computeNotifications(
       item({ state: "running.command_executing" }),
@@ -149,6 +153,27 @@ describe("computeNotifications — edges", () => {
       categories: ALL_CATS,
     });
     expect(specs.map((s) => s.category)).toEqual(["approval"]);
+  });
+
+  // Phase1 sweep QA-1: failed カテゴリの初回観測 (prev=undefined) 立ち上がり。prevFailed が
+  // 「prev 不在=既に失敗扱い」に化ける mutation で最初の failed 通知が黙って消えるのを塞ぐ。
+  it("prev=undefined(初回) で curr=failed なら failed 通知を出す", () => {
+    const specs = computeNotifications(undefined, item({ state: "failed" }), {
+      categories: ALL_CATS,
+    });
+    expect(specs.map((s) => s.category)).toEqual(["failed"]);
+  });
+
+  // Phase1 sweep QA-2: failed 判定の非該当クラス (state 欠落 / 未知トークン) は spec を出さない。
+  it("state=undefined / 未知文字列は failed 通知を出さない (fail-safe)", () => {
+    for (const state of [undefined, "garbage"] as const) {
+      const specs = computeNotifications(
+        item({ state: "running.command_executing" }),
+        item({ state }),
+        { categories: ALL_CATS },
+      );
+      expect(specs, `state=${String(state)} must not notify`).toEqual([]);
+    }
   });
 
   it("INV-NOTIFY-EDGE-ONLY: true→true は発火しない", () => {

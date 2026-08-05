@@ -2,7 +2,7 @@
  * INV-STATE-TRANSITION (P0, testing.md / ingestion-events.md)。
  *
  * State Engine reducer の不変条件 (純関数・DB 非依存・決定論):
- *  1. terminal (completed/failed/interrupted) 後の state 変更を**拒否** (安全側・無視)。
+ *  1. terminal (completed/failed/interrupted/suspended) 後の state 変更を**拒否** (安全側・無視)。
  *  2. 不正遷移は projection に適用せず、不正としてカウントする (append-only の events には残る)。
  *  3. 妥当な遷移は適用される。
  *  4. 決定論: 同じイベント列 → 同じ最終 state。
@@ -56,7 +56,8 @@ describe("INV-STATE-TRANSITION: reducer rejects terminal-after transitions (safe
   });
 
   it("rejects each terminal state's outbound transitions", () => {
-    for (const terminal of ["completed", "failed", "interrupted"] as State[]) {
+    // suspended (ADR 0014) も含め TERMINAL_STATES 全メンバの outbound 拒否を実走 (Phase1 sweep TDA-1)。
+    for (const terminal of ["completed", "failed", "interrupted", "suspended"] as State[]) {
       expect(isTerminalState(terminal)).toBe(true);
       let proj = initialProjection(SID);
       proj = applyEvent(

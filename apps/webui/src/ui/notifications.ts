@@ -13,9 +13,9 @@
  *    `window.Notification` のみ。バックグラウンドのタブ(document.hidden=true)で発火する。
  *
  * 表示層・純ロジック: realtime/bff/backend を value-import しない（token-isolation）。
- * event-model からは type-only + T1 enum 値(FAILURE_TERMINAL_STATES)のみを取り込む。
+ * event-model からは type-only + T1 純関数(isFailureTerminalStateValue)のみを取り込む。
  */
-import { FAILURE_TERMINAL_STATES } from "@actradeck/event-model";
+import { isFailureTerminalStateValue } from "@actradeck/event-model";
 
 import { shortSessionId } from "./wall-display";
 
@@ -31,16 +31,18 @@ export const NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
   "failed",
 ] as const;
 
-/**
- * 失敗とみなす終端 state 集合 = event-model の正典 `FAILURE_TERMINAL_STATES` (= failed/interrupted)。
+/*
+ * 失敗判定は event-model の正典 helper `isFailureTerminalStateValue`（FAILURE_TERMINAL_STATES =
+ * failed/interrupted 帰着・string | undefined 緩包含）を直接使う（Phase1 sweep TDA-2: 旧
+ * `FAILED_STATES = new Set(FAILURE_TERMINAL_STATES)` のローカル Set 中継を廃し、この用途のために
+ * 用意された helper を live 化）。
  *
  * ⚠️ **減算派生しない（ADR 0014 SEC-1/TDA-1 回帰防止）**: 以前は `TERMINAL_STATES.filter(≠completed)`
  * で導出していたため、TERMINAL_STATES に **非失敗**の新 terminal `suspended`（provider unload・再開可）が
  * 加わった瞬間、再開可能な休止が「異常終了」通知へ誤って巻き込まれた。失敗判定は「terminal から引く」
- * のではなく、失敗であるものだけを明示列挙した T1 正典集合を唯一の出所とする（新 terminal 追加は既定で
- * 非失敗＝安全側）。`SessionListItem.state` は `string | undefined` のため Set<string> に正規化して照合する。
+ * のではなく、失敗を明示列挙した T1 正典集合（helper が帰着する FAILURE_TERMINAL_STATES）を唯一の
+ * 出所とする（新 terminal 追加は既定で非失敗＝安全側）。
  */
-export const FAILED_STATES: ReadonlySet<string> = new Set(FAILURE_TERMINAL_STATES);
 
 /** UI が `window.Notification` へ渡すための、純粋な通知仕様（i18n 解決前）。 */
 export interface NotificationSpec {
@@ -124,7 +126,7 @@ function buildSpec(category: NotificationCategory, curr: SessionListItem): Notif
  * 検出するエッジ（いずれも false/非該当 → true/該当 への立ち上がりのみ）:
  *  - approval: `!prev?.needs_attention && curr.needs_attention`
  *  - stalled:  `!prev?.stalled_suspected && curr.stalled_suspected`
- *  - failed:   curr.state が FAILED_STATES(failed/interrupted) かつ prev.state がそれ以外
+ *  - failed:   curr.state が失敗 terminal (isFailureTerminalStateValue=failed/interrupted) かつ prev.state がそれ以外
  *
  * prev=undefined（初回観測）は「直前=偽」とみなす。これにより snapshot 直後に既に true の
  * session が一斉発火するのを **呼び出し側**（マネージャ）が snapshot 経路を通さないことで防ぐ
@@ -147,8 +149,8 @@ export function computeNotifications(
     out.push(buildSpec("stalled", curr));
   }
   if (cats.failed) {
-    const currFailed = curr.state !== undefined && FAILED_STATES.has(curr.state);
-    const prevFailed = prev?.state !== undefined && FAILED_STATES.has(prev.state);
+    const currFailed = isFailureTerminalStateValue(curr.state);
+    const prevFailed = isFailureTerminalStateValue(prev?.state);
     if (currFailed && !prevFailed) out.push(buildSpec("failed", curr));
   }
 
