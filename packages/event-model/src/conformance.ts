@@ -32,12 +32,16 @@
  *
  * NOTE (local-dev tool): findings are meant for an adapter author validating their OWN JSONL on their
  * OWN machine (`scripts/check-conformance.mjs` reads only an operator-named file/stdin — no network).
- * A finding `message` may echo adapter-controlled, non-secret structural metadata (event_type, the
- * payload `kind` discriminator, request_id, session_id, event_id, state, timestamp, seq — all
- * schema-constrained enums/ISO timestamps/non-negative integers) verbatim; it never echoes payload
- * body content (`canonicalize` is compared internally and discarded, never emitted). If this checker
- * is ever exposed as a hosted endpoint that renders findings across a trust boundary, re-sanitize
- * those adapter-controlled fields before display (SEC-L1, ADR 0014 Phase 2).
+ * A finding `message` may echo adapter-controlled, non-secret structural metadata verbatim. The
+ * echoed fields fall in two tiers: event_type and state are schema-constrained enums, timestamp is
+ * a schema-validated ISO 8601 string, seq is a schema-validated non-negative integer, and event_id
+ * is UUIDv7-shaped — while session_id, the payload `kind` discriminator, and request_id are OPAQUE
+ * adapter-controlled strings (the schema constrains them barely or not at all; the kind-mismatch
+ * message in particular echoes a `kind` value precisely because it did NOT match the enum). A
+ * message never echoes payload body content (`canonicalize` is compared internally and discarded,
+ * never emitted). If this checker is ever exposed as a hosted endpoint that renders findings across
+ * a trust boundary, re-sanitize ALL of these adapter-controlled fields before display — the opaque
+ * tier especially (SEC-L1, ADR 0014 Phase 2).
  *
  * Severity split: `error` findings are contract breaks (the harness fails); `warning` findings
  * are contract-consistent and do NOT fail the harness — a duplicate `event_id` with identical
