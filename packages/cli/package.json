@@ -1,6 +1,6 @@
 {
   "name": "actradeck",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "license": "Apache-2.0",
   "description": "ActraDeck bootstrap CLI — verify-and-fetch a signed release, diagnose your machine, and hand off to quickstart. A thin, dependency-free wrapper; the full product ships as a signed GitHub Release + GHCR image.",
   "type": "module",
