@@ -22,6 +22,8 @@
  */
 import { randomUUID } from "node:crypto";
 
+import { PendingRoundTrips } from "./pending-round-trips.js";
+
 import {
   type AgentVisibilityWire,
   aggregateAgentReadiness,
@@ -349,49 +351,20 @@ export class SidecarRegistry {
   /** grace 期間 (ms)。既定 PRESENCE_GRACE_MS。テスト/統合で短縮注入可能。 */
   private readonly graceMs: number;
   /**
-   * 段階2 (ADR 019ea4ba D2-B): 未解決の diff 要求 (request_id → 解決/タイムアウト)。
-   * sidecar が diff.response を返したら resolveDiff が該当 Promise を解決する。タイムアウトで
-   * 安全側 reject し、応答本文を **at-rest に貯めない** (解決後即破棄)。
+   * 制御チャネル round-trip の pending envelope 4 面 (TDA-1 M・decision 019f4241 の抽出着地)。
+   * envelope (timeout 武装 / settle 前段ガード / dispose reject / count) は `PendingRoundTrips`
+   * 単一出所で、per-type の payload build・応答投影・fan-out のみ本クラスに残る。
+   * いずれも応答を at-rest に貯めない (解決後即破棄・タイムアウトで安全側 reject)。
+   *
+   * - diff: 段階2 (ADR 019ea4ba D2-B)。sidecar の diff.response で resolveDiff が解決。
+   * - allowlist: PAL-v2 (ADR 019ee147)。allowlist.response で resolveAllowlist が解決。
+   * - policy: ADR 019f0c3e Phase 2。policy.response で resolvePolicy が解決。
+   * - spawn: ADR 019f4206 A段。codex.spawn.response で resolveCodexSpawn が解決 (prompt/cwd 非保持)。
    */
-  private readonly pendingDiffs = new Map<
-    string,
-    { resolve: (r: DiffRelayResult) => void; timer: ReturnType<typeof setTimeout> }
-  >();
-  /** diff 要求のタイムアウト (ms)。テストで短縮注入可能。 */
-  private readonly diffTimeoutMs: number;
-  /**
-   * PAL-v2 (ADR 019ee147): 未解決の allowlist 要求 (request_id → 解決/タイムアウト)。
-   * sidecar が allowlist.response を返したら resolveAllowlist が該当 Promise を解決する。
-   * pendingDiffs と同型 (応答を at-rest に貯めず解決後即破棄・タイムアウトで安全側 reject)。
-   */
-  private readonly pendingAllowlist = new Map<
-    string,
-    { resolve: (r: AllowlistRelayResult) => void; timer: ReturnType<typeof setTimeout> }
-  >();
-  /** allowlist 要求のタイムアウト (ms)。テストで短縮注入可能。 */
-  private readonly allowlistTimeoutMs: number;
-  /**
-   * ADR 019f0c3e Phase 2: 未解決の policy 要求 (request_id → 解決/タイムアウト)。
-   * sidecar が policy.response を返したら resolvePolicy が該当 Promise を解決する。
-   * pendingAllowlist と同型 (応答を at-rest に貯めず解決後即破棄・タイムアウトで安全側 reject)。
-   */
-  private readonly pendingPolicy = new Map<
-    string,
-    { resolve: (r: PolicyRelayResult) => void; timer: ReturnType<typeof setTimeout> }
-  >();
-  /** policy 要求のタイムアウト (ms)。テストで短縮注入可能。 */
-  private readonly policyTimeoutMs: number;
-  /**
-   * ADR 019f4206 A段: 未解決の codex spawn 要求 (request_id → 解決/タイムアウト)。sidecar が
-   * codex.spawn.response を返したら resolveCodexSpawn が該当 Promise を解決する。pendingPolicy と同型
-   * (応答を at-rest に貯めず解決後即破棄・タイムアウトで安全側 reject)。prompt/cwd は載らない。
-   */
-  private readonly pendingSpawn = new Map<
-    string,
-    { resolve: (r: CodexSpawnRelayResult) => void; timer: ReturnType<typeof setTimeout> }
-  >();
-  /** codex spawn 要求のタイムアウト (ms)。テストで短縮注入可能。 */
-  private readonly spawnTimeoutMs: number;
+  private readonly pendingDiffs: PendingRoundTrips<DiffRelayResult>;
+  private readonly pendingAllowlist: PendingRoundTrips<AllowlistRelayResult>;
+  private readonly pendingPolicy: PendingRoundTrips<PolicyRelayResult>;
+  private readonly pendingSpawn: PendingRoundTrips<CodexSpawnRelayResult>;
 
   constructor(
     opts: {
@@ -403,10 +376,15 @@ export class SidecarRegistry {
     } = {},
   ) {
     this.graceMs = opts.graceMs ?? PRESENCE_GRACE_MS;
-    this.diffTimeoutMs = opts.diffTimeoutMs ?? DIFF_REQUEST_TIMEOUT_MS;
-    this.allowlistTimeoutMs = opts.allowlistTimeoutMs ?? ALLOWLIST_REQUEST_TIMEOUT_MS;
-    this.policyTimeoutMs = opts.policyTimeoutMs ?? POLICY_REQUEST_TIMEOUT_MS;
-    this.spawnTimeoutMs = opts.spawnTimeoutMs ?? CODEX_SPAWN_REQUEST_TIMEOUT_MS;
+    // タイムアウト (ms) はテストで短縮注入可能 (従来の per-type フィールドと同既定)。
+    this.pendingDiffs = new PendingRoundTrips(opts.diffTimeoutMs ?? DIFF_REQUEST_TIMEOUT_MS);
+    this.pendingAllowlist = new PendingRoundTrips(
+      opts.allowlistTimeoutMs ?? ALLOWLIST_REQUEST_TIMEOUT_MS,
+    );
+    this.pendingPolicy = new PendingRoundTrips(opts.policyTimeoutMs ?? POLICY_REQUEST_TIMEOUT_MS);
+    this.pendingSpawn = new PendingRoundTrips(
+      opts.spawnTimeoutMs ?? CODEX_SPAWN_REQUEST_TIMEOUT_MS,
+    );
   }
 
   /** 接続を登録する (handshake 前。controlToken はまだ無い)。 */
@@ -595,30 +573,16 @@ export class SidecarRegistry {
     for (const timer of this.graceTimers.values()) clearTimeout(timer);
     this.graceTimers.clear();
     this.presenceListeners.length = 0;
-    // 段階2: 未解決 diff 要求を安全側 reject し、タイマを解放する (本文は貯めていない)。
-    for (const [, pending] of this.pendingDiffs) {
-      clearTimeout(pending.timer);
-      pending.resolve({ ok: false, error: "server shutting down" });
-    }
-    this.pendingDiffs.clear();
-    // PAL-v2: 未解決 allowlist 要求も安全側 reject (応答を貯めていない)。
-    for (const [, pending] of this.pendingAllowlist) {
-      clearTimeout(pending.timer);
-      pending.resolve({ ok: false, error: "server shutting down" });
-    }
-    this.pendingAllowlist.clear();
-    // ADR 019f0c3e Phase 2: 未解決 policy 要求も安全側 reject (応答を貯めていない)。
-    for (const [, pending] of this.pendingPolicy) {
-      clearTimeout(pending.timer);
-      pending.resolve({ ok: false, error: "server shutting down" });
-    }
-    this.pendingPolicy.clear();
-    // ADR 019f4206 A段: 未解決の spawn 要求も安全側 reject (transient・呼び元 HTTP は 503)。
-    for (const [, pending] of this.pendingSpawn) {
-      clearTimeout(pending.timer);
-      pending.resolve({ ok: false, error: "server shutting down", transient: true });
-    }
-    this.pendingSpawn.clear();
+    // 未解決の round-trip 4 面を安全側 reject し、タイマを解放する (応答は貯めていない)。
+    // spawn のみ transient を付ける (呼び元 HTTP は 503)。
+    this.pendingDiffs.rejectAll(() => ({ ok: false, error: "server shutting down" }));
+    this.pendingAllowlist.rejectAll(() => ({ ok: false, error: "server shutting down" }));
+    this.pendingPolicy.rejectAll(() => ({ ok: false, error: "server shutting down" }));
+    this.pendingSpawn.rejectAll(() => ({
+      ok: false,
+      error: "server shutting down",
+      transient: true,
+    }));
   }
 
   /** 接続数 (テスト/監視)。 */
@@ -745,12 +709,10 @@ export class SidecarRegistry {
     }
     const requestId = randomUUID();
     return new Promise<DiffRelayResult>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingDiffs.delete(requestId);
-        resolve({ ok: false, error: "diff request timed out" });
-      }, this.diffTimeoutMs);
-      timer.unref?.();
-      this.pendingDiffs.set(requestId, { resolve, timer });
+      this.pendingDiffs.register(requestId, resolve, () => ({
+        ok: false,
+        error: "diff request timed out",
+      }));
       const msg = {
         type: "diff.request" as const,
         request_id: requestId,
@@ -760,9 +722,7 @@ export class SidecarRegistry {
       try {
         conn.link.send(JSON.stringify(msg));
       } catch {
-        clearTimeout(timer);
-        this.pendingDiffs.delete(requestId);
-        resolve({ ok: false, error: "relay send failed" });
+        this.pendingDiffs.abort(requestId, { ok: false, error: "relay send failed" });
       }
     });
   }
@@ -780,11 +740,9 @@ export class SidecarRegistry {
     redaction_count?: unknown;
   }): void {
     if (typeof frame.request_id !== "string") return;
-    const pending = this.pendingDiffs.get(frame.request_id);
-    if (!pending) return; // 未知 / タイムアウト済 → 黙殺。
-    clearTimeout(pending.timer);
-    this.pendingDiffs.delete(frame.request_id);
-    pending.resolve({
+    const resolve = this.pendingDiffs.settle(frame.request_id);
+    if (!resolve) return; // 未知 / タイムアウト済 → 黙殺。
+    resolve({
       ok: true,
       diff: {
         body: typeof frame.body === "string" ? frame.body : "",
@@ -829,12 +787,10 @@ export class SidecarRegistry {
     }
     const requestId = randomUUID();
     return new Promise<AllowlistRelayResult>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingAllowlist.delete(requestId);
-        resolve({ ok: false, error: "allowlist request timed out" });
-      }, this.allowlistTimeoutMs);
-      timer.unref?.();
-      this.pendingAllowlist.set(requestId, { resolve, timer });
+      this.pendingAllowlist.register(requestId, resolve, () => ({
+        ok: false,
+        error: "allowlist request timed out",
+      }));
       const msg = {
         type: "allowlist.request" as const,
         request_id: requestId,
@@ -846,9 +802,7 @@ export class SidecarRegistry {
       try {
         conn.link.send(JSON.stringify(msg));
       } catch {
-        clearTimeout(timer);
-        this.pendingAllowlist.delete(requestId);
-        resolve({ ok: false, error: "relay send failed" });
+        this.pendingAllowlist.abort(requestId, { ok: false, error: "relay send failed" });
       }
     });
   }
@@ -866,10 +820,8 @@ export class SidecarRegistry {
     removed?: unknown;
   }): void {
     if (typeof frame.request_id !== "string") return;
-    const pending = this.pendingAllowlist.get(frame.request_id);
-    if (!pending) return; // 未知 / タイムアウト済 → 黙殺。
-    clearTimeout(pending.timer);
-    this.pendingAllowlist.delete(frame.request_id);
+    const resolve = this.pendingAllowlist.settle(frame.request_id);
+    if (!resolve) return; // 未知 / タイムアウト済 → 黙殺。
     const rawEntries = Array.isArray(frame.entries) ? frame.entries : [];
     const entries: AllowlistEntry[] = [];
     for (const e of rawEntries) {
@@ -892,7 +844,7 @@ export class SidecarRegistry {
             : 0,
       });
     }
-    pending.resolve({
+    resolve({
       ok: true,
       enabled: frame.enabled === true,
       entries,
@@ -963,12 +915,10 @@ export class SidecarRegistry {
     const requestId = randomUUID();
     const isMutating = op === "set" || op === "unset";
     return new Promise<PolicyRelayResult>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingPolicy.delete(requestId);
-        resolve({ ok: false, error: "policy request timed out" });
-      }, this.policyTimeoutMs);
-      timer.unref?.();
-      this.pendingPolicy.set(requestId, { resolve, timer });
+      this.pendingPolicy.register(requestId, resolve, () => ({
+        ok: false,
+        error: "policy request timed out",
+      }));
       const payload = {
         op,
         // set のみ categories/enabled を載せる (get/unset/list では宛先 sidecar の現状を読む/削除のみ)。
@@ -998,9 +948,7 @@ export class SidecarRegistry {
           }),
         );
       } catch {
-        clearTimeout(timer);
-        this.pendingPolicy.delete(requestId);
-        resolve({ ok: false, error: "relay send failed" });
+        this.pendingPolicy.abort(requestId, { ok: false, error: "relay send failed" });
         return;
       }
       // ADR 019f0eca multi-daemon fan-out: mutation (set/unset) は owner daemon が persist+memory
@@ -1067,13 +1015,11 @@ export class SidecarRegistry {
     error?: unknown;
   }): void {
     if (typeof frame.request_id !== "string") return;
-    const pending = this.pendingPolicy.get(frame.request_id);
-    if (!pending) return; // 未知 / タイムアウト済 → 黙殺。
-    clearTimeout(pending.timer);
-    this.pendingPolicy.delete(frame.request_id);
+    const resolve = this.pendingPolicy.settle(frame.request_id);
+    if (!resolve) return; // 未知 / タイムアウト済 → 黙殺。
     if (typeof frame.error === "string" && frame.error.length > 0) {
       // SEC-2 / SEC-R3-4: browser へ反射する前に長さ上限でクランプ (無制限文字列の defense-in-depth)。
-      pending.resolve({ ok: false, error: frame.error.slice(0, MAX_RELAY_ERROR_LEN) });
+      resolve({ ok: false, error: frame.error.slice(0, MAX_RELAY_ERROR_LEN) });
       return;
     }
     // closed enum 投影 (TDA-1): event-model の単一出所で options 安定順を保ち、未知/型不一致/非配列を
@@ -1091,7 +1037,7 @@ export class SidecarRegistry {
             categories: projectPolicyCategories(r.categories),
           }))
       : undefined;
-    pending.resolve({
+    resolve({
       ok: true,
       enabled: frame.enabled === true,
       categories,
@@ -1130,12 +1076,11 @@ export class SidecarRegistry {
     }
     const requestId = randomUUID();
     return new Promise<CodexSpawnRelayResult>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingSpawn.delete(requestId);
-        resolve({ ok: false, error: "codex spawn request timed out", transient: true });
-      }, this.spawnTimeoutMs);
-      timer.unref?.();
-      this.pendingSpawn.set(requestId, { resolve, timer });
+      this.pendingSpawn.register(requestId, resolve, () => ({
+        ok: false,
+        error: "codex spawn request timed out",
+        transient: true,
+      }));
       try {
         conn.link.send(
           JSON.stringify({
@@ -1151,9 +1096,11 @@ export class SidecarRegistry {
           }),
         );
       } catch {
-        clearTimeout(timer);
-        this.pendingSpawn.delete(requestId);
-        resolve({ ok: false, error: "relay send failed", transient: true });
+        this.pendingSpawn.abort(requestId, {
+          ok: false,
+          error: "relay send failed",
+          transient: true,
+        });
       }
     });
   }
@@ -1171,19 +1118,17 @@ export class SidecarRegistry {
     error?: unknown;
   }): void {
     if (typeof frame.request_id !== "string") return;
-    const pending = this.pendingSpawn.get(frame.request_id);
-    if (!pending) return; // 未知 / タイムアウト済 → 黙殺。
-    clearTimeout(pending.timer);
-    this.pendingSpawn.delete(frame.request_id);
+    const resolve = this.pendingSpawn.settle(frame.request_id);
+    if (!resolve) return; // 未知 / タイムアウト済 → 黙殺。
     if (frame.ok === true) {
-      pending.resolve({
+      resolve({
         ok: true,
         ...(typeof frame.session_id === "string" ? { session_id: frame.session_id } : {}),
       });
       return;
     }
     // 失敗: daemon-report の error を closed enum へ投影 (未知/欠落は spawn_failed)。原文非依存。
-    pending.resolve({ ok: false, error: asCodexSpawnErrorCode(frame.error) });
+    resolve({ ok: false, error: asCodexSpawnErrorCode(frame.error) });
   }
 
   /** pending codex spawn 要求数 (テスト/監視: タイムアウト・解決後の破棄を pin する)。 */
