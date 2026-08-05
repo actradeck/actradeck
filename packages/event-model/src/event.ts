@@ -30,6 +30,16 @@ export type Metrics = z.infer<typeof Metrics>;
  * (段階導入・前方互換)。厳密判別が必要な場合は EventPayload で再パースする。
  */
 export const Payload = z.looseObject({});
+
+/**
+ * 観測モード (ADR 019ea476 D8) の正典 enum。managed = ActraDeck が起動を所有する PTY/app-server
+ * 経路、attach = hooks 後付け観測、codex_rollout = rollout JSONL の passive tail (observe-only)。
+ * ADR 0014 sweep TDA-1: named export にして型注釈の手コピー再宣言を禁じる (test helper で
+ * codex_rollout 欠落の stale 実例あり)。hook 経路の `"managed" | "attach"` は意図的 narrow
+ * (rollout は hook を通らない) で subset として正当。
+ */
+export const CaptureMode = z.enum(["managed", "attach", "codex_rollout"]);
+export type CaptureMode = z.infer<typeof CaptureMode>;
 export type Payload = z.infer<typeof Payload>;
 
 export const NormalizedEvent = z.object({
@@ -92,7 +102,7 @@ export const NormalizedEvent = z.object({
    * 本フィールド無しでも通る。**projection key には使わない** (presence/liveness は既存経路)。
    * 欠落時は managed 既定扱い (wire validator は寛容; LIVE-FOUND-3 教訓)。
    */
-  capture_mode: z.enum(["managed", "attach", "codex_rollout"]).optional(),
+  capture_mode: CaptureMode.optional(),
   /**
    * 権限モード (sandbox)。Claude Code hooks の `permission_mode` 由来
    * (default / acceptEdits / bypassPermissions / plan 等)。ActraDeck は監督対象 agent の

@@ -196,7 +196,14 @@ export type { BoundedMonotonicOptions } from "./timestamp.js";
 export { BoundedLruMap } from "./bounded-lru-map.js";
 
 // normalized event
-export { NormalizedEvent, Metrics, Payload, parseEvent, safeParseEvent } from "./event.js";
+export {
+  CaptureMode,
+  NormalizedEvent,
+  Metrics,
+  Payload,
+  parseEvent,
+  safeParseEvent,
+} from "./event.js";
 export type { NormalizedEventInput } from "./event.js";
 
 // Stream-level conformance checker for third-party ingestion adapters (schema + cross-field

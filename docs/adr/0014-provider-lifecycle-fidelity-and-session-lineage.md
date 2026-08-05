@@ -134,9 +134,9 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
   | Codex managed (app-server)                          | **Enrich-only**: `thread.sessionId` when the server reports it           | Not emitted (`NULL` — this path observes no restart lineage)                                                                                                                                                 | Not emitted                                                                                                          | One managed run per spawn. `end_kind`/`recoverability` are set on the process-exit terminal but not on the handshake-failure path (non-uniform; uniformization is deferred to the Phase 3c precedence decision) |
   | Codex rollout (observe-only tail)                   | Stable `session_meta.payload.session_id` when declared, else the file id | `resume` only when a `forked_from_id` edge is declared, else `unknown` (never a claimed `fresh`)                                                                                                             | **As declared** by `forked_from_id`: the parent may be unobserved and the referent may be the stable conversation id | One rollout file = one observation run                                                                                                                                                                          |
 
-  The consumer requirements for declared rollout edges (resolve by `session_id`,
-  linked-unknown rendering, no self-loop on the stable conversation id) are stated once in the
-  Codex rollout bullet above; the normalizer docstring defers here instead of restating them.
+  The consumer requirements for declared rollout edges are stated exactly once, in the Codex
+  rollout bullet above; the normalizer docstring defers to that bullet instead of restating
+  them.
 
 **Phase 4 — Approval restart reconciliation.**
 

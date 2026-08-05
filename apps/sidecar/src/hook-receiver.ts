@@ -41,6 +41,7 @@ export interface HookReceiverOptions {
   /**
    * 観測モード (ADR 019ea476 D8)。Attach 構成では "attach" を渡し、全 emit に
    * capture_mode="attach" を付与する (UI の attach バッジ用)。省略時は付与しない (managed 既定)。
+   * event-model CaptureMode の**意図的 narrow** (hook 経路は codex_rollout を通らない・TDA-1)。
    */
   readonly captureMode?: "managed" | "attach";
   /**

@@ -1447,6 +1447,7 @@ export interface NormalizeContext {
   /**
    * 観測モード (ADR 019ea476 D8)。Attach 経路の hook 正規化では "attach" を渡し、
    * 全候補イベントに capture_mode="attach" を付与する。省略時は付与しない (managed 既定扱い)。
+   * event-model CaptureMode の**意図的 narrow** (hook 経路は codex_rollout を通らない・TDA-1)。
    */
   readonly captureMode?: "managed" | "attach";
   /**
