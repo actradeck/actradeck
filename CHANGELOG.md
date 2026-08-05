@@ -11,6 +11,57 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-05
+
+### Added
+
+- **`actradeck conformance` — a stream conformance checker for third-party adapters.**
+  The bootstrap CLI now bundles the event-model conformance checker: feed it a JSONL
+  event stream and it validates the ingestion contract offline (schema, cross-field,
+  ordering, drop-detection wiring) plus the semantic lifecycle rules added by ADR 0014
+  Phase 2 — empty streams, `event_id` retry-vs-collision, `seq` collisions, missing
+  `payload.kind`, events after terminal, re-starts after terminal, and approval
+  request/resolve lifecycle. False-green paths (an empty or `kind`-less stream passing
+  silently) now fail closed.
+- **Run lineage: resume no longer collapses onto a dead session.** ActraDeck now
+  persists `provider_session_id`, `start_kind`, `resumed_from_session_id`, `end_kind`,
+  and `recoverability` per session, and the cockpit detail pane shows a lineage section
+  ("continued from", continuation, run chain) that distinguishes an observed parent
+  from a declared-but-unobserved reference (linked-unknown) and never over-claims
+  (ADR 0014 Phase 3). On top of that: an attach `SessionEnd` now leaves a bounded
+  terminal tombstone, so resuming the same provider session after the daemon reaped it
+  mints a new run with an observed `resumed_from` edge instead of folding post-terminal
+  events into the terminated run; and a managed launch's own `--resume`/`--continue`
+  argv now authoritatively sets the first run's `start_kind` (UUID shape-gated,
+  self-loop-guarded — absence of the flags asserts nothing).
+- **Evidence-based completion (ADR 0015).** Agent-declared plans and tasks (Claude Code
+  task hooks, Codex `update_plan`) fold into per-session work items, completion claims
+  are verified against observed checks, and the cockpit shows a work-items panel with
+  evidence badges plus a claimed-unverified count on the Wall — "the agent said done"
+  and "we saw it verified" are now visibly different states.
+- **`scripts/ci-preflight.sh` — a one-command local mirror of the CI gates** (lint,
+  type-check, tests with real PostgreSQL, builds, coverage, INV tripwires) with a
+  drift tripwire so the local gate cannot silently diverge from `ci.yml`.
+- **Post-demo onboarding.** After the safety demo the cockpit now guides you through
+  wiring your real agents (per-agent readiness checks with concrete next commands)
+  instead of dead-ending on demo data.
+
+### Fixed
+
+- **Terminal poisoning: a single aborted turn no longer freezes a live session
+  (ADR 0014 Phase 1).** A Codex `turn_aborted`/`systemError` or a thread unload used to
+  mark the whole session `failed`/`completed` permanently — every later real event was
+  then ignored by the projection. Turn failures now land on a separate
+  `last_turn_outcome` axis, transient system errors degrade to non-terminal
+  diagnostics, and a thread unload becomes the resumable terminal `suspended`.
+  Terminal states stay immutable; resume creates a new run with lineage instead of
+  re-opening the old one.
+- **Test harnesses refuse production-port databases (SEC-2).** Every workspace's test
+  setup now fails closed if `DATABASE_URL` points at a production PostgreSQL port, so a
+  misconfigured environment cannot let tests write into the live event store.
+- **Two waves of high-severity dependency advisories patched** (INV-DEP-AUDIT keeps
+  `pnpm audit` high/critical at zero).
+
 ### Changed
 
 - **Positioning: the headline subject is now "audit cockpit", not "control plane".**
@@ -253,7 +304,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/actradeck/actradeck/releases/tag/v0.6.0
 [0.5.2]: https://github.com/actradeck/actradeck/releases/tag/v0.5.2
 [0.5.1]: https://github.com/actradeck/actradeck/releases/tag/v0.5.1
 [0.5.0]: https://github.com/actradeck/actradeck/releases/tag/v0.5.0
