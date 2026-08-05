@@ -228,8 +228,9 @@ const ja = {
   "audit.coverage.status.warn": "遅延",
   "audit.coverage.status.critical": "停止疑い",
   // staleness 可視化 (誤安心の是正)。stale=表示が古い (最終成功からの経過を明示)・unreachable=一度も取得不能。
-  "audit.coverage.staleBanner": "この表示は{age}前のデータ — coverage API に到達できていません",
-  "audit.coverage.unreachable": "監査カバレッジに到達できません",
+  "audit.coverage.staleBanner":
+    "この表示は{age}前のデータ — coverage API から有効な応答が得られていません",
+  "audit.coverage.unreachable": "監査カバレッジ: API から有効な応答が得られていません",
   // seq-drop 下限 (ADR 019f4cdb Phase2)。hedged ("?"): client 申告 seq の穴＝**下限** (真の欠落はこれ以上)。
   "audit.coverage.seqDrop": "欠落 ≥{count}?",
   // 表示上限超 (SEC-1・桁溢れ防止)。`+` で「これ以上」を示す。
@@ -1057,8 +1058,9 @@ const en: Record<MessageKey, string> = {
   "audit.coverage.status.critical": "stalled?",
   // staleness surfacing (correcting false reassurance): stale = shown data is old (age since last success),
   // unreachable = never fetched successfully. Observed fact (fetch failed), not a fabricated state.
-  "audit.coverage.staleBanner": "Showing data from {age} ago — the coverage API is unreachable",
-  "audit.coverage.unreachable": "Audit coverage unreachable",
+  "audit.coverage.staleBanner":
+    "Showing data from {age} ago — the coverage API is not responding with valid data",
+  "audit.coverage.unreachable": "Audit coverage: no valid response from the API",
   // seq-drop lower bound (ADR 019f4cdb Phase2). hedged ("?"): a hole in client-declared seq is a
   // **lower bound** (true loss may be higher; head/tail drops are undetectable).
   "audit.coverage.seqDrop": "≥{count} dropped?",

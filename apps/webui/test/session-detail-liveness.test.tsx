@@ -70,6 +70,27 @@ describe("SessionDetail liveness evidence 描画 (INV-STALLED-UI 折りたたみ
     expect(html).toContain("not stalled despite stale others");
   });
 
+  // GFI #19 QA-2: ageLabel の compactDuration 委譲は {maxUnit:"m", clampNegative:false} の束縛が
+  // 従来出力を保存する要。オプションを落とすと 1h 超が "1h" に畳まれ・負 skew が "0s" に clamp
+  // されるため、render 経由で束縛そのものを固定する (単体テストは関数を守るが束縛は守らない)。
+  it("heartbeat 行の age は 1h 超でも分で描き (72m)・時計 skew は符号付き秒 (-3s) のまま", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionDetailView, {
+        detail: detail({
+          liveness_evidence: {
+            process: { ageMs: 4_320_000, fresh: false, alive: true },
+            event: { ageMs: -3_000, fresh: true },
+          },
+        }),
+        loading: false,
+        nowMs: FRESH_NOW,
+      }),
+    );
+    expect(html).toContain(">72m<");
+    expect(html).not.toContain(">1h<");
+    expect(html).toContain(">-3s<");
+  });
+
   it("live のとき折りたたみ既定は閉 (密度を下げる・根拠は drill-down)", () => {
     const html = renderToStaticMarkup(
       createElement(SessionDetailView, {

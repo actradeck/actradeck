@@ -16,6 +16,7 @@ import {
   needsOperator,
   waitingKind,
 } from "./liveness-display";
+import { compactDuration } from "./audit-coverage-display";
 import { formatCurrentAction } from "./action-units-display";
 import { MANAGED_CODEX_CMD } from "./managed-codex";
 import { shortSessionId } from "./wall-display";
@@ -30,10 +31,8 @@ function relativeAge(iso: string | undefined, nowMs: number): string {
   if (!iso) return "—";
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return "—";
-  const s = Math.max(0, Math.round((nowMs - t) / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${Math.round(s / 3600)}h`;
+  // GFI #19: 整形は共有 compactDuration (既定 = s/m/h + 負値 clamp・従来コピーと出力同一)。
+  return compactDuration(nowMs - t);
 }
 
 export interface SessionRowProps {

@@ -192,7 +192,7 @@ describe("AuditCoveragePanel — 静的描画", () => {
       expect(html).toContain('data-testid="coverage-stale-banner"');
       expect(html).toContain('role="status"');
       expect(html).toContain("3m"); // 経過 (compactDuration)
-      expect(html).toContain("the coverage API is unreachable");
+      expect(html).toContain("the coverage API is not responding with valid data");
       expect(html).toContain('data-stale="true"');
       // last-known 行は依然描画する (バナーが優先信号・行 severity は不変)。
       expect(html).toContain('data-testid="coverage-row-codex"');
@@ -208,7 +208,7 @@ describe("AuditCoveragePanel — 静的描画", () => {
       });
       expect(html).toContain('data-testid="coverage-unreachable"');
       expect(html).toContain('role="status"');
-      expect(html).toContain("Audit coverage unreachable");
+      expect(html).toContain("Audit coverage: no valid response from the API");
       // 通常の行 section は出さない (取得データがない)。
       expect(html).not.toContain('data-testid="audit-coverage"');
     });

@@ -42,6 +42,36 @@ const opts = (o: Partial<InstallOpts> = {}): InstallOpts => ({
   ...o,
 });
 
+describe("cmdInstall — network fail-closed (GFI #21)", () => {
+  // fetchOk bounds every request with AbortSignal.timeout(8000). A rejected fetch (timeout /
+  // offline) must FAIL CLOSED: cmdInstall throws (the CLI router maps any throw to exit 1)
+  // and no side effect has happened — no write, no extraction, no quickstart hand-off.
+  it("a rejected release fetch fails closed: throws and performs zero side effects", async () => {
+    const abortErr = Object.assign(new Error("This operation was aborted"), {
+      name: "AbortError",
+    });
+    const f = makeFakeDeps({ json: { [latestUrl]: abortErr } });
+    await expect(
+      cmdInstall(f.deps, { version: undefined, dryRun: false, skipProvenance: false }),
+    ).rejects.toThrow(/aborted/);
+    expect(f.writes).toHaveLength(0);
+    expect(f.extracted).toHaveLength(0);
+    expect(f.handoffs).toHaveLength(0);
+  });
+
+  it("a rejected tarball download fails closed too (after resolution, before any extraction)", async () => {
+    const f = makeFakeDeps(
+      baseCfg({
+        bytes: { [TAR_URL]: Object.assign(new Error("fetch failed"), { name: "TypeError" }) },
+      }),
+    );
+    await expect(cmdInstall(f.deps, opts())).rejects.toThrow(/fetch failed/);
+    expect(f.writes).toHaveLength(0);
+    expect(f.extracted).toHaveLength(0);
+    expect(f.handoffs).toHaveLength(0);
+  });
+});
+
 describe("cmdInstall — verification", () => {
   it("dry-run verifies checksum + provenance, then stops before extraction", async () => {
     const f = makeFakeDeps(baseCfg());

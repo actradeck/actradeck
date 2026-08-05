@@ -25,7 +25,11 @@ export interface PersistedApprovalsPanelProps {
   readonly filterScope?: string;
 }
 
-/** 残り期限を人間可読に (分→時→日)。期限切れは null (呼び元が i18n の「期限切れ」を出す)。 */
+/**
+ * 残り期限を人間可読に (分→時→日)。期限切れは null (呼び元が i18n の「期限切れ」を出す)。
+ * GFI #19 対象外: これは「経過」でなく「残り時間」の別意味論 (最小単位 m・48h 境界で d へ・
+ * 期限切れ null) で、compactDuration (audit-coverage-display の s/m/h 経過整形) のコピーではない。
+ */
 function formatRemaining(expiresAtMs: number, nowMs: number): string | null {
   const ms = expiresAtMs - nowMs;
   if (ms <= 0) return null;
