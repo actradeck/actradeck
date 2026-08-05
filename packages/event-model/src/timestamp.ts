@@ -8,6 +8,8 @@
  */
 import { z } from "zod";
 
+import { BoundedLruMap } from "./bounded-lru-map.js";
+
 /**
  * ISO8601 / RFC3339 の UTC タイムスタンプか判定する。
  * 受理: 日付・時刻・任意のミリ秒(任意桁) + "Z" または明示オフセット。
@@ -102,9 +104,8 @@ export interface BoundedMonotonicOptions {
 }
 
 export class BoundedMonotonicTimestampChecker {
-  /** session_id → { 最大 timestamp(ms), 最終アクセス時刻(ms) }。Map 挿入順 = LRU 順。 */
-  private readonly entries = new Map<string, { maxMs: number; touchedAt: number }>();
-  private readonly maxSessions: number;
+  /** session_id → { 最大 timestamp(ms), 最終アクセス時刻(ms) }。LRU は共有 BoundedLruMap (A2 TDA-4)。 */
+  private readonly entries: BoundedLruMap<string, { maxMs: number; touchedAt: number }>;
   private readonly ttlMs: number | undefined;
   private readonly now: () => number;
 
@@ -113,7 +114,7 @@ export class BoundedMonotonicTimestampChecker {
     if (!Number.isInteger(max) || max < 1) {
       throw new Error("maxSessions must be a positive integer");
     }
-    this.maxSessions = max;
+    this.entries = new BoundedLruMap(max);
     this.ttlMs = opts.ttlMs;
     this.now = opts.now ?? Date.now;
   }
@@ -169,15 +170,9 @@ export class BoundedMonotonicTimestampChecker {
     return e;
   }
 
-  /** LRU 更新 (delete→set で最近使用へ移動) + 上限超過分を先頭 (LRU) から退避。 */
+  /** LRU 更新 (最近使用へ移動 + 上限超過 evict は共有 BoundedLruMap.set が行う)。 */
   private touch(sessionId: string, maxMs: number, nowMs: number): void {
-    this.entries.delete(sessionId);
     this.entries.set(sessionId, { maxMs, touchedAt: nowMs });
-    while (this.entries.size > this.maxSessions) {
-      const oldest = this.entries.keys().next().value;
-      if (oldest === undefined) break;
-      this.entries.delete(oldest);
-    }
   }
 }
 

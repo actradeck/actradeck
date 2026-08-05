@@ -191,6 +191,7 @@ export {
   isMonotonicNonDecreasing,
 } from "./timestamp.js";
 export type { BoundedMonotonicOptions } from "./timestamp.js";
+export { BoundedLruMap } from "./bounded-lru-map.js";
 
 // normalized event
 export { NormalizedEvent, Metrics, Payload, parseEvent, safeParseEvent } from "./event.js";

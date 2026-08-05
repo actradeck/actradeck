@@ -143,6 +143,22 @@ TaskUpdate)` parsing (all transitions; only fields verified against live CC are 
   Legacy `steps` stays populated for old consumers. No new event type for plans: the state
   mapping, subject derivation (`undefined`), and both Codex normalizers already exist for
   `turn.plan.updated`; the typed field is the upgrade path that fixes gaps (a)+(c) in place.
+  - **`steps` is deprecated-in-place; retirement criterion recorded (A1 TDA-8 / SEC-A2-L1)**:
+    carrying `steps[]` alongside `items[]` duplicates the plan snapshot (~2x payload; both go
+    through the same redaction choke, so this is bloat, not a leak — intentional
+    legacy-compat duplication). `steps` retires when **every consumer reads `items`**
+    (repo-wide: no `steps` reader left outside the normalizers); at that point the
+    normalizers stop populating it, which also halves the plan-snapshot payload. Until then
+    both stay populated and new consumers MUST read `items`, never `steps`.
+  - **Dual emission is intentional (TDA-B2-5)**: `PostToolUse(TaskCreate/TaskUpdate)` emits
+    `work.item.updated` **in addition to** the generic `tool.completed`, because dropping the
+    generic event would break the `tool.started ↔ tool.completed` balance that the
+    timeline/action-unit folds rely on. No double count results: the work-items fold does not
+    react to `tool.completed` (`WORK_ITEM_REACTIVE_EVENT_TYPES` excludes it; pinned by a
+    negative test in `inv-work-items-reactive-set.test.ts`). Live-verified id fields for the
+    dual source: `TaskCreated`/`TaskCompleted` hook `task_id`, `TaskCreate`
+    `tool_response.task.id`, `TaskUpdate` `tool_input.taskId` (see the cross-channel
+    equivalence note above).
 - **Why two shapes, not one**: the providers genuinely observe differently. CC delivers
   per-item lifecycle events but never a full task-list snapshot; Codex delivers full-plan
   replacement snapshots and can only express item _removal_ snapshot-wise. Forcing one shape
@@ -195,7 +211,10 @@ deterministic (same redactor rules → same text → same id).
   the claim. Consequence: **every consumer of `verification_state` MUST gate on `status`** (a
   `removed` row can still carry `verification_state=passed`); the badge derivation already does
   (§D8: non-`completed` → no badge). A `removed` item reappearing in a later snapshot updates the
-  existing row (inheriting `claimed_at`), not a new one.
+  existing row (inheriting `claimed_at`), not a new one. If it reappears as `completed`
+  (removed → completed), the fold treats it as a **fresh claim**: `upsertItem`'s new-claim
+  branch resets `verification_state` to `unverified` (the safe direction — an old `passed`
+  is not resurrected for a re-listed item; it must be re-verified on the current tree).
 - Cross-run continuity (a resumed run re-observing the same CC task list) is **P1** (join via
   ADR 0014 run lineage / `provider_session_id`); P0 identity is per run, honestly.
 
@@ -231,7 +250,13 @@ deterministic (same redactor rules → same text → same id).
   events skip at zero cost) and (ii) the
   webui, which folds **client-side over the event feed the Session Detail already fetches** —
   the exact pattern the replay reducer established. An INV parity test pins table rows ==
-  `reduceEvents` output.
+  `reduceWorkItems` output (the work-items fold; `reduceEvents` is the session-state reducer).
+  For the client-side fold to see its inputs, the replay layer **additively carries the fold's
+  payload fields on `ReplayEventDTO`** (the 10-field carriage: `provider_task_id`,
+  `work_item_status`, `work_item_subject`, `observation_method`, `observation_fidelity`,
+  `check_kind`, `check_match`, `head_sha`, `diff_hash`, `plan_items`) — without it the panel is
+  silently always-empty in production (decision `019fca46`; the carriage round-trip INV pins
+  it against real SQL).
 - Bound: `MAX_WORK_ITEMS = 200` per session (DoS bound, `MAX_PENDING_APPROVALS` precedent);
   overflow drops new items and counts them (observable, honest).
 - **Terminal freeze**: the fold freezes on `event_type === "session.ended"` or any event
@@ -428,7 +453,8 @@ strings via the existing LocaleProvider pattern — no baked Japanese):
 
 Non-completed items render plain status (no badge). `waived` renders only after its P1
 mutation surface exists. Session Detail gains an additive work-items panel (fed by the
-client-side fold over the already-fetched event feed; exact pane placement is
+client-side fold over the already-fetched event feed — which works only because the replay
+DTO additively carries the fold's payload fields, §D4 carriage note; exact pane placement is
 frontend-engineer discretion — the contract is the badge set, the per-item list with
 `method/fidelity` evidence annotation, `run_dirty` and stale-reason display, and evidence-ref
 links jumping to the claim / check / diff timeline entries). The Wall session card gains a

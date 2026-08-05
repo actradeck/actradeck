@@ -55,9 +55,16 @@ function isoMsOrNull(s: string | undefined): number | null {
 /**
  * QA-B3-1 = SEC-B3-2 = TDA-B3-3 (carriage round-trip): 読み戻した ReplayEventDTO を **本番 webui と同一
  * 経路で** NormalizedEvent へ復元する。webui の `replayDtoToEvent` (apps/webui/src/replay/replay-state.ts
- * `dtoPayload`) を backend test から import せず等価コピーする (パッケージ跨ぎ import を避ける・別ツリー)。
- * fold 入力へ写す payload 形は projection `reduceWorkItems` が読む形と同一で、これで
+ * `dtoPayload`) の **work-items 部分集合コピー** (TDA-B3R2-1: fold 入力 field のみ faithful・非 fold field
+ * は対象外。「等価コピー」ではない) — backend test から import しない (パッケージ跨ぎ import を避ける・
+ * 別ツリー)。fold 入力へ写す payload 形は projection `reduceWorkItems` が読む形と同一で、これで
  * EVENT_COLUMNS → DTO → fold の**貫通**を検証する (手作り EventRow ではなく実 SQL を通す)。
+ *
+ * ⚠️ DTO→payload 変換は 3 コピーが並存する (TDA-B3R2-1 (3)・将来 carriage field を足すときは全て拡張):
+ *   1. 本関数 (backend test・work-items 部分集合)
+ *   2. 本番 webui `dtoPayload` (apps/webui/src/replay/replay-state.ts)
+ *   3. webui test の `canonicalPayload`+`wireDto` (apps/webui/test/inv-work-items-fold.test.ts)
+ * cross-tier 単一出所化 (共有 package hoist) は契約走査範囲変更ゆえ full 監査つき別 PR の follow-up。
  */
 function dtoToEvent(dto: ReplayEventDTO): NormalizedEvent {
   const payload: Record<string, unknown> = {
@@ -698,7 +705,11 @@ describe.skipIf(!reachable)("INV-WORKITEMS-WIRING (real Postgres)", () => {
     expect(repaired.verified_tree_fp).toBe(canonical.items[0]!.verified_tree_fp);
   });
 
-  it("gate: non-work-relevant events create no work_items rows", async () => {
+  // QA-2 (A2 sweep): 本テストが pin するのは **membership** (non-work-relevant イベントが行を作らない)。
+  //   `isWorkItemFoldEvent` gate 自体は correctness-neutral な **cost 最適化** (fold は非対象イベントで
+  //   prev をそのまま返すため、gate を always-true にしても行は増えず本テストは緑のまま = 意図どおり)。
+  //   gate の集合整合は INV-WORKITEM-REACTIVE-SET-COMPLETE (projection) が別途固定する。
+  it("gate (membership pin): non-work-relevant events create no work_items rows", async () => {
     const store = new IngestStore({ pool });
     const sid = newSession("wi_gate");
     await store.ingest(
@@ -731,6 +742,58 @@ describe.skipIf(!reachable)("INV-WORKITEMS-WIRING (real Postgres)", () => {
       [sid],
     );
     expect(rows[0]!.n).toBe(0);
+  });
+
+  // QA 受入15 (A2 sweep): terminal freeze の **ingest 経路** pin。fold 単体の凍結 (projection 側
+  //   受入15 テスト) に加え、実 PG ingest 経路でも post-terminal イベントが frozen 行を mutate しない
+  //   (end-of-run 真実を保存する) ことを固定する。
+  it("QA 受入15: post-terminal events do not mutate frozen work_items rows (ingest path)", async () => {
+    const store = new IngestStore({ pool });
+    const sid = newSession("wi_freeze");
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        state: "starting",
+        event_type: "session.started",
+        timestamp: iso(base, 0),
+      }),
+    );
+    await store.ingest(planCompleted(sid, 10));
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        state: "idle",
+        event_type: "session.ended",
+        timestamp: iso(base, 20),
+        end_kind: "unloaded",
+        recoverability: "resumable",
+      }),
+    );
+    const frozen = await fetchRows(sid);
+    expect(frozen.size).toBe(1);
+    const frozenRow = [...frozen.values()][0]!;
+    expect(frozenRow.status).toBe("completed");
+
+    // post-terminal: step を in_progress へ戻す snapshot + 新 step。frozen 行は一切変わらず、新行も増えない。
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "turn.plan.updated",
+        state: "running.planning",
+        timestamp: iso(base, 30),
+        payload: {
+          kind: "turn.plan.updated",
+          items: [
+            { step: "build feature", status: "in_progress" },
+            { step: "post-terminal new step", status: "pending" },
+          ],
+          steps: ["build feature", "post-terminal new step"],
+        },
+      }),
+    );
+    const after = await fetchRows(sid);
+    expect(after.size).toBe(1);
+    expect([...after.values()][0]).toEqual(frozenRow);
   });
 
   // ── QA-B3-1 = SEC-B3-2 = TDA-B3-3 (3 lane 収束・裁定 R1 unblock): EVENT_COLUMNS SQL carriage 貫通 ──

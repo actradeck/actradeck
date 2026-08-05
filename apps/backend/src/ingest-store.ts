@@ -17,6 +17,7 @@
 import {
   ALL_EVENT_TYPES,
   ALL_STATES,
+  BoundedLruMap,
   BoundedMonotonicTimestampChecker,
   FILE_EVENT_TYPES,
   isActionKind,
@@ -204,18 +205,18 @@ export class IngestStore {
    * backend 再起動やキャッシュ eviction 後は events から lazy 再 fold で再構成する
    * (append-only ゆえ完全 rebuild 可能・migration 追加なし)。Map は挿入順を保つので LRU として使う。
    */
-  private readonly workItemsCache = new Map<string, WorkItemsProjection>();
-  private readonly workItemsCacheMax: number;
+  private readonly workItemsCache: BoundedLruMap<string, WorkItemsProjection>;
   /** TDA-2 観測 (テスト/監視用): 直近 rebuild で読み込んだ gate 済みイベント数 (無 gate なら全件になる)。 */
   private _lastRebuiltEventCount = 0;
 
   constructor(opts: IngestStoreOptions) {
     this.pool = opts.pool;
     this.livenessOptions = opts.livenessOptions;
-    this.workItemsCacheMax =
+    this.workItemsCache = new BoundedLruMap(
       opts.workItemsCacheMax !== undefined && opts.workItemsCacheMax > 0
         ? opts.workItemsCacheMax
-        : DEFAULT_WORK_ITEMS_CACHE_MAX;
+        : DEFAULT_WORK_ITEMS_CACHE_MAX,
+    );
     this.monotonic = new BoundedMonotonicTimestampChecker({
       ...(opts.monotonicMaxSessions !== undefined
         ? { maxSessions: opts.monotonicMaxSessions }
@@ -710,15 +711,9 @@ export class IngestStore {
     return out;
   }
 
-  /** LRU set: 既存キーは末尾へ移動し、上限超過で最古 (先頭) を evict する (Map の挿入順を利用)。 */
+  /** LRU set (末尾へ移動 + 上限超過 evict は event-model の共有 BoundedLruMap・A2 TDA-4)。 */
   private cacheWorkItems(sessionId: string, proj: WorkItemsProjection): void {
-    if (this.workItemsCache.has(sessionId)) this.workItemsCache.delete(sessionId);
     this.workItemsCache.set(sessionId, proj);
-    while (this.workItemsCache.size > this.workItemsCacheMax) {
-      const oldest = this.workItemsCache.keys().next().value;
-      if (oldest === undefined) break;
-      this.workItemsCache.delete(oldest);
-    }
   }
 
   /**
@@ -755,14 +750,22 @@ export class IngestStore {
 }
 
 /**
- * ADR 0015 §D4: DB 行を fold 用 NormalizedEvent へ復元する。full payload を保持 (fold は
- * items / check_kind / diff_hash / head_sha / exit_code / request_id を payload から読む)。
- * T1 (safeParseEvent) を通し、契約違反行は null (fold から除外・secret 非出力で理由のみ記録)。
+ * QA-4 (A2 sweep): DB 行 → NormalizedEvent 復元の**共有実装** (単一出所)。
+ * rowToFoldEvent (work-items fold) と validateRowForLiveness (liveness M4) がほぼ逐語コピー
+ * だったため集約した (silent drift 防止・consolidation-invariant-sweep)。full payload を保持し
+ * T1 (safeParseEvent) を通す。契約違反行は null (secret 非出力で理由のみ記録)。
+ * `context` は skip ログの経路識別のみに使う (undefined = liveness 経路の従来文言)。
  */
-function rowToFoldEvent(r: EventRow, sessionId: string): NormalizedEvent | null {
+function restoreRowAsEvent(
+  r: EventRow,
+  sessionId: string,
+  context?: string,
+): NormalizedEvent | null {
   const isoTs = r.timestamp instanceof Date ? r.timestamp.toISOString() : String(r.timestamp);
   if (!Number.isFinite(Date.parse(isoTs))) {
-    logSkippedRow(sessionId, r.event_type, "non-finite timestamp (work-items fold)");
+    const reason =
+      context === undefined ? "non-finite timestamp" : `non-finite timestamp (${context})`;
+    logSkippedRow(sessionId, r.event_type, reason);
     return null;
   }
   const ev: Record<string, unknown> = {
@@ -787,10 +790,23 @@ function rowToFoldEvent(r: EventRow, sessionId: string): NormalizedEvent | null 
     const issues = parsed.error.issues
       .map((i) => `${i.path.join(".") || "<root>"}:${i.code}`)
       .join(",");
-    logSkippedRow(sessionId, r.event_type, `T1 validation failed (work-items fold: ${issues})`);
+    const reason =
+      context === undefined
+        ? `T1 validation failed (${issues})`
+        : `T1 validation failed (${context}: ${issues})`;
+    logSkippedRow(sessionId, r.event_type, reason);
     return null;
   }
   return parsed.data;
+}
+
+/**
+ * ADR 0015 §D4: DB 行を fold 用 NormalizedEvent へ復元する。full payload を保持 (fold は
+ * items / check_kind / diff_hash / head_sha / exit_code / request_id を payload から読む)。
+ * 実装は restoreRowAsEvent (QA-4 共有)。
+ */
+function rowToFoldEvent(r: EventRow, sessionId: string): NormalizedEvent | null {
+  return restoreRowAsEvent(r, sessionId, "work-items fold");
 }
 
 /**
@@ -946,41 +962,10 @@ export async function aggregateObservationSql(
  *    よる full T1 検証を通し、契約違反なら除外する (payload 汚染の防御)。
  *
  * 戻り値 null = この行は契約違反のため liveness 合成から除外。skip 時は **secret を出力しない**
- * (payload / summary はログせず、zod issue の path / code のみ)。
+ * (payload / summary はログせず、zod issue の path / code のみ)。実装は restoreRowAsEvent (QA-4 共有)。
  */
 function validateRowForLiveness(r: EventRow, sessionId: string): NormalizedEvent | null {
-  const isoTs = r.timestamp instanceof Date ? r.timestamp.toISOString() : String(r.timestamp);
-  if (!Number.isFinite(Date.parse(isoTs))) {
-    logSkippedRow(sessionId, r.event_type, "non-finite timestamp");
-    return null;
-  }
-
-  const ev: Record<string, unknown> = {
-    event_id: r.event_id,
-    provider: r.provider,
-    source: r.source,
-    session_id: r.session_id,
-    event_type: r.event_type,
-    timestamp: isoTs,
-    payload: r.payload ?? {},
-    metrics: r.metrics ?? {},
-  };
-  if (r.thread_id != null) ev.thread_id = r.thread_id;
-  if (r.turn_id != null) ev.turn_id = r.turn_id;
-  if (r.agent_id != null) ev.agent_id = r.agent_id;
-  if (r.state != null) ev.state = r.state;
-  if (r.cwd != null) ev.cwd = r.cwd;
-  if (r.summary != null) ev.summary = r.summary;
-
-  const parsed = safeParseEvent(ev);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join(".") || "<root>"}:${i.code}`)
-      .join(",");
-    logSkippedRow(sessionId, r.event_type, `T1 validation failed (${issues})`);
-    return null;
-  }
-  return parsed.data;
+  return restoreRowAsEvent(r, sessionId);
 }
 
 /** 契約違反行の skip を secret 非出力で記録する (event_type は enum なので秘匿性なし)。 */

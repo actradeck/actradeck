@@ -41,7 +41,8 @@ import {
   type WorkItemStatus,
 } from "@actradeck/event-model";
 
-import { boundTurnSummary } from "./index.js";
+// leaf module から import する (A1 TDA-4: index.ts 経由だと index ↔ work-items の 2 ノード循環になる)。
+import { boundTurnSummary } from "./bound.js";
 
 /** 1 セッションあたりの work item 上限 (DoS 境界・MAX_PENDING_APPROVALS 前例)。超過は drop + count。 */
 export const MAX_WORK_ITEMS = 200;
@@ -172,12 +173,14 @@ function payloadString(payload: unknown, key: string): string | undefined {
 // WorkItemStatus の closed-enum gate は event-model の正準 `coerceWorkItemStatus` を使う
 // (TDA-B2-1: sidecar 3 normalizer と手書きコピーを共有・単一出所。未知/非文字列は "unknown")。
 
-function gateCheckKind(v: unknown): string | undefined {
+// TDA-5: 戻りは closed-enum へ narrow する (r.data は既に narrow・ゼロコスト)。fold が値で branch
+// しない列 (WorkItem 側の check_kind/check_match 等の搬送 field) は string のままでよい。
+function gateCheckKind(v: unknown): CheckKind | undefined {
   const r = CheckKind.safeParse(v);
   return r.success ? r.data : undefined;
 }
 
-function gateCheckMatch(v: unknown): string | undefined {
+function gateCheckMatch(v: unknown): CheckMatch | undefined {
   const r = CheckMatch.safeParse(v);
   return r.success ? r.data : undefined;
 }

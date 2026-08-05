@@ -29,7 +29,14 @@ import { replayDtoToEvent } from "../replay/replay-state";
 
 import type { MessageKey } from "./i18n/messages";
 import type { Tone } from "./kit";
-import type { NormalizedEvent } from "@actradeck/event-model";
+import type {
+  CheckKind,
+  CheckMatch,
+  NormalizedEvent,
+  ObservationFidelity,
+  ObservationMethod,
+  WorkItemStatus,
+} from "@actradeck/event-model";
 import type { ReplayEventDTO } from "../realtime/contract";
 
 /**
@@ -90,7 +97,10 @@ export function badgeDisplay(item: WorkItem): BadgeDisplay | undefined {
 }
 
 // ── status (非 completed / plain 表示) ────────────────────────────────────────
-const STATUS_LABEL_KEY: Record<string, MessageKey> = {
+// TDA-B3-4: 以下の locale map は badge map (Record<WorkItemBadge>) と同様 **enum キーで exhaustive** に
+//   型付ける。新 enum member 追加時に silent fallback せず compile error で写像追加を強制する。
+//   lookup 側の引数は row 由来 string のままなので、enum 外文字列は従来どおり fallback/undefined。
+const STATUS_LABEL_KEY: Record<WorkItemStatus, MessageKey> = {
   pending: "workitem.status.pending",
   in_progress: "workitem.status.in_progress",
   completed: "workitem.status.completed",
@@ -100,11 +110,14 @@ const STATUS_LABEL_KEY: Record<string, MessageKey> = {
 };
 
 export function statusLabelKey(status: string): MessageKey {
-  return STATUS_LABEL_KEY[status] ?? "workitem.status.unknown";
+  return (
+    (STATUS_LABEL_KEY as Record<string, MessageKey | undefined>)[status] ??
+    "workitem.status.unknown"
+  );
 }
 
 // ── observation evidence (§D7 method/fidelity の locale 写像・closed enum) ──────
-const METHOD_LABEL_KEY: Record<string, MessageKey> = {
+const METHOD_LABEL_KEY: Record<ObservationMethod, MessageKey> = {
   official_hook: "workitem.evidence.method.official_hook",
   official_api: "workitem.evidence.method.official_api",
   provider_jsonl: "workitem.evidence.method.provider_jsonl",
@@ -113,7 +126,7 @@ const METHOD_LABEL_KEY: Record<string, MessageKey> = {
   heuristic: "workitem.evidence.method.heuristic",
 };
 
-const FIDELITY_LABEL_KEY: Record<string, MessageKey> = {
+const FIDELITY_LABEL_KEY: Record<ObservationFidelity, MessageKey> = {
   authoritative: "workitem.evidence.fidelity.authoritative",
   observed: "workitem.evidence.fidelity.observed",
   parsed: "workitem.evidence.fidelity.parsed",
@@ -124,17 +137,17 @@ const FIDELITY_LABEL_KEY: Record<string, MessageKey> = {
 /** method 文字列 → locale ラベルキー (未知/欠落は undefined = 証拠注記を出さない)。 */
 export function methodLabelKey(method: string | undefined): MessageKey | undefined {
   if (method === undefined) return undefined;
-  return METHOD_LABEL_KEY[method];
+  return (METHOD_LABEL_KEY as Record<string, MessageKey | undefined>)[method];
 }
 
 /** fidelity 文字列 → locale ラベルキー (未知/欠落は undefined)。 */
 export function fidelityLabelKey(fidelity: string | undefined): MessageKey | undefined {
   if (fidelity === undefined) return undefined;
-  return FIDELITY_LABEL_KEY[fidelity];
+  return (FIDELITY_LABEL_KEY as Record<string, MessageKey | undefined>)[fidelity];
 }
 
 // ── check 分類 (§D6 check_kind/check_match の locale 写像) ─────────────────────
-const CHECK_KIND_LABEL_KEY: Record<string, MessageKey> = {
+const CHECK_KIND_LABEL_KEY: Record<CheckKind, MessageKey> = {
   test: "workitem.check.kind.test",
   lint: "workitem.check.kind.lint",
   typecheck: "workitem.check.kind.typecheck",
@@ -142,19 +155,19 @@ const CHECK_KIND_LABEL_KEY: Record<string, MessageKey> = {
   format: "workitem.check.kind.format",
 };
 
-const CHECK_MATCH_LABEL_KEY: Record<string, MessageKey> = {
+const CHECK_MATCH_LABEL_KEY: Record<CheckMatch, MessageKey> = {
   program: "workitem.check.match.program",
   script: "workitem.check.match.script",
 };
 
 export function checkKindLabelKey(kind: string | undefined): MessageKey | undefined {
   if (kind === undefined) return undefined;
-  return CHECK_KIND_LABEL_KEY[kind];
+  return (CHECK_KIND_LABEL_KEY as Record<string, MessageKey | undefined>)[kind];
 }
 
 export function checkMatchLabelKey(match: string | undefined): MessageKey | undefined {
   if (match === undefined) return undefined;
-  return CHECK_MATCH_LABEL_KEY[match];
+  return (CHECK_MATCH_LABEL_KEY as Record<string, MessageKey | undefined>)[match];
 }
 
 // ── evidence-ref (§D8 claim/check/diff の timeline event へジャンプ) ───────────

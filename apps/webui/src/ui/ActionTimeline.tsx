@@ -155,6 +155,11 @@ export interface ActionTimelineProps {
    * (後方互換・既存呼び出しは不変)。
    */
   readonly focusEventId?: string;
+  /**
+   * TDA-B3-6: 同一 focusEventId の再クリックでも effect を再発火させる nonce (SessionDetail が
+   * クリックごとに増分)。undefined は後方互換 (focusEventId のみで発火)。
+   */
+  readonly focusNonce?: number;
 }
 
 /**
@@ -168,6 +173,7 @@ export function ActionTimeline({
   className,
   emptyLabel,
   focusEventId,
+  focusNonce,
 }: ActionTimelineProps) {
   const { t } = useLocale();
   const [showRaw, setShowRaw] = useState(false);
@@ -191,7 +197,9 @@ export function ActionTimeline({
       el?.scrollIntoView({ block: "center" });
     });
     return () => cancelAnimationFrame(id);
-  }, [focusEventId]);
+    // TDA-B3-6: focusNonce を deps に含め、同一 event_id の再クリック (nonce のみ増分) でも
+    // raw 切替 + 再スクロールを再発火させる。
+  }, [focusEventId, focusNonce]);
 
   return (
     <div className={["ad-action-timeline", className].filter(Boolean).join(" ")}>

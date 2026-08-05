@@ -35,6 +35,8 @@ const REAL_PG_TESTS = [
   "test/inv-row-to-event.test.ts",
   "test/inv-run-lineage-persist.test.ts",
   "test/inv-wall.test.ts",
+  // QA-B3R2-3 (B3 sweep): real-PG writer (実 ingest 書込) だが未登録だった (pre-existing omission)。
+  "test/inv-work-items-wiring.test.ts",
 ];
 
 export default defineConfig({
@@ -103,7 +105,7 @@ export default defineConfig({
       // QA-2: testing.md 契約 (statements>80 / branches>70 / functions>85) を **下回らせない**。
       //   閾値は「実測を割らず、かつ意味のある」値に置く。緩めすぎ禁止 (QA-1 の sink
       //   50→70 撤回の教訓: 契約 70 を下限に固定し、実測直下にタイトに張る)。
-      //   除外後の実測 (2026-06-04): 全体 94.22/81.34/96.87/96.46。
+      //   除外後の実測 (2026-08-05・A2 sweep 時点): 全体 94.48/86.96/97.84/95.68。
       thresholds: {
         statements: 90,
         branches: 78,
@@ -115,7 +117,10 @@ export default defineConfig({
         "src/reducer.ts": { statements: 95, branches: 90, functions: 100, lines: 100 },
         // 実測: liveness 98.48/87.75/100/100。
         "src/liveness.ts": { statements: 95, branches: 85, functions: 100, lines: 100 },
-        // 実測: ingest-store 88.88/73.41/90.9/93.75。branches=72 は契約 70 超を維持。
+        // 実測 (2026-08-05・A2 sweep: QA-4 共有 helper 化 + BoundedLruMap 抽出 + wiring テスト増後):
+        //   ingest-store 95.13/81.74/97.29/96.38。QA-7: lines floor 93 は実測の 3.38pt 下 =
+        //   per-file-coverage-floor 規律 (worst-observed の 3-5pt 下) を満たすため据え置き。
+        //   branches=72 は契約 70 超を維持。
         "src/ingest-store.ts": { statements: 88, branches: 72, functions: 90, lines: 93 },
         // Realtime ③ (QA-3): INV-bearing なので実測直下でタイトに張り劣化を CI で止める。
         //   実測 (2026-06-04): hub 100/81.25/100/100, server 100/93.33/92.3/100,

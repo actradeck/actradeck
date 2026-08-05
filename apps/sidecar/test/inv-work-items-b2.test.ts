@@ -79,6 +79,15 @@ describe("INV-WORKITEMS-B2: 専用 hook TaskCreated/TaskCompleted → work.item.
     expect(evs).toHaveLength(1);
     expect(evs[0]!.event_type).toBe("heartbeat");
   });
+
+  // QA-B2-1 (sweep): TaskCompleted 側の task_id 欠落分岐は TaskCreated とは別コード (normalize.ts の
+  //   独立 case) ゆえ、上のテストでは pin されない (mutation M6 が生存していた)。明示 pin。
+  it("QA-B2-1: TaskCompleted の task_id 欠落も work item を作らず heartbeat 化", () => {
+    const evs = normalizeHook(hook({ hook_event_name: "TaskCompleted", task_subject: "no id" }));
+    expect(evs).toHaveLength(1);
+    expect(evs[0]!.event_type).toBe("heartbeat");
+    expect((evs[0]!.payload as Record<string, unknown>).process_alive).toBe(true);
+  });
 });
 
 describe("INV-WORKITEMS-B2: PostToolUse(TaskCreate/TaskUpdate) parse → work.item.updated (parsed)", () => {
