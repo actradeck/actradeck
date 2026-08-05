@@ -104,6 +104,20 @@ describe("computeNotifications — edges", () => {
     expect(specs.map((s) => s.category)).toEqual(["stalled"]);
   });
 
+  // cockpit sweep TDA-2: location の repo@branch 合成は action-rail の repoBranchLabel 単一出所へ
+  // 委譲した。ここで **値をリテラル pin** し、通知側だけローカル合成へ戻す/書式が変わる drift を
+  // 赤化させる (mutation probe: 合成書式を repo#branch にすると本テストが RED)。
+  it("location params: repo@branch を優先し、無ければ cwd、いずれも無ければ —", () => {
+    const at = (over: Partial<SessionListItem>) =>
+      computeNotifications(item(over), item({ ...over, needs_attention: true }), {
+        categories: ALL_CATS,
+      })[0]!.params.location;
+    expect(at({})).toBe("acme/widgets@main");
+    expect(at({ branch: undefined })).toBe("acme/widgets");
+    expect(at({ repo: undefined, branch: undefined })).toBe("/home/dev/widgets");
+    expect(at({ repo: undefined, branch: undefined, cwd: undefined })).toBe("—");
+  });
+
   // ADR 0014 SEC-1/TDA-1 回帰防止: 失敗集合を **リテラルで membership-pin** する。以前は
   //   判定集合そのものを oracle にしていたため、TERMINAL_STATES への非失敗 terminal (`suspended`)
   //   混入を原理的に検出できず誤挙動を緑固定していた (tautology)。Phase1 sweep TDA-2 でローカル

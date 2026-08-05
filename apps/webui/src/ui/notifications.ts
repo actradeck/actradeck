@@ -17,6 +17,7 @@
  */
 import { isFailureTerminalStateValue } from "@actradeck/event-model";
 
+import { repoBranchLabel } from "./action-rail";
 import { shortSessionId } from "./wall-display";
 
 import type { MessageKey } from "./i18n/messages";
@@ -84,12 +85,13 @@ function sessionLabel(sessionId: string): string {
 /**
  * 「どこで動いているか」表示（memory: wall-show-working-directory）。
  * repo@branch を優先し、無ければ cwd、いずれも無ければ空文字（params 側で吸収）。
+ * repo@branch の合成は action-rail の {@link repoBranchLabel} 単一出所へ委譲する
+ * （cockpit sweep TDA-2: 書式変更の片側ドリフト防止）。cwd fallback は通知固有
+ * （Action Rail は NO-RAW で cwd を出さない — この差は意図）。
  * これらは list-level の非秘匿メタ（projection 由来）であり command/secret ではない。
  */
 function locationLabel(item: SessionListItem): string {
-  if (item.repo) return item.branch ? `${item.repo}@${item.branch}` : item.repo;
-  if (item.cwd) return item.cwd;
-  return "";
+  return repoBranchLabel(item.repo, item.branch) ?? item.cwd ?? "";
 }
 
 /**
