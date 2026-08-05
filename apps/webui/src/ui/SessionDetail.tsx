@@ -33,6 +33,7 @@ import { useLocale } from "./LocaleProvider";
 import { PersistedApprovalsPanel } from "./PersistedApprovalsPanel";
 import { PolicySettingsPanel } from "./PolicySettingsPanel";
 import { WorkItemsPanel } from "./WorkItemsPanel";
+import { deriveContinuedFrom, hasLineageChain, resolvedContinuationOf } from "./lineage-display";
 import {
   effectiveLivenessState,
   heartbeatRows,
@@ -45,6 +46,7 @@ import {
   redactionEntriesTotal,
   redactionKindLabelKey,
 } from "./redaction-display";
+import { shortSessionId } from "./wall-display";
 
 import type { DiffBody, OutputBody } from "../replay/parse-body";
 import type { ReplayEventDTO, SessionDetail as SessionDetailDTO } from "../realtime/contract";
@@ -588,6 +590,95 @@ function LivenessEvidence({
   );
 }
 
+/**
+ * run lineage メタ (ADR 0014 Phase 3c・decision 019fd250)。
+ *
+ * lineage フィールドが 1 つも無ければ何も描かない (attach 大半 = 何も主張しない・over-claim
+ * 防止 TDA-3。「連結不明」を常設ラベルにしない)。lifecycle 表示は state バッジが権威のままで、
+ * end_kind から lifecycle 表現を合成しない (各軸を各ラベルで独立表示)。continuation は
+ * resolveContinuation (stored-first) の resolved 値 1 つのみ (矛盾値禁止則)。
+ * 値は enum/short id のみの非秘匿メタ (command/payload は載らない)。
+ */
+function LineageMeta({ detail }: { readonly detail: SessionDetailDTO }) {
+  const { t } = useLocale();
+  const continuedFrom = deriveContinuedFrom(detail);
+  const continuation = resolvedContinuationOf(detail);
+  const showChain = hasLineageChain(detail);
+  const hasAny =
+    detail.start_kind !== undefined ||
+    continuedFrom !== undefined ||
+    detail.end_kind !== undefined ||
+    detail.recoverability !== undefined ||
+    detail.last_turn_outcome !== undefined ||
+    showChain;
+  if (!hasAny) return null;
+  return (
+    <dl className="ad-detail-grid" data-testid="detail-lineage">
+      {detail.start_kind !== undefined ? (
+        <div>
+          <dt className="ad-kv-label">{t("detail.lineage.start")}</dt>
+          <dd className="ad-kv-value" data-testid="lineage-start-kind">
+            {detail.start_kind}
+          </dd>
+        </div>
+      ) : null}
+      {continuedFrom !== undefined ? (
+        <div>
+          <dt className="ad-kv-label">{t("detail.lineage.continuedFrom")}</dt>
+          <dd
+            className="ad-kv-value"
+            data-testid="lineage-continued-from"
+            data-kind={continuedFrom.kind}
+          >
+            <code>{shortSessionId(continuedFrom.sessionId)}</code>
+            {continuedFrom.kind === "linked-unknown" ? (
+              <span className="ad-session-meta"> {t("detail.lineage.linkedUnknown")}</span>
+            ) : null}
+          </dd>
+        </div>
+      ) : null}
+      {detail.end_kind !== undefined ? (
+        <div>
+          <dt className="ad-kv-label">{t("detail.lineage.end")}</dt>
+          <dd className="ad-kv-value" data-testid="lineage-end-kind">
+            {detail.end_kind}
+          </dd>
+        </div>
+      ) : null}
+      {continuation !== undefined ? (
+        <div>
+          <dt className="ad-kv-label">{t("detail.lineage.continuation")}</dt>
+          <dd className="ad-kv-value" data-testid="lineage-continuation">
+            {continuation}
+          </dd>
+        </div>
+      ) : null}
+      {detail.last_turn_outcome !== undefined ? (
+        <div>
+          <dt className="ad-kv-label">{t("detail.lineage.lastTurn")}</dt>
+          <dd className="ad-kv-value" data-testid="lineage-last-turn">
+            {detail.last_turn_outcome}
+          </dd>
+        </div>
+      ) : null}
+      {showChain && detail.lineage_runs !== undefined ? (
+        <div>
+          <dt className="ad-kv-label">{t("detail.lineage.runs")}</dt>
+          <dd className="ad-kv-value" data-testid="lineage-runs">
+            {detail.lineage_runs
+              .map((r) =>
+                r.session_id === detail.session_id
+                  ? `[${shortSessionId(r.session_id)}]`
+                  : shortSessionId(r.session_id),
+              )
+              .join(" → ")}
+          </dd>
+        </div>
+      ) : null}
+    </dl>
+  );
+}
+
 export function SessionDetailView({
   detail,
   loading,
@@ -787,6 +878,10 @@ export function SessionDetailView({
           <dd className="ad-kv-value">{detail.invalid_transition_count}</dd>
         </div>
       </dl>
+
+      {/* run lineage (ADR 0014 Phase 3c): continued-from / 開始・終了種別 / 再開可能性 /
+          直近 turn / run 系譜。素材が無ければ何も描かない (attach 大半・over-claim しない)。 */}
+      <LineageMeta detail={detail} />
 
       {/* 4 ペイン拡張 (ADR 019ea4ba 段階1)。events 未指定 (既存呼び出し) では描かない。
           status-bar / 承認 / liveness を 1 ペイン目 (上) として、ここに 残り 3 ペインを足す:

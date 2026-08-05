@@ -18,6 +18,7 @@ import {
   TERMINAL_EVIDENCE_DEFAULT,
   isFailureTerminalStateValue,
   isTerminalState,
+  resolveContinuation,
   terminalContinuation,
   terminalEvidenceFor,
   type State,
@@ -85,5 +86,32 @@ describe("INV-TERMINAL-AXES: continuation / terminal_evidence 導出 (ADR 0014 Q
     }
     expect(terminalContinuation(undefined)).toBeUndefined();
     expect(terminalEvidenceFor(undefined)).toBeUndefined();
+  });
+});
+
+describe("INV-TERMINAL-AXES: resolveContinuation は stored-first (ADR 0014 Phase 3c・decision 019fd250)", () => {
+  it("TDA-4 実例: managed codex child-exit — stored=not_resumable が derived('failed')=unknown に勝つ", () => {
+    expect(resolveContinuation("not_resumable", "failed")).toBe("not_resumable");
+    // stored 不在なら derived 既定 (failed→unknown) へ fallback する。
+    expect(resolveContinuation(undefined, "failed")).toBe("unknown");
+  });
+
+  it("stored があれば state に依らず stored (state 側の既定を並記/上書きしない)", () => {
+    expect(resolveContinuation("resumable", "completed")).toBe("resumable");
+    expect(resolveContinuation("unknown", "suspended")).toBe("unknown");
+    expect(resolveContinuation("not_resumable", undefined)).toBe("not_resumable");
+    expect(resolveContinuation("not_resumable", "bogus-state")).toBe("not_resumable");
+  });
+
+  it("stored 不在は terminalContinuation(state) へ fallback (全 terminal で一致)", () => {
+    for (const s of TERMINAL_STATES) {
+      expect(resolveContinuation(undefined, s)).toBe(terminalContinuation(s));
+    }
+  });
+
+  it("stored 不在 + 非 terminal / out-of-enum / undefined state は undefined (over-claim しない)", () => {
+    expect(resolveContinuation(undefined, "running.command_executing")).toBeUndefined();
+    expect(resolveContinuation(undefined, "bogus-state")).toBeUndefined();
+    expect(resolveContinuation(undefined, undefined)).toBeUndefined();
   });
 });

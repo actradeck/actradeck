@@ -297,6 +297,30 @@ export function terminalContinuation(state: State | undefined): Continuation | u
   return state !== undefined ? TERMINAL_CONTINUATION[state] : undefined;
 }
 
+/**
+ * continuation の解決 (ADR 0014 Phase 3c precedence・decision 019fd250): **stored-first**。
+ *
+ * `stored` (sessions.recoverability = provider/process の実証跡・last-non-null-wins で終了時に
+ * 確定) があればそれを、無ければ `terminalContinuation(state)` (state-keyed の正直な既定・
+ * over-claim しない床) を返す。実証跡は既定より常に情報量が多い (例: managed codex child-exit
+ * は stored=not_resumable が derived("failed")=unknown に勝つ)。
+ *
+ * UI/backend の continuation 表示はこの resolver を **単一出所** とし、stored と derived を
+ * 並記しない (矛盾値禁止則) / 手書きの precedence 分岐コピーを置かない。
+ *
+ * `state` は read 層の DTO (string | undefined) を直接受けられるよう緩く取り、内部で
+ * State enum へ gate する (isFailureTerminalStateValue と同じ緩包含パターン。out-of-enum は
+ * derived なし = stored のみ)。
+ */
+export function resolveContinuation(
+  stored: Continuation | undefined,
+  state: string | undefined,
+): Continuation | undefined {
+  if (stored !== undefined) return stored;
+  const parsed = State.safeParse(state);
+  return parsed.success ? terminalContinuation(parsed.data) : undefined;
+}
+
 /** terminal 状態の既定 terminal_evidence を引く (non-terminal / undefined は undefined)。 */
 export function terminalEvidenceFor(state: State | undefined): TerminalEvidence | undefined {
   return state !== undefined ? TERMINAL_EVIDENCE_DEFAULT[state] : undefined;

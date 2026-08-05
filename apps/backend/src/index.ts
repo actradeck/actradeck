@@ -80,6 +80,8 @@ export {
   type SessionApprovals,
   // ADR 019ead7a 段階1: Live Wall 横断フィードの DTO。webui contract.ts が type-only 追従する。
   type WallLane,
+  // ADR 0014 Phase 3c: run lineage の兄弟 run DTO。webui contract.ts が type-only 追従する。
+  type LineageRun,
 } from "./realtime-hub.js";
 export { RealtimeStore } from "./realtime-store.js";
 export {
