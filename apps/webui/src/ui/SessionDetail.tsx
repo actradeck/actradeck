@@ -17,6 +17,7 @@
 import { useState } from "react";
 
 import { ActionTimeline } from "./ActionTimeline";
+import { compactDuration } from "./audit-coverage-display";
 import { formatCurrentAction } from "./action-units-display";
 import { MANAGED_CODEX_PREFIX } from "./managed-codex";
 import { interruptEnabledForState, type AckState, type ApprovalDecision } from "./approval-display";
@@ -66,8 +67,9 @@ export interface SessionBodyController {
 
 function ageLabel(ageMs: number | null): string {
   if (ageMs === null) return "—";
-  const s = Math.round(ageMs / 1000);
-  return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`;
+  // GFI #19: 整形は共有 compactDuration へ委譲。heartbeat 行は従来 (a) h へ畳まず分で出し続け
+  // (b) 時計 skew を符号付き秒で見せていたため、options で従来の描画出力を厳密に保存する。
+  return compactDuration(ageMs, { maxUnit: "m", clampNegative: false });
 }
 
 export interface SessionDetailProps {

@@ -35,4 +35,17 @@ describe("cmdVersion", () => {
     expect(await cmdVersion(f.deps)).toBe(0);
     expect(f.out.join("\n")).toMatch(/Could not reach GitHub/);
   });
+
+  // GFI #21: fetchOk bounds every request with AbortSignal.timeout(8000); when the timer fires,
+  // fetch rejects with an AbortError-shaped error. Pin that this rejection takes the SAME
+  // offline path as a DNS failure (local version printed, exit 0 — never a crash).
+  it("an AbortError-shaped timeout rejection takes the offline path (local version, exit 0)", async () => {
+    const abortErr = Object.assign(new Error("This operation was aborted"), {
+      name: "AbortError",
+    });
+    const f = makeFakeDeps({ selfVersion: "0.4.0", json: { [latestUrl]: abortErr } });
+    expect(await cmdVersion(f.deps)).toBe(0);
+    expect(f.out[0]).toBe("actradeck 0.4.0");
+    expect(f.out.join("\n")).toMatch(/Could not reach GitHub/);
+  });
 });

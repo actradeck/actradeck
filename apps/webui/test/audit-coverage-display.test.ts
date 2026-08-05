@@ -98,6 +98,27 @@ describe("compactDuration — ms 差の compact 整形 (relativeReceivedAge と�
   it("負値は 0s へ clamp (未来 skew を負表示しない)", () => {
     expect(compactDuration(-5_000)).toBe("0s");
   });
+
+  // GFI #19: 各呼び元の従来出力を境界値で pin し、共有化が output-preserving であることを固定する。
+  it("GFI #19 境界 (既定 = SessionList relativeAge / staleness バナーと同一出力): 59s/60s/3599s/3600s", () => {
+    expect(compactDuration(59_000)).toBe("59s");
+    expect(compactDuration(60_000)).toBe("1m");
+    expect(compactDuration(3_599_000)).toBe("60m"); // 3599s = 59.98 分 → 四捨五入 60m (h 未満)
+    expect(compactDuration(3_600_000)).toBe("1h");
+  });
+
+  it("GFI #19 maxUnit:'m' (SessionDetail ageLabel の従来出力): 1h 以上も分で出し続ける", () => {
+    const opts = { maxUnit: "m" } as const;
+    expect(compactDuration(59_000, opts)).toBe("59s");
+    expect(compactDuration(60_000, opts)).toBe("1m");
+    expect(compactDuration(3_600_000, opts)).toBe("60m"); // 旧 ageLabel: h へ畳まない
+    expect(compactDuration(4_320_000, opts)).toBe("72m");
+  });
+
+  it("GFI #19 clampNegative:false (SessionDetail ageLabel の従来出力): 時計 skew は符号付き秒", () => {
+    expect(compactDuration(-3_000, { clampNegative: false })).toBe("-3s");
+    expect(compactDuration(-3_000)).toBe("0s"); // 既定は従来どおり clamp
+  });
 });
 
 describe("formatSeqDrop — seq-drop chip 整形 (SEC-1 UI cap)", () => {

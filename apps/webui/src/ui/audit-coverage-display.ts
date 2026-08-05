@@ -64,19 +64,38 @@ export function relativeReceivedAge(
   return compactDuration(gen - recv);
 }
 
+/** compactDuration のオプション (GFI #19: 出力保存のための呼び元別差分を明示引数化)。 */
+export interface CompactDurationOptions {
+  /**
+   * 最大単位 (既定 "h")。"m" は h へ畳まず分で出し続ける — SessionDetail の heartbeat 行が
+   * 従来この形 (`"72m"`) で描画していたため、出力保存のためのオプション。
+   */
+  readonly maxUnit?: "m" | "h";
+  /**
+   * 負値 (未来 skew) を 0 へ clamp するか (既定 true)。false は符号付き秒 (`"-3s"`) で
+   * 従来出力を保存する (SessionDetail heartbeat 行)。
+   */
+  readonly clampNegative?: boolean;
+}
+
 /**
  * ミリ秒差を compact な相対経過 (`"12s"` / `"3m"` / `"2h"`) へ整形する純関数。
- *  - 負値は 0 へ clamp (未来 skew を負表示しない)。
+ *  - 負値は既定で 0 へ clamp (未来 skew を負表示しない)。
  *  - 単位付与 (`ago` / `前`) は i18n に委ねる (language-neutral な数値+単位)。
  *
- * staleness バナー (最終成功 fetch からの経過・同一 client 時計差分) と relativeReceivedAge
- * (server generated_at 基準) の**共通整形**。両者は「参照する時計」だけが異なり整形規則は同一ゆえ
- * 単一出所化する (ドリフト防止・consolidation-invariant-sweep)。
+ * **webui の相対経過表示の単一出所** (GFI #19): staleness バナー / relativeReceivedAge に加え、
+ * SessionList の last-event 列 (`relativeAge`) と SessionDetail の heartbeat 行 (`ageLabel`) も
+ * 本関数へ委譲する (private コピーの並存はドリフト源・consolidation-invariant-sweep)。呼び元の
+ * 従来出力差 (m-cap / 符号付き skew) は options で明示し、描画出力を変えない。
+ * ※ PersistedApprovalsPanel の `formatRemaining` (m/h/d・期限切れ null) は「残り時間」の別意味論で
+ *   本関数のコピーではない (対象外・当該ファイルのコメント参照)。action-units-display の小数秒
+ * (`1.4s`) も別書式で対象外。
  */
-export function compactDuration(deltaMs: number): string {
-  const s = Math.max(0, Math.round(deltaMs / 1000));
+export function compactDuration(deltaMs: number, opts?: CompactDurationOptions): string {
+  const rounded = Math.round(deltaMs / 1000);
+  const s = opts?.clampNegative === false ? rounded : Math.max(0, rounded);
   if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (opts?.maxUnit === "m" || s < 3600) return `${Math.round(s / 60)}m`;
   return `${Math.round(s / 3600)}h`;
 }
 
