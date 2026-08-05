@@ -3,9 +3,7 @@ import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import type { NormalizedEvent } from "@actradeck/event-model";
-
-import type { StartKind } from "@actradeck/event-model";
+import type { NormalizedEvent, StartKind } from "@actradeck/event-model";
 
 import {
   normalizeRolloutLine,
@@ -331,6 +329,11 @@ export class CodexRolloutTailer {
       // ADR 0014 Phase 3b-2: presence-prime も lineage を確定しておく (primed 後に tail-from-end
       //   で session_meta を再読しない既存ファイルでも mid-stream イベントが正しい provider_session_id
       //   を載せられる)。emit はしない (presence-only)。
+      // 3b-2 sweep TDA-3 (意図的重複・rule-of-three): この 3-field runtime 反映は processLine の
+      //   session_meta 分岐と statement-identical (インデント深さのみ異なる)。同じ 3 field 集合は
+      //   processLine 末尾の runtime→normalizeRolloutLine options の conditional spread にも共変
+      //   列挙されており、lineage field を増やすときは 3 点 lockstep。producer 3 箇所目/field 4 つ目に
+      //   増えるときは applyRolloutLineage() helper へ集約すること (現 2 箇所は許容・防御的均一性)。
       if (line.type === "session_meta") {
         const lineage = rolloutStartLineage(p);
         if (lineage.providerSessionId !== undefined)

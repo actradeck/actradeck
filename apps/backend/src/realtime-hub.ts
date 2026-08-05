@@ -15,7 +15,7 @@
  * transport (WS) は realtime-server.ts が握り、socket を本 hub に登録する。hub は socket を
  * 「send(string) を持つ最小インタフェース」としてしか知らない (テストで偽 socket を注入可能)。
  */
-import type { ActionKind } from "@actradeck/event-model";
+import type { ActionKind, CaptureMode } from "@actradeck/event-model";
 
 import type { LivenessEvidence, LivenessState } from "./liveness.js";
 import type { PendingApproval } from "./reducer.js";
@@ -80,7 +80,7 @@ export interface SessionListItem {
    * を示すための判別子。approval relay 可否とは直交する。
    * projection key には使わない (presence/liveness は既存経路)。
    */
-  readonly capture_mode?: "managed" | "attach" | "codex_rollout";
+  readonly capture_mode?: CaptureMode;
   /**
    * ADR 0015 §D4/§D8: この session の **自己申告完了だが未検証** な work item 数
    * (status='completed' ∧ verification_state='unverified')。work_items 投影の query-derived 集約。

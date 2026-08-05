@@ -17,7 +17,7 @@ import { tokenEquals } from "@actradeck/redaction";
 
 import { buildEvent } from "./event-factory.js";
 import { type HookCommonInput, type NormalizeContext, normalizeHook } from "./normalize.js";
-import type { SessionIdentity } from "./session-identity.js";
+import type { RunIdentity, SessionIdentity } from "./session-identity.js";
 import { HOOK_TOKEN_HEADER } from "./settings-injection.js";
 import type { EventSink } from "./sink.js";
 import type { ApprovalBridge } from "./approval-bridge.js";
@@ -41,6 +41,7 @@ export interface HookReceiverOptions {
   /**
    * 観測モード (ADR 019ea476 D8)。Attach 構成では "attach" を渡し、全 emit に
    * capture_mode="attach" を付与する (UI の attach バッジ用)。省略時は付与しない (managed 既定)。
+   * event-model CaptureMode の**意図的 narrow** (hook 経路は codex_rollout を通らない・TDA-1)。
    */
   readonly captureMode?: "managed" | "attach";
   /**
@@ -241,7 +242,9 @@ export class HookReceiver {
     // run 境界 (ADR 0014 D2): onHookSession が provider id 変化 / terminal-reopen を判定し、この hook を
     // どの canonical run へ ingest するか (start_kind / resumed_from を run 起点に載せるか) を返す。
     // 監視イベントは境界を駆動しない (D3・分裂防止)。
-    const identity =
+    // 注釈は run 語彙エイリアス RunIdentity (= SessionIdentity): ここでの用途は run 境界判定
+    // (onHookSession) であり、エイリアスの意図した使用点 (3b-1 sweep TDA-1 で実体化)。
+    const identity: RunIdentity | undefined =
       this.resolveIdentity !== undefined
         ? this.resolveIdentity(input.session_id, input.cwd)
         : this.identity;

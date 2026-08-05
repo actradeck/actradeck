@@ -459,6 +459,19 @@ function deriveStartKind(src: string | undefined, hasParent: boolean): StartKind
 }
 
 /**
+ * synthetic / fallback session id (`sess_<uuidv7>`) の**鋳造単一出所** (3b-1 sweep TDA-2)。
+ * 使用点は 2 つ: terminal-reopen の synthetic run mint (下 mintSyntheticRunId) と
+ * cli.ts `resolveManagedSession` の fallback id。shape (`sess_` prefix + uuidv7) を変えるときは
+ * redaction 側 `CORRELATION_PREFIXED_UUID_RE` (packages/redaction/src/redactor.ts) が同 shape を
+ * 相関 id として keep する結合も必ず sweep すること (独立リテラルを再導入しない)。
+ *
+ * @param idFactory テスト注入用の id 生成器 (既定 newEventId)。
+ */
+export function mintSyntheticSessionId(idFactory: () => string = newEventId): string {
+  return `sess_${idFactory()}`;
+}
+
+/**
  * terminal-reopen で衝突する provider id を採用できないときの synthetic run id を鋳造する (D1)。
  * 既存 fallback id shape (`sess_<uuidv7>`・cli.ts resolveManagedSession と同型) を再利用する。
  * 全層 (redaction allowlist / relay / webui) が既に処理済みの 2 種類目の id 形。
@@ -466,5 +479,5 @@ function deriveStartKind(src: string | undefined, hasParent: boolean): StartKind
  * (hook-receiver は逐次処理・rotate 後の再送は case (C) で畳まれ再 mint しない)。
  */
 function mintSyntheticRunId(): string {
-  return `sess_${newEventId()}`;
+  return mintSyntheticSessionId();
 }

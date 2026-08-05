@@ -58,7 +58,7 @@ Do **not** make terminal states re-openable. Instead:
 
 - **Normalized phase** — the existing `State` machine: what the agent is doing now.
 - **Failure outcome** — `last_turn_outcome: "completed" | "failed" | "interrupted" | undefined`
-  (a *turn's* result, not the session's).
+  (a _turn's_ result, not the session's).
 - **Recoverability** — `continuation: "resumable" | "not_resumable" | "unknown"`.
 - **Terminal evidence** — `terminal_evidence: "provider" | "process_exit" | "timeout" | "inferred"`.
 - **Run lineage** — `provider_session_id` links a chain of observation runs.
@@ -75,6 +75,7 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
 ## Phased implementation (priority order)
 
 **Phase 1 — Stop terminal poisoning (highest priority; correctness).**
+
 - `turn.failed` / `turn_aborted` → do NOT set session state `failed`; return to `idle` or
   `running.model_wait`; project `last_turn_outcome="failed"` on the separate axis.
 - `systemError` → `stalled` or `disconnected` unless there is an explicit process exit;
@@ -84,6 +85,7 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
 - Add minimal projections: `last_turn_outcome`, `continuation`, `terminal_evidence`.
 
 **Phase 2 — Conformance false-green fixes + semantic extensions (absorbs prior P2).**
+
 - Errors: empty stream; same `event_id` with differing content; same `seq` with a different
   `event_id`; missing `payload.kind`; an event after terminal; a re-start after terminal on the
   same `session_id`; an unrequested approval resolution; an unresolved approval at terminal
@@ -99,6 +101,7 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
   it is a stricter reading than "same id ⇒ retry". Severity is intentional, not a manifest concern.
 
 **Phase 3 — `provider_session_id` persistence + run lineage.**
+
 - Persist `provider_session_id` on `sessions` (and `events` if needed); add
   `sessions.{start_kind, resumed_from_session_id, end_kind, recoverability}`
   (`start_kind: fresh | resume | recovery | clear | unknown`).
@@ -121,13 +124,27 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
 - UI links runs sharing a `provider_session_id` as "continued from".
 - Existing events without `provider_session_id` are treated as single-run lineages (no
   destructive migration).
+- Capture-path lineage fidelity matrix (Phase 3b sweep). This table is the single source for
+  how much each observation path can honestly claim; UI and docs must not present a weaker
+  tier as a stronger one (e.g. a declared rollout edge as an observed one):
+
+  | Capture path                                        | `provider_session_id`                                                    | `start_kind`                                                                                                                                                                                                 | `resumed_from_session_id`                                                                                            | Run boundary / end                                                                                                                                                                                              |
+  | --------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | Claude Code hooks (managed + attach; `RunIdentity`) | raw hook `session_id`, on all events                                     | **Observed, best-effort**: derived from the observed SessionStart `source` (`startup`→`fresh`, `resume`→`resume`, `clear`→`clear`); with an observed parent but no usable `source`, `resume`; else `unknown` | Only when the parent run was **actually observed in-process** — never a declared edge                                | A provider-id change or a terminal-reopen mints a distinct run (synthetic `sess_<uuidv7>`); monitoring events never drive a boundary (D3)                                                                       |
+  | Codex managed (app-server)                          | **Enrich-only**: `thread.sessionId` when the server reports it           | Not emitted (`NULL` — this path observes no restart lineage)                                                                                                                                                 | Not emitted                                                                                                          | One managed run per spawn. `end_kind`/`recoverability` are set on the process-exit terminal but not on the handshake-failure path (non-uniform; uniformization is deferred to the Phase 3c precedence decision) |
+  | Codex rollout (observe-only tail)                   | Stable `session_meta.payload.session_id` when declared, else the file id | `resume` only when a `forked_from_id` edge is declared, else `unknown` (never a claimed `fresh`)                                                                                                             | **As declared** by `forked_from_id`: the parent may be unobserved and the referent may be the stable conversation id | One rollout file = one observation run                                                                                                                                                                          |
+
+  The consumer requirements for declared rollout edges are stated exactly once, in the Codex
+  rollout bullet above; the normalizer docstring defers to that bullet instead of restating
+  them.
 
 **Phase 4 — Approval restart reconciliation.**
+
 - `tool.permission.resolved` gains `resolution_origin` (`operator | timeout | policy | shutdown |
-  child_exit | relay_lost`) and `delivery_status` (`sent | not_sent | unknown`). Never claim a
+child_exit | relay_lost`) and `delivery_status` (`sent | not_sent | unknown`). Never claim a
   deny was "sent" when the provider vanished (e.g. child exit → `deny, origin=child_exit,
-  delivery=not_sent`; timeout → `deny, origin=timeout, delivery=sent`; daemon crash → `cancel,
-  origin=relay_lost, delivery=not_sent`).
+delivery=not_sent`; timeout → `deny, origin=timeout, delivery=sent`; daemon crash → `cancel,
+origin=relay_lost, delivery=not_sent`).
 - Sidecar `hello` gains `runtime_epoch` and `active_pending_request_ids`; the backend keeps
   pending across a backend restart if the same sidecar reconnects, and makes stale pending
   non-actionable when the sidecar epoch changed.
@@ -142,6 +159,7 @@ even if the adapter wiring later changes. Acceptance test #9 below transposes to
 whose fixtures contradict its declared `observation_evidence` fails CI. Phase 4 (approval
 restart reconciliation) remains in this ADR, unaffected. Original phase text kept for the
 record:
+
 - `adapter.manifest.json` per adapter declaring capabilities over a closed vocabulary
   {`authoritative`, `observed`, `inferred`, `unsupported`, `unverified`} (session_start,
   session_end, resume, restart_recovery, approval_observation, approval_relay,

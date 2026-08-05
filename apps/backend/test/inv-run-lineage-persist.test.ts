@@ -49,7 +49,7 @@ describe.skipIf(!reachable)(
       const child = newSession("sess_child");
       const base = Date.now();
 
-      // 親 run: fresh 起動 → 正常終了 (sidecar が emit する形)。
+      // 親 run: fresh 起動 → 正常終了 (sidecar が emit する形・per-run seq 0,1)。
       await store.ingest(
         makeEvent({
           session_id: parent,
@@ -58,6 +58,7 @@ describe.skipIf(!reachable)(
           event_type: "session.started",
           timestamp: iso(base, 0),
           start_kind: "fresh",
+          seq: 0,
         }),
       );
       await store.ingest(
@@ -69,6 +70,7 @@ describe.skipIf(!reachable)(
           timestamp: iso(base, 1_000),
           end_kind: "completed",
           recoverability: "not_resumable",
+          seq: 1,
         }),
       );
 
@@ -84,7 +86,8 @@ describe.skipIf(!reachable)(
       expect(parentBefore.rows[0].recoverability).toBe("not_resumable");
       expect(parentBefore.rows[0].resumed_from_session_id).toBeNull();
 
-      // 子 run: 別 provider id での resume (resumed_from=親 canonical)。
+      // 子 run: 別 provider id での resume (resumed_from=親 canonical)。sidecar は run ごとに
+      // seq 空間をリセットするため、新 run の最初の永続イベントは seq=0 で emit される。
       await store.ingest(
         makeEvent({
           session_id: child,
@@ -94,6 +97,7 @@ describe.skipIf(!reachable)(
           timestamp: iso(base, 2_000),
           start_kind: "resume",
           resumed_from_session_id: parent,
+          seq: 0,
         }),
       );
 
@@ -108,6 +112,21 @@ describe.skipIf(!reachable)(
       // 子は lineage エッジを持つ (INV-RUN-LINEAGE-EDGE)。
       expect(childRow.rows[0].start_kind).toBe("resume");
       expect(childRow.rows[0].resumed_from_session_id).toBe(parent);
+
+      // INV-SEQ-RESET-PER-RUN (direct・3b-1 sweep QA-3): 新 run の最初の永続イベントは seq=0。
+      // 親 run が同一 stream 内で既に seq 0..1 を使っていても、子 run は独立 seq 空間を 0 から
+      // 始められる (per-session seq・cross-run 衝突/連番引き継ぎをしない) ことを events 行で直接固定。
+      const childEvents = await pool.query(
+        `SELECT seq FROM events WHERE session_id = $1 ORDER BY timestamp ASC`,
+        [child],
+      );
+      expect(childEvents.rowCount).toBe(1);
+      expect(Number(childEvents.rows[0].seq)).toBe(0);
+      const parentSeqs = await pool.query(
+        `SELECT seq FROM events WHERE session_id = $1 ORDER BY seq ASC`,
+        [parent],
+      );
+      expect(parentSeqs.rows.map((r) => Number(r.seq))).toEqual([0, 1]);
 
       // INV-TERMINAL-IMMUTABLE-ACROSS-RESUME: 子 ingest 後も親 terminal 行は byte 不変 (再オープンしない)。
       const parentAfter = await pool.query(

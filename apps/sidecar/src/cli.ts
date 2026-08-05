@@ -31,6 +31,7 @@ import { newEventId } from "@actradeck/event-model";
 
 import { runAgentDoctorCli } from "./agent-visibility.js";
 import { ApprovalAllowlistStore } from "./approval-allowlist-store.js";
+import { mintSyntheticSessionId } from "./session-identity.js";
 import { runApprovalsCli } from "./approvals-cli.js";
 import { Sidecar } from "./sidecar.js";
 import { AttachDaemon } from "./attach-daemon.js";
@@ -178,7 +179,8 @@ export function resolveManagedSession(idFactory: () => string = newEventId): {
   explicitSession: false;
 } {
   const env = process.env.ACTRADECK_SESSION;
-  const sessionId = env !== undefined && env.length > 0 ? env : `sess_${idFactory()}`;
+  // fallback id は mintSyntheticSessionId 単一出所 (3b-1 sweep TDA-2・独立リテラル 2 箇所を統合)。
+  const sessionId = env !== undefined && env.length > 0 ? env : mintSyntheticSessionId(idFactory);
   return { sessionId, explicitSession: false };
 }
 

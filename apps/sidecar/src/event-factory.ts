@@ -8,6 +8,7 @@ import {
   type Continuation,
   type EndKind,
   EventPayload,
+  type CaptureMode,
   type EventType,
   type NormalizedEvent,
   type Provider,
@@ -55,7 +56,7 @@ export interface BuildEventInput {
    * 観測モード (ADR 019ea476 D8)。managed = PTY/app-server 所有経路、attach = hooks 後付け観測。
    * 省略時は wire 上 undefined のまま (= 欠落 = managed 既定扱い, 後方互換)。
    */
-  readonly capture_mode?: "managed" | "attach" | "codex_rollout";
+  readonly capture_mode?: CaptureMode;
   /**
    * 権限モード (sandbox)。hook の `permission_mode` 由来 (ADR 019ea4ba 段階2)。
    * 省略時は wire 上 undefined (後方互換)。表示専用 (projection key 非使用)。

@@ -12,6 +12,8 @@
  * 生 payload / tool_input を独自取得しない・新たな本文チャネルを作らない (段階1 は行サマリのみ)。
  * stdout 本文 tail / git 全体 diff 本文 / secret_detected 明示化は段階2 (本ファイル対象外)。
  */
+import type { CaptureMode } from "@actradeck/event-model";
+
 import { formatCurrentAction } from "./action-units-display";
 import { t, type Locale } from "./i18n/messages";
 
@@ -201,10 +203,11 @@ export interface SessionRiskFacts {
 
 const RISK_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
 
-/** capture_mode を欠落許容で正規化する (欠落/未知 = managed 既定; ADR 019ea4ba D4 寛容性)。 */
-export function normalizeCaptureMode(
-  v: string | undefined,
-): "managed" | "attach" | "codex_rollout" {
+/**
+ * capture_mode を欠落許容で正規化する (欠落/未知 = managed 既定; ADR 019ea4ba D4 寛容性)。
+ * 返り値型は event-model の CaptureMode 単一出所 (TDA-1・手コピー union を再宣言しない)。
+ */
+export function normalizeCaptureMode(v: string | undefined): CaptureMode {
   return v === "attach" || v === "codex_rollout" ? v : "managed";
 }
 
@@ -215,7 +218,7 @@ export function normalizeCaptureMode(
  * opencode 等) は capture_mode を持たず、`normalizeCaptureMode` 単独だと欠落を **managed と誤表示**する。
  * 本 helper は source を優先的に見て external を独立分類し、その誤表示を断つ (単一出所)。
  */
-export type CaptureProvenance = "managed" | "attach" | "codex_rollout" | "external";
+export type CaptureProvenance = CaptureMode | "external";
 
 /**
  * (capture_mode, source) → 表示 provenance の正準写像 (単一出所)。

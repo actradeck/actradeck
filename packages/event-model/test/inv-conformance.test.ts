@@ -158,6 +158,37 @@ describe("INV-CONFORMANCE: adapter stream conformance checker", () => {
     expect(r.findings.map((f) => f.rule)).not.toContain("event-id-collision");
   });
 
+  it("ERRORS on a duplicate event_id whose ONLY difference is payload content (content sensitivity)", () => {
+    // ADR 0014 Phase 2 sweep QA-3: the other collision tests vary envelope fields (event_type/seq);
+    // this one keeps the envelope byte-identical and drifts ONLY the payload body. With the same
+    // (seq, event_id) pair the seq detector sees a legitimate re-send shape, so payload-content
+    // sensitivity of `canonicalize` is the ONLY signal that catches this break.
+    const id = newEventId();
+    const base = {
+      session_id: "s1",
+      seq: 0,
+      event_id: id,
+      event_type: "command.started",
+      timestamp: "2026-07-18T00:00:00.000Z",
+    };
+    const stream = [
+      ev({
+        ...base,
+        payload: { kind: "command.started", command: "echo one", request_id: "tu:1" },
+      }),
+      ev({
+        ...base,
+        payload: { kind: "command.started", command: "echo two", request_id: "tu:1" },
+      }),
+    ];
+    const r = checkConformance(stream);
+    expect(r.ok).toBe(false);
+    const rules = r.findings.map((f) => f.rule);
+    expect(rules).toContain("event-id-collision");
+    expect(rules).not.toContain("event-id-duplicate");
+    expect(rules).not.toContain("seq-collision"); // same event_id on the seq → not a seq collision
+  });
+
   it("flags a per-session timestamp regression (emission-order non-decreasing)", () => {
     const stream = [
       ev({ session_id: "s1", seq: 0, timestamp: "2026-07-18T00:00:05.000Z" }),
@@ -309,23 +340,29 @@ describe("INV-CONFORMANCE: adapter stream conformance checker", () => {
     expect(r.findings.map((f) => f.rule)).toContain("event-after-terminal");
   });
 
-  it("ERRORS on a re-start (created/starting) after terminal — resume must use a NEW session_id", () => {
-    const stream = [
-      ev({ session_id: "s1", seq: 0, event_type: "session.ended", state: "completed" }),
-      ev({
-        session_id: "s1",
-        seq: 1,
-        event_type: "session.started",
-        state: "starting",
-        timestamp: "2026-07-18T00:00:01.000Z",
-      }),
-    ];
-    const r = checkConformance(stream);
-    expect(r.ok).toBe(false);
-    expect(r.findings.map((f) => f.rule)).toContain("restart-after-terminal");
-    // it is the lineage-specific rule, not the generic post-terminal one
-    expect(r.findings.map((f) => f.rule)).not.toContain("event-after-terminal");
-  });
+  // Parametrized over BOTH members of INITIAL_STATES (sweep QA-1): dropping either "created" or
+  // "starting" from the canonical set silently degrades the finding to the generic
+  // event-after-terminal rule — each member needs its own red test to pin the rule label.
+  it.each(["created", "starting"] as const)(
+    "ERRORS on a re-start (%s) after terminal — resume must use a NEW session_id",
+    (initialState) => {
+      const stream = [
+        ev({ session_id: "s1", seq: 0, event_type: "session.ended", state: "completed" }),
+        ev({
+          session_id: "s1",
+          seq: 1,
+          event_type: "session.started",
+          state: initialState,
+          timestamp: "2026-07-18T00:00:01.000Z",
+        }),
+      ];
+      const r = checkConformance(stream);
+      expect(r.ok).toBe(false);
+      expect(r.findings.map((f) => f.rule)).toContain("restart-after-terminal");
+      // it is the lineage-specific rule, not the generic post-terminal one
+      expect(r.findings.map((f) => f.rule)).not.toContain("event-after-terminal");
+    },
+  );
 
   it("suspended (ADR 0014 terminal) makes a later new event a post-terminal error too", () => {
     const stream = [
@@ -357,6 +394,71 @@ describe("INV-CONFORMANCE: adapter stream conformance checker", () => {
     expect(r.ok).toBe(true); // a retry is not a post-terminal emission
     expect(r.findings.map((f) => f.rule)).not.toContain("event-after-terminal");
     expect(r.findings.map((f) => f.rule)).toContain("event-id-duplicate"); // still the retry warning
+  });
+
+  it("does NOT flag interleaved sessions when ONE goes terminal (terminal is per-session)", () => {
+    // ADR 0014 Phase 2 sweep QA-2: sa reaches terminal, then sb starts and keeps emitting in the
+    // same stream. If `terminalReached` ever leaked across sessions, sb's initial-state event would
+    // trip restart-after-terminal and its later event event-after-terminal.
+    const stream = [
+      ev({ session_id: "sa", seq: 0, event_type: "session.ended", state: "completed" }),
+      ev({
+        session_id: "sb",
+        seq: 0,
+        event_type: "session.started",
+        state: "starting",
+        timestamp: "2026-07-18T00:00:01.000Z",
+      }),
+      ev({
+        session_id: "sb",
+        seq: 1,
+        event_type: "turn.started",
+        state: "running.model_wait",
+        timestamp: "2026-07-18T00:00:02.000Z",
+      }),
+    ];
+    const r = checkConformance(stream);
+    expect(r.ok, JSON.stringify(r.findings)).toBe(true);
+    const rules = r.findings.map((f) => f.rule);
+    expect(rules).not.toContain("restart-after-terminal");
+    expect(rules).not.toContain("event-after-terminal");
+  });
+
+  it("does NOT correlate approvals across sessions (request_id keyspace is per-session)", () => {
+    // ADR 0014 Phase 2 sweep QA-2: sa requests apr-x; sb resolves the SAME request_id. sb must
+    // error (never requested THERE), and sa must still warn unresolved-at-terminal — a resolution
+    // in another session does not clear sa's pending set.
+    const stream = [
+      ev({
+        session_id: "sa",
+        seq: 0,
+        event_type: "tool.permission.requested",
+        state: "waiting.approval",
+        payload: { kind: "tool.permission.requested", request_id: "apr-x" },
+      }),
+      ev({
+        session_id: "sb",
+        seq: 0,
+        event_type: "tool.permission.resolved",
+        state: "running.tool_preparing",
+        timestamp: "2026-07-18T00:00:01.000Z",
+        payload: { kind: "tool.permission.resolved", request_id: "apr-x" },
+      }),
+      ev({
+        session_id: "sa",
+        seq: 1,
+        event_type: "session.ended",
+        state: "completed",
+        timestamp: "2026-07-18T00:00:02.000Z",
+      }),
+    ];
+    const r = checkConformance(stream);
+    expect(r.ok).toBe(false);
+    const rulesOf = (sid: string): string[] =>
+      r.findings.filter((f) => f.sessionId === sid).map((f) => f.rule);
+    expect(rulesOf("sb")).toContain("approval-resolved-unrequested");
+    expect(rulesOf("sa")).toContain("approval-unresolved-at-terminal");
+    expect(rulesOf("sa")).not.toContain("approval-resolved-unrequested");
   });
 
   it("ERRORS on a tool.permission.resolved with no prior matching request (approval-resolved-unrequested)", () => {

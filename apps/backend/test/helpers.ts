@@ -2,7 +2,14 @@
  * テストヘルパ: NormalizedEvent 生成 + 実 PG 接続ユーティリティ。
  * REAL DATA ONLY: モック DB は無い。実 Postgres へ接続する (DATABASE_URL)。
  */
-import { newEventId, parseEvent, type NormalizedEvent } from "@actradeck/event-model";
+import {
+  newEventId,
+  parseEvent,
+  type Continuation,
+  type EndKind,
+  type NormalizedEvent,
+  type StartKind,
+} from "@actradeck/event-model";
 import { Pool } from "pg";
 
 export interface MakeEventOverrides {
@@ -15,8 +22,12 @@ export interface MakeEventOverrides {
   payload?: Record<string, unknown>;
   provider?: string;
   source?: string;
-  /** 取得方式 (ADR 019ea476/019ea4ba)。省略時は未指定 (managed 既定扱い)。 */
-  capture_mode?: "managed" | "attach";
+  /**
+   * 取得方式 (ADR 019ea476/019ea4ba)。省略時は未指定 (managed 既定扱い)。
+   * 型は event-model schema の indexed access で単一出所化 (ADR 0014 3a sweep TDA-3: 手コピー
+   * リテラルは codex_rollout 追加時に stale 化した実例あり・再宣言しない)。
+   */
+  capture_mode?: NormalizedEvent["capture_mode"];
   /** 権限モード (sandbox)。ADR 019ea4ba D3 / 段階2。省略時は未指定。 */
   permission_mode?: string;
   /** 作業ディレクトリ (sessions.cwd の出所)。project scope テスト等で指定。省略時は未指定。 */
@@ -33,22 +44,14 @@ export interface MakeEventOverrides {
   seq?: number;
   /** ADR 0014 Phase 3a: provider 発行 raw session id (run lineage)。省略時は未指定 (= NULL)。 */
   provider_session_id?: string;
-  /** ADR 0014 Phase 3a: run 開始種別 (StartKind)。省略時は未指定 (= NULL)。 */
-  start_kind?: "fresh" | "resume" | "recovery" | "clear" | "unknown";
+  /** ADR 0014 Phase 3a: run 開始種別 (event-model StartKind・単一出所)。省略時は未指定 (= NULL)。 */
+  start_kind?: StartKind;
   /** ADR 0014 Phase 3a: resume 元 session_id (lineage エッジ)。省略時は未指定 (= NULL)。 */
   resumed_from_session_id?: string;
-  /** ADR 0014 Phase 3a: run 終了種別 (EndKind)。省略時は未指定 (= NULL)。 */
-  end_kind?:
-    | "completed"
-    | "failed"
-    | "interrupted"
-    | "unloaded"
-    | "cleared"
-    | "logout"
-    | "other"
-    | "unknown";
-  /** ADR 0014 Phase 3a: 再開可能性 (Recoverability=Continuation 再利用)。省略時は未指定 (= NULL)。 */
-  recoverability?: "resumable" | "not_resumable" | "unknown";
+  /** ADR 0014 Phase 3a: run 終了種別 (event-model EndKind・単一出所)。省略時は未指定 (= NULL)。 */
+  end_kind?: EndKind;
+  /** ADR 0014 Phase 3a: 再開可能性 (event-model Continuation=Recoverability 再利用)。省略時は未指定 (= NULL)。 */
+  recoverability?: Continuation;
 }
 
 /**

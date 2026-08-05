@@ -7,7 +7,7 @@
  * REAL DATA ONLY: 実 PostgreSQL の永続 projection からのみ DTO を作る。生 payload には触れず
  * (backend は再 redaction しない / 新規露出させない)、redaction 済の projection/liveness のみ写す。
  */
-import { gateRedactionCountByKind, isActionKind } from "@actradeck/event-model";
+import { CaptureMode, gateRedactionCountByKind, isActionKind } from "@actradeck/event-model";
 
 import type { ActionKind } from "@actradeck/event-model";
 
@@ -89,9 +89,13 @@ const JOIN_SELECT = `
     FROM session_state ss
     JOIN sessions s ON s.session_id = ss.session_id`;
 
-/** capture_mode を型安全に写す (未知/欠落は undefined = managed 既定扱い・projection key 非使用)。 */
-function toCaptureMode(v: unknown): "managed" | "attach" | "codex_rollout" | undefined {
-  return v === "managed" || v === "attach" || v === "codex_rollout" ? v : undefined;
+/**
+ * capture_mode を型安全に写す (未知/欠落は undefined = managed 既定扱い・projection key 非使用)。
+ * enum 帰属判定は event-model の CaptureMode zod enum 単一出所 (手書き 3 値比較を置かない・TDA-1)。
+ */
+function toCaptureMode(v: unknown): CaptureMode | undefined {
+  const parsed = CaptureMode.safeParse(v);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**

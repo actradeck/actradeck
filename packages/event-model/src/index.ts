@@ -50,6 +50,8 @@ export {
   // ADR 0014 Phase 3a (TDA-1 昇格): LastTurnOutcome も zod enum を値の単一出所として value export
   //   する (ingest-store gate が .safeParse/.options を再利用・手写し Set 廃止)。
   LastTurnOutcome,
+  // ADR 0014 Phase 2 (TDA-2): 初期状態集合の正典 (conformance restart-after-terminal が参照)。
+  INITIAL_STATES,
 } from "./state.js";
 export type { Continuation, TerminalEvidence } from "./state.js";
 
@@ -194,7 +196,14 @@ export type { BoundedMonotonicOptions } from "./timestamp.js";
 export { BoundedLruMap } from "./bounded-lru-map.js";
 
 // normalized event
-export { NormalizedEvent, Metrics, Payload, parseEvent, safeParseEvent } from "./event.js";
+export {
+  CaptureMode,
+  NormalizedEvent,
+  Metrics,
+  Payload,
+  parseEvent,
+  safeParseEvent,
+} from "./event.js";
 export type { NormalizedEventInput } from "./event.js";
 
 // Stream-level conformance checker for third-party ingestion adapters (schema + cross-field
