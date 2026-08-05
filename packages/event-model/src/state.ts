@@ -48,6 +48,13 @@ export type State = z.infer<typeof State>;
 export const ALL_STATES = State.options;
 
 /**
+ * 初期状態 (run 起動局面) の正典集合。conformance の「terminal 後の re-start 検知」
+ * (restart-after-terminal) が参照する (ADR 0014 Phase 2 TDA-2: 手書き
+ * `state === "created" || "starting"` を置かない・単一出所)。
+ */
+export const INITIAL_STATES: readonly State[] = ["created", "starting"] as const;
+
+/**
  * 終端状態。ここに入ったら原則として遷移しない (リプレイ/新ターンは新セッション/
  * 再 starting で扱う)。reducer はこれらを「セッション確定」として projection する。
  *

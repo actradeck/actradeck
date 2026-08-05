@@ -33,7 +33,8 @@
  * NOTE (local-dev tool): findings are meant for an adapter author validating their OWN JSONL on their
  * OWN machine (`scripts/check-conformance.mjs` reads only an operator-named file/stdin — no network).
  * A finding `message` may echo adapter-controlled, non-secret structural metadata (event_type, the
- * payload `kind` discriminator, request_id, session_id, event_id) verbatim; it never echoes payload
+ * payload `kind` discriminator, request_id, session_id, event_id, state, timestamp, seq — all
+ * schema-constrained enums/ISO timestamps/non-negative integers) verbatim; it never echoes payload
  * body content (`canonicalize` is compared internally and discarded, never emitted). If this checker
  * is ever exposed as a hosted endpoint that renders findings across a trust boundary, re-sanitize
  * those adapter-controlled fields before display (SEC-L1, ADR 0014 Phase 2).
@@ -45,7 +46,7 @@
  * approval capability — a Phase 5 manifest concern; the checker defaults to a warning).
  */
 import { safeParseEvent, type NormalizedEvent } from "./event.js";
-import { isTerminalStateValue } from "./state.js";
+import { INITIAL_STATES, isTerminalStateValue } from "./state.js";
 import { toEpochMs } from "./timestamp.js";
 
 export type ConformanceSeverity = "error" | "warning";
@@ -221,7 +222,7 @@ export function checkConformance(events: readonly unknown[]): ConformanceReport 
     // break; a re-start (created/starting) after terminal is the lineage violation the design
     // forbids (resume must mint a NEW session_id). A true retry of a prior event is benign.
     if (st.terminalReached && !isRetry) {
-      const restarting = ev.state === "created" || ev.state === "starting";
+      const restarting = ev.state !== undefined && INITIAL_STATES.includes(ev.state);
       findings.push({
         index,
         severity: "error",

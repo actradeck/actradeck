@@ -1514,6 +1514,9 @@ export function normalizeHook(
   > = {
     session_id: ctx.canonicalSessionId ?? input.session_id,
     provider_session_id: ctx.providerSessionId ?? input.session_id,
+    // 3b-1 sweep TDA-3 (accepted edge): start_kind は全候補に載るため、run の初観測 hook が
+    // SessionEnd のとき session.ended が start_kind(unknown) を持ちうる。無害 — backend first-wins
+    // が「起点未観測 = unknown」を正直に記録するだけで、over-claim も上書きも起きない。
     ...(ctx.runStartKind !== undefined ? { start_kind: ctx.runStartKind } : {}),
     ...(ctx.resumedFromSessionId !== undefined
       ? { resumed_from_session_id: ctx.resumedFromSessionId }
