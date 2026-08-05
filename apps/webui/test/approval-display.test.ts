@@ -236,10 +236,12 @@ describe("interruptEnabledForState (段階③ interrupt 配線・D5)", () => {
     expect(interruptEnabledForState("starting")).toBe(true);
   });
 
-  it("terminal (completed/failed/interrupted) では false (中断は無意味)", () => {
+  it("terminal (completed/failed/interrupted/suspended) では false (中断は無意味)", () => {
     expect(interruptEnabledForState("completed")).toBe(false);
     expect(interruptEnabledForState("failed")).toBe(false);
     expect(interruptEnabledForState("interrupted")).toBe(false);
+    // ADR 0014 の第 4 terminal (unload 再開可)。suspended への SIGINT も無意味 (Phase1 sweep TDA-1)。
+    expect(interruptEnabledForState("suspended")).toBe(false);
   });
 
   it("state 不明 (undefined) は安全側で false", () => {

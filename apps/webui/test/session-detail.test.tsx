@@ -287,8 +287,9 @@ describe("SessionDetailView 段階③: interrupt ボタン配線 (D5)", () => {
     expect(html).toContain('data-testid="interrupt-button"');
   });
 
-  it("terminal (completed/failed/interrupted) では interrupt ボタンを出さない", () => {
-    for (const s of ["completed", "failed", "interrupted"]) {
+  it("terminal (completed/failed/interrupted/suspended) では interrupt ボタンを出さない", () => {
+    // suspended (ADR 0014 の第 4 terminal・unload 再開可) も loop に含め全 terminal を pin (Phase1 sweep TDA-1)。
+    for (const s of ["completed", "failed", "interrupted", "suspended"]) {
       const html = renderToStaticMarkup(
         createElement(SessionDetailView, { detail: detail([], s), loading: false, onInterrupt }),
       );

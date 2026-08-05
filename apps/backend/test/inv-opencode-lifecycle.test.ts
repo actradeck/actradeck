@@ -96,7 +96,7 @@ describe("INV-OPENCODE-LIFECYCLE (QA-7): adapter → reducer/liveness 統合", (
 
     const proj = reduceEvents(MAIN_SESSION, main);
     expect(proj.state).toBe("idle");
-    // idle は終端ではない (completed/failed/interrupted のいずれでもない)。
+    // idle は終端ではない (completed/failed/interrupted/suspended のいずれでもない)。
     expect(proj.state !== undefined && isTerminalState(proj.state)).toBe(false);
     // 全遷移が T1 許可表内 (正規化イベント列が不正遷移を生まない)。
     expect(proj.invalid_transition_count).toBe(0);

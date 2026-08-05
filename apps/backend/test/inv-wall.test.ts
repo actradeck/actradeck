@@ -350,7 +350,7 @@ describe.skipIf(!reachable)("INV-WALL (real PG + real WS)", () => {
     expect(byId.has(nonExt)).toBe(false);
   });
 
-  // --- INV-WALL-ENDED-EXTERNAL (ADR 019f4c19 wall-ended-badge): terminal(completed/failed/interrupted)な
+  // --- INV-WALL-ENDED-EXTERNAL (ADR 019f4c19 wall-ended-badge): terminal(completed/failed/interrupted/suspended)な
   //     external セッションは last_event_at が WALL_RECENT_MS 窓内でも LiveWall に出さない。
   //     session.ended→completed を発火した external が緑 ✓LIVE で残る誤表示 (実機 2026-07-10 gemini
   //     session 1025b431) を塞ぐ。terminal 除外を撤去する mutation (presence.ts の isTerminalStateValue
