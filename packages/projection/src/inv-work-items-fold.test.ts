@@ -280,6 +280,30 @@ describe("QA-1 (時刻条項の falsifying): claimed_at ≤ check 完了時刻�
     ]);
     expect(onlyTaskItem(after).verification_state).toBe("passed");
   });
+
+  // A1 sweep (QA 観察): 等号境界の明示 pin。条項は `claimed_at ≤ check 完了時刻` (work-items.ts の
+  //   skip 条件は strict `>`) ゆえ、claimed_at == check 完了 timestamp は**束縛する**側。
+  //   等号を除外する変異 (>= へ) を falsify する。
+  it("claim 完了時刻 (t10) と同時刻に完了した check (t10) は束縛する (等号は ≤ 側・passed)", () => {
+    const same = reduce([
+      ev({
+        event_type: "diff.updated",
+        timestamp: ts(1),
+        payload: { head_sha: "h1", diff_hash: "d1" },
+      }),
+      ev({
+        event_type: "work.item.updated",
+        timestamp: ts(10),
+        payload: { provider_task_id: "1", status: "completed" },
+      }),
+      ev({
+        event_type: "command.completed",
+        timestamp: ts(10),
+        payload: { check_kind: "test", exit_code: 0, request_id: "rSame" },
+      }),
+    ]);
+    expect(onlyTaskItem(same).verification_state).toBe("passed");
+  });
 });
 
 describe("run_dirty (受入9): check の start〜completed 間に tree が動くと run_dirty=true", () => {

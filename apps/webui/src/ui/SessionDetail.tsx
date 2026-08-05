@@ -255,10 +255,12 @@ function TimelinePane({
   sessionId,
   events,
   focusEventId,
+  focusNonce,
 }: {
   readonly sessionId: string;
   readonly events: readonly ReplayEventDTO[];
   readonly focusEventId?: string;
+  readonly focusNonce?: number;
 }) {
   const { t } = useLocale();
   return (
@@ -270,6 +272,7 @@ function TimelinePane({
         ariaLabel={t("timeline.aria")}
         emptyLabel={t("timeline.empty")}
         {...(focusEventId !== undefined ? { focusEventId } : {})}
+        {...(focusNonce !== undefined ? { focusNonce } : {})}
       />
     </section>
   );
@@ -596,7 +599,11 @@ export function SessionDetailView({
   const { locale, t } = useLocale();
   // ADR 0015 §D8 evidence-ref: work-items パネルの claim/check/diff 参照が指す timeline event_id。
   //   TimelinePane → ActionTimeline へ橋渡しし raw ビューへスクロールさせる (表示専用・live gate 不変)。
-  const [focusEventId, setFocusEventId] = useState<string | undefined>(undefined);
+  //   TDA-B3-6: nonce を併走させ、同一 event_id の再クリックでも effect が再発火して再スクロールする
+  //   (eventId だけだと state 不変 → 2 回目クリックが no-op になる)。
+  const [focusRequest, setFocusRequest] = useState<{ eventId: string; nonce: number } | undefined>(
+    undefined,
+  );
   if (!detail) {
     return (
       <section className="ad-empty" data-testid="detail-empty">
@@ -794,7 +801,9 @@ export function SessionDetailView({
           <TimelinePane
             sessionId={detail.session_id}
             events={events}
-            {...(focusEventId !== undefined ? { focusEventId } : {})}
+            {...(focusRequest !== undefined
+              ? { focusEventId: focusRequest.eventId, focusNonce: focusRequest.nonce }
+              : {})}
           />
           <RiskPane detail={detail} events={events} {...(body !== undefined ? { body } : {})} />
         </div>
@@ -807,7 +816,9 @@ export function SessionDetailView({
         <WorkItemsPanel
           sessionId={detail.session_id}
           events={events}
-          onJumpToEvent={setFocusEventId}
+          onJumpToEvent={(eventId) =>
+            setFocusRequest((prev) => ({ eventId, nonce: (prev?.nonce ?? 0) + 1 }))
+          }
         />
       ) : null}
 

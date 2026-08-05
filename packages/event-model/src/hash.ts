@@ -16,6 +16,12 @@
  * 入力文字列は UTF-8 でバイト化してから処理する (git-watcher の `sha256(status ∥ \0 ∥ diff)` と同じ
  * NUL 連結規約に整合)。UTF-8 エンコードは lib=ES2023 だけで型付くよう自前実装し (`TextEncoder` は
  * DOM/node lib 依存)、event-model の isomorphic + 依存ゼロ規律を保つ。
+ *
+ * ## sha256 実装は意図的に 2 面 (A1 SEC-2≡TDA-2・naive な一本化禁止)
+ * Node 専用 tier の `apps/backend/src/audit-integrity.ts` (`sha256Hex`) は perf のため `node:crypto`
+ * を維持する。browser を含む fold 経路だけが本 pure-TS 実装を使う。どちらかへ一本化すると
+ * isomorphic 制約 (browser で node:crypto 不可) か Node perf のどちらかを壊すため、境界を跨いだ
+ * 統合をしないこと (相互参照コメントあり)。
  */
 
 /**

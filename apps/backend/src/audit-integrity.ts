@@ -146,6 +146,8 @@ export interface AuditManifest {
 // 単射 canonical 直列化 (JSON.stringify・SEC-3) + ハッシュ。
 // ---------------------------------------------------------------------------
 
+// A1 SEC-2≡TDA-2: sha256 実装は意図的に 2 面。browser を含む fold 経路は event-model/src/hash.ts の
+// pure-TS isomorphic 実装、本 Node 専用 tier は perf のため node:crypto を維持 (naive な一本化禁止)。
 function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }

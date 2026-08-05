@@ -10,6 +10,9 @@
  * projection へ適用し、参照が変われば「反応した」とみなす。terminal state による freeze は event_type と
  * 直交ゆえ非 terminal state で走査する (session.ended のみ event_type 起因の freeze で反応・集合に含む)。
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import { ALL_EVENT_TYPES, type NormalizedEvent } from "@actradeck/event-model";
@@ -64,8 +67,9 @@ function seededProjection(): WorkItemsProjection {
  *   superset** を維持しなければならない。ある case が新 field で反応するようになったのに、ここへ足し忘れると
  *   その case が本テスト内で「反応しない」ように見え、`gate ⊇ reactive-set` の走査から漏れて silent
  *   under-count drift を通してしまう。fold に新反応 field を足したら **必ず** ここへも足すこと (下の各 field
- *   は provider_task_id=work.item.updated / items=turn.plan.updated / check_kind+exit_code+request_id=
- *   command.started/completed / diff_hash+head_sha=diff.updated に対応)。
+ *   は provider_task_id+observation=work.item.updated / items=turn.plan.updated /
+ *   check_kind+exit_code+request_id=command.started/completed / diff_hash+head_sha=diff.updated に対応)。
+ *   この宣言は下の TDA-B1R3-3 metatest が source introspection で機械検証する (宣言任せにしない)。
  */
 function richEvent(eventType: string): NormalizedEvent {
   return ev({
@@ -75,6 +79,7 @@ function richEvent(eventType: string): NormalizedEvent {
       provider_task_id: "task-1",
       status: "completed",
       subject: "s",
+      observation: { method: "provider_jsonl", fidelity: "parsed" },
       items: [{ step: "another step", status: "completed" }],
       check_kind: "test",
       check_match: "program",
@@ -110,5 +115,34 @@ describe("INV-WORKITEM-REACTIVE-SET-COMPLETE", () => {
     // 逆に集合の 5 switch case + session.ended は実際に反応する (dead entry でない・over-broad でない証)。
     // (session.ended は freeze で反応。terminal state 起因の freeze は別途 backend gate が OR 合成。)
     expect(changedTypes).toEqual(expect.arrayContaining([...WORK_ITEM_REACTIVE_EVENT_TYPES]));
+  });
+
+  // TDA-B2-3: sidecar は tool 実行で work.item.updated と tool.completed を二重 emit する (§D2)。
+  // 二重カウント防止は「tool.completed が work item を一切触らない」ことに依存するため、全型走査に
+  // 加えて明示 negative pin を置く (tool.completed を fold に足す変更は必ずここで意図を問われる)。
+  it("TDA-B2-3: tool.completed は rich payload でも projection を変えない (二重 emit の negative pin)", () => {
+    const seed = seededProjection();
+    expect(applyWorkItemsEvent(seed, richEvent("tool.completed"))).toBe(seed);
+  });
+
+  // TDA-B1R3-3: richEvent の superset 性を宣言 (⚠️ TDA-B1-5 コメント) 任せにせず機械検証する。
+  // fold が `payloadValue/payloadString(ev.payload, "<field>")` で読む top-level field 名を
+  // work-items.ts ソースから抽出し、richEvent payload キー集合がその superset であることを assert。
+  // これを欠くと「fold 反応 case + 新 field + richEvent 未更新」の三重脱落 (新 field でのみ反応する
+  // 新 case が本テスト内で反応せず gate ⊇ reactive 走査から漏れる) が escape する。
+  it("TDA-B1R3-3: richEvent payload は fold が読む全 top-level field の superset (source introspection)", () => {
+    const src = readFileSync(fileURLToPath(new URL("./work-items.ts", import.meta.url)), "utf8");
+    const fields = new Set<string>();
+    for (const m of src.matchAll(/payload(?:Value|String)\(ev\.payload,\s*"([^"]+)"\)/g)) {
+      fields.add(m[1]!);
+    }
+    // 抽出が壊れて空/激減したら本 metatest 自体を RED にする (helper 改名等での vacuous 化防止)。
+    expect(fields.size).toBeGreaterThanOrEqual(8);
+    const richKeys = new Set(
+      Object.keys(richEvent("work.item.updated").payload as Record<string, unknown>),
+    );
+    for (const f of fields) {
+      expect(richKeys.has(f), `fold が読む field "${f}" が richEvent payload に無い`).toBe(true);
+    }
   });
 });

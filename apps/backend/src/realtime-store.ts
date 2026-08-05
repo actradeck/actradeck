@@ -76,7 +76,10 @@ const JOIN_SELECT = `
          -- needs_attention とは分離 (reducer の deriveNeedsAttention は不変・approvals + waiting のみ)。
          -- 述語 status='completed' AND verification_state='unverified' は projection の canonical badge
          -- deriveWorkItemBadge の self_claimed 分岐を **cross-tier で mirror** する (TDA-B3-1: webui panel は
-         -- badge 由来へ統一済・SQL は同意味論の別集計。両者の drift は work-items-fold の 4 状態 assert が固定)。
+         -- badge 由来へ統一済・SQL は同意味論の別集計)。この SQL 述語自体の drift を固定するのは backend の
+         -- claimed_unverified_count テスト (test/inv-work-items-wiring.test.ts §D4/§D8・count 値で pin)。
+         -- work-items-fold の 4 状態 assert が固定するのは badge 側 (webui/projection) で、SQL は対象外
+         -- (TDA-B3R2-2: 誤帰属を訂正)。
          COALESCE((
            SELECT count(*) FROM work_items wi
             WHERE wi.session_id = ss.session_id
