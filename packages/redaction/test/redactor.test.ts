@@ -592,6 +592,10 @@ describe("INV-REDACTION: redactString ReDoS performance (再#SEC-1)", () => {
       // QA-R2-5: @-less rule の pass 捕捉 + 末尾 lookahead **不成立** 経路 (`}` は charset 外かつ構造
       //   区切り外 → match 放棄)。atomic emulation の有無に依らず線形であることを実測固定する
       //   (port-gate dense は keep 経路のみで pass 捕捉が走らないため本 case が mask/abandon 経路を担う)。
+      // 感度開示 (QA-R3-2 L): 本 case の t(n) は他ルールの線形走査に支配され、当該 rule 単独の share は
+      //   ~0.1% (64KB 実測)。ratio 3.5 越えには rule の二乗成分が現コストの ~3000 倍必要 = **真の O(n²)
+      //   導入 (anchor 除去等) は確実に RED だが、比例的な定数倍回帰は見逃す**。過信しないこと (rule
+      //   単独の絶対 budget 化は sweep 019fd61d で検討)。
       name: "anchorless url-credential lookahead-fail postgres://u:a*n}",
       build: (n) => `postgres://u:${"a".repeat(n)}}`,
       n: 64 * 1024,
