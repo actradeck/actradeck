@@ -11,6 +11,18 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: audit manifest canonical form bumped to v3** (`actradeck-audit-manifest/v3`).
+  The signed manifest summary now carries `approval_synthetic_retired` (relay-lost synthetic
+  retires, itemized separately from operator decisions), which changes the canonical
+  chain/signature input. Manifests exported by v0.6.0 (v2) no longer verify against the
+  current form; the verify surface reports them as a distinct `unsupported-manifest-version`
+  (not `malformed-manifest`), so archived evidence from older builds is distinguishable from
+  tampering. Re-export reports to obtain v3 manifests. Approval request ids also use a new
+  canonical shape (`s<hash12>:apr-<32 hex>`); pendings persisted by older daemons are retired
+  as `relay_lost` on the first hello after a coordinated upgrade (designed recovery).
+
 ## [0.6.0] - 2026-08-05
 
 ### Added

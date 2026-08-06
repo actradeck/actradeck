@@ -198,8 +198,9 @@ origin=relay_lost, delivery=not_sent`).
   **Audit round 2 hardening (2026-08-06, SEC/QA/TDA full audit findings landed):**
 
   - **Redaction-stable request ids (SEC-1, H).** Approval request ids no longer embed the raw
-    session id: `mintApprovalRequestId` derives `s<sha256(session_id)[0..12]>:apr-<128bit>`
-    so no charset run reaches the redaction high-entropy threshold. The old
+    session id: `mintApprovalRequestId` derives `s<sha256(session_id)[0..12]>:apr-<token>`
+    (R2 shipped a 128-bit base64url token; round 3 superseded it with the canonical 32-hex /
+    122-bit form) so no charset run reaches the redaction high-entropy threshold. The old
     `${sessionId}:apr-…` shape was mangled at the ingress floor for `sess_<uuidv7>` session
     ids (41-char single run), splitting the id space between the bridge (raw) and the DB/UI
     (redacted) — which both made the UI approve relay a silent no-op and made reconciliation
@@ -232,6 +233,7 @@ origin=relay_lost, delivery=not_sent`).
   - **Production wiring gate (TDA-3, M).** `INV-APPROVAL-RECONCILE-WIRING` drives
     `buildIngestionServer` end-to-end (real WS hello → synthetic cancel → fold) so deleting
     the `onApprovalReconcile` registration goes red.
+
   **Audit round 3 hardening (2026-08-06, full SEC/QA/TDA re-audit of the R2 landing):**
 
   - **Canonical request-id minting for both tiers (TDA-R2-1/SEC-R2-4/QA-R2-5, M).** The minter
@@ -300,6 +302,62 @@ origin=relay_lost, delivery=not_sent`).
     resolved. (c) TDA-4: after a synthetic cancel the session state may remain `waiting.*`,
     keeping the needs-attention badge lit with no actionable card; state semantics for
     relay-lost sessions are a tracked follow-up.
+
+  **Audit round 4 hardening (2026-08-07, full SEC/QA/TDA re-audit of the R3 landing — no H):**
+
+  - **Old manifests verify honestly (SEC-R3-1/TDA-R3-3, M).** The v2→v3
+    `AUDIT_MANIFEST_VERSION` bump is a breaking change for every manifest exported by v0.6.0:
+    before this round the verify surface collapsed them to `malformed-manifest` (HTTP 400 via
+    `decodeManifestBase64`), making "made by an older build" indistinguishable from "tampered"
+    — an evidence-continuity defect for a tamper-evidence product. `decodeManifestBase64` now
+    passes any string-versioned manifest through and `verifyAuditManifest` reports a distinct
+    `unsupported-manifest-version` reason. Still fail-closed: no prior version can verify
+    `ok=true` (the chain is only recomputed under the current canonical form). Recorded in the
+    CHANGELOG as a breaking note.
+  - **Manifest summary projection is value-bound (QA-R3-1, M).** Every
+    `normalizeSummaryForManifest` field is pinned with distinct non-zero values (the R3 fixture
+    used `synthetic_retired: 0`, so a `str(0)` constant mutation survived — class-wide,
+    pre-existing). A manifest can no longer cryptographically sign a wrong ledger value without
+    a red test.
+  - **Demo minting pinned in T1 (QA-R3-2, M).** `deriveDemoApprovalRequestId` reverting to the
+    legacy `${sessionId}:apr-1` shape was invisible (all call sites recompute expectations via
+    the same helper). `INV-APPROVAL-REQUEST-ID-STABLE` case (d) pins RE conformance,
+    determinism and real-redactor invariance independently.
+  - **Third exclusion site pinned (QA-R3-3, M).** Of the three "synthetic events are not
+    observed activity" sites, audit-coverage's `MAX(ingested_at)` WHERE exclusion had no
+    failing test; a real-PG vector (relay_lost as the only recent event keeps `last_received`
+    stale, plus an operator-resolved positive control) closes the asymmetry.
+  - **Display-tier honesty is regression-protected (QA-R3-4/TDA-R3-2/SEC-R3-3, M/L).** The
+    webui's hand-copied `ResolutionOrigin` mirror is replaced by the canonical
+    `RESOLUTION_ORIGINS` export from event-model (structural drift removal, per
+    security-gate-reuse-canonical-parser), and the previously untested surfaces — closed-set
+    parse gate, `synthetic_retired` totals, relay_lost muted tag + dedicated label vs operator
+    tones, `decisionLabel` cancel/allow_for_session, list/modal retired chips — are all pinned
+    (5/5 QA mutants killed).
+  - **Re-roll defence class corrected + structural metatest (SEC-R3-2, M).** The bridge re-roll
+    only mitigates token-dependent redaction rules; the tag and the `:apr-` literal are
+    invariant across re-rolls, so a fixed-portion rule defeats all 8 attempts
+    deterministically. The docstring now says so; exhaustion is observable via a non-negative
+    `unstableRequestIdCount` (NO-RAW); and the real gate is the new structural metatest — all
+    `REDACTION_RULES` × an adversarial + fuzz id corpus must produce zero matches, so adding a
+    colliding rule of either class goes red in CI the same day.
+  - **Exclusion scope boundary disclosed (TDA-R3-1/SEC-R3-7, M/L).** The relay_lost activity
+    exclusion covers `liveness_state` (SQL + TS mirrors) and audit-coverage `last_received`
+    only. It deliberately does **not** cover `session_state.last_event_at` (projection fold
+    advances it unconditionally; it feeds ordering, purge exemption, `activity_at`, and the
+    audit report's `last_event_at` which is chain-bound into the manifest) — defensible because
+    the event really was appended, and verified harmless for liveness: the webui freshness
+    branch can only downgrade live→idle, and `sessions.source` is not updatable via ingest
+    upsert, so a synthetic cancel cannot convert a session into a Wall recency-proxy candidate.
+    Bounded residual: a genuinely `source="external"` session stays inside the Wall
+    `WALL_RECENT_MS` retention window (order/retention only, no LIVE badge); practically
+    unreachable today because observe-only codex-rollout daemons do not send
+    `active_pending_request_ids`, and an omitted declaration means no reconcile. Changing the
+    fold itself is a boundary-gate scope change → full audit by default.
+  - **Entropy disclosure (SEC-R3-8, L).** The uuid-v4 token carries 122 bits (6 bits fixed by
+    version/variant), down from R2's 128-bit `randomBytes(16)` — still far beyond the 3#SEC-1
+    requirement; docstrings updated (including the demo-id rationale: the operative guard is
+    the per-connection controlToken, not "backend-internal" execution).
 
 **Phase 5 — Adapter capability manifest + UI.**
 **Absorbed by ADR 0015 (§D7).** The closed vocabulary {`authoritative`, `observed`, `inferred`,

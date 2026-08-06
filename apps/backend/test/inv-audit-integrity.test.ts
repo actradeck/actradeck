@@ -19,6 +19,7 @@ import {
   canonicalizeEventFields,
   fingerprintOfPublicKey,
   normalizeEventForManifest,
+  normalizeSummaryForManifest,
   resolveAuditSignerFromEnv,
   decodeManifestBase64,
   encodeManifestBase64,
@@ -455,5 +456,110 @@ describe("INV-AUDIT-INTEGRITY embed round-trip + NO-RAW", () => {
     const html = sessionReportToHtml(SAMPLE, spoofed);
     expect(html).toContain(realFp); // 実鍵由来 fp を表示
     expect(html).not.toContain("0".repeat(64)); // 詐称値は表示しない
+  });
+});
+
+/**
+ * QA-R3-1: summary 投影の値結合。fixture 値が mutant 定数 (0/"") と一致すると定数化 mutation が
+ * 生き残るため、**全 field を distinct な非ゼロ値**で与え、投影が各 field を実際に反映することを
+ * 一括で固定する (manifest は投影値へ暗号署名する — 台帳値と投影の fidelity がここの契約)。
+ */
+describe("INV-AUDIT-INTEGRITY summary 投影の値結合 (QA-R3-1)", () => {
+  it("normalizeSummaryForManifest は全 field を distinct 値で反映 (定数化 mutant で RED)", () => {
+    const s: AuditSessionSummary = {
+      session_id: "sid-vb",
+      provider: "p-vb",
+      source: "src-vb",
+      agent_id: "agent-vb",
+      repo: "repo-vb",
+      branch: "branch-vb",
+      cwd: "/cwd-vb",
+      capture_mode: "managed",
+      permission_mode: "pm-vb",
+      state: "state-vb",
+      started_at: "2026-01-01T00:00:01.000Z",
+      ended_at: "2026-01-01T00:00:02.000Z",
+      last_event_at: "2026-01-01T00:00:03.000Z",
+      secret_detected: true,
+      secret_redaction_count: 11,
+      secret_redaction_count_by_kind: { "github-token": 13, "aws-access-key-id": 12 },
+      approvals: {
+        total: 21,
+        by_decision: { allow: 3, allow_for_session: 4, deny: 5, cancel: 6 },
+        synthetic_retired: 7,
+        pending: 8,
+      },
+      high_risk_op_count: 9,
+      auto_allowed_count: 10,
+    };
+    expect(normalizeSummaryForManifest(s)).toEqual({
+      provider: "p-vb",
+      source: "src-vb",
+      agent_id: "agent-vb",
+      repo: "repo-vb",
+      branch: "branch-vb",
+      cwd: "/cwd-vb",
+      capture_mode: "managed",
+      permission_mode: "pm-vb",
+      state: "state-vb",
+      started_at: "2026-01-01T00:00:01.000Z",
+      ended_at: "2026-01-01T00:00:02.000Z",
+      last_event_at: "2026-01-01T00:00:03.000Z",
+      secret_detected: "true",
+      secret_redaction_count: "11",
+      redaction_by_kind: [
+        ["aws-access-key-id", "12"],
+        ["github-token", "13"],
+      ],
+      approval_total: "21",
+      approval_allow: "3",
+      approval_allow_for_session: "4",
+      approval_deny: "5",
+      approval_cancel: "6",
+      approval_synthetic_retired: "7",
+      approval_pending: "8",
+      high_risk_op_count: "9",
+    });
+  });
+});
+
+/**
+ * SEC-R3-1: manifest version の区別。v2→v3 bump は v0.6.0 出荷済み artifact の breaking であり、
+ * 旧版を「malformed (改竄と同じ見え方)」へ潰すと evidence-continuity と honest-signalling を欠く。
+ * 旧版は fail-closed のまま **distinct reason** で返す (ok=true になる経路は存在しない)。
+ */
+describe("INV-AUDIT-INTEGRITY manifest version 区別 (SEC-R3-1)", () => {
+  it("旧 version (v2) は malformed でなく unsupported-manifest-version (fail-closed 維持)", () => {
+    const v2 = {
+      ...buildAuditManifest(SAMPLE),
+      version: "actradeck-audit-manifest/v2",
+    } as unknown as AuditManifest;
+    const r = verifyAuditManifest(v2);
+    expect(r.ok).toBe(false);
+    expect(r.chain_valid).toBe(false);
+    expect(r.reason).toBe("unsupported-manifest-version");
+  });
+
+  it("旧 version は decodeManifestBase64 を透過し verify が同 reason を返す (route 400 に潰れない)", () => {
+    const v2 = {
+      ...buildAuditManifest(SAMPLE),
+      version: "actradeck-audit-manifest/v2",
+    } as unknown as AuditManifest;
+    const decoded = decodeManifestBase64(encodeManifestBase64(v2));
+    expect(decoded).toBeDefined();
+    expect(verifyAuditManifest(decoded!).reason).toBe("unsupported-manifest-version");
+  });
+
+  it("version 非 string / events 非配列は decode で undefined (manifest ですらない)", () => {
+    const noVersion = { ...buildAuditManifest(SAMPLE), version: 3 } as unknown as AuditManifest;
+    expect(decodeManifestBase64(encodeManifestBase64(noVersion))).toBeUndefined();
+    const noEvents = { ...buildAuditManifest(SAMPLE), events: "x" } as unknown as AuditManifest;
+    expect(decodeManifestBase64(encodeManifestBase64(noEvents))).toBeUndefined();
+  });
+
+  it("現行 version の verify は不変 (positive control)", () => {
+    const r = verifyAuditManifest(buildAuditManifest(SAMPLE));
+    expect(r.ok).toBe(true);
+    expect(r.reason).not.toBe("unsupported-manifest-version");
   });
 });

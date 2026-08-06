@@ -62,7 +62,7 @@ describe.skipIf(!reachable)(
     it("requested → 再接続 hello (pending ゼロ宣言) → 合成 cancel が fold され pending が消える", async () => {
       const sid = `sess_wiring_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       sessions.push(sid);
-      const requestId = "s0123456789ab:apr-WiringStaleToken01"; // mint 形 (redaction-stable)
+      const requestId = "s0123456789ab:apr-00112233445566778899aabbccddeeff"; // 正準 mint 形 (RE 準拠・redaction-stable)
 
       const ws = new WebSocket(`${wsBase}/ingest/ws`, {
         headers: { authorization: `Bearer ${TOKEN}` },

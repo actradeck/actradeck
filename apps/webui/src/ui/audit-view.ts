@@ -5,28 +5,19 @@
  * を defensive parse し、表示用ヘルパと export URL 構築を提供する。token はここに現れない
  * (same-origin path のみ・BFF が server-side で付与する)。
  */
-import { gateRedactionCountByKind } from "@actradeck/event-model";
+import { gateRedactionCountByKind, RESOLUTION_ORIGINS } from "@actradeck/event-model";
+import type { ResolutionOrigin } from "@actradeck/event-model";
 
 import { shortSessionId } from "./wall-display";
 
 export type AuditDecision = "allow" | "allow_for_session" | "deny" | "cancel";
 
-/** resolution_origin の closed set (backend ResolutionOrigin と同値・表示用に複製)。 */
-export type AuditResolutionOrigin =
-  | "operator"
-  | "timeout"
-  | "policy"
-  | "shutdown"
-  | "child_exit"
-  | "relay_lost";
-const RESOLUTION_ORIGINS: readonly AuditResolutionOrigin[] = [
-  "operator",
-  "timeout",
-  "policy",
-  "shutdown",
-  "child_exit",
-  "relay_lost",
-];
+/**
+ * resolution_origin の closed set。TDA-R3-2/SEC-R3-3: 手書きミラーを廃し event-model の正準
+ * enum を消費する (backend で origin が追加されたとき表示層が黙って落とし operator success
+ * トーンへ誤縮退する drift の構造遮断・membership 判定も正準 RESOLUTION_ORIGINS を使う)。
+ */
+export type AuditResolutionOrigin = ResolutionOrigin;
 
 export interface AuditApprovalSummary {
   readonly total: number;

@@ -16,19 +16,25 @@
  *    既知 vendor prefix (xox[baprs]- / AKIA / ghp_ / sk- / glpat- / hf_ 等) はいずれも
  *    hex 外の文字 (g-z の大半・大文字・`_`) を必要とし、token 内に出現し得ない
  *    (R2 の base64url token は `xoxb-…` 形を確率的に含みえた — 実測 ~4.5e-9/id)。
- *  - 残余 (固定リテラル `apr-` を跨ぐ将来ルール等) は sidecar bridge の採番時 re-roll
- *    (redactString(id) === id を確認) と INV-APPROVAL-REQUEST-ID-STABLE (実 redactor pin)
- *    が防衛線。redaction ルールを追加する際は同 INV を必ず通すこと。
+ *  - 残余 (固定リテラル `apr-` / tag 枠を跨ぐ将来ルール等) の防衛線は **構造 metatest**
+ *    (INV-APPROVAL-REQUEST-ID-STABLE: 全 REDACTION_RULES × id 形状 corpus で 0 マッチを pin —
+ *    該当ルールを追加した日に CI で赤くなる)。sidecar bridge の採番時 re-roll は token 依存
+ *    ルールの runtime 緩和にすぎない (固定部マッチには無力・bridge docstring 参照・SEC-R3-2)。
+ *    redaction ルールを追加する際は同 INV を必ず通すこと。
  *
  * ## 予測不能性 (3#SEC-1)
- * mint の token は uuid v4 (CSPRNG・122 bit)。foreign request_id 拒否は bridge Map lookup で
- * 行われ、tag (session 相関のデバッグ補助) の解析には依存しない。
+ * mint の token は uuid v4 (CSPRNG)。**実効エントロピーは 122 bit** (128 bit 中 6 bit は
+ * version/variant 固定 — R2 の randomBytes(16) 比で 6 bit 減だが要件に対し十分・正直開示
+ * SEC-R3-8)。foreign request_id 拒否は bridge Map lookup で行われ、tag (session 相関の
+ * デバッグ補助) の解析には依存しない。
  *
  * ## demo 変種
  * safety-demo は「テストが同じ id を再計算できる」決定論的 request_id を要する。
- * `deriveDemoApprovalRequestId` は sha256 由来の決定論 token を使う (session_id は公開の
- * 相関キーであり、demo の id が予測可能でも 3#SEC-1 の脅威 (foreign resolve 総当たり) は
- * demo driver が backend 内部で完結するため該当しない)。形式は mint と同一 = redaction-stable。
+ * `deriveDemoApprovalRequestId` は sha256 由来の決定論 token を使う。予測可能でも
+ * 3#SEC-1 (foreign resolve 総当たり) が成立しないのは、demo hold の解決が per-connection
+ * 256bit controlToken 検証 (safety-demo-driver の tokenMatches) で gate されるため
+ * (SEC-R3-8: 「backend 内部で完結」は誤り — driver は WS 越しの別プロセス)。
+ * 形式は mint と同一 = redaction-stable。
  */
 import { v4 as uuidv4 } from "uuid";
 

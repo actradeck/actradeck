@@ -75,6 +75,7 @@ export {
   ApprovalDecision,
   ApprovalTrigger,
   ResolutionOrigin,
+  RESOLUTION_ORIGINS,
   DeliveryStatus,
   SecretKind,
   PolicyCategory,

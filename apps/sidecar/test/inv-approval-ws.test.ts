@@ -10,7 +10,7 @@
  * 対策後の不変条件:
  * (a) token 無し/誤 token の approval injection は WsClient で破棄され resolve に至らない。
  * (b) interrupt も同様。
- * (c) request_id が予測可能な連番 (Date.now/seq) でない (crypto.randomBytes 由来)。
+ * (c) request_id が予測可能な連番 (Date.now/seq) でない (CSPRNG 由来・正準 mintApprovalRequestId)。
  * (d) decision が enum (allow/deny) 以外なら sidecar 配線で破棄される。
  * 既存 SEC-2 scope テスト (foreign request_id 拒否) は緑維持。
  */

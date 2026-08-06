@@ -480,17 +480,30 @@ export class ApprovalBridge {
    * request_id を高エントロピーで採番する (3#SEC-1)。実装は event-model の正準
    * `mintApprovalRequestId` (redaction-stable 契約の単一出所)。
    *
-   * SEC-R2-3 (belt-and-braces): 正準形式は charset 構造で redaction 非誘発だが、将来の
-   * ルール追加 (固定リテラル `apr-` を跨ぐ形等) への防衛線として、採番直後に実 redactor で
-   * 不変性を確認し、万一 mangle されるなら再採番する (有界 8 回・系統的な全滅は
-   * INV-APPROVAL-REQUEST-ID-STABLE が CI で先に赤くする)。
+   * SEC-R2-3 → SEC-R3-2 (防衛クラスの正直な開示): re-roll が緩和できるのは **token (32hex)
+   * 依存で確率的にマッチする**ルールだけ。tag `s<hash12>` と固定リテラル `:apr-` は再採番で
+   * 変わらないため、固定部にマッチするルールには 8 回全て決定論的に失敗し、そのまま
+   * 不安定 id を返す (deny へ落とすと該当ルール追加時に承認機能が全停止するため、runtime は
+   * `unstableRequestIdCount` (非負整数・NO-RAW) で観測可能にするに留める)。本命の防衛線は
+   * 構造 metatest (INV-APPROVAL-REQUEST-ID-STABLE: 全 REDACTION_RULES × id 形状 corpus で
+   * 0 マッチ) — 固定部/token いずれのマッチ形ルールも追加した日に CI で赤くなる。
    */
   private nextRequestId(sessionId: string): string {
     let id = mintApprovalRequestId(sessionId);
     for (let i = 0; i < 8 && redactString(id) !== id; i++) {
+      this.unstableRequestIdMints += 1;
       id = mintApprovalRequestId(sessionId);
     }
+    if (redactString(id) !== id) this.unstableRequestIdMints += 1;
     return id;
+  }
+
+  /** SEC-R3-2: redactor に mangle された採番の観測カウンタ (非負整数のみ・原文非依存)。 */
+  private unstableRequestIdMints = 0;
+
+  /** re-roll を要した/使い切った採番の累計 (0 が正常。>0 は redaction ルールと採番形式の衝突)。 */
+  get unstableRequestIdCount(): number {
+    return this.unstableRequestIdMints;
   }
 
   /**

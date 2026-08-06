@@ -570,9 +570,11 @@ export class AuditStore {
    * SQL の `max/min/count(DISTINCT)` は非負・safe-integer 域の値を扱う (負値混入は CHECK が構造遮断)。
    *
    * ## NO-RAW (INV-AUDIT-COVERAGE-NO-RAW)
-   * SELECT は **provider slug + 時刻 + 件数 (seq 集計含む・原文非依存) のみ** (cwd/path/payload/secret を
-   * 一切読まない)。行は `buildCoverageReport` → `projectProviderCoverageRow` で provider を
-   * `PROVIDER_SLUG_RE` 再ゲートし余剰 field を構造的に落とす (生パス混入 row は drop)。
+   * **SELECT 投影**は provider slug + 時刻 + 件数 (seq 集計含む・原文非依存) のみで、cwd/path/secret
+   * を一切読まない (SEC-R3-5: WHERE 句は `payload->>'resolution_origin'` を固定リテラル比較で参照
+   * するが、payload 由来の値が投影・応答へ到達する経路は無い)。行は `buildCoverageReport` →
+   * `projectProviderCoverageRow` で provider を `PROVIDER_SLUG_RE` 再ゲートし余剰 field を構造的に
+   * 落とす (生パス混入 row は drop)。
    *
    * events を provider で GROUP BY 集約する (ingested_at と timestamp の MAX を同スキャンで併算)。planner は
    * これを **seq-scan** で実行する — `(provider, ingested_at)` 索引を足しても MAX(timestamp) の heap 参照が
@@ -607,9 +609,11 @@ export class AuditStore {
        ),
        ev AS (
          -- 権威クロック: サーバ受信時刻 ingested_at の provider 別 MAX。timestamp(adapter 申告)は表示補助。
-         -- SEC-R2-2 (Phase 4 R3): backend 合成の relay_lost retire は「provider からの受信」では
-         -- ないため除外する (合成 ingest が当該 provider の受信 gap を覆い隠さない)。判定は
-         -- liveness 側 (aggregateObservationSql / observeFromEvents) の除外と同一の申告 field。
+         -- SEC-R2-2 (Phase 4 R3): relay_lost retire は「provider からの受信」ではないため除外する
+         -- (合成 ingest が当該 provider の受信 gap を覆い隠さない)。判定は producer 申告の
+         -- resolution_origin (正当な産出者は backend reconciler のみ・SEC-R3-4: in-boundary の詐称は
+         -- 自分を stale に見せる安全方向のみ)。liveness 側 (aggregateObservationSql /
+         -- observeFromEvents) の除外と同一の申告 field。
          SELECT provider,
                 max(extract(epoch from ingested_at) * 1000) AS max_ingested_ms,
                 max(extract(epoch from timestamp) * 1000) AS max_ts_ms

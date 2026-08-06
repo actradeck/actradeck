@@ -364,6 +364,13 @@ export function AuditDetailModal({
                     {t("audit.pending")} ×{summary.approvals.pending}
                   </Tag>
                 ) : null}
+                {/* TDA-R3-6: relay_lost 合成 retire のサマリチップ (エントリ表示と同じ muted トーン・
+                    operator 決定チップと混同しない別立て)。 */}
+                {summary.approvals.synthetic_retired > 0 ? (
+                  <Tag tone="muted" size="sm">
+                    {t("audit.relayLostRetired")} ×{summary.approvals.synthetic_retired}
+                  </Tag>
+                ) : null}
                 {summary.high_risk_op_count > 0 ? (
                   <Tag tone="warn" size="sm">
                     {t("audit.highRisk")} ×{summary.high_risk_op_count}

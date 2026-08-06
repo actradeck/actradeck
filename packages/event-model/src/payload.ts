@@ -54,6 +54,12 @@ export const ResolutionOrigin = z.enum([
   "relay_lost",
 ]);
 export type ResolutionOrigin = z.infer<typeof ResolutionOrigin>;
+/**
+ * resolution_origin の正準 closed-set 配列 (TDA-R3-2/SEC-R3-3)。表示層 (webui) の membership
+ * gate はこの配列を import する — 手書きミラーを作らない (origin 追加時に表示層が黙って
+ * 未知値を落とし、operator success トーンへ誤縮退する drift の構造遮断)。
+ */
+export const RESOLUTION_ORIGINS: readonly ResolutionOrigin[] = ResolutionOrigin.options;
 
 /**
  * ADR 0014 Phase 4: 決定が **agent へ実際に届いたか** (書込結果から導出・偽らない)。
@@ -301,9 +307,10 @@ const ToolFailed = variant("tool.failed", {
 /**
  * INV-REQUEST-ID-NAMESPACE (T1 契約・TDA-1 decision 019ebc07):
  * `request_id` フィールドには **2 つの非交差キー空間** が同居する:
- *  1. **承認キー** (`s<hash12>:apr-…`、sidecar 承認ブリッジが採番。raw session_id は含めない
- *     — redaction-stable 契約は sidecar `mintApprovalRequestId` docstring 参照):
- *     tool.permission.requested / tool.permission.resolved のみが持つ。
+ *  1. **承認キー** (`s<hash12>:apr-…`。採番の正準は event-model `approval-request-id.ts` の
+ *     `mintApprovalRequestId` (sidecar 承認ブリッジ) / `deriveDemoApprovalRequestId`
+ *     (backend safety-demo) — raw session_id は含めない。redaction-stable 契約は同ファイルの
+ *     docstring 参照): tool.permission.requested / tool.permission.resolved のみが持つ。
  *  2. **`tu:<tool_use_id>`** (CC hook の tool_use_id 由来・`tu:` prefix で構造分離):
  *     command.started / command.completed / tool.failed が持つ。
  * 両者は同一フィールドを共有して下流 (projection / replay-store / UI) へ混在して流れるのが

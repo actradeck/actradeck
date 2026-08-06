@@ -432,7 +432,10 @@ export function encodeManifestBase64(manifest: AuditManifest): string {
 export function decodeManifestBase64(b64: string): AuditManifest | undefined {
   try {
     const obj = JSON.parse(Buffer.from(b64, "base64").toString("utf8")) as AuditManifest;
-    if (obj.version !== AUDIT_MANIFEST_VERSION || !Array.isArray(obj.events)) return undefined;
+    // SEC-R3-1: version は「manifest らしい形か」のみここで見る (string であること)。現行版との
+    // 一致判定は verifyAuditManifest に委ねる — 旧版 (v0.6.0 出荷済み v2 等) をここで undefined に
+    // 潰すと route が 400 を返し「改竄」と「旧ビルド産」が区別不能になる (evidence-continuity 欠陥)。
+    if (typeof obj?.version !== "string" || !Array.isArray(obj.events)) return undefined;
     return obj;
   } catch {
     return undefined;
@@ -492,6 +495,28 @@ export function verifyAuditManifest(
   manifest: AuditManifest,
   opts: { expectedFingerprint?: string } = {},
 ): AuditVerifyResult {
+  // SEC-R3-1: 旧バージョン manifest (v0.6.0 が出荷した v2 等) は「非対応バージョン」として
+  // 明示的に区別して返す (改竄・破損と見分けが付かない malformed へ潰さない)。fail-closed は
+  // 不変 — 旧版が ok=true になる経路は無い (現行 canonical form でしか chain を再計算しない)。
+  // 区別は family prefix を持つ別版のみ (本製品の別ビルド産と識別できる形)。それ以外の
+  // 壊れ値 (`version: "wrong"` 等) は従来どおり malformed。
+  // (version は literal 型宣言ゆえ !== 比較で never へ narrowing される — unknown で受けて判定)
+  const declaredVersion: unknown =
+    manifest !== null && typeof manifest === "object"
+      ? (manifest as { version?: unknown }).version
+      : undefined;
+  if (
+    typeof declaredVersion === "string" &&
+    declaredVersion !== AUDIT_MANIFEST_VERSION &&
+    declaredVersion.startsWith(`${AUDIT_MANIFEST_MARKER}/`)
+  ) {
+    return {
+      ok: false,
+      chain_valid: false,
+      signed: false,
+      reason: "unsupported-manifest-version",
+    };
+  }
   if (!isWellFormedManifest(manifest)) {
     return { ok: false, chain_valid: false, signed: false, reason: "malformed-manifest" };
   }

@@ -11,6 +11,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AuditDetailModal } from "../src/ui/AuditDetailModal";
+import { AuditView } from "../src/ui/AuditView";
 import { FixedLocaleProvider } from "../src/ui/LocaleProvider";
 
 let dom: import("jsdom").JSDOM | undefined;
@@ -312,5 +313,167 @@ describe("AuditDetailModal redaction drill-down (019f03cc)", () => {
       await flush();
     });
     expect(ctx.rootEl.querySelector('[data-testid="audit-occurrences"]')).toBeNull();
+  });
+});
+
+/**
+ * QA-R3-4 (TDA-R2-2 の表示半分の回帰保護): relay_lost 合成 retire は operator success トーンで
+ * 描かない。muted + 専用ラベル (audit.detail.relayLostRetired) と、サマリチップの synthetic_retired
+ * 別立て (TDA-R3-6) を pin する。トーン誤縮退 mutant / ラベル削除 mutant で RED。
+ */
+describe("AuditDetailModal relay_lost 合成 retire の正直表示 (QA-R3-4)", () => {
+  const SUMMARY_RL = {
+    session_id: SID,
+    provider: "claude_code",
+    source: "hooks",
+    secret_detected: false,
+    secret_redaction_count: 0,
+    secret_redaction_count_by_kind: {},
+    approvals: {
+      total: 2,
+      by_decision: { cancel: 1 },
+      synthetic_retired: 2,
+      pending: 0,
+    },
+    high_risk_op_count: 0,
+    entries: [
+      {
+        event_id: "e-rl",
+        timestamp: "2026-08-06T00:00:01.000Z",
+        tool_name: "Bash",
+        decision: "cancel",
+        resolution_origin: "relay_lost",
+      },
+      {
+        event_id: "e-op",
+        timestamp: "2026-08-06T00:00:02.000Z",
+        tool_name: "Bash",
+        decision: "cancel",
+        resolution_origin: "operator",
+      },
+    ],
+  };
+
+  let ctx: DomCtx;
+  beforeEach(async () => {
+    ctx = await mountDom();
+  });
+  afterEach(async () => {
+    await ctx.teardown();
+    vi.restoreAllMocks();
+  });
+
+  async function render(): Promise<void> {
+    await act(async () => {
+      ctx.root.render(
+        <FixedLocaleProvider locale="ja">
+          <AuditDetailModal sessionId={SID} onClose={() => {}} />
+        </FixedLocaleProvider>,
+      );
+      await Promise.resolve();
+    });
+  }
+
+  it("relay_lost エントリは muted + 専用ラベル・operator cancel は danger のまま (トーン分離)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(jsonResponse(SUMMARY_RL))),
+    );
+    await render();
+    const tags = [...ctx.rootEl.querySelectorAll(".ad-tag")];
+    // relay_lost: 専用ラベルを持つ tag が muted で存在する (success/danger でない)。
+    const rlTag = tags.find((el) => el.textContent?.includes("取消 (中継喪失・自動整理)"));
+    expect(rlTag).toBeDefined();
+    expect(rlTag!.className).toContain("ad-tag--muted");
+    expect(rlTag!.className).not.toContain("ad-tag--success");
+    expect(rlTag!.className).not.toContain("ad-tag--danger");
+    // operator cancel: 通常の decision ラベル (取消) が danger トーン (hard gate 表現)。
+    const opTag = tags.find(
+      (el) => el.textContent === "取消" && el.className.includes("ad-tag--danger"),
+    );
+    expect(opTag).toBeDefined();
+  });
+
+  it("サマリチップに synthetic_retired を別立て表示 (muted・件数付き・TDA-R3-6)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(jsonResponse(SUMMARY_RL))),
+    );
+    await render();
+    const chip = [...ctx.rootEl.querySelectorAll(".ad-tag")].find((el) =>
+      el.textContent?.includes("中継喪失 取消"),
+    );
+    expect(chip).toBeDefined();
+    expect(chip!.textContent).toContain("×2");
+    expect(chip!.className).toContain("ad-tag--muted");
+  });
+});
+
+/**
+ * QA-R3-4 (probe h4b): AuditView 一覧行の synthetic_retired チップ。チップを消しても 988 が
+ * 緑のままだった生存 mutant を pin する (同一 jsdom harness を再利用するためこのファイルに同居)。
+ */
+describe("AuditView synthetic_retired チップ (QA-R3-4 h4b)", () => {
+  const RANGE_REPORT = {
+    generated_at: "2026-08-06T00:00:00.000Z",
+    session_count: 1,
+    totals: {
+      secret_redaction_count: 0,
+      secret_redaction_count_by_kind: {},
+      approvals_by_decision: { cancel: 1 },
+      synthetic_retired: 2,
+      approval_total: 3,
+      high_risk_op_count: 0,
+      sessions_with_secret: 0,
+    },
+    sessions: [
+      {
+        session_id: "s-rl-view",
+        provider: "claude_code",
+        source: "hooks",
+        secret_detected: false,
+        secret_redaction_count: 0,
+        secret_redaction_count_by_kind: {},
+        approvals: {
+          total: 3,
+          by_decision: { cancel: 1 },
+          synthetic_retired: 2,
+          pending: 0,
+        },
+        high_risk_op_count: 0,
+      },
+    ],
+    limit: 200,
+    has_more: false,
+  };
+
+  let ctx: DomCtx;
+  beforeEach(async () => {
+    ctx = await mountDom();
+  });
+  afterEach(async () => {
+    await ctx.teardown();
+    vi.restoreAllMocks();
+  });
+
+  it("synthetic_retired>0 の行に muted チップ (中継喪失 取消 ×n) を出す (チップ削除 mutant で RED)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(jsonResponse(RANGE_REPORT))),
+    );
+    await act(async () => {
+      ctx.root.render(
+        <FixedLocaleProvider locale="ja">
+          <AuditView active={true} />
+        </FixedLocaleProvider>,
+      );
+      await Promise.resolve();
+    });
+    const chip = [...ctx.rootEl.querySelectorAll(".ad-tag")].find((el) =>
+      el.textContent?.includes("中継喪失 取消"),
+    );
+    expect(chip).toBeDefined();
+    expect(chip!.textContent).toContain("×2");
+    expect(chip!.className).toContain("ad-tag--muted");
   });
 });

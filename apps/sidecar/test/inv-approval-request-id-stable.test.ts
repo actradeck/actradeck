@@ -16,9 +16,17 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { redactEventWithAuthoritativeCounts } from "@actradeck/redaction";
+import {
+  REDACTION_RULES,
+  redactEventWithAuthoritativeCounts,
+  redactString,
+} from "@actradeck/redaction";
 
-import { APPROVAL_REQUEST_ID_RE, mintApprovalRequestId } from "@actradeck/event-model";
+import {
+  APPROVAL_REQUEST_ID_RE,
+  deriveDemoApprovalRequestId,
+  mintApprovalRequestId,
+} from "@actradeck/event-model";
 
 import { ApprovalBridge } from "../src/approval-bridge.js";
 import type { HookCommonInput } from "../src/normalize.js";
@@ -92,5 +100,69 @@ describe("INV-APPROVAL-REQUEST-ID-STABLE (SEC-1 R2): request_id は redaction �
     // hello 宣言 (raw) と DB pending (at-rest) が突合可能。
     expect(redactedRequestId(SYNTHETIC_SESSION_ID, requestId)).toBe(requestId);
     await done; // timeout deny で回収 (リーク防止)
+  });
+
+  it("(d) QA-R3-2: deriveDemoApprovalRequestId も正準形式 + 決定論 + redaction 不変 (旧形回帰で RED)", () => {
+    for (const sessionId of SESSION_ID_VECTORS) {
+      const demoId = deriveDemoApprovalRequestId(sessionId);
+      // 旧形 `${sessionId}:apr-1` へ戻す退行はこの RE 非マッチで決定論的に赤くなる
+      // (demo テスト群は同一 helper で期待値を再計算するため tautological — ここが T1 pin)。
+      expect(demoId).toMatch(APPROVAL_REQUEST_ID_RE);
+      expect(deriveDemoApprovalRequestId(sessionId)).toBe(demoId); // 決定論
+      expect(redactedRequestId(sessionId, demoId)).toBe(demoId); // 実 redactor 透過
+    }
+    // session が異なれば id も異なる (tag + token とも session 由来)。
+    expect(deriveDemoApprovalRequestId("s1")).not.toBe(deriveDemoApprovalRequestId("s2"));
+  });
+});
+
+/**
+ * SEC-R3-2 構造 metatest: 「hex charset ゆえ redaction ルールと構造的に非衝突」を prose でなく
+ * T1 にする。全 REDACTION_RULES × (worst-case 決定論 token + 乱択 mint corpus) で 0 マッチを
+ * 全数 assert する。固定部 (`s<hash12>:apr-`) にマッチするルール・token にマッチし得るルールの
+ * どちらを追加しても、その日にここが赤くなる (bridge re-roll は固定部マッチに無力 — 本 metatest
+ * が唯一の CI ゲート)。
+ */
+describe("INV-APPROVAL-REQUEST-ID-STABLE (SEC-R3-2): REDACTION_RULES × id 形状の構造非衝突", () => {
+  /** 決定論 worst-case token (charset の端 + vendor-prefix に最も近い並び)。 */
+  const ADVERSARIAL_TOKENS: readonly string[] = [
+    "0".repeat(32),
+    "f".repeat(32),
+    "deadbeef".repeat(4),
+    "0123456789abcdef".repeat(2),
+    "abcdefabcdefabcdefabcdefabcdefab", // 英字のみ hex
+  ];
+  const corpus: string[] = [];
+  for (const tag of ["0".repeat(12), "f".repeat(12), "a1b2c3d4e5f6"]) {
+    for (const token of ADVERSARIAL_TOKENS) corpus.push(`s${tag}:apr-${token}`);
+  }
+  for (let i = 0; i < 2000; i++) corpus.push(mintApprovalRequestId(`fuzz-session-${i}`));
+
+  it("corpus が id 形状を満たす (非空虚ガード)", () => {
+    expect(corpus.length).toBeGreaterThan(2000);
+    for (const id of corpus) expect(id).toMatch(APPROVAL_REQUEST_ID_RE);
+  });
+
+  it("最長 charset run は 40 未満 (high-entropy ルールの構造排除・実測)", () => {
+    for (const id of corpus) {
+      const runs = id.match(/[A-Za-z0-9+/_-]+/g) ?? [];
+      const longest = Math.max(...runs.map((r) => r.length));
+      expect(longest).toBeLessThan(40);
+    }
+  });
+
+  it("全 REDACTION_RULES が corpus のどの id にもマッチしない (ルール追加日に RED)", () => {
+    expect(REDACTION_RULES.length).toBeGreaterThanOrEqual(30); // 非空虚ガード
+    for (const rule of REDACTION_RULES) {
+      // global flag の lastIndex 汚染を避けるため flags から g を落として再構築。
+      const re = new RegExp(rule.pattern.source, rule.pattern.flags.replace("g", ""));
+      for (const id of corpus) {
+        expect(re.test(id), `rule "${rule.kind}" が request_id 形状にマッチ: ${id}`).toBe(false);
+      }
+    }
+  });
+
+  it("redactString は corpus 全体で恒等 (rule 単体でなく end-to-end 経路でも不変)", () => {
+    for (const id of corpus) expect(redactString(id)).toBe(id);
   });
 });
