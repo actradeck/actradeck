@@ -614,17 +614,18 @@ export class IngestStore {
 
   /**
    * ADR 0014 Phase 4 (decision 019fd705 D6): 再起動跨ぎ reconciliation の読み口。
-   * 指定 session 群のうち **pending_approvals が非空** の行について、pending request_id 一覧と
+   * 指定 session 群のうち **pending_approvals が非空** の行について、pending の request_id と
+   * requested_at (QA-1/TDA-5 R2 watermark: hello 受信より新しい pending を合成対象から外す)、
    * 合成 cancel イベント構築に必要な最小メタ (provider / 現 state) を返す。
-   * NO-RAW: 返すのは request_id (bridge 採番の相関 id) / provider slug / state enum のみで、
-   * pending entry の command/path (redaction 済みだが本 API では不要) は返さない。
+   * NO-RAW: 返すのは request_id (bridge 採番の相関 id) / requested_at (timestamp) / provider slug /
+   * state enum のみで、pending entry の command/path (redaction 済みだが本 API では不要) は返さない。
    */
   async pendingApprovalsForSessions(sessionIds: readonly string[]): Promise<
     {
       session_id: string;
       provider: string;
       state: string | undefined;
-      request_ids: string[];
+      requests: { request_id: string; requested_at: string }[];
     }[]
   > {
     if (sessionIds.length === 0) return [];
@@ -647,7 +648,10 @@ export class IngestStore {
       session_id: r.session_id,
       provider: r.provider,
       state: r.state ?? undefined,
-      request_ids: parsePendingApprovals(r.pending_approvals).map((p) => p.request_id),
+      requests: parsePendingApprovals(r.pending_approvals).map((p) => ({
+        request_id: p.request_id,
+        requested_at: p.requested_at,
+      })),
     }));
   }
 

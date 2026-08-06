@@ -9,7 +9,7 @@
  * ── REAL DATA ONLY / 因果の捏造禁止 (最重要 KPI) ──────────────────────────────
  * 相関は **request_id の実観測一致のみ**。request_id には **2 つの非交差キー空間** が同居する
  * (T1 契約: packages/event-model/src/payload.ts の INV-REQUEST-ID-NAMESPACE 参照):
- *  - 承認キー (`<session_id>:apr-…` 等、sidecar 採番): tool.permission.requested / resolved が持つ。
+ *  - 承認キー (`s<hash12>:apr-…`、sidecar 採番・raw session_id 非含): tool.permission.requested / resolved が持つ。
  *  - `tu:<tool_use_id>` (sidecar 55a5abf 以降): command.started / command.completed / tool.failed が
  *    持ち、exit_code / command も同時に載るようになった (それ以前の旧イベントはどちらも持たない)。
  * **畳み込みゲートは event_type で判定する (request_id の有無で判定しない)**: 承認チェーン

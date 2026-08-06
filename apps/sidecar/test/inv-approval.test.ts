@@ -591,7 +591,7 @@ describe("INV-APPROVAL: resolve ownership scoping (SEC-2)", () => {
     const p = bridge.requestApproval(preToolUse("Bash", { command: "rm -rf x" }), (id) => {
       myId = id;
     });
-    expect(myId).toMatch(/^s1:apr-/); // request_id は sessionId プレフィックス
+    expect(myId).toMatch(/^s[0-9a-f]{12}:apr-/); // 短縮ハッシュ tag (raw session_id 非含・SEC-1 R2)
     // 別セッション (s2) を騙る request_id では resolve できない。
     expect(bridge.resolve("s2:apr-1", "allow")).toBe(false);
     // 自セッションの正しい id でのみ resolve できる。

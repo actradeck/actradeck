@@ -9,6 +9,10 @@
  * ## ガバナンス集計 (EU AI Act Art.12 hook)
  * 各承認介入を hard/soft/auto の 3 分類で集約する:
  *  - **hard gate (denied/blocked)** = `approvals.by_decision.deny + cancel` (timeout→deny 含む)。
+ *    TDA-1 (Phase 4 R2): backend 合成の relay_lost retire は by_decision に**含まれない**
+ *    (audit-store foldApprovals が origin で分離・summary.approvals.synthetic_retired に別立て) —
+ *    誰も決定していない取消を「実施した gate」と数えない。what-to-review では reason=relay_lost
+ *    で itemize される。
  *  - **soft gate (allowed-after-prompt)** = `approvals.by_decision.allow + allow_for_session`
  *    (各 resolved = プロンプトが出て operator が明示選択した)。
  *  - **auto-allowed (無プロンプト)** = `summary.auto_allowed_count` (audit-store の **full-session SQL
@@ -58,7 +62,7 @@ const HIGH_RISK_LEVELS = new Set(["high", "critical"]);
 
 /** 1 セッションのガバナンス分類 (hard/soft/auto + 高リスク + redaction 件数)。 */
 export interface SessionGovernance {
-  /** denied/blocked = deny + cancel (timeout-deny 含む)。 */
+  /** denied/blocked = deny + cancel (timeout-deny 含む・relay_lost 合成 retire は非含・TDA-1 R2)。 */
   readonly hard_gate: number;
   /** allowed-after-prompt = allow + allow_for_session (operator 明示)。 */
   readonly soft_gate: number;
@@ -71,7 +75,7 @@ export interface SessionGovernance {
 /** what-to-review digest の 1 項目 (redacted 表示列のみ・NO-RAW)。 */
 export interface FlaggedItem {
   readonly session_id: string;
-  readonly reason: "denied" | "high_risk";
+  readonly reason: "denied" | "high_risk" | "relay_lost";
   readonly risk_level: string;
   readonly decision: string;
   /** 対象 (redacted command ?? path・生 secret 非載せ)。 */
@@ -124,7 +128,10 @@ function deriveFlagged(summary: AuditSessionSummary): FlaggedItem[] {
     if (e.decision === "deny" || e.decision === "cancel") {
       out.push({
         session_id: summary.session_id,
-        reason: "denied",
+        // TDA-1 (Phase 4 R2): relay_lost 合成 retire は「誰も決定していない・agent へ何も届いて
+        // いない」— operator の denied と偽らず別 reason で itemize する (hard_gate 計上は
+        // by_decision 側で既に除外済み)。
+        reason: e.resolution_origin === "relay_lost" ? "relay_lost" : "denied",
         risk_level: e.risk_level ?? "",
         decision: e.decision,
         subject,

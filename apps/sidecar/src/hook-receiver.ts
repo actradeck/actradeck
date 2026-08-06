@@ -336,23 +336,28 @@ export class HookReceiver {
       }
     };
     res.on("close", onClientGone);
-    const decision = await this.approvalBridge.requestApproval(input, (requestId, reason) => {
-      capturedRequestId = requestId;
-      // 承認要求イベントを正規化して emit (UI が承認カードを出せる)。ADR 0014: lineage (canonical /
-      // provider_session_id / run 起点) を全 ingest に相乗りさせる (承認カードも同一 run へ属す)。
-      // 自動ガード (ADR 019ecc70 D4): guard 理由 (trigger / secret_kinds) を ingest へ渡し、
-      // normalize が tool.permission.requested payload に載せる。INV-AUTOGUARD-NO-RAW: kind 名のみ。
-      this.ingest(input, {
-        ...lineage,
-        approvalRequestId: requestId,
-        guardTrigger: reason.trigger,
-        ...(reason.secretKinds.length > 0 ? { guardSecretKinds: reason.secretKinds } : {}),
-        // ADR 019ee0c0: 永続化可能なときのみ UI へ persistable を伝える。
-        ...(reason.persistable ? { guardPersistable: true } : {}),
+    let decision: Awaited<ReturnType<ApprovalBridge["requestApproval"]>>;
+    try {
+      decision = await this.approvalBridge.requestApproval(input, (requestId, reason) => {
+        capturedRequestId = requestId;
+        // 承認要求イベントを正規化して emit (UI が承認カードを出せる)。ADR 0014: lineage (canonical /
+        // provider_session_id / run 起点) を全 ingest に相乗りさせる (承認カードも同一 run へ属す)。
+        // 自動ガード (ADR 019ecc70 D4): guard 理由 (trigger / secret_kinds) を ingest へ渡し、
+        // normalize が tool.permission.requested payload に載せる。INV-AUTOGUARD-NO-RAW: kind 名のみ。
+        this.ingest(input, {
+          ...lineage,
+          approvalRequestId: requestId,
+          guardTrigger: reason.trigger,
+          ...(reason.secretKinds.length > 0 ? { guardSecretKinds: reason.secretKinds } : {}),
+          // ADR 019ee0c0: 永続化可能なときのみ UI へ persistable を伝える。
+          ...(reason.persistable ? { guardPersistable: true } : {}),
+        });
       });
-    });
-    // 解決後は切断検知を外す (pending は解決済みで cancelPending は no-op だが、listener を残さない)。
-    res.removeListener("close", onClientGone);
+    } finally {
+      // 解決後 (throw 経路含む・SEC-7 R2) は切断検知を外す (pending は解決済みで cancelPending は
+      // no-op だが、listener を残さない)。
+      res.removeListener("close", onClientGone);
+    }
 
     // defer はゲート対象外 (low-risk)。承認イベントを出さず、通常 permission flow に委ねる。
     // ⚠️ force-allow しない (INV-APPROVAL): 空 JSON を返す。

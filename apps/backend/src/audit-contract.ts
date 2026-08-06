@@ -20,7 +20,23 @@
  *    backend は再 redaction しない (sidecar choke を唯一の権威として維持する)。
  */
 
-import { isKnownRedactionKind, type RedactionKind } from "@actradeck/event-model";
+import {
+  isKnownRedactionKind,
+  type RedactionKind,
+  ResolutionOrigin,
+  type ResolutionOrigin as ResolutionOriginT,
+} from "@actradeck/event-model";
+
+/**
+ * TDA-1 (Phase 4 監査 R2): resolved payload の resolution_origin を監査層へ投影する closed gate。
+ * 未知値 / 欠落は undefined (ingress parseEvent は looseObject 素通しゆえ、監査 read 層で
+ * closed-enum に落とすのが本 gate の役割)。
+ */
+export function asResolutionOrigin(raw: string | null | undefined): ResolutionOriginT | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const parsed = ResolutionOrigin.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
 
 /** 承認 decision の closed-enum (event-model ApprovalDecision と同値・監査表示用に複製)。 */
 export const AUDIT_DECISIONS = ["allow", "allow_for_session", "deny", "cancel"] as const;
@@ -49,15 +65,30 @@ export interface AuditApprovalEntry {
   readonly path: string | undefined;
   /** 解決済みの decision。requested のみで未解決なら undefined。 */
   readonly decision: AuditDecision | undefined;
+  /**
+   * TDA-1 (Phase 4 R2): 解決の出所 (closed enum・未知/欠落は undefined)。`relay_lost` は
+   * backend 合成の retire (誰も決定していない・agent へ何も届いていない) であり、operator の
+   * hard gate と区別して表示・集計する。
+   */
+  readonly resolution_origin: ResolutionOriginT | undefined;
   readonly auto_allowed: boolean | undefined;
 }
 
 export interface AuditApprovalSummary {
   /** 承認要求 (tool.permission.requested) の件数。 */
   readonly total: number;
-  /** decision 別の解決件数。 */
+  /**
+   * decision 別の解決件数。TDA-1 (Phase 4 R2): backend 合成の relay_lost retire は**含めない**
+   * (operator の決定でも agent へ届いた deny でもないため hard/soft gate へ計上しない)。
+   */
   readonly by_decision: AuditDecisionTally;
-  /** 要求されたが decision が記録されていない件数 (= total - Σby_decision, clamp ≥0)。 */
+  /**
+   * TDA-1 (Phase 4 R2): backend 合成 (resolution_origin=relay_lost) で retire された件数。
+   * 「daemon 再起動等で中継が失われ、operator が決定できないまま非 actionable 化された」観測で
+   * あり、gate 実施と偽らないための別立て集計。
+   */
+  readonly synthetic_retired: number;
+  /** 要求されたが decision が記録されていない件数 (= total - Σby_decision - synthetic_retired, clamp ≥0)。 */
   readonly pending: number;
 }
 
@@ -96,6 +127,8 @@ export interface AuditRangeTotals {
   readonly secret_redaction_count: number;
   readonly secret_redaction_count_by_kind: Record<string, number>;
   readonly approvals_by_decision: AuditDecisionTally;
+  /** TDA-1 (Phase 4 R2): relay_lost 合成 retire の range 合計 (by_decision 非含・別立て)。 */
+  readonly synthetic_retired: number;
   readonly approval_total: number;
   readonly high_risk_op_count: number;
   /** 無プロンプト自動許可 (auto_allowed=true) の range 合計。high_risk_op_count と対称 (QA-1)。 */

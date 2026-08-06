@@ -28,7 +28,9 @@ import {
   type AgentVisibilityWire,
   aggregateAgentReadiness,
   asCodexSpawnErrorCode,
+  parseActivePendingRequestIds,
   parseAgentVisibilityWire,
+  parseRuntimeEpoch,
   type PolicyCategory,
   projectPolicyCategories,
 } from "@actradeck/event-model";
@@ -336,6 +338,12 @@ export type PresenceListener = (sessionId: string, live: boolean) => void;
 export interface ApprovalReconcileSignal {
   readonly sessionIds: readonly string[];
   readonly activeRequestIds: ReadonlySet<string>;
+  /**
+   * この hello を backend が受信した時刻 (epoch ms)。QA-1/TDA-5 (R2) watermark: 宣言は hello 構築
+   * 時点のスナップショットゆえ、これ以降 (直前の余裕幅込み) に requested された pending は
+   * 「宣言に載る機会が無かった」だけで stale ではない — reconciler が合成対象から除外する。
+   */
+  readonly receivedAt: number;
   /** 申告された runtime epoch (診断用・reconcile 判定には使わない)。 */
   readonly runtimeEpoch?: string;
 }
@@ -343,15 +351,17 @@ export interface ApprovalReconcileSignal {
 /** ADR 0014 Phase 4: pending 宣言つき hello を受けたときの通知 (ingestion-server が reconciler を配線)。 */
 export type ApprovalReconcileListener = (signal: ApprovalReconcileSignal) => void;
 
-/**
- * ADR 0014 Phase 4: active_pending_request_ids の受理上限。正規 sidecar の pending は高々数十
- * (MAX_PENDING_APPROVALS=64/session) であり、これを大きく超える宣言は malformed とみなし
- * **reconcile 自体をスキップ**する (fail-safe: 不正な宣言を根拠に pending を消さない)。
- */
-export const MAX_ACTIVE_PENDING_IDS = 1024;
+// 宣言の受理上限 (MAX_ACTIVE_PENDING_IDS / MAX_REQUEST_ID_LEN) と検証は event-model の
+// approval-reconcile-wire (正準実装) を送信側 (sidecar ws-client) と共有する (TDA-2 R2:
+// 手書きミラー禁止・field 改名の silent-off を構造遮断)。
+export { MAX_ACTIVE_PENDING_IDS } from "@actradeck/event-model";
 
-/** 個々の request_id の受理上限長 (bridge 採番 id は十分短い・異常長は malformed)。 */
-const MAX_REQUEST_ID_LEN = 256;
+/**
+ * SEC-3 (R2): 1 signal が対象にできる session 数の上限。hello の session claim 自体は無制限
+ * (既存 presence 意味論) だが、reconcile の DB 読取り (`= ANY($1)`) を無制限 fan-in させない。
+ * 超過は reconcile スキップ (fail-safe: 消さない方向・正規 daemon の session 数はこの遥か下)。
+ */
+export const MAX_RECONCILE_SESSIONS = 1024;
 
 /** policy relay 操作種別 (get/set/unset/list/resolve)。 */
 export type PolicyRelayOp = "get" | "set" | "unset" | "list" | "resolve";
@@ -504,14 +514,10 @@ export class SidecarRegistry {
       }
     }
     // ADR 0014 Phase 4 (decision 019fd705): runtime epoch (診断用) と pending 宣言を処理する。
-    // epoch は uuid 想定の短い文字列のみ受理 (NO-RAW・異常長は無視)。
-    if (
-      typeof frame.runtime_epoch === "string" &&
-      frame.runtime_epoch.length > 0 &&
-      frame.runtime_epoch.length <= 64
-    ) {
-      conn.runtimeEpoch = frame.runtime_epoch;
-    }
+    // epoch は event-model 正準パーサで uuid shape のみ受理 (SEC-6 R2: 任意文字列を conn メタとして
+    // 保持しない・latent raw 面の遮断)。
+    const epoch = parseRuntimeEpoch(frame.runtime_epoch);
+    if (epoch !== undefined) conn.runtimeEpoch = epoch;
     this.maybeEmitApprovalReconcile(conn, frame.active_pending_request_ids);
     return true;
   }
@@ -522,24 +528,22 @@ export class SidecarRegistry {
    *
    * fail-safe (消さない方向) の判定:
    *  - field 欠落 (旧 sidecar / observe-only codex-rollout daemon) → シグナルなし (reconcile しない)。
-   *  - 非配列 / 要素に非 string / 上限超過 (MAX_ACTIVE_PENDING_IDS) → malformed とみなしシグナルなし
-   *    (不正な宣言を根拠に pending を合成 cancel しない)。
+   *  - 非配列 / 要素に非 string / 上限超過 → malformed とみなしシグナルなし (検証は event-model の
+   *    正準パーサ parseActivePendingRequestIds・送信側と cap を共有・TDA-2 R2)。
    *  - 対象 session は **この接続が現に所有する** もののみ (sessionOwner 一致)。後勝ち再接続で他接続へ
    *    移った session の pending を、古い接続の宣言で消さない (multiplex 安全)。
+   *  - 所有 session 数が MAX_RECONCILE_SESSIONS 超 → スキップ (SEC-3 R2: DB 読取りの無制限 fan-in 防止)。
    *  - 空配列は正当な「pending ゼロ」宣言 (当該 session 群の DB pending は全て stale = 受入#7 の根拠)。
    */
   private maybeEmitApprovalReconcile(conn: SidecarConn, declared: unknown): void {
-    if (!Array.isArray(declared) || declared.length > MAX_ACTIVE_PENDING_IDS) return;
-    const active = new Set<string>();
-    for (const id of declared) {
-      if (typeof id !== "string" || id.length === 0 || id.length > MAX_REQUEST_ID_LEN) return; // malformed → 全スキップ
-      active.add(id);
-    }
+    const active = parseActivePendingRequestIds(declared);
+    if (active === undefined) return; // 欠落 / malformed → reconcile しない (fail-safe)
     const sessionIds = [...conn.sessions].filter((sid) => this.sessionOwner.get(sid) === conn);
-    if (sessionIds.length === 0) return;
+    if (sessionIds.length === 0 || sessionIds.length > MAX_RECONCILE_SESSIONS) return;
     const signal: ApprovalReconcileSignal = {
       sessionIds,
       activeRequestIds: active,
+      receivedAt: Date.now(),
       ...(conn.runtimeEpoch !== undefined ? { runtimeEpoch: conn.runtimeEpoch } : {}),
     };
     for (const cb of this.approvalReconcileListeners) {

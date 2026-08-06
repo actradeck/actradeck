@@ -17,6 +17,8 @@ import { defaultExclude, defineConfig } from "vitest/config";
 const REAL_PG_TESTS = [
   // ADR 0014 Phase 4: 受入#6/#7 (real-PG writer・requested/合成 cancel を実 ingest 書込)。
   "test/inv-approval-reconcile.test.ts",
+  // ADR 0014 Phase 4 R2 (TDA-3): 本番配線 (hello → onApprovalReconcile → ingestOne) の e2e ゲート。
+  "test/inv-approval-reconcile-wiring.test.ts",
   "test/inv-safety-demo-backend-e2e.test.ts",
   "test/inv-audit-coverage.test.ts",
   "test/inv-audit-packet-route.test.ts",
@@ -148,6 +150,11 @@ export default defineConfig({
         //   (unit + relay INV 経由) → floor は worst-observed の 5-10pt 下 (per-file-coverage-floor-
         //   below-worst-not-best・branches は unref?.() 型分岐の環境揺れを見込み広めに)。
         "src/pending-round-trips.ts": { statements: 95, branches: 90, functions: 95, lines: 95 },
+        // TDA-10 (Phase 4 R2): INV-APPROVAL-RECONCILE を担う新規モジュールに erosion tripwire。
+        //   実測 100/92.85/100/100 (branches は SEC-4 の producer 検証 fail 枝が構造的到達不能で
+        //   恒久未被覆 — 意図した防御床)。floor は worst-observed の 4-5pt 下
+        //   (per-file-coverage-floor-below-worst-not-best: 実測に floor を張ると flaky RED)。
+        "src/approval-reconciler.ts": { statements: 96, branches: 88, functions: 95, lines: 96 },
         // QA-2 (ADR 019f280c 監査): INV-SAFETY-DEMO + INV-DEMO-SPAWN-PATH-INDEPENDENT を担う
         //   INV-bearing ファイルに erosion tripwire を張る (global 90/78/92/92 だけでは silent erode)。
         //   実測 98.36/87.09/100/100。floor は WORST-observed の下 (per-file-coverage-floor-below-worst-

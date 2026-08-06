@@ -157,9 +157,9 @@ describe("INV-APPROVAL-WS (3#SEC-1): request_id entropy + decision enum", () => 
         ids.push(id),
       );
     }
-    // sessionId プレフィックスは温存 (SEC-2 scope)。
-    for (const id of ids) expect(id).toMatch(/^s1:apr-/);
-    const randomParts = ids.map((id) => id.replace(/^s1:apr-/, ""));
+    // SEC-1 (Phase 4 R2): raw session_id は含めない。短縮ハッシュ tag (redaction-stable)。
+    for (const id of ids) expect(id).toMatch(/^s[0-9a-f]{12}:apr-/);
+    const randomParts = ids.map((id) => id.replace(/^s[0-9a-f]{12}:apr-/, ""));
     // 連番でない: 隣接 id が数値インクリメントでない。
     for (let i = 1; i < randomParts.length; i++) {
       expect(randomParts[i]).not.toBe(randomParts[i - 1]);

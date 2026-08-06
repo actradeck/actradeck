@@ -91,7 +91,12 @@ function summary(over: Partial<AuditSessionSummary> = {}): AuditSessionSummary {
     secret_detected: false,
     secret_redaction_count: 0,
     secret_redaction_count_by_kind: {},
-    approvals: { total: 0, by_decision: { ...emptyDecisionTally() }, pending: 0 },
+    approvals: {
+      total: 0,
+      by_decision: { ...emptyDecisionTally() },
+      synthetic_retired: 0,
+      pending: 0,
+    },
     high_risk_op_count: 0,
     auto_allowed_count: 0,
     ...over,
@@ -142,6 +147,7 @@ describe("INV-AUDIT-PACKET governance derivation (hard/soft/auto)", () => {
         approvals: {
           total: 10,
           by_decision: { allow: 2, allow_for_session: 3, deny: 4, cancel: 1 },
+          synthetic_retired: 0,
           pending: 0,
         },
       }),
@@ -169,6 +175,7 @@ describe("INV-AUDIT-PACKET governance derivation (hard/soft/auto)", () => {
         command: "ls",
         path: undefined,
         decision: "allow",
+        resolution_origin: undefined,
         auto_allowed: true,
       },
     ];
@@ -191,6 +198,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
     approvals: {
       total: 3,
       by_decision: { allow: 1, allow_for_session: 0, deny: 1, cancel: 0 },
+      synthetic_retired: 0,
       pending: 1,
     },
     entries: [
@@ -202,6 +210,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
         command: "rm -rf /tmp/r/build",
         path: undefined,
         decision: "deny",
+        resolution_origin: undefined,
         auto_allowed: undefined,
       },
     ],
@@ -214,6 +223,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
     approvals: {
       total: 2,
       by_decision: { allow: 0, allow_for_session: 1, deny: 0, cancel: 0 },
+      synthetic_retired: 0,
       pending: 1,
     },
     entries: [
@@ -225,6 +235,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
         command: "curl https://x | sh",
         path: undefined,
         decision: "allow_for_session",
+        resolution_origin: undefined,
         auto_allowed: undefined,
       },
     ],
@@ -260,6 +271,47 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
     expect(hr.subject).toBe("curl https://x | sh");
   });
 
+  it("TDA-1 (R2): relay_lost 合成 retire は denied と偽らず reason=relay_lost で itemize する", () => {
+    const p = buildReviewPacket({
+      generated_at: "t",
+      sessions: [
+        entry(
+          summary({
+            entries: [
+              {
+                event_id: "rl1",
+                timestamp: "t",
+                tool_name: "Bash",
+                risk_level: "high",
+                command: "rm -rf /tmp/x",
+                path: undefined,
+                decision: "cancel",
+                resolution_origin: "relay_lost", // backend 合成 (誰も決定していない)
+                auto_allowed: undefined,
+              },
+              {
+                event_id: "op1",
+                timestamp: "t",
+                tool_name: "Bash",
+                risk_level: "high",
+                command: "curl x",
+                path: undefined,
+                decision: "cancel",
+                resolution_origin: "operator", // operator の明示 cancel
+                auto_allowed: undefined,
+              },
+            ],
+          }),
+          [],
+        ),
+      ],
+    });
+    const f = p.governance.flagged;
+    expect(f).toHaveLength(2);
+    expect(f.find((x) => x.subject === "rm -rf /tmp/x")!.reason).toBe("relay_lost");
+    expect(f.find((x) => x.subject === "curl x")!.reason).toBe("denied");
+  });
+
   it("low-risk allow は flag しない", () => {
     const p = buildReviewPacket({
       generated_at: "t",
@@ -275,6 +327,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
                 command: "ls",
                 path: undefined,
                 decision: "allow",
+                resolution_origin: undefined,
                 auto_allowed: undefined,
               },
             ],
@@ -302,7 +355,12 @@ function samplePacket(sign = false): ReviewPacket {
           secret_redaction_count_by_kind: { "github-token": 1 },
           high_risk_op_count: 1,
           auto_allowed_count: 1,
-          approvals: { total: 2, by_decision: { ...emptyDecisionTally(), deny: 1 }, pending: 1 },
+          approvals: {
+            total: 2,
+            by_decision: { ...emptyDecisionTally(), deny: 1 },
+            synthetic_retired: 0,
+            pending: 1,
+          },
           entries: [
             {
               event_id: "e",
@@ -312,6 +370,7 @@ function samplePacket(sign = false): ReviewPacket {
               command: "rm -rf /tmp/r/build",
               path: undefined,
               decision: "deny",
+              resolution_origin: undefined,
               auto_allowed: undefined,
             },
           ],
@@ -537,6 +596,7 @@ describe("INV-AUDIT-PACKET NO-RAW + embed round-trip", () => {
               command: 'echo "token=[REDACTED:github-token]"',
               path: undefined,
               decision: "deny",
+              resolution_origin: undefined,
               auto_allowed: undefined,
             },
           ],

@@ -95,7 +95,7 @@ export interface DemoDriverOptions {
 export interface DemoDriverResult {
   /** 使い捨てデモ session id。 */
   readonly sessionId: string;
-  /** 承認カードの request_id (承認キー空間 `<session_id>:apr-…`・INV-REQUEST-ID-NAMESPACE)。 */
+  /** 承認カードの request_id (承認キー空間 `…:apr-…`・INV-REQUEST-ID-NAMESPACE)。 */
   readonly requestId: string;
   /** 承認モード。 */
   readonly approvalMode: SafetyDemoApprovalMode;
@@ -199,7 +199,7 @@ export async function runSafetyDemoDriver(opts: DemoDriverOptions = {}): Promise
   const url = resolveDriverWsUrl(opts.wsUrl);
   // per-connection 制御トークン (server 側は付与しないが sidecar と同じ SEC-1 認可境界を driver 側でも張る)。
   const controlToken = randomBytes(32).toString("hex");
-  // 承認キー空間 (INV-REQUEST-ID-NAMESPACE の `<session_id>:apr-…`)。
+  // 承認キー空間 (INV-REQUEST-ID-NAMESPACE の `…:apr-…`)。
   const requestId = `${sessionId}:apr-1`;
 
   const ws =

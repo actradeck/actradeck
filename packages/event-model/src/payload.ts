@@ -301,7 +301,8 @@ const ToolFailed = variant("tool.failed", {
 /**
  * INV-REQUEST-ID-NAMESPACE (T1 契約・TDA-1 decision 019ebc07):
  * `request_id` フィールドには **2 つの非交差キー空間** が同居する:
- *  1. **承認キー** (`<session_id>:apr-…` 等、sidecar 承認ブリッジが採番):
+ *  1. **承認キー** (`s<hash12>:apr-…`、sidecar 承認ブリッジが採番。raw session_id は含めない
+ *     — redaction-stable 契約は sidecar `mintApprovalRequestId` docstring 参照):
  *     tool.permission.requested / tool.permission.resolved のみが持つ。
  *  2. **`tu:<tool_use_id>`** (CC hook の tool_use_id 由来・`tu:` prefix で構造分離):
  *     command.started / command.completed / tool.failed が持つ。
@@ -335,7 +336,11 @@ const ToolPermissionResolved = variant("tool.permission.resolved", {
   decision: ApprovalDecision,
   // ADR 0014 Phase 4 (decision 019fd705): 解決の出所と配送結果 (正直性メタデータ)。
   // additive optional (trigger/secret_kinds と同じ後方互換パターン)。closed enum のみ (NO-RAW)。
-  // 読まない consumer は無影響。語彙は coordinated deploy 前提 (strict enum ゆえ未知値は parse 拒否)。
+  // 読まない consumer は無影響。語彙は coordinated deploy 前提。
+  // SEC-4 (Phase 4 監査 R2) 正直な開示: この strict enum が未知値を拒否するのは **EventPayload を
+  // 実際に parse する境界** (sidecar producer の assertPayloadConsistency / backend 合成 producer の
+  // 検証 / 型付き consumer) のみ。backend ingress の `parseEvent` は payload を looseObject で
+  // 素通しするため、ingress 単体では未知値は落ちない (INV テストが両実態を pin する)。
   resolution_origin: ResolutionOrigin.optional(),
   delivery_status: DeliveryStatus.optional(),
 });

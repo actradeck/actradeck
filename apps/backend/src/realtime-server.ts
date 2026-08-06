@@ -609,6 +609,7 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
               secret_redaction_count: summary.secret_redaction_count,
               secret_redaction_count_by_kind: summary.secret_redaction_count_by_kind,
               approvals_by_decision: summary.approvals.by_decision,
+              synthetic_retired: summary.approvals.synthetic_retired,
               approval_total: summary.approvals.total,
               high_risk_op_count: summary.high_risk_op_count,
               auto_allowed_count: summary.auto_allowed_count,

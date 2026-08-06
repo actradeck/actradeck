@@ -78,6 +78,7 @@ function sampleSession(overrides: Partial<AuditSessionSummary> = {}): AuditSessi
     approvals: {
       total: 4,
       by_decision: { allow: 2, allow_for_session: 1, deny: 1, cancel: 0 },
+      synthetic_retired: 0,
       pending: 0,
     },
     high_risk_op_count: 1,
@@ -96,6 +97,7 @@ function report(sessions: readonly AuditSessionSummary[]): AuditRangeReport {
       secret_redaction_count: 3,
       secret_redaction_count_by_kind: { "github-token": 2, "aws-access-key-id": 1 },
       approvals_by_decision: { allow: 2, allow_for_session: 1, deny: 1, cancel: 0 },
+      synthetic_retired: 0,
       approval_total: 4,
       high_risk_op_count: 1,
       auto_allowed_count: 2,

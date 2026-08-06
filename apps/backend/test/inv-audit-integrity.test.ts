@@ -85,7 +85,12 @@ function sampleSummary(): AuditSessionSummary {
     secret_detected: true,
     secret_redaction_count: 2,
     secret_redaction_count_by_kind: { "aws-access-key-id": 1, "github-token": 1 },
-    approvals: { total: 1, by_decision: { ...emptyDecisionTally(), deny: 1 }, pending: 0 },
+    approvals: {
+      total: 1,
+      by_decision: { ...emptyDecisionTally(), deny: 1 },
+      synthetic_retired: 0,
+      pending: 0,
+    },
     high_risk_op_count: 1,
     auto_allowed_count: 0,
   };

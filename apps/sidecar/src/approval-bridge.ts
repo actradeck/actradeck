@@ -147,6 +147,12 @@ interface PendingApproval {
  * 例: `["bash","high","b c"]` と `["bash","high b","c"]` は素朴な空白連結なら同一文字列
  * `bash high b c` に潰れるが、JSON 配列なら別エンコードで別署名になる (テストがこれをゲートする)。
  */
+export function encodeOperationSignature(kind: string, risk: string, operand: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify([kind, risk, operand]))
+    .digest("hex");
+}
+
 /**
  * ADR 0014 Phase 4: resolved イベント summary の出所ラベル (日本語・観測性)。
  * hook-receiver (CC) と codex-runner が共有する単一出所 (2 経路の表示 drift 防止)。
@@ -169,10 +175,30 @@ export function resolutionOriginSuffix(origin: ResolutionOrigin | undefined): st
   }
 }
 
-export function encodeOperationSignature(kind: string, risk: string, operand: string): string {
-  return createHash("sha256")
-    .update(JSON.stringify([kind, risk, operand]))
-    .digest("hex");
+/**
+ * 承認 request_id の採番 (単一出所・redaction-stable 契約)。
+ *
+ * 形式: `s<sha256(session_id) 先頭12hex>:apr-<128bit 乱数 base64url>`。
+ *
+ * SEC-1 (Phase 4 監査 R2): 旧形式 `${sessionId}:apr-…` は **raw session_id を payload.request_id へ
+ * 露出**していた。`sess_<uuidv7>` 形 (41 文字の単一 charset run) の session_id は redaction の
+ * high-entropy ルール (40 文字以上 + 複数 class) に合致し、ingress 床で request_id の prefix が
+ * `[REDACTED:…]` へ置換される。結果 at-rest (DB/UI カード) の request_id と bridge Map の raw キーが
+ * **別空間**になり、①UI approve relay が resolve で no-op ②Phase 4 reconcile が生存 pending を
+ * 「宣言に無い」と誤判定して合成 cancel、の両方が起きる (top-level session_id は相関 field 救済で
+ * 保持されるため session 自体は無事＝request_id 内だけが壊れる非対称)。
+ *
+ * 対策: raw session_id を id に含めない。短縮ハッシュ tag (13 文字) + `:` 区切り + 乱数部 (26 文字)
+ * で **どの charset run も high-entropy 閾値 (40) を大きく下回る** = redaction 非誘発 by construction。
+ * INV-APPROVAL-REQUEST-ID-STABLE がこれを実 redactor で回帰固定する (id 形式や redaction 閾値を
+ * 変える場合はそのテストが赤くなる)。
+ *
+ * 予測不能性 (3#SEC-1) は 128bit 乱数部が担う。foreign request_id 拒否 (SEC-2) は bridge Map lookup
+ * で行われ prefix 解析には依存しない (tag は per-session 相関のデバッグ補助のみ)。
+ */
+export function mintApprovalRequestId(sessionId: string): string {
+  const tag = createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
+  return `s${tag}:apr-${randomBytes(16).toString("base64url")}`;
 }
 
 /**
@@ -472,16 +498,11 @@ export class ApprovalBridge {
   }
 
   /**
-   * request_id を高エントロピーで採番する (3#SEC-1)。
-   *
-   * 旧実装は `${sessionId}:apr-${Date.now()}-${seq}` で Date.now/連番が予測容易だった。
-   * inbound 制御チャネル (WsClient) は同チャネルに request_id を observable にするため、
-   * 予測可能な id は「foreign request_id 拒否 (SEC-2)」ゲートを総当たりで突破されうる。
-   * 16 byte (128bit) の暗号乱数を base64url 化し、sessionId プレフィックスは「自セッション
-   * スコープ判定 (SEC-2)」のために残す (突合は乱数部で行う)。
+   * request_id を高エントロピーで採番する (3#SEC-1)。実装は module-level の
+   * `mintApprovalRequestId` (redaction-stable 契約の単一出所) — docstring 参照。
    */
   private nextRequestId(sessionId: string): string {
-    return `${sessionId}:apr-${randomBytes(16).toString("base64url")}`;
+    return mintApprovalRequestId(sessionId);
   }
 
   /**

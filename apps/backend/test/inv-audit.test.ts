@@ -17,6 +17,7 @@ import { buildIngestionServer } from "../src/ingestion-server.js";
 import { IngestStore } from "../src/ingest-store.js";
 import { AuditStore } from "../src/audit-store.js";
 import { auditReportToCsv } from "../src/audit-contract.js";
+import { deriveSessionGovernance } from "../src/audit-packet.js";
 import { cleanupSessions, dbReachable, iso, makeEvent } from "./helpers.js";
 
 import type { FastifyInstance } from "fastify";
@@ -36,6 +37,9 @@ const S2 = "sess_audit_beta";
 const S3 = "sess_audit_gamma";
 // S4 も窓外 (BASE+60_000)。command なし・path/file_path ありの承認で path 投影 + COALESCE フォールバックを固定 (QA-1)。
 const S4 = "sess_audit_delta";
+// S5 も窓外 (BASE+70_000)。TDA-1 (Phase 4 R2): relay_lost 合成 retire は operator の hard gate と
+// 同一計上しない (by_decision 非含・synthetic_retired 別立て・operator cancel は従来どおり計上)。
+const S5 = "sess_audit_epsilon";
 // write-gate を迂回した dirty by-kind を模す secret 形 phantom。test 間で共有し gate 健在性を route まで固定。
 const PHANTOM_KIND = "ghp_FAKEphantomSECRETkind0123456789";
 
@@ -48,7 +52,7 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
   let app: FastifyInstance;
   let store: IngestStore;
   let audit: AuditStore;
-  const sessions = [S1, S2, S3, S4];
+  const sessions = [S1, S2, S3, S4, S5];
 
   beforeAll(async () => {
     pool = new Pool({ connectionString: DATABASE_URL, max: 4 });
@@ -174,6 +178,40 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
           file_path: "should-not-win.js",
         },
       }),
+      // S5 (窓外・TDA-1 R2): relay_lost 合成 retire (q1) と operator cancel (q2) の分離計上。
+      makeEvent({
+        session_id: S5,
+        event_type: "tool.permission.requested",
+        state: "waiting.approval",
+        timestamp: iso(BASE, 70_000),
+        payload: { request_id: "q1", tool_name: "Bash", risk_level: "high", command: "rm -rf x" },
+      }),
+      makeEvent({
+        session_id: S5,
+        event_type: "tool.permission.resolved",
+        timestamp: iso(BASE, 70_100),
+        // ApprovalReconciler の合成形 (backend 起点・誰も決定していない)。
+        payload: {
+          request_id: "q1",
+          decision: "cancel",
+          resolution_origin: "relay_lost",
+          delivery_status: "not_sent",
+        },
+      }),
+      makeEvent({
+        session_id: S5,
+        event_type: "tool.permission.requested",
+        state: "waiting.approval",
+        timestamp: iso(BASE, 70_200),
+        payload: { request_id: "q2", tool_name: "Bash", risk_level: "high", command: "curl x" },
+      }),
+      makeEvent({
+        session_id: S5,
+        event_type: "tool.permission.resolved",
+        timestamp: iso(BASE, 70_300),
+        // operator の明示 cancel (origin 付き・従来どおり hard gate に計上される)。
+        payload: { request_id: "q2", decision: "cancel", resolution_origin: "operator" },
+      }),
     ];
     for (const ev of evs) await store.ingest(ev);
   });
@@ -210,6 +248,27 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
     const entriesJson = JSON.stringify(sum.entries);
     expect(entriesJson).not.toContain("RAWLEAK");
     expect(entriesJson).not.toContain("note_should_not_leak");
+  });
+
+  it("TDA-1 (R2): relay_lost 合成 retire は hard gate / by_decision に計上しない (synthetic_retired 別立て)", async () => {
+    const s = (await audit.sessionSummary(S5, { detail: true })) as AuditSessionSummary;
+    expect(s).toBeDefined();
+    expect(s.approvals.total).toBe(2);
+    // operator cancel (q2) のみが by_decision に入る。relay_lost 合成 (q1) は入らない。
+    expect(s.approvals.by_decision.cancel).toBe(1);
+    expect(s.approvals.by_decision.deny).toBe(0);
+    expect(s.approvals.synthetic_retired).toBe(1);
+    // retire 済みは「未解決」でも「gate 済み」でもない → pending 0。
+    expect(s.approvals.pending).toBe(0);
+    // governance: hard_gate は operator cancel の 1 件のみ (relay_lost を「実施した gate」と数えない)。
+    const g = deriveSessionGovernance(s);
+    expect(g.hard_gate).toBe(1);
+    // entries には origin が closed gate 済みで投影される (packet の reason 分離の根拠)。
+    const q1 = s.entries?.find((e) => e.command === "rm -rf x");
+    expect(q1?.decision).toBe("cancel");
+    expect(q1?.resolution_origin).toBe("relay_lost");
+    const q2 = s.entries?.find((e) => e.command === "curl x");
+    expect(q2?.resolution_origin).toBe("operator");
   });
 
   it("approvalEntries: command 無し承認は path を投影し file_path にフォールバックする (QA-1)", async () => {
@@ -302,6 +361,7 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
         secret_redaction_count: s.secret_redaction_count,
         secret_redaction_count_by_kind: s.secret_redaction_count_by_kind,
         approvals_by_decision: s.approvals.by_decision,
+        synthetic_retired: s.approvals.synthetic_retired,
         approval_total: s.approvals.total,
         high_risk_op_count: s.high_risk_op_count,
         auto_allowed_count: s.auto_allowed_count,

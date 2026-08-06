@@ -52,6 +52,7 @@ function summary(id = "sess_r"): AuditSessionSummary {
     approvals: {
       total: 0,
       by_decision: { allow: 0, allow_for_session: 0, deny: 0, cancel: 0 },
+      synthetic_retired: 0,
       pending: 0,
     },
     high_risk_op_count: 0,

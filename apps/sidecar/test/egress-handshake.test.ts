@@ -19,6 +19,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket as WsServerSocket, type RawData } from "ws";
 import type { IncomingMessage } from "node:http";
 
+import { MAX_ACTIVE_PENDING_IDS } from "@actradeck/event-model";
+
 import { buildEvent } from "../src/event-factory.js";
 import { EventStore } from "../src/store.js";
 import { WsClient } from "../src/ws-client.js";
@@ -414,7 +416,7 @@ describe("ADR 0014 Phase 4: hello runtime_epoch + active_pending_request_ids", (
       ingestToken: "tok",
       controlToken: "ctl-p4",
       sessionIds: ["s1"],
-      runtimeEpoch: "epoch-uuid-1",
+      runtimeEpoch: "0199f0a1-2b3c-7d4e-8f01-234567890001",
       pendingApprovalIdsProvider: () => [],
     });
     client.connect();
@@ -426,7 +428,7 @@ describe("ADR 0014 Phase 4: hello runtime_epoch + active_pending_request_ids", (
       active_pending_request_ids?: unknown;
     };
     expect(hello.type).toBe("hello");
-    expect(hello.runtime_epoch).toBe("epoch-uuid-1");
+    expect(hello.runtime_epoch).toBe("0199f0a1-2b3c-7d4e-8f01-234567890001");
     // 空配列でも field を載せる (「pending ゼロ」の宣言は省略と意味が異なる)。
     expect(hello.active_pending_request_ids).toEqual([]);
   });
@@ -462,7 +464,7 @@ describe("ADR 0014 Phase 4: hello runtime_epoch + active_pending_request_ids", (
       ingestToken: "tok",
       controlToken: "ctl-p4-re",
       sessionIds: ["s1"],
-      runtimeEpoch: "epoch-uuid-2",
+      runtimeEpoch: "0199f0a1-2b3c-7d4e-8f01-234567890002",
       pendingApprovalIdsProvider: () => pending,
     });
     client.connect();
@@ -485,7 +487,50 @@ describe("ADR 0014 Phase 4: hello runtime_epoch + active_pending_request_ids", (
       active_pending_request_ids?: unknown;
     }[];
     const last = hellos[hellos.length - 1]!;
-    expect(last.runtime_epoch).toBe("epoch-uuid-2"); // epoch はプロセス寿命内不変で毎回載る。
+    expect(last.runtime_epoch).toBe("0199f0a1-2b3c-7d4e-8f01-234567890002"); // epoch はプロセス寿命内不変で毎回載る。
     expect(last.active_pending_request_ids).toEqual([]); // 送信ごとに provider を再評価。
+  });
+
+  it("(P4-4) provider undefined (bridge 未生成) では field 省略 — 空宣言へ倒さない (TDA-8 R2)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4-undef",
+      sessionIds: ["s1"],
+      // 旧実装の `?? []` は「pending ゼロ宣言」= 全 pending stale の最も破壊的な値だった。
+      // undefined は「宣言不能」= field 省略 = backend は reconcile しない (fail-safe)。
+      pendingApprovalIdsProvider: () => undefined,
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+    const hello = cap.frames[0] as Record<string, unknown>;
+    expect(hello.type).toBe("hello");
+    expect("active_pending_request_ids" in hello).toBe(false);
+  });
+
+  it("(P4-5) cap 超過は切り詰めでなく field 省略 (TDA-9 R2: 偽 stale を作らない)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    const over = Array.from({ length: MAX_ACTIVE_PENDING_IDS + 1 }, (_, i) => `s1:apr-${i}`);
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4-cap",
+      sessionIds: ["s1"],
+      pendingApprovalIdsProvider: () => over,
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+    const hello = cap.frames[0] as Record<string, unknown>;
+    expect(hello.type).toBe("hello");
+    // 切り詰めて送ると「載らなかった生存 pending」が backend で偽 stale になる。省略なら
+    // 受信側 (parseActivePendingRequestIds) の欠落扱いと同じ「reconcile しない」= fail-safe。
+    expect("active_pending_request_ids" in hello).toBe(false);
   });
 });

@@ -116,6 +116,17 @@ export { normalizeScopePath, isPathWithinScope, sanitizeRepoLabel } from "./path
 export { parseAgentVisibilityWire, aggregateAgentReadiness } from "./agent-visibility-wire.js";
 export type { AgentVisibilityWire } from "./agent-visibility-wire.js";
 
+// approval reconcile hello 宣言の wire 構築 + 受信検証 (T1 single source: sidecar 送信 / backend 検証・ADR 0014 Phase 4)
+export {
+  MAX_ACTIVE_PENDING_IDS,
+  MAX_REQUEST_ID_LEN,
+  ACTIVE_PENDING_FIELD,
+  RUNTIME_EPOCH_FIELD,
+  buildApprovalReconcileHelloFields,
+  parseActivePendingRequestIds,
+  parseRuntimeEpoch,
+} from "./approval-reconcile-wire.js";
+
 // audit-coverage 導出 (per-provider 最終受信・gap 候補) の T1 single source
 //   (backend SQL 射影 / route / webui parse が共有・ingested_at 権威 + 非稼働≠gap + NO-RAW・ADR 019f4cdb)
 export {

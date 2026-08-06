@@ -195,6 +195,55 @@ origin=relay_lost, delivery=not_sent`).
     unrelated pending in the reducer), keeping the existing `auto_allowed`/`persist_grant`
     observation markers instead.
 
+  **Audit round 2 hardening (2026-08-06, SEC/QA/TDA full audit findings landed):**
+
+  - **Redaction-stable request ids (SEC-1, H).** Approval request ids no longer embed the raw
+    session id: `mintApprovalRequestId` derives `s<sha256(session_id)[0..12]>:apr-<128bit>`
+    so no charset run reaches the redaction high-entropy threshold. The old
+    `${sessionId}:apr-…` shape was mangled at the ingress floor for `sess_<uuidv7>` session
+    ids (41-char single run), splitting the id space between the bridge (raw) and the DB/UI
+    (redacted) — which both made the UI approve relay a silent no-op and made reconciliation
+    retire live pendings as `relay_lost`. `INV-APPROVAL-REQUEST-ID-STABLE` pins the contract
+    against the real redactor, including a hazard-reproduction pin for the legacy shape.
+  - **Freshness watermark (QA-1/TDA-5, M).** The declaration is a snapshot taken when the
+    hello frame is built, so a pending created just after it cannot appear in it. The
+    reconciler now skips pendings whose `requested_at` is newer than
+    `receivedAt - RECONCILE_WATERMARK_MS` (2s; sidecar and backend share a clock on the
+    loopback trust boundary). Genuinely stale pendings are retired by a later hello.
+  - **Amplification guards (SEC-3, M).** Reconciles are capped at `MAX_CONCURRENT_RECONCILES`
+    (excess signals dropped; retried on the next hello) and a signal covers at most
+    `MAX_RECONCILE_SESSIONS` owned sessions (over-limit skips reconcile, fail-safe).
+  - **Canonical wire parsing (TDA-2/SEC-6/TDA-9, M/L).** Field names, caps and validation for
+    `runtime_epoch` / `active_pending_request_ids` live once in event-model
+    (`approval-reconcile-wire.ts`) shared by the sidecar builder and the backend parser;
+    `runtime_epoch` is gated to uuid shape; an over-cap declaration is **omitted, never
+    truncated** (truncation would fabricate stale pendings). A provider returning `undefined`
+    (bridge not yet constructed) omits the field rather than declaring "zero pending".
+  - **Producer-side strict validation (SEC-4, M).** The synthetic cancel is validated against
+    the strict `EventPayload` union before ingest (parity with the sidecar's
+    `assertPayloadConsistency`); honest disclosure: backend ingress `parseEvent` passes
+    payloads through a loose object, so enum strictness lives at producer/consumer parse
+    boundaries, not at ingress (both realities are pinned by tests).
+  - **Audit read-layer separation (TDA-1, H).** `relay_lost` synthetic cancels are no longer
+    counted as operator hard gates: the audit store folds them into a separate
+    `synthetic_retired` counter (excluded from `by_decision`, hence from `hard_gate`), and
+    the review packet itemizes them under `reason=relay_lost` instead of `denied`. Nothing
+    claims a gate was exercised when nobody decided.
+  - **Production wiring gate (TDA-3, M).** `INV-APPROVAL-RECONCILE-WIRING` drives
+    `buildIngestionServer` end-to-end (real WS hello → synthetic cancel → fold) so deleting
+    the `onApprovalReconcile` registration goes red.
+  - **Accepted-risk / tracked disclosures (deadline v0.7):** (a) SEC-2: a peer holding
+    INGEST_TOKEN can claim any session with one hello and retire its pendings — same
+    single-operator/loopback trust boundary as the existing claim-based relay takeover; a
+    structural fix (restricting reconcile to ingest-observed sessions) would break acceptance
+    #7 for restarted daemons, so this is disclosed and tracked instead. (b) SEC-5: when a
+    real resolved is lost before persistence, the synthetic cancel row can be the only audit
+    record for a request that an operator did in fact decide; the synthetic row is defined as
+    an **observation of reconciliation**, not an assertion that the request was never
+    resolved. (c) TDA-4: after a synthetic cancel the session state may remain `waiting.*`,
+    keeping the needs-attention badge lit with no actionable card; state semantics for
+    relay-lost sessions are a tracked follow-up.
+
 **Phase 5 — Adapter capability manifest + UI.**
 **Absorbed by ADR 0015 (§D7).** The closed vocabulary {`authoritative`, `observed`, `inferred`,
 `unsupported`, `unverified`} maps onto ADR 0015's three observation-evidence axes

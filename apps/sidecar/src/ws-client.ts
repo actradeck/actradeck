@@ -13,6 +13,7 @@ import { EventEmitter } from "node:events";
 import { WebSocket } from "ws";
 
 import type { AgentVisibilityWire, PolicyCategory } from "@actradeck/event-model";
+import { buildApprovalReconcileHelloFields } from "@actradeck/event-model";
 import { tokenEquals } from "@actradeck/redaction";
 
 import type { EventStore } from "./store.js";
@@ -311,11 +312,13 @@ export interface WsClientOptions {
    * (ApprovalBridge.pendingRequestIds を daemon が配線)。hello の `active_pending_request_ids` に載せ、
    * backend の再起動跨ぎ reconciliation が「宣言に無い DB stale pending」を合成 cancel で非 actionable 化
    * する (受入#7)。**空配列も意味を持つ** (pending ゼロの宣言) ため、provider があれば常に field を載せる。
-   * 未指定 (observe-only codex-rollout daemon / 旧 daemon) は field 省略 = backend は reconcile しない
-   * (安全側・後方互換)。agentVisibilityProvider と同じ送信直前解決パターン (buildHelloFrame 単一出所で
-   * connect/reannounce 一様・TDA-1: 片方欠落だと reannounce で宣言が落ち偽 stale 化する)。
+   * 未指定 (observe-only codex-rollout daemon / 旧 daemon)、または provider が **undefined を返す**
+   * (bridge 未生成・teardown 中・TDA-8: `?? []` の空宣言は「全 pending stale」の最も破壊的な値ゆえ禁止)
+   * は field 省略 = backend は reconcile しない (安全側・後方互換)。agentVisibilityProvider と同じ
+   * 送信直前解決パターン (buildHelloFrame 単一出所で connect/reannounce 一様・TDA-1: 片方欠落だと
+   * reannounce で宣言が落ち偽 stale 化する)。
    */
-  readonly pendingApprovalIdsProvider?: () => readonly string[];
+  readonly pendingApprovalIdsProvider?: () => readonly string[] | undefined;
   /** 再接続バックオフ初期値 (ms)。 */
   readonly reconnectBaseMs?: number;
   readonly reconnectMaxMs?: number;
@@ -351,7 +354,7 @@ export class WsClient extends EventEmitter {
   private readonly spawnCapable: boolean;
   private readonly agentVisibilityProvider: (() => AgentVisibilityWire | undefined) | undefined;
   private readonly runtimeEpoch: string | undefined;
-  private readonly pendingApprovalIdsProvider: (() => readonly string[]) | undefined;
+  private readonly pendingApprovalIdsProvider: (() => readonly string[] | undefined) | undefined;
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
   private reconnectAttempts = 0;
@@ -582,11 +585,10 @@ export class WsClient extends EventEmitter {
     // ADR 019f1972 §2b: 送信直前に毎回 visibility を解決 (provider 未注入 / undefined なら field 省略)。
     // provider が fs I/O を担い (fail-safe に undefined)、buildHelloFrame は純粋なまま。
     const agentVisibility = this.agentVisibilityProvider?.();
-    // ADR 0014 Phase 4 (D5): 送信直前に生きている pending request_id 群を解決する (provider 未注入なら
-    // field 省略 = backend は reconcile しない)。**空配列も送る** (pending ゼロの宣言が stale 判定の根拠)。
-    const pendingIds = this.pendingApprovalIdsProvider
-      ? [...this.pendingApprovalIdsProvider()]
-      : undefined;
+    // ADR 0014 Phase 4 (D5): 送信直前に生きている pending request_id 群を解決する (provider 未注入 /
+    // provider が undefined を返す (bridge 未生成・TDA-8) なら field 省略 = backend は reconcile しない)。
+    // **空配列は送る** (pending ゼロの宣言が stale 判定の根拠)。
+    const pendingIds = this.pendingApprovalIdsProvider?.();
     return JSON.stringify({
       type: "hello",
       control_token: this.controlToken,
@@ -605,8 +607,9 @@ export class WsClient extends EventEmitter {
       // ADR 0014 Phase 4 (D5): daemon プロセスの runtime epoch (uuid・診断用) と、送信時点で生きている
       // 承認 pending の宣言 (backend 再起動跨ぎ reconciliation の根拠)。connect/reannounce 両経路を本
       // builder が単一出所として通る (TDA-1: 片方欠落だと reannounce で宣言が落ち偽 stale 化する)。
-      ...(this.runtimeEpoch !== undefined ? { runtime_epoch: this.runtimeEpoch } : {}),
-      ...(pendingIds !== undefined ? { active_pending_request_ids: pendingIds } : {}),
+      // field 名・cap は event-model の正準実装と共有 (TDA-2: 手書きミラー禁止)。cap 超過は切り詰め
+      // でなく field 省略 (TDA-9: 切り詰めは偽 stale を作る・省略は「reconcile しない」= fail-safe)。
+      ...buildApprovalReconcileHelloFields(this.runtimeEpoch, pendingIds),
     });
   }
 
