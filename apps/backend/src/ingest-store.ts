@@ -612,6 +612,45 @@ export class IngestStore {
     return { projection, liveness: reconstructLiveness(r.liveness) };
   }
 
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D6): 再起動跨ぎ reconciliation の読み口。
+   * 指定 session 群のうち **pending_approvals が非空** の行について、pending request_id 一覧と
+   * 合成 cancel イベント構築に必要な最小メタ (provider / 現 state) を返す。
+   * NO-RAW: 返すのは request_id (bridge 採番の相関 id) / provider slug / state enum のみで、
+   * pending entry の command/path (redaction 済みだが本 API では不要) は返さない。
+   */
+  async pendingApprovalsForSessions(sessionIds: readonly string[]): Promise<
+    {
+      session_id: string;
+      provider: string;
+      state: string | undefined;
+      request_ids: string[];
+    }[]
+  > {
+    if (sessionIds.length === 0) return [];
+    const { rows } = await this.pool.query(
+      `SELECT ss.session_id, ss.state, ss.pending_approvals, s.provider
+         FROM session_state ss
+         JOIN sessions s ON s.session_id = ss.session_id
+        WHERE ss.session_id = ANY($1::text[])
+          AND jsonb_array_length(ss.pending_approvals) > 0`,
+      [[...sessionIds]],
+    );
+    return (
+      rows as {
+        session_id: string;
+        state: string | null;
+        pending_approvals: unknown;
+        provider: string;
+      }[]
+    ).map((r) => ({
+      session_id: r.session_id,
+      provider: r.provider,
+      state: r.state ?? undefined,
+      request_ids: parsePendingApprovals(r.pending_approvals).map((p) => p.request_id),
+    }));
+  }
+
   /** ADR 0015 §D4: work-items 投影キャッシュが現在保持する session 数 (テスト/監視用・常に <= 上限)。 */
   get workItemsTrackedSessions(): number {
     return this.workItemsCache.size;

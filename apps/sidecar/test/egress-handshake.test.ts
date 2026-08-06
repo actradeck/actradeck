@@ -391,3 +391,101 @@ describe("INV egress: Bearer auth + hello handshake (real ws server)", () => {
     expect(helloFrames[helloFrames.length - 1]?.control_token).toBe(CTL);
   });
 });
+
+/**
+ * ADR 0014 Phase 4 (decision 019fd705 D5): hello の runtime_epoch / active_pending_request_ids。
+ *
+ * 不変条件:
+ *  (P4-1) runtimeEpoch / pendingApprovalIdsProvider 設定時、hello に runtime_epoch と
+ *         active_pending_request_ids が載る。**空配列も載る** (pending ゼロの宣言が stale 判定の根拠)。
+ *  (P4-2) 未設定 (旧 daemon / observe-only codex-rollout) では両 field を載せない (後方互換 =
+ *         backend は reconcile しない)。
+ *  (P4-3) reannounce も同一 builder を通り、provider を **送信ごとに再評価** した最新 pending 集合を
+ *         載せる (TDA-1: 片方欠落だと reannounce で宣言が落ち偽 stale 化する H 回帰と同型)。
+ */
+describe("ADR 0014 Phase 4: hello runtime_epoch + active_pending_request_ids", () => {
+  it("(P4-1) hello carries runtime_epoch and active_pending_request_ids (empty array included)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4",
+      sessionIds: ["s1"],
+      runtimeEpoch: "epoch-uuid-1",
+      pendingApprovalIdsProvider: () => [],
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+
+    const hello = cap.frames[0] as {
+      type?: string;
+      runtime_epoch?: unknown;
+      active_pending_request_ids?: unknown;
+    };
+    expect(hello.type).toBe("hello");
+    expect(hello.runtime_epoch).toBe("epoch-uuid-1");
+    // 空配列でも field を載せる (「pending ゼロ」の宣言は省略と意味が異なる)。
+    expect(hello.active_pending_request_ids).toEqual([]);
+  });
+
+  it("(P4-2) hello omits both fields when not configured (backward compat / observe-only daemon)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4-omit",
+      sessionIds: ["s1"],
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+
+    const hello = cap.frames[0] as Record<string, unknown>;
+    expect(hello.type).toBe("hello");
+    expect("runtime_epoch" in hello).toBe(false);
+    expect("active_pending_request_ids" in hello).toBe(false);
+  });
+
+  it("(P4-3) reannounce re-sends hello with per-send re-evaluated pending ids (single-source builder)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    let pending: string[] = ["sess:apr-1"];
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4-re",
+      sessionIds: ["s1"],
+      runtimeEpoch: "epoch-uuid-2",
+      pendingApprovalIdsProvider: () => pending,
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+    expect(
+      (cap.frames[0] as { active_pending_request_ids?: unknown }).active_pending_request_ids,
+    ).toEqual(["sess:apr-1"]);
+
+    // pending が解決されて空になった状況を模して reannounce → 最新 (空) 集合 + epoch 維持。
+    pending = [];
+    client.reannounce();
+    for (
+      let i = 0;
+      i < 100 && cap.frames.filter((f) => (f as { type?: string }).type === "hello").length < 2;
+      i++
+    )
+      await sleep(10);
+    const hellos = cap.frames.filter((f) => (f as { type?: string }).type === "hello") as {
+      runtime_epoch?: unknown;
+      active_pending_request_ids?: unknown;
+    }[];
+    const last = hellos[hellos.length - 1]!;
+    expect(last.runtime_epoch).toBe("epoch-uuid-2"); // epoch はプロセス寿命内不変で毎回載る。
+    expect(last.active_pending_request_ids).toEqual([]); // 送信ごとに provider を再評価。
+  });
+});

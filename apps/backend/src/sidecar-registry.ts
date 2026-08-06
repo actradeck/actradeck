@@ -78,6 +78,13 @@ interface SidecarConn {
    * セッション出現で panel が消えること)。
    */
   agentVisibility?: AgentVisibilityWire;
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705): sidecar daemon **プロセス**の runtime epoch (sidecar 起動時
+   * randomUUID・寿命内不変・hello で申告)。daemonId (per-connection churn) と異なり同一プロセスの
+   * 再接続で不変ゆえ「再接続 vs 再起動」を診断区別できる。credential でない・NO-RAW (uuid のみ)。
+   * 未申告 (旧 dist / observe-only daemon) は undefined。
+   */
+  runtimeEpoch?: string;
   /** この接続が所有する session_id 群 (hello + ingest 観測で学習)。 */
   readonly sessions: Set<string>;
 }
@@ -105,6 +112,14 @@ interface HelloFrame {
    * parseAgentVisibilityWire で検証射影する (wire を盲信しない・多層防御)。
    */
   agent_visibility?: unknown;
+  /** ADR 0014 Phase 4: sidecar プロセスの runtime epoch (uuid 申告・診断用)。unknown 受け。 */
+  runtime_epoch?: unknown;
+  /**
+   * ADR 0014 Phase 4: 送信時点で sidecar 側に **生きている** 承認 pending の request_id 宣言。
+   * 空配列も意味を持つ (pending ゼロの宣言)。field 欠落 = 旧 sidecar / observe-only daemon で
+   * reconcile 対象外 (安全側)。unknown 受け — handleHello が型/上限を検証する。
+   */
+  active_pending_request_ids?: unknown;
 }
 
 /** sidecar handshake か判定する (ingest event と区別)。 */
@@ -311,6 +326,33 @@ export const PRESENCE_GRACE_MS = 5000;
 /** presence(接続在席) membership 変化の通知。live=true で in、false で out(grace 満了後)。 */
 export type PresenceListener = (sessionId: string, live: boolean) => void;
 
+/**
+ * ADR 0014 Phase 4 (decision 019fd705 D6): hello の pending 宣言シグナル。
+ * sessionIds = この hello を送った接続が **現に所有する** session 群 (sessionOwner 一致のみ)。
+ * activeRequestIds = sidecar 側で生きている pending の宣言。宣言に無い DB pending は stale
+ * (sidecar が再起動して in-memory pending を失った等) であり、reconciler が合成 cancel
+ * (relay_lost/not_sent) で非 actionable 化する (受入#7)。宣言に在る pending は維持 (受入#6)。
+ */
+export interface ApprovalReconcileSignal {
+  readonly sessionIds: readonly string[];
+  readonly activeRequestIds: ReadonlySet<string>;
+  /** 申告された runtime epoch (診断用・reconcile 判定には使わない)。 */
+  readonly runtimeEpoch?: string;
+}
+
+/** ADR 0014 Phase 4: pending 宣言つき hello を受けたときの通知 (ingestion-server が reconciler を配線)。 */
+export type ApprovalReconcileListener = (signal: ApprovalReconcileSignal) => void;
+
+/**
+ * ADR 0014 Phase 4: active_pending_request_ids の受理上限。正規 sidecar の pending は高々数十
+ * (MAX_PENDING_APPROVALS=64/session) であり、これを大きく超える宣言は malformed とみなし
+ * **reconcile 自体をスキップ**する (fail-safe: 不正な宣言を根拠に pending を消さない)。
+ */
+export const MAX_ACTIVE_PENDING_IDS = 1024;
+
+/** 個々の request_id の受理上限長 (bridge 採番 id は十分短い・異常長は malformed)。 */
+const MAX_REQUEST_ID_LEN = 256;
+
 /** policy relay 操作種別 (get/set/unset/list/resolve)。 */
 export type PolicyRelayOp = "get" | "set" | "unset" | "list" | "resolve";
 
@@ -348,6 +390,8 @@ export class SidecarRegistry {
   private readonly graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** presence membership 変化リスナ (delta.list 発火源)。 */
   private readonly presenceListeners: PresenceListener[] = [];
+  /** ADR 0014 Phase 4: pending 宣言つき hello のリスナ (approval reconciler の駆動源)。 */
+  private readonly approvalReconcileListeners: ApprovalReconcileListener[] = [];
   /** grace 期間 (ms)。既定 PRESENCE_GRACE_MS。テスト/統合で短縮注入可能。 */
   private readonly graceMs: number;
   /**
@@ -459,7 +503,57 @@ export class SidecarRegistry {
         if (!next.has(sid)) this.releaseSession(conn, sid);
       }
     }
+    // ADR 0014 Phase 4 (decision 019fd705): runtime epoch (診断用) と pending 宣言を処理する。
+    // epoch は uuid 想定の短い文字列のみ受理 (NO-RAW・異常長は無視)。
+    if (
+      typeof frame.runtime_epoch === "string" &&
+      frame.runtime_epoch.length > 0 &&
+      frame.runtime_epoch.length <= 64
+    ) {
+      conn.runtimeEpoch = frame.runtime_epoch;
+    }
+    this.maybeEmitApprovalReconcile(conn, frame.active_pending_request_ids);
     return true;
+  }
+
+  /**
+   * ADR 0014 Phase 4 (D6): hello の `active_pending_request_ids` 宣言を検証し、reconcile シグナルを
+   * リスナ (ingestion-server が配線する ApprovalReconciler) へ通知する。
+   *
+   * fail-safe (消さない方向) の判定:
+   *  - field 欠落 (旧 sidecar / observe-only codex-rollout daemon) → シグナルなし (reconcile しない)。
+   *  - 非配列 / 要素に非 string / 上限超過 (MAX_ACTIVE_PENDING_IDS) → malformed とみなしシグナルなし
+   *    (不正な宣言を根拠に pending を合成 cancel しない)。
+   *  - 対象 session は **この接続が現に所有する** もののみ (sessionOwner 一致)。後勝ち再接続で他接続へ
+   *    移った session の pending を、古い接続の宣言で消さない (multiplex 安全)。
+   *  - 空配列は正当な「pending ゼロ」宣言 (当該 session 群の DB pending は全て stale = 受入#7 の根拠)。
+   */
+  private maybeEmitApprovalReconcile(conn: SidecarConn, declared: unknown): void {
+    if (!Array.isArray(declared) || declared.length > MAX_ACTIVE_PENDING_IDS) return;
+    const active = new Set<string>();
+    for (const id of declared) {
+      if (typeof id !== "string" || id.length === 0 || id.length > MAX_REQUEST_ID_LEN) return; // malformed → 全スキップ
+      active.add(id);
+    }
+    const sessionIds = [...conn.sessions].filter((sid) => this.sessionOwner.get(sid) === conn);
+    if (sessionIds.length === 0) return;
+    const signal: ApprovalReconcileSignal = {
+      sessionIds,
+      activeRequestIds: active,
+      ...(conn.runtimeEpoch !== undefined ? { runtimeEpoch: conn.runtimeEpoch } : {}),
+    };
+    for (const cb of this.approvalReconcileListeners) {
+      try {
+        cb(signal);
+      } catch {
+        // リスナ側の失敗は handshake 処理に波及させない (reconcile は best-effort・次 hello で再試行)。
+      }
+    }
+  }
+
+  /** ADR 0014 Phase 4: pending 宣言つき hello を購読する (ingestion-server が reconciler を配線)。 */
+  onApprovalReconcile(cb: ApprovalReconcileListener): void {
+    this.approvalReconcileListeners.push(cb);
   }
 
   /**
@@ -573,6 +667,7 @@ export class SidecarRegistry {
     for (const timer of this.graceTimers.values()) clearTimeout(timer);
     this.graceTimers.clear();
     this.presenceListeners.length = 0;
+    this.approvalReconcileListeners.length = 0;
     // 未解決の round-trip 4 面を安全側 reject し、タイマを解放する (応答は貯めていない)。
     // spawn のみ transient を付ける (呼び元 HTTP は 503)。
     this.pendingDiffs.rejectAll(() => ({ ok: false, error: "server shutting down" }));

@@ -74,6 +74,8 @@ export {
   RiskLevel,
   ApprovalDecision,
   ApprovalTrigger,
+  ResolutionOrigin,
+  DeliveryStatus,
   SecretKind,
   PolicyCategory,
   DEFAULT_GATED_CATEGORIES,

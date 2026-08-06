@@ -15,6 +15,8 @@ import { defaultExclude, defineConfig } from "vitest/config";
  * ため real-PG ではなく unit 側。
  */
 const REAL_PG_TESTS = [
+  // ADR 0014 Phase 4: 受入#6/#7 (real-PG writer・requested/合成 cancel を実 ingest 書込)。
+  "test/inv-approval-reconcile.test.ts",
   "test/inv-safety-demo-backend-e2e.test.ts",
   "test/inv-audit-coverage.test.ts",
   "test/inv-audit-packet-route.test.ts",

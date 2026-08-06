@@ -164,6 +164,37 @@ origin=relay_lost, delivery=not_sent`).
   pending across a backend restart if the same sidecar reconnects, and makes stale pending
   non-actionable when the sidecar epoch changed.
 
+  **Landed 2026-08-06 (decision `019fd705`).** Implementation notes, where they refine the
+  sketch above:
+
+  - Reconciliation is driven by the `active_pending_request_ids` **declaration**, not by an
+    epoch comparison: an empty array is a meaningful "no pending survives" declaration, while
+    a missing field means an older (or observe-only) daemon and reconciliation is skipped
+    entirely (fail-safe: nothing is retired on missing/malformed declarations, and only
+    sessions the declaring connection currently owns are considered). `runtime_epoch` is
+    announced and recorded for diagnostics; the declaration is always current, so an epoch
+    comparison adds no reconcile signal.
+  - Stale entries are retired by ingesting a synthetic `tool.permission.resolved
+    { decision: cancel, resolution_origin: relay_lost, delivery_status: not_sent }` through
+    the **normal ingress path** (redaction floor + `parseEvent` + store). The fold clears the
+    card (acceptance #7) and the audit trail records honestly that nobody decided and nothing
+    was delivered. Declared-alive entries are left untouched and resolve exactly once over the
+    re-established relay (acceptance #6). Known edge (disclosed): a sidecar that reconnects
+    with a queued real `resolved` still unsent can produce both the synthetic cancel and the
+    real event for one request_id — projection treats the second as a no-op; the audit trail
+    keeps both.
+  - The Claude Code hook path gains real `child_exit` detection: a hook client that
+    disconnects before the response resolves its pending immediately
+    (`origin=child_exit, delivery=not_sent`) instead of hanging until the 30s timeout.
+  - `delivery_status` derives from the actual write result (CC: hook HTTP response write
+    accepted by the socket layer; codex: `sendResponse` success, with `suppressed`/sync-throw
+    mapping to `not_sent`). "sent" claims socket-layer acceptance only, never that the peer
+    read it.
+  - `resolution_origin=policy` is reserved vocabulary with no current emitter: auto-allow
+    paths still emit no `requested`/`resolved` pair (a request_id-less `resolved` would clear
+    unrelated pending in the reducer), keeping the existing `auto_allowed`/`persist_grant`
+    observation markers instead.
+
 **Phase 5 — Adapter capability manifest + UI.**
 **Absorbed by ADR 0015 (§D7).** The closed vocabulary {`authoritative`, `observed`, `inferred`,
 `unsupported`, `unverified`} maps onto ADR 0015's three observation-evidence axes

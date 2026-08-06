@@ -20,9 +20,10 @@
  */
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 
-import type { ApprovalDecision } from "@actradeck/event-model";
+import type { ApprovalDecision, DeliveryStatus, ResolutionOrigin } from "@actradeck/event-model";
 
 import type { ApprovalBridge } from "./approval-bridge.js";
+import { resolutionOriginSuffix } from "./approval-bridge.js";
 import {
   CodexApprovalBridge,
   type CodexApprovalCard,
@@ -265,14 +266,21 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
         }),
       );
     },
-    emitResolved: (requestId: string, decision: ApprovalDecision | "deny") => {
+    emitResolved: (
+      requestId: string,
+      decision: ApprovalDecision | "deny",
+      origin: ResolutionOrigin | undefined,
+      delivery: DeliveryStatus,
+    ) => {
       // TDA-1 (ADR 019f2476): 承認解決を tool.permission.resolved として対称 emit
       //   (claude=hook-receiver.ts と同一契約)。①Approval Inbox カードの clear
       //   (projection foldPendingApprovals は provider 非依存で request_id 一致除去)
       //   ②決定の監査証跡。emitCard と同じ codex event metadata を通し
       //   provider=codex / source=app_server / thread_id / turn_id を担保する。
-      //   NO-RAW: payload は kind/request_id/decision(enum) のみ・raw command/cwd を再掲しない。
+      //   NO-RAW: payload は kind/request_id/enum のみ・raw command/cwd を再掲しない。
       //   全イベントは sink.emit の redactDeep choke を通る。
+      //   ADR 0014 Phase 4 (decision 019fd705): resolution_origin / delivery_status を CC 経路と
+      //   同一契約で載せる (closed enum のみ・「送った」と偽らない)。
       const allowed = decision === "allow" || decision === "allow_for_session";
       emitCodex((sessionId, ts) =>
         buildEvent({
@@ -285,8 +293,14 @@ export function startManagedCodex(opts: CodexRunnerOptions): CodexManagedSession
           event_type: "tool.permission.resolved",
           state: allowed ? "running.tool_preparing" : "running.model_wait",
           timestamp: ts,
-          summary: `承認 ${allowed ? "許可" : "拒否"}`,
-          payload: { kind: "tool.permission.resolved", request_id: requestId, decision },
+          summary: `承認 ${allowed ? "許可" : "拒否"}${resolutionOriginSuffix(origin)}`,
+          payload: {
+            kind: "tool.permission.resolved",
+            request_id: requestId,
+            decision,
+            ...(origin !== undefined ? { resolution_origin: origin } : {}),
+            delivery_status: delivery,
+          },
         }),
       );
     },

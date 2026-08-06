@@ -32,6 +32,41 @@ export const ApprovalDecision = z.enum(["allow", "allow_for_session", "deny", "c
 export type ApprovalDecision = z.infer<typeof ApprovalDecision>;
 
 /**
+ * ADR 0014 Phase 4 (decision 019fd705): 承認解決の **出所 (誰が/何が解決したか)**。
+ * 「deny を送った」と偽らないための正直性メタデータ (closed enum・NO-RAW)。
+ * - "operator":   UI の人間決定 (allow/allow_for_session/deny/cancel)。
+ * - "timeout":    承認タイムアウトの安全側 deny (30s 既定)。
+ * - "policy":     ポリシー由来の自動解決 (語彙のみ確保・現行 emitter は未使用 — auto-allow 経路は
+ *                 requested 自体を emit しない設計を維持。projection の request_id 無し resolved
+ *                 全消し挙動と衝突させないため)。
+ * - "shutdown":   sidecar graceful shutdown の drain (安全側 deny)。
+ * - "child_exit": agent プロセス消失 (codex child exit / CC hook クライアント切断) の安全側 deny。
+ * - "relay_lost": daemon crash 等で中継が失われ、backend が stale pending を **合成 cancel** で
+ *                 非 actionable 化したもの (誰も決定していない・deny を偽装しない)。
+ * additive optional。未設定は「(旧 sidecar) 出所情報なし」の後方互換値。
+ */
+export const ResolutionOrigin = z.enum([
+  "operator",
+  "timeout",
+  "policy",
+  "shutdown",
+  "child_exit",
+  "relay_lost",
+]);
+export type ResolutionOrigin = z.infer<typeof ResolutionOrigin>;
+
+/**
+ * ADR 0014 Phase 4: 決定が **agent へ実際に届いたか** (書込結果から導出・偽らない)。
+ * - "sent":     応答書込がソケット/transport 層に受理された (CC: hook HTTP 応答 write 成功、
+ *               codex: JSON-RPC Response 送出成功)。「相手が読んだ」までは主張しない。
+ * - "not_sent": 書けなかった / 書かなかった (クライアント切断・suppressed・合成 cancel)。
+ * - "unknown":  送信を試みたが成否を判定できない。
+ * additive optional。未設定は「(旧 sidecar) 配送情報なし」の後方互換値。
+ */
+export const DeliveryStatus = z.enum(["sent", "not_sent", "unknown"]);
+export type DeliveryStatus = z.infer<typeof DeliveryStatus>;
+
+/**
  * 自動ガード (ADR 019ecc70 段階1): 承認 pause の **理由 (trigger)**。
  * - "destructive": 既存の破壊的コマンド/ファイル/MCP/WebFetch ゲート (rm -rf 等) で pause。
  * - "secret": tool_input に secret が検出されたため pause (新規・D1/D4)。
@@ -298,6 +333,11 @@ const ToolPermissionResolved = variant("tool.permission.resolved", {
   // 該当 request_id を除去するために必要 (ADR 019e9999)。
   request_id: z.string().optional(),
   decision: ApprovalDecision,
+  // ADR 0014 Phase 4 (decision 019fd705): 解決の出所と配送結果 (正直性メタデータ)。
+  // additive optional (trigger/secret_kinds と同じ後方互換パターン)。closed enum のみ (NO-RAW)。
+  // 読まない consumer は無影響。語彙は coordinated deploy 前提 (strict enum ゆえ未知値は parse 拒否)。
+  resolution_origin: ResolutionOrigin.optional(),
+  delivery_status: DeliveryStatus.optional(),
 });
 
 // --- コマンド実行 -------------------------------------------------------

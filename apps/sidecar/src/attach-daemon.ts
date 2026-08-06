@@ -16,7 +16,7 @@
  * - INV-ATTACH-REDACTION: 全 emit (hook 正規化 / git diff) は sink.emit choke を通る。
  * - INV-ATTACH-MULTIPLEX: registry が session_id ごとに独立 identity/projection を持つ。
  */
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import { parseCodexSpawnRequest, type CodexSpawnResult } from "@actradeck/event-model";
 
@@ -89,6 +89,11 @@ export class AttachDaemon {
   private readonly hookToken: string;
   /** inbound 制御チャネルトークン (approval は honor、interrupt は no-kill)。 */
   private readonly controlToken: string;
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D5): daemon プロセスの runtime epoch (起動時採番・寿命内不変)。
+   * hello の runtime_epoch に載せる (診断用・credential でない・NO-RAW uuid のみ)。
+   */
+  private readonly runtimeEpoch: string = randomUUID();
   private readonly onInterruptIgnored: ((sessionId: string | undefined) => void) | undefined;
   private readonly onSpawnHandled: ((ok: boolean, code?: string) => void) | undefined;
   private started = false;
@@ -122,6 +127,11 @@ export class AttachDaemon {
       ],
       // ADR 019f1972 §2b: agent 観測可能性を hello に相乗り (machine-global・fresh per send・fail-safe)。
       agentVisibilityProvider: () => computeAgentVisibilityWire(),
+      // ADR 0014 Phase 4 (decision 019fd705 D5): daemon プロセスの runtime epoch + 生存 pending 宣言。
+      // approvalBridge は本コンストラクタで後続生成されるため provider は遅延参照する (hello 送出は
+      // connect 後 = 構築完了後のみ)。未生成ガードは防御的 (構造上到達しない)。
+      runtimeEpoch: this.runtimeEpoch,
+      pendingApprovalIdsProvider: () => this.approvalBridge?.pendingRequestIds() ?? [],
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }
         : {}),

@@ -16,7 +16,12 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 
-import type { ApprovalDecision, ApprovalTrigger, PolicyCategory } from "@actradeck/event-model";
+import type {
+  ApprovalDecision,
+  ApprovalTrigger,
+  PolicyCategory,
+  ResolutionOrigin,
+} from "@actradeck/event-model";
 import {
   DEFAULT_GATED_CATEGORIES,
   isKnownRedactionKind,
@@ -68,6 +73,13 @@ export interface ApprovalResult {
    * 観測イベントに persist_grant マーカーを付けて「再起動跨ぎ grant 由来」を監査識別可能にする。
    */
   readonly persistGrant?: boolean;
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705): この解決の **出所** (operator / timeout / shutdown /
+   * child_exit)。pending を解決する全経路が必ず設定し、hook-receiver / codex emitResolved が
+   * tool.permission.resolved payload の `resolution_origin` へ透過する (「deny を送った」と偽らない)。
+   * defer / auto-allow (resolved を emit しない経路) では未設定。
+   */
+  readonly origin?: ResolutionOrigin;
 }
 
 /**
@@ -135,6 +147,28 @@ interface PendingApproval {
  * 例: `["bash","high","b c"]` と `["bash","high b","c"]` は素朴な空白連結なら同一文字列
  * `bash high b c` に潰れるが、JSON 配列なら別エンコードで別署名になる (テストがこれをゲートする)。
  */
+/**
+ * ADR 0014 Phase 4: resolved イベント summary の出所ラベル (日本語・観測性)。
+ * hook-receiver (CC) と codex-runner が共有する単一出所 (2 経路の表示 drift 防止)。
+ * operator は従来表示を変えない空文字 (後方互換)。
+ */
+export function resolutionOriginSuffix(origin: ResolutionOrigin | undefined): string {
+  switch (origin) {
+    case "timeout":
+      return " (タイムアウト)";
+    case "shutdown":
+      return " (シャットダウン)";
+    case "child_exit":
+      return " (プロセス消失)";
+    case "relay_lost":
+      return " (中継喪失)";
+    case "policy":
+      return " (ポリシー)";
+    default:
+      return "";
+  }
+}
+
 export function encodeOperationSignature(kind: string, risk: string, operand: string): string {
   return createHash("sha256")
     .update(JSON.stringify([kind, risk, operand]))
@@ -761,7 +795,12 @@ export class ApprovalBridge {
     return new Promise<ApprovalResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        resolve({ behavior: "deny", reason: "approval timeout (safe default: deny)" });
+        // ADR 0014 Phase 4: origin="timeout" を明示 (resolved payload の resolution_origin へ透過)。
+        resolve({
+          behavior: "deny",
+          reason: "approval timeout (safe default: deny)",
+          origin: "timeout",
+        });
       }, this.timeoutMs);
       // D5: secret-trigger は resolve で allow_for_session が来ても署名を登録しない
       // (cacheable=false)。destructive-only のみ後で cache 登録しうる。
@@ -876,13 +915,45 @@ export class ApprovalBridge {
         );
       }
     }
-    p.resolve({ behavior, decision, ...(reason !== undefined ? { reason } : {}) });
+    // ADR 0014 Phase 4: resolve() 経由は UI の人間決定 = origin="operator"。
+    p.resolve({
+      behavior,
+      decision,
+      origin: "operator",
+      ...(reason !== undefined ? { reason } : {}),
+    });
+    return true;
+  }
+
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D3): pending を **外部要因** (agent プロセス消失等) で
+   * 安全側 deny へ即解決する。origin を呼び元が指定する (CC hook クライアント切断 / codex child exit
+   * = "child_exit")。UI 決定 (resolve) と区別され、resolved payload の resolution_origin に載る。
+   * pending 不在 (解決済み / timeout 済み) は no-op で false (冪等・二重解決しない)。
+   */
+  cancelPending(requestId: string, origin: ResolutionOrigin, reason?: string): boolean {
+    const p = this.pending.get(requestId);
+    if (!p) return false;
+    clearTimeout(p.timer);
+    this.pending.delete(requestId);
+    p.resolve({ behavior: "deny", origin, ...(reason !== undefined ? { reason } : {}) });
     return true;
   }
 
   /** 保留中の承認件数 (検証・shutdown 用)。 */
   get pendingCount(): number {
     return this.pending.size;
+  }
+
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D5): 現在保留中の承認 request_id 一覧。
+   * hello frame の `active_pending_request_ids` provider が送信直前に毎回呼ぶ (backend の
+   * 再起動跨ぎ reconciliation で「まだ生きている pending」を宣言し、宣言に無い DB stale pending を
+   * backend が合成 cancel で非 actionable 化する)。id は bridge 採番の高エントロピー相関 id のみ
+   * (NO-RAW: コマンド/パス/秘匿値を含まない・既存 event payload と同じ公開面)。
+   */
+  pendingRequestIds(): string[] {
+    return [...this.pending.keys()];
   }
 
   /**
@@ -1110,7 +1181,12 @@ export class ApprovalBridge {
   drain(): void {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.resolve({ behavior: "deny", reason: "sidecar shutdown (safe default: deny)" });
+      // ADR 0014 Phase 4: origin="shutdown" を明示 (graceful shutdown 由来の deny と分かる監査行)。
+      p.resolve({
+        behavior: "deny",
+        reason: "sidecar shutdown (safe default: deny)",
+        origin: "shutdown",
+      });
     }
     this.pending.clear();
     // TDA-1 (ADR 019e9b7a): session-allow 署名キャッシュも破棄する。allow_for_session は
