@@ -18,7 +18,12 @@
  */
 import { randomBytes, randomUUID } from "node:crypto";
 
-import { parseCodexSpawnRequest, type CodexSpawnResult } from "@actradeck/event-model";
+import {
+  APPROVAL_DECISIONS,
+  parseCodexSpawnRequest,
+  type ApprovalDecision,
+  type CodexSpawnResult,
+} from "@actradeck/event-model";
 
 import { computeAgentVisibilityWire } from "./agent-visibility.js";
 import { AttachSessionRegistry } from "./attach-session-registry.js";
@@ -212,17 +217,18 @@ export class AttachDaemon {
       "approval",
       (msg: { request_id: string; decision: unknown; reason?: string; persist?: unknown }) => {
         if (typeof msg.request_id !== "string") return;
+        // TDA-R6-1: 判定は正準 `APPROVAL_DECISIONS` (event-model) を消費する — sidecar.ts と同一の
+        // set-equivalent ゲート (第 5 の手書き `!==` 連鎖ミラーを残さない・受理集合不変)。
         if (
-          msg.decision !== "allow" &&
-          msg.decision !== "allow_for_session" &&
-          msg.decision !== "deny" &&
-          msg.decision !== "cancel"
+          typeof msg.decision !== "string" ||
+          !(APPROVAL_DECISIONS as readonly string[]).includes(msg.decision)
         ) {
           return; // enum 外は破棄 (fail-safe)
         }
+        const decision = msg.decision as ApprovalDecision;
         // ADR 019ee0c0: persist は boolean のときのみ honor (型崩れは false 扱い=fail-safe)。
         const persist = msg.persist === true;
-        this.approvalBridge.resolve(msg.request_id, msg.decision, msg.reason, persist);
+        this.approvalBridge.resolve(msg.request_id, decision, msg.reason, persist);
       },
     );
 

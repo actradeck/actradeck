@@ -433,7 +433,10 @@ origin=relay_lost, delivery=not_sent`).
     `INV-APPROVAL-DECISION-VOCAB` pins `AUDIT_DECISIONS`/webui `DECISIONS` reference identity
     (the identical hand literal previously survived the full suite — probe P3c) and pins the
     signed manifest's `approval_<d>` projection over the whole vocabulary, so a future 5th
-    decision goes RED and forces a deliberate manifest version bump.
+    decision goes RED at the normalize stage; the *binding* follow-through (that a declared
+    field actually folds into the signed root) is enforced separately by the R7
+    root-sensitivity pin (`INV-AUDIT-BINDING-COMPLETENESS`, SEC-R6-1) — the projection pin
+    alone did not force it.
   - **Renderer-side binding-boundary complement (QA-R5-4, M).** The SEC-R4-1 pin only fixed
     "entries do not change `root`"; nothing failed if a renderer started displaying entries
     (probe P22). HTML/MD outputs are now pinned byte-identical under entries injection, so
@@ -457,8 +460,10 @@ origin=relay_lost, delivery=not_sent`).
     declaration and is therefore always synthetically cancelled past the watermark — a live
     approval retired with an audit row asserting `relay_lost`. Honest scoping: the trigger
     class is structurally kept at zero by CI (`INV-APPROVAL-REQUEST-ID-STABLE`: all
-    `REDACTION_RULES` × id-shape corpus = 0 matches), the degradation is inside the
-    single-operator boundary, and it predates R5. The fix is a gate change on the predicate
+    `REDACTION_RULES` × id-shape corpus = 0 matches — deterministic for fixed-part-matching
+    rules; sparse probabilistic rules are outside the corpus guarantee and are mitigated by
+    the bridge's runtime re-roll, per that metatest's own coverage disclosure), the
+    degradation is inside the single-operator boundary, and it predates R5. The fix is a gate change on the predicate
     that decides destruction (skip synthesis for ids that are neither canonical nor a
     known-legacy shape the coordinated deploy intends to retire), which per the
     finding-registry's boundary-gate default requires a full re-audit — it is scheduled into
@@ -467,6 +472,46 @@ origin=relay_lost, delivery=not_sent`).
   - **Sweep (L).** relay_lost human-label divergence across tiers (TDA-R5-4) and the
     `ACTIVE_PENDING_FIELD`/`RUNTIME_EPOCH_FIELD` exports with no external runtime consumer
     (TDA-R5-5, disclosed in their docstring) are tracked in the phase tech-debt sweep.
+
+  **Audit round 7 (2026-08-07, landing of the R6 targeted re-audit findings — no H):**
+
+  - **The fifth hand copy is gone (TDA-R6-1, M).** The R6 claim "the four residual hand
+    copies are gone" was literally true for the four sites the R5 audit enumerated, but the
+    attach daemon — the default observation mode — carried a byte-identical `!==` chain with
+    zero tripwire (no test exercised its approval handler). The gate now consumes
+    `APPROVAL_DECISIONS` (same set-equivalent form as the managed sidecar) and the
+    set-equivalence test runs against **both** wirings. Honest scope after this round: the
+    untyped-gate class is closed repo-wide; the `by_decision.<d>` hand projections in the
+    CSV/HTML/MD report renderers remain (TDA-R6-2, L — a 5th decision would silently miss
+    from those outputs while the conservation row and the vocabulary pin go visibly
+    inconsistent; tracked in the sweep, not individually).
+  - **The set-equivalence pin now asserts argument fidelity (QA-R6-1, M).** The R6 test
+    asserted only call counts; an injected mutant that discarded the validated decision and
+    passed `"allow"` — converting every operator deny/cancel into allow on the relay —
+    survived 1654/1654. Each canonical member is now asserted to reach `resolve` with the
+    **unaltered** decision (`toHaveBeenLastCalledWith`), plus a non-vacuity guard on the
+    vocabulary length (QA-R6-3).
+  - **Binding completeness is pinned (SEC-R6-1, M).** The R6 projection pin fixed only the
+    normalize stage; a field added to the interface + normalize but omitted from
+    `canonicalizeSummary`'s positional list would be declared yet unbound (forgeable with
+    `verify ok=true`) while every tripwire stayed green. `INV-AUDIT-BINDING-COMPLETENESS`
+    asserts root-sensitivity for **every** `manifest.summary` key (auto-extends on key
+    addition; 23-field floor), closing the declared-but-unbound class for the summary
+    projection. The ADR wording above is corrected accordingly.
+  - **Canonical arrays are frozen (SEC-R6-4, L).** `APPROVAL_DECISIONS` /
+    `RESOLUTION_ORIGINS` are now frozen copies (the approval gate's runtime dependency must
+    not be a shared mutable array; zod's `.options` stays untouched internally), with an
+    `Object.isFrozen` pin. `decisionLabel` lookups are `Object.hasOwn`-guarded so
+    prototype-chain members (`"constructor"`, `"__proto__"`) pass through as raw text instead
+    of vanishing (SEC-R6-3, with test vectors).
+  - **Sentinel metatest precision (SEC-R6-2/R6-5, L).** The SQL-presence guard is per known
+    file (a trailing comment can no longer satisfy the count while the real SQL disappears),
+    `/* … */ code` lines keep their code tail, and the test name says "backend src" honestly
+    (sidecar/webui sentinel switches are compile-guarded; the operand-order asymmetry of the
+    forbidden-form regex is sweep-tracked, TDA-R6-3).
+  - **Tracked with deadline (QA-R6-2, M).** One unidentified flaky sidecar test appeared once
+    under CPU contention and was lost to output truncation; a task requires CI to retain the
+    full sidecar reporter output so the next occurrence is identifiable.
 
 **Phase 5 — Adapter capability manifest + UI.**
 **Absorbed by ADR 0015 (§D7).** The closed vocabulary {`authoritative`, `observed`, `inferred`,

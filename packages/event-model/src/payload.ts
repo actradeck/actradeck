@@ -35,8 +35,16 @@ export type ApprovalDecision = z.infer<typeof ApprovalDecision>;
  * と表示層 (webui) の membership/tally はこの配列を消費する — 手書きミラーを作らない
  * (decision 追加時に片側が黙って落とし、署名済み manifest が誤った台帳を attest する drift の
  * 構造遮断)。
+ *
+ * SEC-R6-4: sidecar 承認ゲートの実行時依存になったため **frozen copy** で export する
+ * (zod 内部配列 `ApprovalDecision.options` を直接晒すと in-process mutation で受理集合が広がる —
+ * single-operator 境界内ゆえ新規 exploit class ではないが、gate 依存の正準値は不変にする)。
+ * `.options` 自体は zod 内部の可変配列のまま (backend の `new Set(ApprovalDecision.options)` 派生は
+ * import 時 snapshot で独立)。
  */
-export const APPROVAL_DECISIONS: readonly ApprovalDecision[] = ApprovalDecision.options;
+export const APPROVAL_DECISIONS: readonly ApprovalDecision[] = Object.freeze([
+  ...ApprovalDecision.options,
+]);
 
 /**
  * ADR 0014 Phase 4 (decision 019fd705): 承認解決の **出所 (誰が/何が解決したか)**。
@@ -62,11 +70,14 @@ export const ResolutionOrigin = z.enum([
 ]);
 export type ResolutionOrigin = z.infer<typeof ResolutionOrigin>;
 /**
- * resolution_origin の正準 closed-set 配列 (TDA-R3-2/SEC-R3-3)。表示層 (webui) の membership
- * gate はこの配列を import する — 手書きミラーを作らない (origin 追加時に表示層が黙って
- * 未知値を落とし、operator success トーンへ誤縮退する drift の構造遮断)。
+ * resolution_origin の正準 closed-set 配列 (TDA-R3-2/SEC-R3-3・いずれも Phase 4 R3 監査所見)。
+ * 表示層 (webui) の membership gate はこの配列を import する — 手書きミラーを作らない
+ * (origin 追加時に表示層が黙って未知値を落とし、operator success トーンへ誤縮退する drift の
+ * 構造遮断)。frozen copy の理由は APPROVAL_DECISIONS (SEC-R6-4) と同じ。
  */
-export const RESOLUTION_ORIGINS: readonly ResolutionOrigin[] = ResolutionOrigin.options;
+export const RESOLUTION_ORIGINS: readonly ResolutionOrigin[] = Object.freeze([
+  ...ResolutionOrigin.options,
+]);
 /**
  * backend 合成 retire を示す sentinel の正準定数 (TDA-R4-5・Phase 4 R4 監査)。
  * この値の比較は「synthetic_retired vs by_decision (→hard_gate)」の分類・liveness/coverage の

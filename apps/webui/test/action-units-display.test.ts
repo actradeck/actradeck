@@ -207,4 +207,13 @@ describe("decisionLabel (QA-R3-4)", () => {
     expect(decisionLabel("deny", "en")).not.toBe("deny");
     expect(decisionLabel("mystery", "ja")).toBe("mystery");
   });
+
+  it("prototype チェーン member も素通し (SEC-R6-3: 素 index access は undefined を返し表示が消えた)", () => {
+    // Record lookup が Object.prototype へ抜けると `"constructor"` 等で key に関数が入り
+    // t() が undefined を返す (戻り型 string の嘘)。hasOwn ガードで寛容表示契約を全入力へ拡張。
+    for (const v of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      expect(decisionLabel(v, "ja")).toBe(v);
+      expect(decisionLabel(v, "en")).toBe(v);
+    }
+  });
 });

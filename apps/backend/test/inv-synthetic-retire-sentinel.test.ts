@@ -41,13 +41,21 @@ function listSrcFiles(dir: string): string[] {
 /**
  * 全行コメント (行頭 `//` / `/*` / docstring 継続 `*`) を除去する。コメント文面が SQL 抽出の
  * 非空虚ガードを偽充足したり比較形スキャンを誤 trip したりしないための正規化 (SEC-R5-3)。
- * 文字列内の `//` (URL 等) を壊さないよう行頭形のみ落とす (トレイリングコメントは残るが、
- * 禁止パターンを含むトレイリングコメントは「過剰 trip = 安全側」で許容する)。
+ * 文字列内の `//` (URL 等) を壊さないよう行頭形のみ落とす。非対称の正直な開示 (SEC-R6-2):
+ * トレイリングコメントは残る — 禁止形スキャンには「過剰 trip = 安全側」だが、SQL 抽出の
+ * 非空虚ガードには偽充足側なので、ガードは件数でなく**期待ファイル単位** (下記) で固定する。
+ * `/* ... *\/ code` 形の行は `*\/` 以降のコードを保持する (行ごと落とすと禁止形を隠しうる)。
  */
 function stripFullLineComments(src: string): string {
   return src
     .split("\n")
-    .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+    .map((line) => {
+      if (/^\s*\/\*/.test(line)) {
+        const close = line.indexOf("*/");
+        return close >= 0 ? line.slice(close + 2) : ""; // 同一行で閉じるならコード部を残す。
+      }
+      return /^\s*(\/\/|\*)/.test(line) ? "" : line;
+    })
     .join("\n");
 }
 
@@ -63,18 +71,29 @@ function read(rel: string): string {
 }
 
 describe("INV-SYNTHETIC-RETIRE-SENTINEL: relay_lost sentinel の単一出所", () => {
-  it("SQL リテラル (payload->>'resolution_origin' = '<x>') は正準定数と一致する (全 src sweep・非空虚)", () => {
+  it("SQL リテラル (payload->>'resolution_origin' = '<x>') は正準定数と一致する (backend src 全体 sweep・非空虚)", () => {
     // SQL 比較は型検査の外 — ソース結合で pin する。正準定数を rename したらここが赤くなり、
-    // SQL の追随を強制する。走査は全 src (allow-list 外の新規 SQL 面も自動で網に入る)。
+    // SQL の追随を強制する。走査は backend src 全体 (allow-list 外の新規 SQL 面も自動で網に入る)。
     const values: string[] = [];
     for (const src of SOURCES.values()) {
       for (const m of src.matchAll(/resolution_origin'\s*=\s*'([^']+)'/g)) values.push(m[1]!);
     }
-    expect(values.length).toBeGreaterThanOrEqual(2); // 非空虚ガード (抽出 regex rot 検知・コメント除去済み)。
+    // SEC-R6-2: 非空虚ガードは総件数でなく既知 SQL 面のファイル単位で固定する (実 SQL が消えて
+    // トレイリングコメントだけが件数を偽充足する穴を閉塞。既知面が消えたら明示的にここを更新)。
+    for (const file of ["ingest-store.ts", "audit-store.ts"]) {
+      expect(
+        /resolution_origin'\s*=\s*'/.test(read(file)),
+        `${file} の既知 SQL 除外面が消えた (意図的なら本ガードを更新)`,
+      ).toBe(true);
+    }
+    expect(values.length).toBeGreaterThanOrEqual(2);
     for (const v of values) expect(v).toBe(SYNTHETIC_RETIRE_ORIGIN);
   });
 
-  it("生リテラル比較/分岐 (===/!==/case 'relay_lost') が全 src に残存しない (SEC-R5-3)", () => {
+  it("生リテラル比較/分岐 (===/!==/case 'relay_lost') が backend src 全体に残存しない (SEC-R5-3/R6-5)", () => {
+    // SEC-R6-5: 走査範囲は backend src のみ (sidecar/webui の sentinel は ResolutionOrigin 上の
+    // 型付き switch = compile ガード済み・backend だけが型不可視な SQL リテラルを持つ)。
+    // 被演算子順序は左辺値形 (`x === "relay_lost"`) のみ対象 — 右辺値形は sweep 追跡 (TDA-R6-3)。
     const forbidden = [/[!=]==\s*["']relay_lost["']/, /case\s+["']relay_lost["']/];
     for (const [rel, src] of SOURCES) {
       for (const re of forbidden) {

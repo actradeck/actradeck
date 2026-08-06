@@ -21,6 +21,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { APPROVAL_DECISIONS } from "@actradeck/event-model";
 
 import { ApprovalBridge } from "../src/approval-bridge.js";
+import { AttachDaemon } from "../src/attach-daemon.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
 import { WsClient } from "../src/ws-client.js";
@@ -192,22 +193,28 @@ describe("INV-APPROVAL-WS (3#SEC-1): request_id entropy + decision enum", () => 
     sidecar.store.close();
   });
 
-  it("(d') gate は正準 APPROVAL_DECISIONS と set-equivalent (TDA-R5-1: 全メンバー受理・非メンバー破棄)", () => {
-    // TDA-R5-1 で手書き `!==` 連鎖を正準配列消費へ置換した。この refactor が受理集合を変えて
-    // いない (set-equivalence) ことを実配線で固定する: 正準語彙の全メンバーは resolve へ到達し、
-    // 非メンバー (型崩れ・大文字・空・prefix 拡張) は 1 件も到達しない。
-    const sidecar = new Sidecar({
-      sessionId: "s1",
-      wsUrl: "ws://127.0.0.1:1/never",
-      dbPath: ":memory:",
-    });
-    const resolveSpy = vi.spyOn(sidecar.approvalBridge, "resolve");
+  /**
+   * (d')/(d''): gate の set-equivalence + **引数忠実性** (QA-R6-1)。
+   * 到達回数だけの assert では「検証済み decision を捨てて "allow" を渡す」強制置換 mutant
+   * (deny→allow 反転 = INV-APPROVAL 中核の破壊) が suite 緑で生存した — 各 emit 直後に
+   * resolve が **その decision のまま** 呼ばれたことを toHaveBeenLastCalledWith で pin する。
+   * 対象は Sidecar (managed) と AttachDaemon (既定モード・TDA-R6-1 の第 5 コピー跡地) の両配線。
+   */
+  function assertGateSetEquivalence(target: {
+    approvalBridge: { resolve: (...a: never[]) => unknown };
+    wsClient: { emit: (ev: "approval", msg: unknown) => unknown };
+  }): void {
+    // QA-R6-3: 空語彙なら両ループが空振りして偽緑になる — 非空虚ガード。
+    expect(APPROVAL_DECISIONS.length).toBeGreaterThanOrEqual(4);
+    const resolveSpy = vi.spyOn(target.approvalBridge, "resolve");
     for (const decision of APPROVAL_DECISIONS) {
-      sidecar.wsClient.emit("approval", {
+      target.wsClient.emit("approval", {
         type: "approval",
         request_id: "s1:apr-anything",
         decision,
       });
+      // QA-R6-1: 忠実性 — request_id/decision が改変されず reason=undefined/persist=false で届く。
+      expect(resolveSpy).toHaveBeenLastCalledWith("s1:apr-anything", decision, undefined, false);
     }
     expect(resolveSpy, "every canonical decision must reach resolve").toHaveBeenCalledTimes(
       APPROVAL_DECISIONS.length,
@@ -223,14 +230,40 @@ describe("INV-APPROVAL-WS (3#SEC-1): request_id entropy + decision enum", () => 
       null,
       undefined,
     ]) {
-      sidecar.wsClient.emit("approval", {
+      target.wsClient.emit("approval", {
         type: "approval",
         request_id: "s1:apr-anything",
         decision: bad as unknown as "allow",
       });
     }
     expect(resolveSpy, "non-members must never reach resolve").not.toHaveBeenCalled();
+    resolveSpy.mockRestore();
+  }
+
+  it("(d') Sidecar gate は正準 APPROVAL_DECISIONS と set-equivalent + 引数忠実 (TDA-R5-1/QA-R6-1)", () => {
+    const sidecar = new Sidecar({
+      sessionId: "s1",
+      wsUrl: "ws://127.0.0.1:1/never",
+      dbPath: ":memory:",
+    });
+    assertGateSetEquivalence(sidecar);
     sidecar.store.close();
+  });
+
+  it("(d'') AttachDaemon gate も同一契約 (TDA-R6-1: 第 5 の手書きコピー跡地・既定モードに tripwire)", () => {
+    const daemon = new AttachDaemon({
+      wsUrl: "ws://127.0.0.1:1/never",
+      dbPath: ":memory:",
+      hookToken: "tok-d2",
+      host: "127.0.0.1",
+      approvalTimeoutMs: 30,
+    });
+    try {
+      assertGateSetEquivalence(daemon);
+    } finally {
+      daemon.wsClient.close();
+      daemon.store.close();
+    }
   });
 
   it("SEC-2 regression stays green: foreign request_id is rejected by resolve()", () => {

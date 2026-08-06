@@ -204,10 +204,14 @@ const DECISION_LABEL_KEYS: Record<ApprovalDecision, MessageKey> = {
   cancel: "action.decision.cancel",
 };
 
-/** decision コードを表示ラベルへ (allow/deny/...)。enum 外の生値は従来どおり素通し (寛容表示)。 */
+/**
+ * decision コードを表示ラベルへ (allow/deny/...)。enum 外の生値は従来どおり素通し (寛容表示)。
+ * SEC-R6-3: lookup は `Object.hasOwn` でガードする — 素の index access は prototype チェーンへ
+ * 抜け、`"constructor"` 等の入力で undefined を返し「観測した実値を表示する」契約が静かに破れる。
+ */
 export function decisionLabel(decision: string, locale: Locale = "ja"): string {
-  const key = (DECISION_LABEL_KEYS as Partial<Record<string, MessageKey>>)[decision];
-  return key !== undefined ? t(locale, key) : decision;
+  if (!Object.hasOwn(DECISION_LABEL_KEYS, decision)) return decision;
+  return t(locale, DECISION_LABEL_KEYS[decision as ApprovalDecision]);
 }
 
 /**

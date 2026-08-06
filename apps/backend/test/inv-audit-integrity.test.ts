@@ -656,4 +656,39 @@ describe("INV-APPROVAL-DECISION-VOCAB: decision 語彙の単一出所 (SEC-R5-1/
       expect(keys, `approval_${d} が manifest 正準形に投影されていない`).toContain(`approval_${d}`);
     }
   });
+
+  it("正準配列は frozen (SEC-R6-4: ゲートの実行時依存になった正準値は不変)", () => {
+    expect(Object.isFrozen(APPROVAL_DECISIONS)).toBe(true);
+  });
+});
+
+/**
+ * INV-AUDIT-BINDING-COMPLETENESS (SEC-R6-1・R6 監査):
+ * 上の投影 pin は **normalize 段のみ**を固定する — interface + normalize へ field を足しても
+ * `canonicalizeSummary` の位置列挙に加え忘れれば「宣言したのに root に畳まれない」field が生まれ、
+ * その値は verify ok=true のまま偽造可能になる (SEC-R5-1 の本体 hazard が tripwire 緑のまま再現)。
+ * interface→normalize は object literal の欠落 property で compile 結合するが、
+ * interface→canonicalize は無結合 — この空隙を **root-sensitivity の全数 assert** で閉じる:
+ * manifest.summary の全 key について「その 1 field だけ改変すると verify が落ちる」を検査する
+ * (key 追加時に自動拡張し、canonicalize 漏れの当日に RED)。
+ */
+describe("INV-AUDIT-BINDING-COMPLETENESS: summary 全 field の root-sensitivity (SEC-R6-1)", () => {
+  it("manifest.summary の全 field は改変で verify が落ちる (canonicalize 漏れで RED)", () => {
+    const base = buildAuditManifest(SAMPLE);
+    const entries = Object.entries(base.summary);
+    expect(entries.length).toBeGreaterThanOrEqual(23); // 非空虚ガード (現行 23 field)。
+    for (const [key, value] of entries) {
+      const mutated = Array.isArray(value)
+        ? [...value, ["zz-probe-kind", "1"]]
+        : `${String(value)}-probe`;
+      const tampered = {
+        ...base,
+        summary: { ...base.summary, [key]: mutated },
+      } as unknown as AuditManifest;
+      const r = verifyAuditManifest(tampered);
+      expect(r.ok, `summary.${key} の改変が検知されない (canonicalizeSummary から漏れている)`).toBe(
+        false,
+      );
+    }
+  });
 });
