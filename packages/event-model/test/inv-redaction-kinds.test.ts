@@ -20,6 +20,8 @@ import {
   REDACTION_MARKER_SUFFIX,
   REDACTION_MARKER_PATTERN,
   REDACTION_MARKER_KIND_PATTERN,
+  REDACT_SWALLOWED_PREFIX,
+  redactSwallowedHint,
   redactionMarker,
   gateRedactionCountByKind,
   isKnownRedactionKind,
@@ -79,6 +81,18 @@ describe("INV-REDACTION-KINDS", () => {
     // pattern は接頭/接尾の正規表現エスケープ形で開始/終了する (`[`→`\\[`, `]`→`\\]`)。
     expect(REDACTION_MARKER_PATTERN.startsWith("\\[REDACTED:")).toBe(true);
     expect(REDACTION_MARKER_PATTERN.endsWith("\\]")).toBe(true);
+  });
+
+  it("swallow ヒントの書式 pin + 非 marker 計数契約 (QA-R3-1)", () => {
+    // TDA-R2-4 の canonical 化は write (redactor) と read/テストを同一 builder 導出にしたため、書式
+    //   drift を検出する literal pin が builder の外に必要 (canonical 化前は redaction 側テストの
+    //   literal が担っていた — b50100e で消えた guard を本 pin が回復する)。
+    expect(REDACT_SWALLOWED_PREFIX).toBe("[REDACT-SWALLOWED:");
+    expect(redactSwallowedHint(16)).toBe("[REDACT-SWALLOWED:16]");
+    // load-bearing 主張の pin: swallow ヒントは redaction marker ではなく、scalar/by-kind 計数
+    //   (REDACTION_MARKER_PATTERN 派生の全 read 側 counter) に**入らない**。接頭辞を `[REDACTED:…`
+    //   系へ変えると計数が膨張する (QA-R3-1 M6b で実測 1→2) — 本 pin が RED にする。
+    expect(redactSwallowedHint(16)).not.toMatch(new RegExp(REDACTION_MARKER_PATTERN));
   });
 
   it("marker charset includes digits (narrowing forward-drift gate)", () => {

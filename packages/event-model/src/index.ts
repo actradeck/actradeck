@@ -95,7 +95,9 @@ export {
   REDACTION_MARKER_SUFFIX,
   REDACTION_MARKER_PATTERN,
   REDACTION_MARKER_KIND_PATTERN,
+  REDACT_SWALLOWED_PREFIX,
   redactionMarker,
+  redactSwallowedHint,
   gateRedactionCountByKind,
   isKnownRedactionKind,
 } from "./redaction-kinds.js";

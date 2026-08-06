@@ -45,20 +45,20 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   `apps/sidecar/e2e` tree, which the OSS secret scan exempts _by path_ (not by content marker), so
   the strict leak gate over the rest of the tree stays hole-free.
 
-Corpus size: **38 redaction positives** across **29 kind families**, **22 hard negatives**, and
+Corpus size: **38 redaction positives** across **29 kind families**, **28 hard negatives**, and
 **43 classifier command vectors**.
 
 ## Results — redaction
 
-Measured on 2026-07-13 against the T1 canonical redactor (`packages/redaction/src/redactor.ts`).
+Measured on 2026-08-06 against the T1 canonical redactor (`packages/redaction/src/redactor.ts`).
 
-| Metric                                   | Value                                                                 |
-| ---------------------------------------- | --------------------------------------------------------------------- |
-| Overall recall (full secret caught)      | **100.0%** (38/38, 0 full leaks)                                      |
-| Mask precision (masks that hit a secret) | **97.4%** (38/39 — the 1 extra mask is the safe over-redaction below) |
-| Benign preservation (hard negatives)     | **95.5%** (21/22 preserved verbatim)                                  |
-| Fragment survival (partial leaks)        | **0 vectors** (tail-hardened — see Fragment survival below)           |
-| Kind families covered                    | 29                                                                    |
+| Metric                                   | Value                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------ |
+| Overall recall (full secret caught)      | **100.0%** (38/38, 0 full leaks)                                         |
+| Mask precision (masks that hit a secret) | **90.5%** (38/42 — the 4 extra masks are the safe over-redactions below) |
+| Benign preservation (hard negatives)     | **85.7%** (24/28 preserved verbatim)                                     |
+| Fragment survival (partial leaks)        | **0 vectors** (tail-hardened — see Fragment survival below)              |
+| Kind families covered                    | 29                                                                       |
 
 "Overall recall" is measured by **full-secret** substring survival — the exact metric a full-match
 check gives. It is deliberately paired with the fragment-survival metric below, which catches
@@ -71,7 +71,12 @@ planetscale-token, flyio-token, slack-webhook, discord-webhook, jwt, basic-auth,
 auth-header-scheme, auth-scheme-value, cookie, npm-auth-token, credential-assignment,
 url-credential, high-entropy-secret, sentry-dsn.
 
-**One false positive (over-redaction, safe direction).** A `sess_<uuidv7>` correlation id passed as
+**Four false positives (over-redaction, safe direction).** Three are the disclosed port-shape-gate
+residuals of the @-less `url-credential` rule, measured on purpose (the corpus includes the shapes
+the gate is known to over-redact): markdown-bold `**http://localhost:55400**.`, the version tag
+`docker://alpine:3.19`, and the word placeholder `ws://host:port` — all masked as `url-credential`
+(pinned residuals; the unified charset/gate redesign is tracked with a deadline). The fourth:
+a `sess_<uuidv7>` correlation id passed as
 **free text** to `redactString` is masked as `high-entropy-secret`. This is by design and worth
 understanding: session-id preservation is **field-aware** — the redactor keeps `sess_<uuid>` only
 when it appears as a top-level correlation-key field of a structured event (see
@@ -309,15 +314,26 @@ fallback), and Stripe keys shorter than 16 characters.
     quoted npm tokens by keyword overlap. Pinned by `INV-REDACTION-QUOTED-CRED-UNTERMINATED`
     (falsifiable RED-before). The **object path was already safe** (`isCredentialKey` masks a
     credential **key**'s whole value regardless of quoting/newlines).
-    - **Disclosed residuals (accepted, strict-improvement, tracked `019f5ca4`).** When there is
-      no reachable closing quote in-window on the credential's own line, branch2 masks only the
-      first line so a low-entropy continuation can survive: (a) truly multi-line unterminated /
-      `>PRE_REDACT_SLICE` newline-split values, or a merge whose following line is **another**
-      unterminated credential; (b) `url-credential` with a missing `@host` (masking to EOL there
-      would break legitimate `host:port/path` — `@` is the only pass/port anchor). Realistic
-      single-line unterminated and in-window newline-split are fully closed; all residuals are
-      pre-existing, single-operator/local-fs bounded, and closed by a keyword-anchor-independent
-      design in the follow-up PR.
+    - **Closure update (task `019f5ca4`).** A structural scanner now closes the previously
+      disclosed residuals: truly multi-line unterminated / `>PRE_REDACT_SLICE` newline-split
+      values are greedily masked to the window end (with a ` [REDACT-SWALLOWED:n]` length hint),
+      and a closing quote immediately preceded by another credential opener is rejected as a
+      terminator (merge/A1, single-line and multi-line). The missing-`@host` `url-credential`
+      class is closed by an @-less rule with a port-shape gate and RFC-3986 capture charsets.
+    - **Remaining honest residuals (pinned by tests).** (a) The scanner is quote-anchored:
+      YAML block scalars (`password: |`), backticks, bare newline-split values and heredocs
+      are out of scope. (b) A multi-line value closes at the first non-suspicious same-type
+      quote; content after that structural close is outside the string. (c) @-less URL
+      passwords of 1-5 pure digits (port-indistinguishable) or digits followed by a structural
+      delimiter are kept. A pass containing a structural delimiter (`/ ? #`) is masked up to
+      that delimiter (marker present, tail raw); a pass containing any other URL-illegal
+      character (`{ } | ^ < > " ] [` etc.) makes the match be abandoned entirely — no marker,
+      fully raw (the unified charset/gate redesign is tracked with a deadline). In the
+      over-redaction direction, non-digit port positions (word tags/placeholders) and valid
+      ports followed by symbols outside the gate terminator set are masked; all pinned by
+      tests. (d) The unterminated-opener greedy swallow trades
+      observability for containment: one unterminated credential opener swallows the rest of
+      the field (disclosed via the length hint).
   - The benchmark **measures** partial survival directly (fragment-survival metric) rather than only
     asserting it — the upgrade R4 asked for — and now reports 0.
 - **Remainder-aware exclusion can hide a _true_ partial leak (false-negative direction).** The

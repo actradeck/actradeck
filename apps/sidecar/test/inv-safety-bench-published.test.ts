@@ -47,12 +47,12 @@ const pct1 = (x: number): string => (x * 100).toFixed(1);
 const PUBLISHED = {
   redaction: {
     positives: 38,
-    negatives: 22,
+    negatives: 28,
     recallPct: "100.0", // overall recall (full secret caught)
-    maskPrecisionPct: "97.4", // masks that hit a secret (38/39)
-    benignPct: "95.5", // hard negatives preserved verbatim (21/22)
-    benignPreserved: 21,
-    falsePositives: 1,
+    maskPrecisionPct: "90.5", // masks that hit a secret (38/42)
+    benignPct: "85.7", // hard negatives preserved verbatim (24/28)
+    benignPreserved: 24,
+    falsePositives: 4,
     fragmentLeaks: 0,
     kindFamilies: 29,
   },
@@ -151,7 +151,7 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
   it("the published doc prints the redaction numbers", () => {
     const r = PUBLISHED.redaction;
     expect(doc, "recall").toContain(`**${r.recallPct}%** (${r.positives}/${r.positives}`);
-    expect(doc, "mask precision").toContain(`**${r.maskPrecisionPct}%** (${r.positives}/39`);
+    expect(doc, "mask precision").toContain(`**${r.maskPrecisionPct}%** (${r.positives}/42`);
     expect(doc, "benign").toContain(`**${r.benignPct}%** (${r.benignPreserved}/${r.negatives}`);
     expect(doc, "corpus size").toContain(
       `**${r.positives} redaction positives** across **${r.kindFamilies} kind families**, **${r.negatives} hard negatives**`,
