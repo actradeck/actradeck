@@ -124,6 +124,19 @@ export const REDACTION_MARKER_SUFFIX = "]";
 export const redactionMarker = (kind: string): string =>
   `${REDACTION_MARKER_PREFIX}${kind}${REDACTION_MARKER_SUFFIX}`;
 
+/**
+ * swallow 長ヒント `[REDACT-SWALLOWED:<n>]` の単一の真実 (TDA-R2-4・task 019f5ca4)。
+ * 構造 scanner (redaction `maskMultilineQuotedCredentials`) が未終端 quoted-credential を window 末尾まで
+ * greedy にマスクした際、消費した文字数 (UTF-16 code unit・非負整数・原文非依存) を開示するラベル。
+ * redaction marker (`[REDACTED:<kind>]`) とは**別系統**: kind ではないため `REDACTION_MARKER_PATTERN` に
+ * 非マッチ = redaction 計数に入らない (`[REDACT-TRUNCATED:<n>]` と同格の情報ラベル)。
+ * write (redactor) と read/テストは本ビルダ・接頭辞を共有し、literal 再 type による round-trip drift を
+ * 構造閉塞する (redactionMarker と同じ TDA-5 規律)。
+ */
+export const REDACT_SWALLOWED_PREFIX = "[REDACT-SWALLOWED:";
+export const redactSwallowedHint = (n: number): string =>
+  `${REDACT_SWALLOWED_PREFIX}${n}${REDACTION_MARKER_SUFFIX}`;
+
 /** literal を正規表現 source へエスケープ (接頭の `[` / 接尾の `]` を含むため必須)。 */
 const escapeRegexLiteral = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

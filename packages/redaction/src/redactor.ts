@@ -24,6 +24,7 @@ import {
   REDACTION_MARKER_PATTERN,
   REDACTION_MARKER_KIND_PATTERN,
   isKnownRedactionKind,
+  redactSwallowedHint,
   redactionMarker,
 } from "@actradeck/event-model";
 
@@ -605,11 +606,11 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
 
   // --- npm registry _authToken (//host/:_authToken=...) --------------------
   // 値 `[^\s"']{6,}` を無界化し tail 残存を閉塞 (INV-REDACTION-TAIL-SURVIVAL)。非 quote 経路 (`\2` 空) は
-  //   terminator-free で self-heal (census カテゴリ A)、quoted 経路 (`\2`=`"`/`'`) は terminator-bearing
+  //   terminator-free で self-heal (census 部分集合 A)、quoted 経路 (`\2`=`"`/`'`) は terminator-bearing
   //   (census カテゴリ 2)。**未終端 quoted** `_authToken="…(閉じ quote 無し)` は `\2` が閉じられず本ルールは
-  //   match 失敗するが、キー名 `_authToken` が credential-keyword (`auth`/`token`) を含むため、直後の
-  //   **credential-assignment EOL/close-quote fallback** (4 本目) が EOL/close-quote まで mop-up する
-  //   (SEC-1・fix/sec1-quoted-cred-eol-fallback で閉塞・INV-REDACTION-QUOTED-CRED-UNTERMINATED)。
+  //   match 失敗するが、キー名 `_authToken` が credential-keyword (`auth`/`token`) を含むため、**構造
+  //   scanner (maskMultilineQuotedCredentials・主閉塞) + credential-assignment 4 本目バックストップ**が
+  //   mop-up する (task 019f5ca4・INV-REDACTION-QUOTED-CRED-UNTERMINATED)。
   {
     kind: "npm-auth-token",
     pattern: new RegExp(`(_authToken\\s{0,8}[:=]\\s{0,8})(["']?)([^\\s"']{6,})\\2`, "gi"),
@@ -756,23 +757,37 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   // user/pass 捕捉は **RFC-3986 の userinfo 合法文字** (unreserved + pct + sub-delims / pass は `:` も) に
   //   限定する (再監査 TDA-1 M: 旧 `[^\s@/]` はテンプレートリテラル `:${…}` や IPv6 `[::1]:8080` を飲み
   //   102/138,539 実 repo 行を破壊した)。IPv6 bracket `[` は user charset 外 → `http://[::1]:8080` 不介入。
-  // 開示する残差 (under-redaction 側・いずれも構造的判別不能または RFC 構造終端):
+  // 開示する残差 (under-redaction 側・R2 再監査 SEC-R2-1/QA-R2-1 で文言を実測へ訂正済み):
   //   (1) **≤5 桁純数字 pass** (`scheme://u:12345`) は port と区別不能 (6 桁以上はマスク・境界 6 を pin)。
   //   (2) **数字 1-5 桁 + `/ ? # ,` で始まる pass** (`svc:99#hunter2`) は port+fragment/path と構造同型。
-  //   (3) **URL 非合法文字を含む未エンコード pass** は合法 prefix のみマスクし残部が raw に残る
-  //       (`pass/word` の `/` 以降 = 個別追跡 SEC-4・`2024!Summer#Prod` の `#Prod`。正規の DSN は
-  //       %-encode される。末尾 lookahead は RFC 構造区切り `[\s/?#]|$` のみ許可 — `{` 等の URL 外文字で
-  //       止まった捕捉は match ごと放棄しテンプレートリテラル `:${…}` を温存する)。
+  //   (3) **RFC 構造区切り (`/ ? #`) を含む未エンコード pass** は合法 prefix のみマスクし区切り以降が
+  //       raw に残る = marker は立つ (`pass/word` の `/` 以降 = 個別追跡 019fd61c・`2024!Summer#Prod` の
+  //       `#Prod`)。
+  //   (3') **⚠ 非構造区切りの URL 非合法文字 (`{ } | ^ < > " ] [ \` 等) を含む pass は match ごと放棄され
+  //       marker なしの全 raw** (末尾 lookahead `[\s/?#]|$` が不成立のため。「partial mask」ではない —
+  //       operator への signal もゼロ)。囲み文字で非対称: `'…'` `(…)` は sub-delim ゆえマスクされ、
+  //       `"…"` `<…>` `[…]` は放棄される。この非対称と `{` 温存 (テンプレートリテラル `:${…}` keep) の
+  //       トレードは統合再設計 task 019fd61c (期限 v0.7) で閉じる。正規の DSN は非合法文字を %-encode
+  //       するため合法 DSN では発生しない。leak 方向 pin あり (INV-REDACTION-URLCRED-ANCHORLESS)。
   //   (4) schemeless `user:pass` (@ なし) は scope 外 (一般テキストの `word:word` と判別不能)。
-  // over-redaction 開示: `scheme://host:notaport` (非数字 port 位置・invalid URL) はマスク。マスクされた
-  //   pass に隣接する RFC 合法の文末記号 (`)` `.` `'` 等) は捕捉に含まれ marker に飲まれる (pin 済み)。
+  // over-redaction 開示 (R2 再監査 SEC-R2-2/TDA-R2-1/QA-R2-2 で実測へ訂正済み):
+  //   (a) **非数字が port 位置に来る形はすべてマスク**: invalid URL (`host:notaport`) だけでなく、
+  //       word 形の placeholder/タグ (`ws://host:port` / `docker://alpine:latest` / `http://h:PORT`) も
+  //       password と構造的判別不能ゆえマスクされる (pin 済み・fail-safe 方向)。
+  //   (b) **正当な数値 port でも直後の記号が gate 終端子集合 (`[\s/?#,]` / 「閉じ記号 + 空白/終端」) の
+  //       外なら credential 側へ倒れる**: markdown 太字 `**http://localhost:55400**.` / `:8080=x` /
+  //       `:8080+ ok` / version タグ `docker://alpine:3.19` (実 repo 実測 6-13 行・pin 済み)。gate 拡張は
+  //       SEC-1 (`2024!Summer`) との緊張を持つため task 019fd61c の統合再設計で扱う。
+  //   (c) マスクされた pass に隣接する RFC 合法の文末記号 (`)` `.` `'` 等) は捕捉に含まれ marker に
+  //       飲まれる (pin 済み)。
   // ReDoS: pass 捕捉は atomic-group emulation `(?=(PASS))\2` (ECMAScript lookahead は backtracking 状態を
-  //   破棄)。ただし本ルールは @-rule の**後**に走るため `…:pass@` 形は常に先行マスク済みで、末尾 lookahead
-  //   不成立の backtrack 誘発形は redactString 経由では到達不能 (defensive-by-construction・直接
-  //   micro-bench では plain greedy でも線形を実測 = load-bearing ではない・QA-4)。gate は有界 lookahead。
-  // 冪等: 出力 `scheme://user:[REDACTED:url-credential]` の再適用は marker 全体を再捕捉して同一 byte を
-  //   返す (marker 文字は charset 内・digit-gate 非該当) ため冪等。count は最終出力の marker 数で数える
-  //   (countRedactions) ため再マッチで増えない。
+  //   破棄)。末尾 lookahead 不成立経路には `@` なしでも到達する (`scheme://u:aaaa…}` 等) が、atomic /
+  //   plain greedy の両実装で線形を実測済み (t(2n)/t(n)≈2.0・emulation は load-bearing でなく
+  //   defense-in-depth・QA-R2-5 で理由を訂正)。gate は有界 lookahead。
+  // 冪等: 出力 `scheme://user:[REDACTED:url-credential]` は marker 先頭の `[` が pass charset 外のため
+  //   **再マッチせず** (非マッチによる冪等・SEC-R2-4 訂正: 「marker 全体を再捕捉」ではない)。charset を
+  //   広げて `[`/`]` を含めると本前提が壊れるので注意。count は最終出力の marker 数で数える
+  //   (countRedactions) ため影響なし。
   {
     kind: "url-credential",
     pattern: new RegExp(
@@ -1023,7 +1038,7 @@ export function countRedactionMarkersByKindDeep(value: unknown): Record<string, 
  *  4. **真の未終端** (window 内に構造的閉じ quote なし・chain の果て含む) → 開始クォートから
  *     **window 末尾まで greedy にマスク** (B1/B1' 閉塞)。private-key/jwt の terminator 欠落 fallback と
  *     同一の greedy-consume 意味論 (census カテゴリ 1 の precedent)。改行を跨いで飲んだ場合は
- *     ` [REDACT-SWALLOWED:n]` (消費 byte 数・非負整数・原文非依存) を付し、swallow 規模を可視化する
+ *     ` [REDACT-SWALLOWED:n]` (消費文字数 = UTF-16 code unit・非負整数・原文非依存) を付し、swallow 規模を可視化する
  *     (SEC-3: 長さヒント無しでは 1 個の未終端 opener がフィールド残り全部を痕跡なく消せた)。
  *
  * 閉塞スコープの正確な開示 (SEC-6/QA-8):
@@ -1115,7 +1130,8 @@ export function maskMultilineQuotedCredentials(value: string): string {
           }
         }
       }
-      if (crossedNewline) masked += ` [REDACT-SWALLOWED:${spanEnd - valueStart}]`;
+      // ラベルは event-model の canonical builder から導出 (TDA-R2-4: literal 再 type 禁止・TDA-5 規律)。
+      if (crossedNewline) masked += ` ${redactSwallowedHint(spanEnd - valueStart)}`;
     }
     out += value.slice(cursor, m.index) + masked;
     cursor = spanEnd;

@@ -294,4 +294,15 @@ export const NEGATIVES: readonly NegativeVector[] = [
   { label: "node-env", input: "NODE_ENV=production" },
   { label: "semver", input: "typescript@5.6.2" },
   { label: "docker-image-digest", input: "postgres@sha256:1234abcd" },
+  // URL host:port shapes (TDA-R2-2, task 019f5ca4): the @-less url-credential rule introduced a
+  //   scheme://x:y decision surface. These vectors make the published benign-preservation number
+  //   actually measure it — including shapes the current port-shape gate is KNOWN to over-redact
+  //   (markdown bold, version tags, word placeholders; disclosed + pinned residuals tracked by
+  //   the unified redesign task). Honest measurement > flattering measurement.
+  { label: "url-port-path", input: "postgres://app:5432/db" },
+  { label: "url-port-eol", input: "redis://localhost:6379" },
+  { label: "ipv6-bracket-url", input: "http://[::1]:8080/health" },
+  { label: "markdown-bold-url-port", input: "**http://localhost:55400**." },
+  { label: "docker-version-tag", input: "docker://alpine:3.19" },
+  { label: "url-port-placeholder", input: "ws://host:port" },
 ];

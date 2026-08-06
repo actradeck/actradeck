@@ -588,6 +588,14 @@ describe("INV-REDACTION: redactString ReDoS performance (再#SEC-1)", () => {
       build: (n) => "http://h:8080) ".repeat(Math.ceil(n / 15)),
       n: 64 * 1024,
     },
+    {
+      // QA-R2-5: @-less rule の pass 捕捉 + 末尾 lookahead **不成立** 経路 (`}` は charset 外かつ構造
+      //   区切り外 → match 放棄)。atomic emulation の有無に依らず線形であることを実測固定する
+      //   (port-gate dense は keep 経路のみで pass 捕捉が走らないため本 case が mask/abandon 経路を担う)。
+      name: "anchorless url-credential lookahead-fail postgres://u:a*n}",
+      build: (n) => `postgres://u:${"a".repeat(n)}}`,
+      n: 64 * 1024,
+    },
   ];
 
   // bestMeasure は describe 冒頭で定義済 (両ブロック単一 basis)。scaling は ratio 精度のため

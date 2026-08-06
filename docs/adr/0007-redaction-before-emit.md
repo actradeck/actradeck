@@ -117,9 +117,16 @@ Scope of this amendment (what it does **not** claim):
   scope. (b) A multi-line value is closed at the first non-suspicious same-type quote;
   content after that structural close is outside the string by definition. (c) @-less
   URL passwords that are 1-5 pure digits (indistinguishable from a port), or digits
-  followed by a structural delimiter (`svc:99#frag` ≡ port+fragment), are kept; a pass
-  containing URL-illegal characters is masked only up to the first structural
-  terminator (`/`-containing passwords tracked separately). All residuals are
+  followed by a structural delimiter (`svc:99#frag` ≡ port+fragment), are kept. A pass
+  containing a structural delimiter (`/ ? #`) is masked up to that delimiter (marker
+  present, tail raw); a pass containing any **other** URL-illegal character (`{ } | ^
+< > " ] [` etc.) makes the match be abandoned entirely — **no marker, fully raw**
+  (enclosure asymmetry: `'…'`/`(…)` still mask, `"…"`/`<…>`/`[…]` abandon). (d) In the
+  over-redaction direction, any non-digit in port position (word-shaped tags such as
+  `docker://alpine:latest`, placeholders such as `ws://host:port`) and valid numeric
+  ports followed by symbols outside the gate's terminator set (markdown bold
+  `**…:55400**.`, version tags `:3.19`) are masked. All of these are pinned by tests;
+  the unified charset/gate redesign is tracked with a deadline. All residuals are
   single-operator/local-fs bounded.
 - **Public copy value-completeness prohibition is retained** (2026-07-13): describe
   masking as applied to detected patterns / masked spans, not as blanket completeness.

@@ -156,11 +156,70 @@ describe("INV-REDACTION-URLCRED-ANCHORLESS: port-shape keep (over-redaction 防�
     );
   });
 
+  // 残差 pin (3') — R2 SEC-R2-1/QA-R2-1 (M・leak 方向): 非構造区切りの URL 非合法文字 (`{` `"` `<` `[` 等)
+  //   を含む pass は末尾 lookahead 不成立で **match ごと放棄 = marker なしの全 raw**。「partial mask」では
+  //   ない。この pin が mask 側へ倒れたら開示が虚偽になり、raw のままなら残差契約どおり。閉塞は統合再設計
+  //   task 019fd61c (期限 v0.7・`{` はテンプレートリテラル keep とのトレード)。
+  it("残差 pin (3'): 非構造区切りの URL 非合法文字を含む pass は match 放棄で全 raw (marker なし)", () => {
+    for (const input of [
+      `postgres://admin:Xy{9zQvwPassword`,
+      `postgres://admin:pa}ssword12345`,
+      `postgres://admin:Sup3r|hunter2secret`,
+      `"postgres://user:swordfish99"`, // JSON/二重引用の DSN — 囲み `"` で放棄される
+      `<postgres://u:swordfish99>`, // markdown autolink
+    ]) {
+      expect(redactString(input), `abandon-raw: ${input}`).toBe(input);
+    }
+    // 囲み文字の非対称: `'…'` は sub-delim ゆえマスクされる (放棄されない) — 非対称自体を pin。
+    expect(redactString(`'postgres://user:swordfish99'`)).toBe(
+      `'postgres://user:[REDACTED:url-credential]`,
+    );
+  });
+
+  // R2 QA-R2-4 (L): 残差 (3') の開示は「正規の DSN は %-encode される」を緩和根拠にしている。
+  //   pct-encoded pass が実際にマスクされることを pin (前提の silent 崩壊防止)。
+  it("pct-encoded pass はマスクされる (%-encode 前提の pin)", () => {
+    expect(redactString(`postgres://user:p%40ssw0rd123`)).toBe(
+      `postgres://user:[REDACTED:url-credential]`,
+    );
+    expect(redactString(`mysql://root:pass%20word99`)).toBe(
+      `mysql://root:[REDACTED:url-credential]`,
+    );
+  });
+
   // QA-5 挙動 pin: マスクされた pass に隣接する RFC 合法の文末記号は捕捉に含まれ marker に飲まれる
   //   (fail-safe 側の既知挙動・観測性コストは 1 文字)。
   it("挙動 pin: trailing punctuation (RFC 合法) は marker に飲まれる", () => {
     expect(redactString(`see (postgres://user:sw0rdfish99) ok`)).toBe(
       `see (postgres://user:[REDACTED:url-credential] ok`,
+    );
+  });
+
+  // R2 QA-R2-3 (L): gate の trailing-punct 終端子のうち load-bearing な `'` `;` `:` を keep 側で pin
+  //   (集合から欠くと実 log/DSN 形が over-redact される)。
+  it("keep pin: 引用/区切り記号直後の port 形を温存する (`'…'` / `; ` / `: `)", () => {
+    for (const input of [
+      `'redis://localhost:6379'`,
+      `redis://h:6379; next`,
+      `use http://h:8080: then`,
+    ]) {
+      expect(redactString(input), `keep: ${input}`).toBe(input);
+    }
+  });
+
+  // R2 SEC-R2-2/TDA-R2-1/QA-R2-2 (M・fail-safe 方向の over-redaction 契約 pin): 正当な数値 port でも
+  //   直後の記号が gate 終端子集合の外なら credential 側へ倒れる (markdown 太字 / version タグ)。
+  //   word 形 placeholder/タグも password と判別不能ゆえマスクされる。これは**開示済みの現状契約**で、
+  //   gate 拡張 (SEC-1 との緊張を持つ) は統合再設計 task 019fd61c で扱う。keep へ改善したらこの pin を
+  //   更新すること (silent 変化の防止が目的・改善方向は歓迎)。
+  it("over-redaction 契約 pin: gate 終端子外の記号隣接 port / word 形タグはマスクされる (現状契約)", () => {
+    expect(redactString(`**http://localhost:55400**.`)).toBe(
+      `**http://localhost:[REDACTED:url-credential]`,
+    );
+    expect(redactString(`docker://alpine:3.19`)).toBe(`docker://alpine:[REDACTED:url-credential]`);
+    expect(redactString(`ws://host:port`)).toBe(`ws://host:[REDACTED:url-credential]`);
+    expect(redactString(`docker://alpine:latest`)).toBe(
+      `docker://alpine:[REDACTED:url-credential]`,
     );
   });
 });

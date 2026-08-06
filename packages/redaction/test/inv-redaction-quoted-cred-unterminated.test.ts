@@ -26,6 +26,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { REDACT_SWALLOWED_PREFIX, redactSwallowedHint } from "@actradeck/event-model";
 import { MAX_VALUE_LEN, PRE_REDACT_SLICE, redactString } from "@actradeck/redaction";
 
 // FRAGMENT_MIN_LEN: apps/sidecar/e2e/safety-bench/bench.ts と同一の 8 字床 (partial disclosure の下限)。
@@ -237,11 +238,11 @@ describe("INV-REDACTION-QUOTED-CRED-UNTERMINATED: full-closure (旧残差 B1/B1'
   });
 
   // over-redaction 意味論の pin: 未終端 opener 以降は構造的に「文字列内部」として単一 marker に飲まれ、
-  //   改行を跨いだ swallow は ` [REDACT-SWALLOWED:n]` (消費 byte 数) で開示される (SEC-3・private-key/jwt
+  //   改行を跨いだ swallow は ` [REDACT-SWALLOWED:n]` (消費文字数 = UTF-16 code unit) で開示される (SEC-3・private-key/jwt
   //   の greedy fallback と同一意味論 + 長さヒント)。
   it("未終端 opener 以降の後続テキストは marker に飲まれ、swallow 長がヒントで開示される", () => {
     expect(redactString(`password="x\nfollowing line`)).toBe(
-      `password="[REDACTED:credential-assignment]" [REDACT-SWALLOWED:16]`,
+      `password="[REDACTED:credential-assignment]" ${redactSwallowedHint(16)}`,
     );
     // 単一行未終端 (EOF まで) は旧 branch2 とバイト等価 (ヒント無し)。
     expect(redactString(`password="abc`)).toBe(`password="[REDACTED:credential-assignment]"`);
@@ -313,7 +314,7 @@ describe("INV-REDACTION-QUOTED-CRED-UNTERMINATED: over-redaction blast radius �
   it('substring-keyword opener (`author: "`) の多行未終端は swallow する (現状契約)', () => {
     const out = redactString(`author: "John\nline2 of bio\nline3`);
     expect(out).toContain("[REDACTED:credential-assignment]");
-    expect(out).toContain("[REDACT-SWALLOWED:");
+    expect(out).toContain(REDACT_SWALLOWED_PREFIX);
     expect(out).not.toContain("line2");
   });
 
