@@ -31,6 +31,7 @@ import {
   AUDIT_MANIFEST_MARKER,
   AUDIT_PACKET_MANIFEST_VERSION,
   AUDIT_PACKET_MANIFEST_MARKER,
+  PACKET_CHAIN_DOMAIN,
   type DecodedPacketManifest,
   type PacketManifest,
 } from "../src/audit-integrity.js";
@@ -385,6 +386,13 @@ function samplePacket(sign = false): ReviewPacket {
 }
 
 describe("INV-AUDIT-PACKET unsigned chain", () => {
+  it("chain domain は version と結合して bump される (QA-R5-2)", () => {
+    // commit body は「v1→v2 (+ chain domain)」を一体の変更として提示するが、chain domain 側は
+    // 参照テストが無く、version だけ bump して domain を据え置く半端な変更が 720 緑で通った
+    // (mutation probe P16)。prefix 結合を pin して片側 bump を RED にする。
+    expect(PACKET_CHAIN_DOMAIN.startsWith(AUDIT_PACKET_MANIFEST_VERSION + "/")).toBe(true);
+  });
+
   it("無改竄 → chain_valid・ok (unsigned=内部整合)", () => {
     const m = samplePacket().manifest;
     expect(m.version).toBe(AUDIT_PACKET_MANIFEST_VERSION);

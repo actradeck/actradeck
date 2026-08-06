@@ -37,9 +37,11 @@
  *    受け手が表示⇔manifest を突合するときは、表示の `"-"` を manifest の `""`(または実値)と読み替える。
  *  - **`summary.entries[]` は非 binding (SEC-R4-1)**: 承認 1 件ごとの itemized 列 (command/decision/
  *    resolution_origin) は **JSON / packet JSON tier のみ**が搬送し、manifest の binding 対象外
- *    (HTML/MD は entries を描画しない)。集計 tally + packet の flagged (denied/cancel + high_risk +
- *    relay_lost) は binding 済みゆえ**総量の偽造と review 重要項目の偽造は検知される**が、JSON を
- *    証跡として配布する場合、受け手は entries を tally / timeline events と突合すること。
+ *    (HTML/MD は entries を描画しない)。集計 tally は binding 済みゆえ**総量の偽造は検知される**。
+ *    review 重要項目 (flagged) の binding は **packet tier のみ** (SEC-R5-4: flagged 投影は packet
+ *    manifest にしか存在せず、per-session JSON tier では entries 単体の command/decision 改竄は
+ *    非検知)。JSON を証跡として配布する場合、受け手は entries を tally / timeline events
+ *    (`tool.permission.requested` は binding 済み timeline に含まれる) と突合すること。
  *    INV-AUDIT-INTEGRITY の境界 pin テストがこの範囲を意図として固定する (entries を binding へ
  *    拡張するなら canonical form 変更 = version bump + full 監査)。
  *  - **at-rest 改竄 (export 前に DB を書換える攻撃)** は対象外 = ingest 時イベント連鎖(モデル B・follow-up)。
@@ -666,8 +668,12 @@ export function verifyAuditManifest(
  * `unsupported-packet-manifest-version` の distinct reason で fail-closed に区別される。
  */
 export const AUDIT_PACKET_MANIFEST_VERSION = "actradeck-audit-packet-manifest/v2";
-/** packet ハッシュ連鎖のドメイン分離定数 (単一 manifest と別領域・version と同時に bump)。 */
-const PACKET_CHAIN_DOMAIN = "actradeck-audit-packet-manifest/v2/sha256-chain";
+/**
+ * packet ハッシュ連鎖のドメイン分離定数 (単一 manifest と別領域・version と同時に bump)。
+ * QA-R5-2: export はテストの結合 assert 用 — 「version bump したのに chain domain を据え置く」
+ * 半端な bump を CI で赤くする (`PACKET_CHAIN_DOMAIN.startsWith(VERSION + "/")` を pin)。
+ */
+export const PACKET_CHAIN_DOMAIN = "actradeck-audit-packet-manifest/v2/sha256-chain";
 /** HTML コメント / MD fence へ埋め込む packet manifest マーカー (単一 manifest と別)。 */
 export const AUDIT_PACKET_MANIFEST_MARKER = "actradeck-audit-packet-manifest";
 

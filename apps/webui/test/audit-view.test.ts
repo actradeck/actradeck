@@ -4,7 +4,10 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { APPROVAL_DECISIONS } from "@actradeck/event-model";
+
 import {
+  DECISIONS,
   aggregateSessions,
   buildAuditUrl,
   buildSessionAuditUrl,
@@ -44,6 +47,14 @@ function mkSession(
     ...over,
   };
 }
+
+describe("INV-APPROVAL-DECISION-VOCAB (webui 面・QA-R5-1)", () => {
+  it("DECISIONS は正準 APPROVAL_DECISIONS と同一参照 (手書きミラー復活で RED)", () => {
+    // TDA-R4-3 の単一出所化は代入の現形にのみ依存し回帰テストが無かった (同値の手書き literal へ
+    // 戻しても suite 緑 — mutation probe P3c と同クラス)。参照同一性 pin で構造固定する。
+    expect(DECISIONS).toBe(APPROVAL_DECISIONS);
+  });
+});
 
 describe("buildAuditUrl", () => {
   it("空指定は base path・from/to/limit/format を query へ (token なし)", () => {

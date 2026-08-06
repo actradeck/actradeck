@@ -363,12 +363,17 @@ origin=relay_lost, delivery=not_sent`).
 
   **Audit round 5 hardening (2026-08-07, full SEC/QA/TDA re-audit of the R4 landing — no H):**
 
-  - **Decision vocabulary is single-sourced (TDA-R4-3, M).** `AUDIT_DECISIONS` (backend) and
-    the webui tally/membership arrays now consume the canonical `APPROVAL_DECISIONS`
-    (`ApprovalDecision.options`) from event-model — the R4 enum sweep had stopped at the
-    origin list while identical hand mirrors of the *decision* list remained, which would
-    have let a 5th decision silently vanish from `by_decision` and be absorbed into
-    `pending`, cryptographically attested by the signed manifest.
+  - **Decision vocabulary consolidation, audit tier (TDA-R4-3, M).** The backend audit tally
+    fold (`AUDIT_DECISIONS`) and the webui tally/membership arrays now consume the canonical
+    `APPROVAL_DECISIONS` (`ApprovalDecision.options`) from event-model — the R4 enum sweep
+    had stopped at the origin list while identical hand mirrors of the *decision* list
+    remained, which would have let a 5th decision silently vanish from `by_decision` and be
+    absorbed into `pending`. Honest scope (SEC-R5-1): this consolidated the *tally fold and
+    membership scans*, not every consumer — the signed manifest's canonical form still
+    projects the decisions as hand-written `approval_<d>` keys, and the sidecar
+    approval-message gate plus two webui type mirrors kept hand copies until R6
+    (`INV-APPROVAL-DECISION-VOCAB` now pins reference identity and the manifest projection;
+    a vocabulary extension goes RED there, forcing a deliberate manifest version bump).
   - **The relay_lost sentinel is single-sourced (TDA-R4-5, M).** `SYNTHETIC_RETIRE_ORIGIN` +
     `isSyntheticRetireOrigin` live in event-model; the classification fold (audit-store), the
     liveness TS mirror, the packet reason and the webui modal consume the predicate, and
@@ -401,9 +406,12 @@ origin=relay_lost, delivery=not_sent`).
     unsafe: a live pending absent from the parsed set gets synthetically cancelled). Rollout:
     daemons on older dists declaring legacy-shape ids fall back to "no reconcile" (stale
     cards persist until the coordinated upgrade — the pre-Phase-4 behaviour, safe direction).
-  - **Dead surfaces resolved (TDA-R4-1/R4-2, M).** `runtime_epoch` gained its consumer: the
-    daemons listing (`GET /realtime/daemons`) now carries it as a non-credential diagnostic
-    (restart discrimination), pinned by a route test. `unstableRequestIdCount` stays a
+  - **Dead surfaces resolved (TDA-R4-1/R4-2, M).** `runtime_epoch` is now exposed on the
+    daemons listing (`GET /realtime/daemons`) as a non-credential diagnostic for operator
+    inspection (restart discrimination), pinned by a route test. Honest scope (TDA-R5-2):
+    this is an operator-facing surface only — the webui daemons parser deliberately extracts
+    `id`/`spawn_capable` and drops the field, so there is no programmatic consumer; wiring a
+    restart-discrimination badge is future work, not a shipped claim. `unstableRequestIdCount` stays a
     queryable bridge API: the docstring/ADR wording is corrected to say no runtime consumer
     is wired (CI's structural metatest is the enforcement), and a unit test pins the bounded
     re-roll + counter semantics under a worst-case always-mangling redactor mock.
@@ -412,6 +420,53 @@ origin=relay_lost, delivery=not_sent`).
     zero-pending declaration) and that the observe-only codex-rollout daemon does not; the
     managed sidecar's wiring to the shared `pendingIdsFromBridge` helper is source-pinned.
     Previously deleting the provider wiring survived the full sidecar suite (silent-off).
+
+  **Audit round 6 (2026-08-07, landing of the R5 full re-audit findings — no H):**
+
+  - **Decision vocabulary consolidation completed across tiers (TDA-R5-1 + SEC-R5-1 +
+    QA-R5-1, M).** The four residual hand copies are gone: the sidecar approval-message
+    security gate consumes `APPROVAL_DECISIONS` (set-equivalent refactor, pinned by a
+    real-wiring test asserting every canonical member reaches `resolve` and no non-member
+    does), the ws-client message type and the webui `ApprovalDecision` re-export the
+    canonical type, and `decisionLabel` is driven by a `Record<ApprovalDecision, MessageKey>`
+    map (compile-exhaustive; unknown raw values still pass through for tolerant display).
+    `INV-APPROVAL-DECISION-VOCAB` pins `AUDIT_DECISIONS`/webui `DECISIONS` reference identity
+    (the identical hand literal previously survived the full suite — probe P3c) and pins the
+    signed manifest's `approval_<d>` projection over the whole vocabulary, so a future 5th
+    decision goes RED and forces a deliberate manifest version bump.
+  - **Renderer-side binding-boundary complement (QA-R5-4, M).** The SEC-R4-1 pin only fixed
+    "entries do not change `root`"; nothing failed if a renderer started displaying entries
+    (probe P22). HTML/MD outputs are now pinned byte-identical under entries injection, so
+    extending the renderer forces extending the binding (version bump + full audit).
+  - **prettier regression fixed (QA-R5-0, M).** The R5 commit's Testing notes claimed a green
+    format gate while `packages/event-model/vitest.config.ts` was RED; fixed.
+  - **Sentinel metatest hardened (SEC-R5-3 + TDA-R5-3, L).** The scan now sweeps all backend
+    src files (no allow-list), strips full-line comments (a comment could previously satisfy
+    the non-vacuity guard), forbids `!==`/`case` comparison forms and single quotes, and pins
+    constant consumption by the producer (`approval-reconciler`) and the shipped report
+    labels (`audit-report` now interpolates `SYNTHETIC_RETIRE_ORIGIN`, byte-identical).
+  - **Packet version coupling closed (QA-R5-2 + QA-R5-3, L).** `PACKET_CHAIN_DOMAIN` is
+    pinned to share the version prefix (probe P16: version-only bump survived), and the
+    packet verify route gains the old-version case the session route already had (200 +
+    `unsupported-packet-manifest-version`, not 400).
+  - **Deferred with deadline — DB-side id gate asymmetry (SEC-R5-2, M).** The reconciler
+    checks DB pendings against the declaration Set but never against
+    `APPROVAL_REQUEST_ID_RE`, while the declaration side requires it. A pending whose
+    at-rest id was mangled by a redaction rule matching the id's fixed part (the bridge
+    returns the unstable id after exhausting 8 re-rolls) can appear in no conforming
+    declaration and is therefore always synthetically cancelled past the watermark — a live
+    approval retired with an audit row asserting `relay_lost`. Honest scoping: the trigger
+    class is structurally kept at zero by CI (`INV-APPROVAL-REQUEST-ID-STABLE`: all
+    `REDACTION_RULES` × id-shape corpus = 0 matches), the degradation is inside the
+    single-operator boundary, and it predates R5. The fix is a gate change on the predicate
+    that decides destruction (skip synthesis for ids that are neither canonical nor a
+    known-legacy shape the coordinated deploy intends to retire), which per the
+    finding-registry's boundary-gate default requires a full re-audit — it is scheduled into
+    the v0.7 redaction-integration work (with the url-credential charset/gate redesign,
+    which lands under a full audit anyway) rather than expanding this round.
+  - **Sweep (L).** relay_lost human-label divergence across tiers (TDA-R5-4) and the
+    `ACTIVE_PENDING_FIELD`/`RUNTIME_EPOCH_FIELD` exports with no external runtime consumer
+    (TDA-R5-5, disclosed in their docstring) are tracked in the phase tech-debt sweep.
 
 **Phase 5 — Adapter capability manifest + UI.**
 **Absorbed by ADR 0015 (§D7).** The closed vocabulary {`authoritative`, `observed`, `inferred`,

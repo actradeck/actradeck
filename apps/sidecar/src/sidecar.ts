@@ -8,6 +8,8 @@
  */
 import { randomBytes, randomUUID } from "node:crypto";
 
+import { APPROVAL_DECISIONS, type ApprovalDecision } from "@actradeck/event-model";
+
 import { computeAgentVisibilityWire } from "./agent-visibility.js";
 import { generateRedactedDiff } from "./diff-provider.js";
 import { findRepoRoot, GitWatcher } from "./git-watcher.js";
@@ -177,23 +179,24 @@ export class Sidecar {
     // SEC-2: resolve は自 sidecar の sessionId スコープの request_id のみ受理する。
     // foreign / unknown request_id は ApprovalBridge.resolve が false を返し無視される。
     // 3#SEC-1: WsClient が token 検証済みのメッセージのみ emit する。さらに decision を
-    //   T1 ApprovalDecision (4 値) で enum 検証し、enum 外 (型崩れ・任意文字列) は破棄する。
+    //   T1 ApprovalDecision で enum 検証し、enum 外 (型崩れ・任意文字列) は破棄する。
+    //   TDA-R5-1: 判定は正準 `APPROVAL_DECISIONS` (event-model) を消費する — 手書き `!==` 連鎖の
+    //   ミラーを残さない (security-gate-reuse-canonical-parser・受理集合は set-equivalent)。
     // 段階③: allow_for_session/cancel を honor (allow_for_session→allow+署名登録、cancel→deny)。
     this.wsClient.on(
       "approval",
       (msg: { request_id: string; decision: unknown; reason?: string; persist?: unknown }) => {
         if (typeof msg.request_id !== "string") return;
         if (
-          msg.decision !== "allow" &&
-          msg.decision !== "allow_for_session" &&
-          msg.decision !== "deny" &&
-          msg.decision !== "cancel"
+          typeof msg.decision !== "string" ||
+          !(APPROVAL_DECISIONS as readonly string[]).includes(msg.decision)
         ) {
           return; // enum 外は破棄 (fail-safe)
         }
+        const decision = msg.decision as ApprovalDecision;
         // ADR 019ee0c0: persist は boolean のときのみ honor (型崩れは false 扱い=fail-safe)。
         const persist = msg.persist === true;
-        this.approvalBridge.resolve(msg.request_id, msg.decision, msg.reason, persist);
+        this.approvalBridge.resolve(msg.request_id, decision, msg.reason, persist);
       },
     );
     // SEC-2: interrupt は **自セッション宛のみ** managed を stop する。

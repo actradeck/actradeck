@@ -11,6 +11,8 @@
  *
  * SEC: ActionUnit の allow-list フィールドのみ参照 (生 payload 経路を作らない)。
  */
+import type { ApprovalDecision } from "@actradeck/event-model";
+
 import { t, type Locale, type MessageKey } from "./i18n/messages";
 
 import type { ActionUnit, ActionKind } from "./action-units";
@@ -190,21 +192,22 @@ export function formatCurrentAction(
   return input.fallback;
 }
 
-/** decision コードを表示ラベルへ (allow/deny/...)。 */
+/**
+ * decision → ラベルキーの写像。`Record<ApprovalDecision, MessageKey>` で **compile-time 網羅**
+ * (TDA-R5-1: 正典へ 5 番目の decision が入るとここが型エラーで赤くなる — TDA-R2-2 の
+ * 「cancel が生 enum 文字列で出ていた」クラスの構造根治。switch の手書き列挙を残さない)。
+ */
+const DECISION_LABEL_KEYS: Record<ApprovalDecision, MessageKey> = {
+  allow: "action.decision.allow",
+  deny: "action.decision.deny",
+  allow_for_session: "action.decision.allowForSession",
+  cancel: "action.decision.cancel",
+};
+
+/** decision コードを表示ラベルへ (allow/deny/...)。enum 外の生値は従来どおり素通し (寛容表示)。 */
 export function decisionLabel(decision: string, locale: Locale = "ja"): string {
-  switch (decision) {
-    case "allow":
-      return t(locale, "action.decision.allow");
-    case "deny":
-      return t(locale, "action.decision.deny");
-    case "allow_for_session":
-      return t(locale, "action.decision.allowForSession");
-    case "cancel":
-      // TDA-R2-2: cancel が生 enum 文字列で出ていた取り残し (relay_lost 合成の初出で顕在化)。
-      return t(locale, "action.decision.cancel");
-    default:
-      return decision;
-  }
+  const key = (DECISION_LABEL_KEYS as Partial<Record<string, MessageKey>>)[decision];
+  return key !== undefined ? t(locale, key) : decision;
 }
 
 /**

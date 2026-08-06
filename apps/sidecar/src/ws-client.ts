@@ -12,7 +12,7 @@ import { EventEmitter } from "node:events";
 
 import { WebSocket } from "ws";
 
-import type { AgentVisibilityWire, PolicyCategory } from "@actradeck/event-model";
+import type { AgentVisibilityWire, ApprovalDecision, PolicyCategory } from "@actradeck/event-model";
 import { buildApprovalReconcileHelloFields } from "@actradeck/event-model";
 import { tokenEquals } from "@actradeck/redaction";
 
@@ -36,8 +36,8 @@ export function pendingIdsFromBridge(
 export type ApprovalDecisionMsg = {
   readonly type: "approval";
   readonly request_id: string;
-  /** 段階③: T1 ApprovalDecision の 4 値 (allow/allow_for_session/deny/cancel)。enum 検証は sidecar.ts。 */
-  readonly decision: "allow" | "allow_for_session" | "deny" | "cancel";
+  /** 段階③: T1 ApprovalDecision (正準型を直接消費・TDA-R5-1 で union ミラー廃止)。enum 検証は sidecar.ts。 */
+  readonly decision: ApprovalDecision;
   readonly reason?: string;
   /**
    * ADR 019ee0c0: allow_for_session に併せ true なら **再起動跨ぎ永続** allowlist へ登録する

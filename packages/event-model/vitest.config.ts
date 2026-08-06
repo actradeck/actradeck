@@ -61,7 +61,12 @@ export default defineConfig({
         "src/approval-request-id.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
         // approval-reconcile-wire.ts (hello 宣言の cap/検証・fail-safe 境界・TDA-R4-12) = 同上。
         //   INV-APPROVAL-RECONCILE-WIRE が worst 100/100/100/100 まで網羅 → floor 95/90/90/95。
-        "src/approval-reconcile-wire.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
+        "src/approval-reconcile-wire.ts": {
+          statements: 95,
+          branches: 90,
+          functions: 90,
+          lines: 95,
+        },
       },
     },
   },

@@ -13,6 +13,8 @@
 import { describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 
+import { APPROVAL_DECISIONS } from "@actradeck/event-model";
+
 import {
   buildAuditManifest,
   verifyAuditManifest,
@@ -30,7 +32,7 @@ import {
 } from "../src/audit-integrity.js";
 import { sessionReportToHtml, sessionReportToMarkdown } from "../src/audit-report.js";
 import type { AuditSessionReport, AuditSessionReportDiff } from "../src/audit-report.js";
-import { emptyDecisionTally } from "../src/audit-contract.js";
+import { AUDIT_DECISIONS, emptyDecisionTally } from "../src/audit-contract.js";
 import type { AuditSessionSummary } from "../src/audit-contract.js";
 import type { ReplayEventDTO } from "../src/replay-contract.js";
 
@@ -601,5 +603,57 @@ describe("INV-AUDIT-INTEGRITY 保証範囲の境界 (SEC-R4-1)", () => {
     const rootNone = buildAuditManifest(SAMPLE).root;
     expect(rootA).toBe(rootB);
     expect(rootA).toBe(rootNone);
+  });
+
+  it("HTML/MD renderer は entries を描画しない (QA-R5-4: 非 binding 境界の補完・renderer 側 pin)", () => {
+    // SEC-R4-1 の root 一致 pin は「entries は binding 外」の片側のみ。module doc の
+    // 「manifest は HTML/MD が表示する監査事実の authoritative record」が成立するには
+    // **renderer が entries を表示しない**ことも必要 (表示するなら binding へ拡張 = version bump
+    // + full 監査を踏ませる)。entries だけ異なる 2 report の描画が byte 一致することで固定する。
+    const entry = {
+      event_id: "e-ent-r5",
+      timestamp: "2026-07-03T12:00:05.000Z",
+      tool_name: "Bash",
+      risk_level: "high",
+      command: "forged-cmd-QA-R5-4-marker",
+      path: undefined,
+      decision: "deny" as const,
+      resolution_origin: undefined,
+      auto_allowed: undefined,
+    };
+    const withEntries: AuditSessionReport = {
+      ...SAMPLE,
+      summary: { ...sampleSummary(), entries: [entry] },
+    };
+    for (const render of [sessionReportToHtml, sessionReportToMarkdown]) {
+      const withOut = render(SAMPLE);
+      const withIn = render(withEntries);
+      expect(withIn).toBe(withOut); // entries の有無で描画が変わらない = 非表示。
+      expect(withIn).not.toContain("forged-cmd-QA-R5-4-marker");
+    }
+  });
+});
+
+/**
+ * INV-APPROVAL-DECISION-VOCAB (SEC-R5-1 + QA-R5-1・R5 監査):
+ * decision 語彙の単一出所を**参照同一性 + manifest 投影**の両面で固定する。
+ *  - QA-R5-1: `AUDIT_DECISIONS = APPROVAL_DECISIONS` は代入の現形にのみ依存し回帰テストが
+ *    無かった (同値の手書き literal へ戻しても 720 緑 — mutation probe P3c で実証)。参照同一性
+ *    pin で手書きミラーの復活を RED にする。
+ *  - SEC-R5-1: 署名 manifest の正準形 (`normalizeSummaryForManifest`) は decision 別計数を
+ *    `approval_<d>` キーで手書き投影しており、正準語彙へ 5 番目の decision が入っても投影されず
+ *    その計数が Ed25519 binding の外に落ちる。本 pin は語彙拡張の日に RED になり、意図的な
+ *    manifest version bump (+ full 監査) を強制する。
+ */
+describe("INV-APPROVAL-DECISION-VOCAB: decision 語彙の単一出所 (SEC-R5-1/QA-R5-1)", () => {
+  it("AUDIT_DECISIONS は正準 APPROVAL_DECISIONS と同一参照 (手書きミラー復活で RED)", () => {
+    expect(AUDIT_DECISIONS).toBe(APPROVAL_DECISIONS);
+  });
+
+  it("manifest 正準形は全 decision を approval_<d> キーで投影する (語彙拡張で RED → version bump を強制)", () => {
+    const keys = Object.keys(normalizeSummaryForManifest(sampleSummary()));
+    for (const d of APPROVAL_DECISIONS) {
+      expect(keys, `approval_${d} が manifest 正準形に投影されていない`).toContain(`approval_${d}`);
+    }
   });
 });

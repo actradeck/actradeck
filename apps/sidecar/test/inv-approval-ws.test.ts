@@ -18,6 +18,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
+import { APPROVAL_DECISIONS } from "@actradeck/event-model";
+
 import { ApprovalBridge } from "../src/approval-bridge.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
@@ -187,6 +189,47 @@ describe("INV-APPROVAL-WS (3#SEC-1): request_id entropy + decision enum", () => 
       decision: "sudo-allow-everything" as unknown as "allow",
     });
     expect(resolveSpy, "non-enum decision must not reach resolve").not.toHaveBeenCalled();
+    sidecar.store.close();
+  });
+
+  it("(d') gate は正準 APPROVAL_DECISIONS と set-equivalent (TDA-R5-1: 全メンバー受理・非メンバー破棄)", () => {
+    // TDA-R5-1 で手書き `!==` 連鎖を正準配列消費へ置換した。この refactor が受理集合を変えて
+    // いない (set-equivalence) ことを実配線で固定する: 正準語彙の全メンバーは resolve へ到達し、
+    // 非メンバー (型崩れ・大文字・空・prefix 拡張) は 1 件も到達しない。
+    const sidecar = new Sidecar({
+      sessionId: "s1",
+      wsUrl: "ws://127.0.0.1:1/never",
+      dbPath: ":memory:",
+    });
+    const resolveSpy = vi.spyOn(sidecar.approvalBridge, "resolve");
+    for (const decision of APPROVAL_DECISIONS) {
+      sidecar.wsClient.emit("approval", {
+        type: "approval",
+        request_id: "s1:apr-anything",
+        decision,
+      });
+    }
+    expect(resolveSpy, "every canonical decision must reach resolve").toHaveBeenCalledTimes(
+      APPROVAL_DECISIONS.length,
+    );
+    resolveSpy.mockClear();
+    for (const bad of [
+      "ALLOW",
+      "",
+      "allow ",
+      "allow_for_session_x",
+      "denyy",
+      42,
+      null,
+      undefined,
+    ]) {
+      sidecar.wsClient.emit("approval", {
+        type: "approval",
+        request_id: "s1:apr-anything",
+        decision: bad as unknown as "allow",
+      });
+    }
+    expect(resolveSpy, "non-members must never reach resolve").not.toHaveBeenCalled();
     sidecar.store.close();
   });
 

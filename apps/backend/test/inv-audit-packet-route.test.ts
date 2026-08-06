@@ -219,6 +219,30 @@ describe.skipIf(!reachable)("INV-AUDIT-PACKET: レビュー・パケット route
     expect(bad.json().ok).toBe(false);
   });
 
+  it("packet verify route: 旧 v1 manifest → 400 でなく 200 + unsupported-packet-manifest-version (QA-R5-3)", async () => {
+    // session 側 SEC-R4-5 の鏡映 (route が旧版を 400 へ潰さず decode→verify の unsupported 分岐へ
+    // 落とすことを route レベルで pin)。packet 側にだけこのケースが無く、decode の version 拒否が
+    // 復活しても unit tier しか赤くならなかった (mutation probe P17a・QA-R5-3)。
+    const v1 = {
+      version: "actradeck-audit-packet-manifest/v1",
+      generated_at: "t",
+      session_count: 0,
+      root: "y",
+      sessions: [],
+      governance: {},
+    };
+    const res = await app.inject({
+      method: "POST",
+      url: "/realtime/audit/packet/verify",
+      headers: auth(),
+      payload: { manifest: v1 },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { ok: boolean; reason: string };
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("unsupported-packet-manifest-version");
+  });
+
   it("sessions 欠落 → 400・未知 session → 404", async () => {
     const missing = await app.inject({
       method: "GET",

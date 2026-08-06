@@ -19,6 +19,8 @@
  * self-contained (外部 JS / CDN 非依存・inline `<style>` のみ)。
  */
 
+import { SYNTHETIC_RETIRE_ORIGIN } from "@actradeck/event-model";
+
 import type { AuditRangeReport, AuditSessionSummary } from "./audit-contract.js";
 import { foldByKind } from "./audit-contract.js";
 import type { ReplayEventDTO } from "./replay-contract.js";
@@ -191,7 +193,7 @@ function approvalsTableHtml(s: AuditSessionSummary): string {
 <tr><th>allow_for_session</th><td>${htmlEscape(a.by_decision.allow_for_session)}</td></tr>
 <tr><th>deny</th><td>${htmlEscape(a.by_decision.deny)}</td></tr>
 <tr><th>cancel</th><td>${htmlEscape(a.by_decision.cancel)}</td></tr>
-<tr><th>synthetic_retired (relay_lost)</th><td>${htmlEscape(a.synthetic_retired)}</td></tr>
+<tr><th>synthetic_retired (${SYNTHETIC_RETIRE_ORIGIN})</th><td>${htmlEscape(a.synthetic_retired)}</td></tr>
 <tr><th>pending</th><td>${htmlEscape(a.pending)}</td></tr>
 <tr><th>high_risk_op_count</th><td>${htmlEscape(s.high_risk_op_count)}</td></tr>
 </table>`;
@@ -418,7 +420,7 @@ export function sessionReportBodyMarkdown(
     `| allow_for_session | ${a.by_decision.allow_for_session} |`,
     `| deny | ${a.by_decision.deny} |`,
     `| cancel | ${a.by_decision.cancel} |`,
-    `| synthetic_retired (relay_lost) | ${a.synthetic_retired} |`,
+    `| synthetic_retired (${SYNTHETIC_RETIRE_ORIGIN}) | ${a.synthetic_retired} |`,
     `| pending | ${a.pending} |`,
     `| high_risk_op_count | ${s.high_risk_op_count} |`,
     ``,

@@ -29,6 +29,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   packets with different governance semantics distinguishable. Packets exported by v0.6.0
   (v1) report the distinct `unsupported-packet-manifest-version` on verify (fail-closed, not
   "tampered"). Re-export review packets to obtain v2.
+  Recipient note: a packet document embeds one `actradeck-audit-packet-manifest` marker
+  (proves the cross-session bundle: governance aggregation + per-session roots) **and** one
+  `actradeck-audit-manifest` marker per bundled session (each proves that single session
+  only). To verify the packet as a whole, extract and verify the packet marker — verifying
+  only a session marker proves that session, not the bundle.
 
 ## [0.6.0] - 2026-08-05
 

@@ -96,7 +96,8 @@ export interface AuditRangeReport {
 
 const AUDIT_BASE = "/realtime/audit/sessions";
 // TDA-R4-3: membership/tally の走査も正準配列を消費 (手書き列挙を残さない)。
-const DECISIONS: readonly AuditDecision[] = APPROVAL_DECISIONS;
+// QA-R5-1: export は identity pin テスト用 (`DECISIONS === APPROVAL_DECISIONS` を回帰固定)。
+export const DECISIONS: readonly AuditDecision[] = APPROVAL_DECISIONS;
 
 /** 期間集計 export の出力形式 (json/csv は既存・html/md は P2・ADR 019f2326)。 */
 export type AuditExportFormat = "json" | "csv" | "html" | "md";
