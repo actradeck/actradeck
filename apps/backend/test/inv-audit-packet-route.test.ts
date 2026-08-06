@@ -231,6 +231,20 @@ describe.skipIf(!reachable)("INV-AUDIT-PACKET: レビュー・パケット route
       sessions: [],
       governance: {},
     };
+    // (1) manifest_b64 経路 — decode→verify の合成そのもの (decode 側の version 拒否が復活すると
+    //     400 へ退行しここが RED — session 側 SEC-R4-5 と同型)。
+    const b64 = Buffer.from(JSON.stringify(v1), "utf8").toString("base64");
+    const viaB64 = await app.inject({
+      method: "POST",
+      url: "/realtime/audit/packet/verify",
+      headers: auth(),
+      payload: { manifest_b64: b64 },
+    });
+    expect(viaB64.statusCode).toBe(200);
+    const b64Body = viaB64.json() as { ok: boolean; reason: string };
+    expect(b64Body.ok).toBe(false);
+    expect(b64Body.reason).toBe("unsupported-packet-manifest-version");
+    // (2) manifest object 経路 — verify 側の unsupported 分岐を route で pin。
     const res = await app.inject({
       method: "POST",
       url: "/realtime/audit/packet/verify",
