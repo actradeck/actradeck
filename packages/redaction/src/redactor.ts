@@ -699,7 +699,9 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
   //      regex ループ前の**構造 scanner** (maskMultilineQuotedCredentials) が suspicious-close chain +
   //      window 末尾 greedy で閉塞済み。本 fallback は scanner が subsume した **defense-in-depth
   //      バックストップ**であり、scanner 出力への再マッチは冪等 (新規マスクは scanner に regression が
-  //      あった場合のみ発火する)。INV-REDACTION-QUOTED-CRED-UNTERMINATED が full-closure を pin する。
+  //      あった場合のみ発火する)。⚠️ backstop が回復するのは**旧 partial-closure の範囲まで** (branch1 の
+  //      A1 merge / branch2 の 1 行目 EOL マスク) — B1/B1'/A1 の full-closure は scanner のみが担い、
+  //      INV-REDACTION-QUOTED-CRED-UNTERMINATED (full-closure ブロック + scanner 直接 unit) が pin する。
   //   ## ReDoS (INV-REDACTION-REDOS-*): keyPart は有界。値部は単一 charset の lazy/greedy 無界反復
   //     (`[\s\S]{0,PRE_REDACT_SLICE}?` / `[^\r\n]{0,}`)・入れ子量指定子/否定先読み反復なし。`\2` は捕捉済み
   //     1 文字リテラルの照合ゆえ非指数。global replace で match の lastIndex は単調前進し (branch2 は空
@@ -747,24 +749,34 @@ export const REDACTION_RULES: readonly RedactionRule[] = [
 
   // --- @-less url-credential: scheme://user:pass (`@host` 欠落・SEC-2/task 019f5ca4) --------
   // 上の @-rule は必須 anchor `@` の欠落で match 失敗し pass が raw 残存していた (裁定 019f5ca3 SEC-2)。
-  // 判別は **port-shape gate**: authority 部の `:` 直後が「1-5 桁数字 + 非 word 文字/終端」なら port
-  //   (`host:5432/db` / `host:8080)` / `h1:27017,h2:27017` / 文末 `host:443.`) とみなし不介入。それ以外の
-  //   `:` 直後は valid URL で port ではありえず (port は数字のみ)、credential とみなし fail-safe にマスクする。
-  // 開示する残差 (under-redaction・構造的判別不能): pass が **≤5 桁の純数字** (`scheme://u:12345`) は
-  //   port と区別不能で不介入 (数字 6 桁以上はマスク)。schemeless `user:pass` (@ なし) は scope 外 (一般
-  //   テキストの `word:word` と判別不能)。
-  // over-redaction 開示: `scheme://host:notaport` (非数字を port 位置に書いた invalid URL) はマスクされる
-  //   (fail-safe 側・実 URL では非実在形)。
-  // ReDoS: pass 捕捉は **atomic-group emulation** `(?=([^\s@/]{1,}))\2` — ECMAScript の lookahead は
-  //   backtracking 状態を破棄する (atomic) ため、`@` 後続 (既 @-rule 処理済み形) で末尾 lookahead が
-  //   落ちても pass 内へ backtrack しない = 線形。port-shape gate は有界 lookahead。
+  // 判別は **port-shape gate**: `:` 直後が「1-5 桁数字 + URL authority 終端子」なら port とみなし不介入。
+  //   終端子は `[\s/?#,]` (path/query/fragment/multi-host 区切り・空白) / 入力終端 / 「閉じ・文末記号
+  //   `).;:'"]}>` + 直後が空白か終端」。**「数字 + 任意の非 word 文字」を port 扱いしてはならない**
+  //   (再監査 SEC-1 H: `admin:2024!Summer` 級の「数字始まり + 記号」現実的パスワードが全 raw になった)。
+  // user/pass 捕捉は **RFC-3986 の userinfo 合法文字** (unreserved + pct + sub-delims / pass は `:` も) に
+  //   限定する (再監査 TDA-1 M: 旧 `[^\s@/]` はテンプレートリテラル `:${…}` や IPv6 `[::1]:8080` を飲み
+  //   102/138,539 実 repo 行を破壊した)。IPv6 bracket `[` は user charset 外 → `http://[::1]:8080` 不介入。
+  // 開示する残差 (under-redaction 側・いずれも構造的判別不能または RFC 構造終端):
+  //   (1) **≤5 桁純数字 pass** (`scheme://u:12345`) は port と区別不能 (6 桁以上はマスク・境界 6 を pin)。
+  //   (2) **数字 1-5 桁 + `/ ? # ,` で始まる pass** (`svc:99#hunter2`) は port+fragment/path と構造同型。
+  //   (3) **URL 非合法文字を含む未エンコード pass** は合法 prefix のみマスクし残部が raw に残る
+  //       (`pass/word` の `/` 以降 = 個別追跡 SEC-4・`2024!Summer#Prod` の `#Prod`。正規の DSN は
+  //       %-encode される。末尾 lookahead は RFC 構造区切り `[\s/?#]|$` のみ許可 — `{` 等の URL 外文字で
+  //       止まった捕捉は match ごと放棄しテンプレートリテラル `:${…}` を温存する)。
+  //   (4) schemeless `user:pass` (@ なし) は scope 外 (一般テキストの `word:word` と判別不能)。
+  // over-redaction 開示: `scheme://host:notaport` (非数字 port 位置・invalid URL) はマスク。マスクされた
+  //   pass に隣接する RFC 合法の文末記号 (`)` `.` `'` 等) は捕捉に含まれ marker に飲まれる (pin 済み)。
+  // ReDoS: pass 捕捉は atomic-group emulation `(?=(PASS))\2` (ECMAScript lookahead は backtracking 状態を
+  //   破棄)。ただし本ルールは @-rule の**後**に走るため `…:pass@` 形は常に先行マスク済みで、末尾 lookahead
+  //   不成立の backtrack 誘発形は redactString 経由では到達不能 (defensive-by-construction・直接
+  //   micro-bench では plain greedy でも線形を実測 = load-bearing ではない・QA-4)。gate は有界 lookahead。
   // 冪等: 出力 `scheme://user:[REDACTED:url-credential]` の再適用は marker 全体を再捕捉して同一 byte を
-  //   返す (marker は charset 内・digit-gate 非該当) ため冪等。count は最終出力の marker 数で数える
+  //   返す (marker 文字は charset 内・digit-gate 非該当) ため冪等。count は最終出力の marker 数で数える
   //   (countRedactions) ため再マッチで増えない。
   {
     kind: "url-credential",
     pattern: new RegExp(
-      `\\b([a-z][a-z0-9+.-]{0,32}:\\/\\/[^\\s:/@]{0,}):(?![0-9]{1,5}(?:[^A-Za-z0-9_-]|$))(?=([^\\s@/]{1,}))\\2(?=[\\s/]|$)`,
+      `\\b([a-z][a-z0-9+.-]{0,32}:\\/\\/[A-Za-z0-9._~%!$&'()*+,;=-]{0,}):(?![0-9]{1,5}(?:[\\s/?#,]|$|[).;:'"\\]}>](?=\\s|$)))(?=([A-Za-z0-9._~%!$&'()*+,;=:-]{1,}))\\2(?=[\\s/?#]|$)`,
       "gi",
     ),
     mask: (_m, userWithScheme: string) => `${userWithScheme}:${token("url-credential")}`,
@@ -999,35 +1011,52 @@ export function countRedactionMarkersByKindDeep(value: unknown): Record<string, 
  * いたちごっこにしない (memory inband-integrity-signal-needs-failsafe-sentinel)。
  *
  * 意味論 (単一・fail-safe):
- *  1. **単一行 terminated** (閉じ quote が同一行内) → 不介入 (既存 quoted ルールへ委譲・バイト等価)。
- *     value 内部の偽 opener を再走査しないよう lastIndex を close 後へ進める。
- *  2. **多行 terminated** (閉じ quote が window 内・改行を跨ぐ) → 現 branch1 と同一出力
- *     (`keyPart + quote + marker + quote`・バイト等価)。ただし **suspicious-close 検査**: 閉じ quote 候補の
- *     直前 (有界 tail) が opener 末尾形 (`keyword…[:=]\s*`) なら、その quote は**後続 credential の開始
- *     クォート**とみなし terminator に採用しない — 次の同種 quote へ探索を継続する (chain・A1 閉塞)。
- *  3. **真の未終端** (window 内に構造的閉じ quote なし・chain の果て含む) → 開始クォートから
- *     **window 末尾まで greedy にマスク** (B1/B1' 閉塞)。これは private-key/jwt の terminator 欠落
- *     fallback と同一の greedy-consume 意味論 (census カテゴリ 1 の既存 precedent)。
+ *  1. **単一行 terminated かつ非 chain** (閉じ quote が同一行内・chain 未発火) → 不介入 (既存 quoted
+ *     ルールへ委譲・バイト等価)。value 内部の偽 opener を再走査しないよう lastIndex を close 後へ進める。
+ *  2. **suspicious-close chain (改行有無に依らず・SEC-2)**: 閉じ quote 候補の直前 (有界 tail) が opener
+ *     末尾形 (`keyword…[:=]\s*`) なら、その quote は**後続 credential の開始クォート**とみなし terminator
+ *     に採用しない — 次の同種 quote へ探索を継続する (A1 閉塞)。単一行の
+ *     `password="x api_key="SECRET"` も chain が発火し全体を単一 marker へ畳む (旧実装は改行がある場合
+ *     のみ chain を走らせ、単一行 A1 が「マーカーは立つが 2 個目の値が raw」で漏れていた)。
+ *  3. **多行 terminated** (構造的閉じ quote が window 内) → `keyPart + quote + marker + quote` の最小
+ *     マスク (regex branch1 とバイト等価)。
+ *  4. **真の未終端** (window 内に構造的閉じ quote なし・chain の果て含む) → 開始クォートから
+ *     **window 末尾まで greedy にマスク** (B1/B1' 閉塞)。private-key/jwt の terminator 欠落 fallback と
+ *     同一の greedy-consume 意味論 (census カテゴリ 1 の precedent)。改行を跨いで飲んだ場合は
+ *     ` [REDACT-SWALLOWED:n]` (消費 byte 数・非負整数・原文非依存) を付し、swallow 規模を可視化する
+ *     (SEC-3: 長さヒント無しでは 1 個の未終端 opener がフィールド残り全部を痕跡なく消せた)。
+ *
+ * 閉塞スコープの正確な開示 (SEC-6/QA-8):
+ *  - B1 閉塞は「開始クォートから**最初の非 suspicious な同種 quote** (構造的閉じ) まで」。継続部の途中に
+ *    benign な同種 quote があればそこで閉じ、それ以降は文字列外として温存する (構造判定の定義どおり。
+ *    `password="l1\n[INFO] "app.json"\n<secret>` の <secret> は文字列外 = scope 外)。
+ *  - 本 scanner は **quote-anchored** class のみ扱う。quote を持たない多行 credential (YAML block scalar
+ *    `password: |` / backtick / bare 改行分断 / heredoc) は scope 外の既知残差 (docs/benchmarks の
+ *    honest residuals に開示・phase sweep で追跡)。
  *
  * over-redaction 開示 (fail-safe 側・under-redaction 絶対回避 > over-redaction):
  *  - 未終端 opener 以降の一般テキストは window 分マスクに飲まれる (構造的には「文字列内部」)。agent が
  *    `password="` を印字すると以降が飲まれる観測性コストは PEM header 印字と同一クラス (single-operator
- *    境界内 accepted)。
- *  - 正当な多行値の末尾が偶然 opener 形で終わる場合 (`password="…\nexport MY_TOKEN="`) は chain が
- *    延伸する (mask 側へ倒す)。
+ *    境界内 accepted)。swallow 長は上記ヒントで開示される。
+ *  - keyword は contains-match ゆえ opener 面は `author: "` (auth) / `signature = "` (sig) 等の benign
+ *    キーにも及ぶ (既存 quoted ルールと同一の keyword 面・単一行 terminated は不介入で従来どおり)。
+ *  - 正当な多行値の末尾が偶然 opener 形で終わる場合 (`password="…\nexport MY_TOKEN="`)・単一行値が
+ *    opener 形で終わる場合 (`password="use api_key="`) は chain が延伸する (mask 側へ倒す)。
  *  - escaped quote (`\"`) は既存 quoted ルールと同様に非対応 (次の同種 quote を構造的閉じとみなす)。
  *
  * 計算量: opener regex の exec / indexOf / 改行走査はすべて cursor 単調前進で amortized 線形
- * (INV-REDACTION-REDOS-SCALING が実測固定)。regex 4 本目 fallback は本 scanner が subsume するが、
- * defense-in-depth の**バックストップとして残置** (scanner 出力への再マッチは冪等)。
+ * (INV-REDACTION-REDOS-SCALING の chain-dense case が実測固定)。regex 4 本目 fallback は本 scanner が
+ * subsume した defense-in-depth バックストップ (scanner 出力への再マッチは冪等・scanner regression 時のみ
+ * 旧 partial-closure を回復する — B1/B1'/A1 の full-closure までは回復しない)。
+ *
+ * 単一出所 (TDA-2): opener regex と suspicious-close tail regex は **CRED_KEY_PART_SRC から導出**する
+ * (手書き再構成禁止 — CRED_KEY_PART_SRC 拡張時に chain 判定だけ取り残されると A1 の穴が silent に再開する。
+ * inv-redaction-quoted-cred-unterminated.test.ts の source-coupling metatest が回帰固定)。
  */
-const MULTILINE_CRED_OPENER_RE = new RegExp(`(${CRED_KEY_PART_SRC})(["'])`, "gi");
+export const MULTILINE_CRED_OPENER_RE = new RegExp(`(${CRED_KEY_PART_SRC})(["'])`, "gi");
 /** suspicious-close 検査の有界 tail 長 (keyPart 最大長 ~176 を包含)。 */
 const SUSPICIOUS_TAIL_WINDOW = 256;
-const SUSPICIOUS_CLOSE_TAIL_RE = new RegExp(
-  `(?:${CREDENTIAL_KEYWORDS})[A-Za-z0-9_.-]{0,${MAX_KEY_TOKEN}}["']?\\s{0,8}[:=]\\s{0,8}$`,
-  "i",
-);
+export const SUSPICIOUS_CLOSE_TAIL_RE = new RegExp(`(?:${CRED_KEY_PART_SRC})$`, "i");
 
 export function maskMultilineQuotedCredentials(value: string): string {
   MULTILINE_CRED_OPENER_RE.lastIndex = 0;
@@ -1038,10 +1067,11 @@ export function maskMultilineQuotedCredentials(value: string): string {
     const keyPart = m[1]!;
     const quote = m[2]!;
     const valueStart = m.index + m[0].length;
-    // 構造的閉じ quote を探索する (suspicious-close は chain で読み飛ばす)。
+    // 構造的閉じ quote を探索する (suspicious-close は改行有無に依らず chain で読み飛ばす・SEC-2)。
     let searchFrom = valueStart;
     let closeIdx = -1;
     let sawNewline = false;
+    let chained = false;
     for (;;) {
       const cand = value.indexOf(quote, searchFrom);
       if (cand === -1) break;
@@ -1054,26 +1084,40 @@ export function maskMultilineQuotedCredentials(value: string): string {
           }
         }
       }
-      if (!sawNewline) {
-        // 単一行 terminated → 既存 quoted ルールへ委譲 (case 1)。
-        closeIdx = cand;
-        break;
-      }
-      // 多行候補: 閉じ quote 直前が opener 末尾形なら後続 credential の開始クォート (A1) とみなす。
+      // 閉じ quote 候補の直前が opener 末尾形なら後続 credential の開始クォート (A1) とみなす。
       const tailStart = Math.max(valueStart, cand - SUSPICIOUS_TAIL_WINDOW);
       if (SUSPICIOUS_CLOSE_TAIL_RE.test(value.slice(tailStart, cand))) {
+        chained = true;
         searchFrom = cand + 1;
         continue;
       }
       closeIdx = cand;
       break;
     }
-    if (closeIdx !== -1 && !sawNewline) {
+    if (closeIdx !== -1 && !sawNewline && !chained) {
+      // 単一行 terminated かつ非 chain → 既存 quoted ルールへ委譲 (case 1・バイト等価)。
       MULTILINE_CRED_OPENER_RE.lastIndex = closeIdx + 1;
       continue;
     }
     const spanEnd = closeIdx === -1 ? value.length : closeIdx + 1;
-    out += value.slice(cursor, m.index) + keyPart + quote + token("credential-assignment") + quote;
+    let masked = keyPart + quote + token("credential-assignment") + quote;
+    if (closeIdx === -1) {
+      // 真の未終端 (case 4): 改行を跨いで飲んだ場合のみ swallow 長ヒントを付す (SEC-3)。
+      //   単一行未終端 (EOF まで) は旧 branch2 とバイト等価を維持する。ヒントは非負整数のみで
+      //   原文非依存 (redaction 件数と同じ公開ポリシー)。
+      let crossedNewline = sawNewline;
+      if (!crossedNewline) {
+        for (let i = searchFrom; i < spanEnd; i++) {
+          const c = value.charCodeAt(i);
+          if (c === 10 || c === 13) {
+            crossedNewline = true;
+            break;
+          }
+        }
+      }
+      if (crossedNewline) masked += ` [REDACT-SWALLOWED:${spanEnd - valueStart}]`;
+    }
+    out += value.slice(cursor, m.index) + masked;
     cursor = spanEnd;
     MULTILINE_CRED_OPENER_RE.lastIndex = spanEnd;
   }

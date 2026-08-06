@@ -575,6 +575,19 @@ describe("INV-REDACTION: redactString ReDoS performance (再#SEC-1)", () => {
       build: (n) => `password="${("A".repeat(80) + "\n").repeat(Math.floor(n / 81))}"`,
       n: 64 * 1024,
     },
+    {
+      // TDA-4 (task 019f5ca4 再監査): 構造 scanner の suspicious-close chain 稠密形。全 quote 候補が
+      //   opener 末尾形で chain が最長に伸びる (indexOf + 有界 tail regex の反復が線形であることを固定)。
+      name: 'scanner suspicious-close chain-dense password="a(\\napi_key=")*n',
+      build: (n) => `password="a${'\napi_key="'.repeat(Math.floor(n / 12))}`,
+      n: 64 * 1024,
+    },
+    {
+      // task 019f5ca4: @-less url-credential の port-shape gate 稠密形 (gate が毎 URL で発火する keep 経路)。
+      name: "anchorless url-credential port-gate dense (http://h:8080) )*n",
+      build: (n) => "http://h:8080) ".repeat(Math.ceil(n / 15)),
+      n: 64 * 1024,
+    },
   ];
 
   // bestMeasure は describe 冒頭で定義済 (両ブロック単一 basis)。scaling は ratio 精度のため

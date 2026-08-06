@@ -309,15 +309,21 @@ fallback), and Stripe keys shorter than 16 characters.
     quoted npm tokens by keyword overlap. Pinned by `INV-REDACTION-QUOTED-CRED-UNTERMINATED`
     (falsifiable RED-before). The **object path was already safe** (`isCredentialKey` masks a
     credential **key**'s whole value regardless of quoting/newlines).
-    - **Disclosed residuals (accepted, strict-improvement, tracked `019f5ca4`).** When there is
-      no reachable closing quote in-window on the credential's own line, branch2 masks only the
-      first line so a low-entropy continuation can survive: (a) truly multi-line unterminated /
-      `>PRE_REDACT_SLICE` newline-split values, or a merge whose following line is **another**
-      unterminated credential; (b) `url-credential` with a missing `@host` (masking to EOL there
-      would break legitimate `host:port/path` — `@` is the only pass/port anchor). Realistic
-      single-line unterminated and in-window newline-split are fully closed; all residuals are
-      pre-existing, single-operator/local-fs bounded, and closed by a keyword-anchor-independent
-      design in the follow-up PR.
+    - **Closure update (task `019f5ca4`).** A structural scanner now closes the previously
+      disclosed residuals: truly multi-line unterminated / `>PRE_REDACT_SLICE` newline-split
+      values are greedily masked to the window end (with a ` [REDACT-SWALLOWED:n]` length hint),
+      and a closing quote immediately preceded by another credential opener is rejected as a
+      terminator (merge/A1, single-line and multi-line). The missing-`@host` `url-credential`
+      class is closed by an @-less rule with a port-shape gate and RFC-3986 capture charsets.
+    - **Remaining honest residuals (pinned by tests).** (a) The scanner is quote-anchored:
+      YAML block scalars (`password: |`), backticks, bare newline-split values and heredocs
+      are out of scope. (b) A multi-line value closes at the first non-suspicious same-type
+      quote; content after that structural close is outside the string. (c) @-less URL
+      passwords of 1-5 pure digits (port-indistinguishable) or digits followed by a structural
+      delimiter are kept; URL-illegal characters bound the masked span (`/`-containing
+      passwords tracked separately). (d) The unterminated-opener greedy swallow trades
+      observability for containment: one unterminated credential opener swallows the rest of
+      the field (disclosed via the length hint).
   - The benchmark **measures** partial survival directly (fragment-survival metric) rather than only
     asserting it — the upgrade R4 asked for — and now reports 0.
 - **Remainder-aware exclusion can hide a _true_ partial leak (false-negative direction).** The

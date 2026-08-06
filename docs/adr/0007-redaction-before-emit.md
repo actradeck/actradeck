@@ -100,17 +100,27 @@ Scope of this amendment (what it does **not** claim):
   `INV-REDACTION-QUOTED-CRED-UNTERMINATED` (falsifiable: reverting the rule reddens the
   leak-closure cases). The credential-**key** object path was already safe via
   `isCredentialKey`.
-- **Disclosed residuals of that fix (accepted, strict-improvement, tracked `019f5ca4`).**
-  When there is **no reachable closing quote in-window on the credential's own line**,
-  branch2 masks only the first line, so a low-entropy continuation can remain raw:
-  (a) a truly multi-line unterminated value, or `>PRE_REDACT_SLICE` newline-split value,
-  or a merge where the following line is **another** unterminated credential whose quote
-  branch1 consumes as the anchor; (b) `url-credential` with a missing `@host` — masking
-  to EOL there would break legitimate `host:port/path` (e.g. `postgres://app:5432/db`)
-  because `@` is the only anchor distinguishing pass from port/path. Realistic
-  single-line unterminated and in-window newline-split are fully closed. All residuals
-  are pre-existing, single-operator/local-fs bounded, and closed by a keyword-anchor-
-  independent design in the follow-up PR (task `019f5ca4`).
+- **Anchor-independent closure (task `019f5ca4`, this release).** A structural scanner
+  (`maskMultilineQuotedCredentials`) now runs before the regex rules: single-line
+  terminated values are untouched; a closing-quote candidate immediately preceded by
+  another credential opener is rejected as a terminator (suspicious-close chain, closing
+  the merge/A1 class on single-line and multi-line inputs alike); truly unterminated
+  values are greedily masked to the window end with a ` [REDACT-SWALLOWED:n]` length
+  hint (same missing-terminator semantics as the private-key/JWT fallbacks). The
+  `url-credential` missing-`@host` class is closed by an @-less rule with a port-shape
+  gate (1-5 digits followed by a URL authority terminator is kept as a port) and
+  RFC-3986 userinfo capture charsets.
+- **Disclosed residuals after closure (accepted, pinned by
+  `INV-REDACTION-QUOTED-CRED-UNTERMINATED` / `INV-REDACTION-URLCRED-ANCHORLESS`).**
+  (a) The scanner is quote-anchored: non-quoted multi-line credentials (YAML block
+  scalars `password: |`, backticks, bare newline-split values, heredocs) remain out of
+  scope. (b) A multi-line value is closed at the first non-suspicious same-type quote;
+  content after that structural close is outside the string by definition. (c) @-less
+  URL passwords that are 1-5 pure digits (indistinguishable from a port), or digits
+  followed by a structural delimiter (`svc:99#frag` ≡ port+fragment), are kept; a pass
+  containing URL-illegal characters is masked only up to the first structural
+  terminator (`/`-containing passwords tracked separately). All residuals are
+  single-operator/local-fs bounded.
 - **Public copy value-completeness prohibition is retained** (2026-07-13): describe
   masking as applied to detected patterns / masked spans, not as blanket completeness.
 
