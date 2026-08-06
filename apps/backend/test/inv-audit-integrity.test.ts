@@ -672,7 +672,7 @@ describe("INV-APPROVAL-DECISION-VOCAB: decision 語彙の単一出所 (SEC-R5-1/
  * manifest.summary の全 key について「その 1 field だけ改変すると verify が落ちる」を検査する
  * (key 追加時に自動拡張し、canonicalize 漏れの当日に RED)。
  */
-describe("INV-AUDIT-BINDING-COMPLETENESS: summary 全 field の root-sensitivity (SEC-R6-1)", () => {
+describe("INV-AUDIT-BINDING-COMPLETENESS: 全投影 field の root-sensitivity (SEC-R6-1/SEC-R8-1)", () => {
   it("manifest.summary の全 field は改変で verify が落ちる (canonicalize 漏れで RED)", () => {
     const base = buildAuditManifest(SAMPLE);
     const entries = Object.entries(base.summary);
@@ -687,6 +687,53 @@ describe("INV-AUDIT-BINDING-COMPLETENESS: summary 全 field の root-sensitivity
       } as unknown as AuditManifest;
       const r = verifyAuditManifest(tampered);
       expect(r.ok, `summary.${key} の改変が検知されない (canonicalizeSummary から漏れている)`).toBe(
+        false,
+      );
+    }
+  });
+
+  it("manifest.events[i] の全 field (hash 除く) は改変で verify が落ちる (SEC-R8-1: 兄弟投影)", () => {
+    // SEC-R8-1: summary だけ閉じても events/diff の位置列挙 (canonicalizeEventFields/Diff) に
+    // 同一の「宣言したのに畳まれない」クラスが残る。events は command/decision を運ぶため
+    // summary より価値の高い偽造標的 — 同型の全数 assert で閉じる。hash は連鎖の出力値ゆえ除外
+    // (改変は連鎖照合そのもので検知される)。
+    const base = buildAuditManifest(SAMPLE);
+    const keys = Object.keys(base.events[0]!).filter((k) => k !== "hash");
+    expect(keys.length).toBeGreaterThanOrEqual(9); // 非空虚ガード (現行 9 field)。
+    for (const key of keys) {
+      const ev0 = base.events[0]! as unknown as Record<string, unknown>;
+      const tamperedEvents = [
+        { ...ev0, [key]: `${String(ev0[key])}-probe` },
+        ...base.events.slice(1),
+      ];
+      const tampered = { ...base, events: tamperedEvents } as unknown as AuditManifest;
+      const r = verifyAuditManifest(tampered);
+      expect(
+        r.ok,
+        `events[0].${key} の改変が検知されない (canonicalizeEventFields から漏れている)`,
+      ).toBe(false);
+    }
+  });
+
+  it("manifest.diff の全 field は改変で verify が落ちる (SEC-R8-1: 兄弟投影)", () => {
+    const withDiff = buildAuditManifest(
+      report([ev({ event_id: "e-bind-diff" })], {
+        available: true,
+        body: "@@ -1 +1 @@\n-a\n+b",
+        truncated: false,
+        secret_detected: false,
+        redaction_count: 0,
+      }),
+    );
+    const entries = Object.entries(withDiff.diff!);
+    expect(entries.length).toBeGreaterThanOrEqual(6); // 非空虚ガード (現行 6 field)。
+    for (const [key, value] of entries) {
+      const tampered = {
+        ...withDiff,
+        diff: { ...withDiff.diff!, [key]: `${String(value)}-probe` },
+      } as unknown as AuditManifest;
+      const r = verifyAuditManifest(tampered);
+      expect(r.ok, `diff.${key} の改変が検知されない (canonicalizeDiff から漏れている)`).toBe(
         false,
       );
     }

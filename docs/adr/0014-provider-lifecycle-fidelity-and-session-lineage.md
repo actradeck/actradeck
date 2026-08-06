@@ -481,10 +481,13 @@ origin=relay_lost, delivery=not_sent`).
     zero tripwire (no test exercised its approval handler). The gate now consumes
     `APPROVAL_DECISIONS` (same set-equivalent form as the managed sidecar) and the
     set-equivalence test runs against **both** wirings. Honest scope after this round: the
-    untyped-gate class is closed repo-wide; the `by_decision.<d>` hand projections in the
-    CSV/HTML/MD report renderers remain (TDA-R6-2, L — a 5th decision would silently miss
-    from those outputs while the conservation row and the vocabulary pin go visibly
-    inconsistent; tracked in the sweep, not individually).
+    **hand-copied** untyped-gate class is closed repo-wide (the remaining untyped-input
+    gates — backend's two module-private `VALID_DECISIONS` sets — consume
+    `ApprovalDecision.options` as an import-time snapshot, not a hand list); the
+    `by_decision.<d>` hand projections in the CSV/HTML/MD report renderers remain
+    (TDA-R6-2, L — a 5th decision would silently miss from those outputs while the
+    conservation row and the vocabulary pin go visibly inconsistent; tracked in the sweep,
+    not individually).
   - **The set-equivalence pin now asserts argument fidelity (QA-R6-1, M).** The R6 test
     asserted only call counts; an injected mutant that discarded the validated decision and
     passed `"allow"` — converting every operator deny/cancel into allow on the relay —
@@ -512,6 +515,39 @@ origin=relay_lost, delivery=not_sent`).
   - **Tracked with deadline (QA-R6-2, M).** One unidentified flaky sidecar test appeared once
     under CPU contention and was lost to output truncation; a task requires CI to retain the
     full sidecar reporter output so the next occurrence is identifiable.
+
+  **Audit round 8→9 (2026-08-07, landing of the R8 targeted re-audit findings — no H; QA
+  lane APPROVE, SEC/TDA CONDITIONAL on the items below, all landed):**
+
+  - **Binding completeness extended to the sibling projections (SEC-R8-1, M).** The R7
+    root-sensitivity pin covered only `summary`; the same declared-but-unbound class stayed
+    open for `canonicalizeEventFields` (9 positional fields — carrying `command` and
+    `decision`, a higher-value forgery target) and `canonicalizeDiff` (6 fields), verified
+    by mutants surviving 728/728. The pin now sweeps every `events[i]` key (except `hash`,
+    the chain output) and every `diff` key with the same auto-extending loops and
+    non-vacuity floors (9 / 6). No unbound field exists today in any projection (23/23,
+    9/9, 6/6 measured) — the pins close the latent class.
+  - **Present→forwarded direction pinned (QA-R8-1/R8-2, L).** The gate tests only emitted
+    frames omitting `reason`/`persist`, so discarding the operator's rationale or forcing
+    the persistent-allowlist flag permanently off survived the full suite (fail-safe
+    directions; the unsafe persist-on direction was already killed). One additional emit
+    asserts both values are forwarded unaltered.
+  - **`RESOLUTION_ORIGINS` freeze is now pinned (TDA-R8-2, L).** The R7 text claimed an
+    `Object.isFrozen` pin for both canonical arrays but only `APPROVAL_DECISIONS` had one,
+    while `RESOLUTION_ORIGINS` is likewise a runtime membership gate (webui origin
+    filtering); the missing pin is added, making the claim true.
+  - **Sentinel scan strips inline/trailing comments (SEC-R8-2, L).** Moving the real SQL
+    predicate into a same-line comment could still satisfy the per-file presence guard; the
+    scan now removes inline `/* … */` and whitespace-preceded trailing `//` segments (the
+    in-string edge cases are disclosed in the helper's doc).
+  - **Recurrence tripwire for the gate-copy class (TDA-R8-1, M → tracked with deadline).**
+    Hand copies of the decision vocabulary surfaced three rounds in a row (R4 mirrors → R5
+    sidecar gate → R6 attach daemon); closure so far rests on per-round manual sweeps. A
+    v0.7 task tracks a structural metatest (reusing the sentinel scanner) that forbids
+    untyped decision-literal comparisons repo-wide.
+  - **Sweep.** Accessor unification for backend's `VALID_DECISIONS` sets (SEC-R8-3 ≡
+    TDA-R8-3), a stale line-number comment (TDA-R8-4), and the packet chain-domain suffix
+    nit (QA-R6-4) stay in the phase tech-debt sweep.
 
 **Phase 5 — Adapter capability manifest + UI.**
 **Absorbed by ADR 0015 (§D7).** The closed vocabulary {`authoritative`, `observed`, `inferred`,

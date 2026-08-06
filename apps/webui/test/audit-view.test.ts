@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { APPROVAL_DECISIONS } from "@actradeck/event-model";
+import { APPROVAL_DECISIONS, RESOLUTION_ORIGINS } from "@actradeck/event-model";
 
 import {
   DECISIONS,
@@ -53,6 +53,12 @@ describe("INV-APPROVAL-DECISION-VOCAB (webui 面・QA-R5-1)", () => {
     // TDA-R4-3 の単一出所化は代入の現形にのみ依存し回帰テストが無かった (同値の手書き literal へ
     // 戻しても suite 緑 — mutation probe P3c と同クラス)。参照同一性 pin で構造固定する。
     expect(DECISIONS).toBe(APPROVAL_DECISIONS);
+  });
+
+  it("RESOLUTION_ORIGINS は frozen (TDA-R8-2: 実行時 membership ゲートの依存は不変)", () => {
+    // audit-view の origin membership 判定 (RESOLUTION_ORIGINS.includes) はこの配列の実行時依存。
+    // APPROVAL_DECISIONS 側の isFrozen pin (backend) と対で、非 frozen `.options` へ戻す退行を RED にする。
+    expect(Object.isFrozen(RESOLUTION_ORIGINS)).toBe(true);
   });
 });
 

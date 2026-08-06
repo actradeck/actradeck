@@ -39,29 +39,37 @@ function listSrcFiles(dir: string): string[] {
 }
 
 /**
- * 全行コメント (行頭 `//` / `/*` / docstring 継続 `*`) を除去する。コメント文面が SQL 抽出の
- * 非空虚ガードを偽充足したり比較形スキャンを誤 trip したりしないための正規化 (SEC-R5-3)。
- * 文字列内の `//` (URL 等) を壊さないよう行頭形のみ落とす。非対称の正直な開示 (SEC-R6-2):
- * トレイリングコメントは残る — 禁止形スキャンには「過剰 trip = 安全側」だが、SQL 抽出の
- * 非空虚ガードには偽充足側なので、ガードは件数でなく**期待ファイル単位** (下記) で固定する。
- * `/* ... *\/ code` 形の行は `*\/` 以降のコードを保持する (行ごと落とすと禁止形を隠しうる)。
+ * コメントを除去する (SEC-R5-3・SEC-R6-2・SEC-R8-2)。コメント文面が SQL 抽出の非空虚ガードを
+ * 偽充足したり比較形スキャンを誤 trip したりしないための正規化。
+ *  - 行頭コメント行 (`//` / `/*` / docstring 継続 `*`) は行ごと除去。`/* ... *\/ code` 形は
+ *    `*\/` 以降のコードを保持 (行ごと落とすと禁止形を隠しうる)。
+ *  - SEC-R8-2: **インライン block comment** (`code /* was: ... *\/`) と **トレイリング行コメント**
+ *    (空白 + `//` 以降) も除去 — 「実 SQL を同一行のコメントへ退避して presence 検査を偽充足」
+ *    する形を閉塞する。トレイリング `//` は空白先行のみ対象 (文字列内 URL `://` は `:` 先行ゆえ
+ *    非該当)。限界の正直な開示: 文字列リテラル内に ` // ` や `/*` を含むコードは以降が
+ *    落ちうる (現 backend src に該当なし・禁止形スキャンには「隠す」方向の理論穴だが、
+ *    そのようなコードを書く時点で本 metatest の走査対象追随が必要)。
  */
-function stripFullLineComments(src: string): string {
+function stripComments(src: string): string {
   return src
     .split("\n")
     .map((line) => {
-      if (/^\s*\/\*/.test(line)) {
-        const close = line.indexOf("*/");
-        return close >= 0 ? line.slice(close + 2) : ""; // 同一行で閉じるならコード部を残す。
+      let out = line;
+      if (/^\s*\/\*/.test(out)) {
+        const close = out.indexOf("*/");
+        out = close >= 0 ? out.slice(close + 2) : "";
       }
-      return /^\s*(\/\/|\*)/.test(line) ? "" : line;
+      if (/^\s*(\/\/|\*)/.test(out)) return "";
+      out = out.replace(/\/\*[^*]*(?:\*(?!\/)[^*]*)*\*\//g, ""); // インライン /* ... */
+      out = out.replace(/\s\/\/.*$/, ""); // トレイリング // (空白先行のみ)
+      return out;
     })
     .join("\n");
 }
 
 const FILES = listSrcFiles(SRC_DIR);
 const SOURCES = new Map(
-  FILES.map((p) => [path.relative(SRC_DIR, p), stripFullLineComments(fs.readFileSync(p, "utf8"))]),
+  FILES.map((p) => [path.relative(SRC_DIR, p), stripComments(fs.readFileSync(p, "utf8"))]),
 );
 
 function read(rel: string): string {

@@ -219,6 +219,21 @@ describe("INV-APPROVAL-WS (3#SEC-1): request_id entropy + decision enum", () => 
     expect(resolveSpy, "every canonical decision must reach resolve").toHaveBeenCalledTimes(
       APPROVAL_DECISIONS.length,
     );
+    // QA-R8-1/R8-2: 「present → forwarded」方向 — reason/persist が付いた frame は値のまま届く
+    // (省略時 default の pin だけでは reason 破棄 / persist 永久 OFF の mutant が生存した)。
+    target.wsClient.emit("approval", {
+      type: "approval",
+      request_id: "s1:apr-anything",
+      decision: "allow_for_session",
+      reason: "operator-rationale-x",
+      persist: true,
+    });
+    expect(resolveSpy).toHaveBeenLastCalledWith(
+      "s1:apr-anything",
+      "allow_for_session",
+      "operator-rationale-x",
+      true,
+    );
     resolveSpy.mockClear();
     for (const bad of [
       "ALLOW",
