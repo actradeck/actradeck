@@ -164,32 +164,49 @@ describe("INV-REDACTION-QUOTED-CRED-UNTERMINATED: 既存挙動の非回帰 (byte
   });
 });
 
-describe("INV-REDACTION-QUOTED-CRED-UNTERMINATED: 残差 tripwire (partial-closure の pin・QA-1)", () => {
+describe("INV-REDACTION-QUOTED-CRED-UNTERMINATED: full-closure (旧残差 B1/B1'/A1 の閉塞・task 019f5ca4)", () => {
   // load-bearing tripwire: realistic ケース (単一行未終端 / window 内で閉じる改行分断) は **run=0 で完全
-  //   閉塞**し続けること。branch1/branch2/truncation 順の regression でこれらが leak を realistic size へ
+  //   閉塞**し続けること。scanner/branch/truncation 順の regression でこれらが leak を realistic size へ
   //   silent 拡大させたら RED になる (assertNoSurvival が ≥8 字生存を検出)。
   it("realistic: 単一行未終端 と window 内改行分断 は run=0 で完全閉塞", () => {
-    const V = gen2(MAX_VALUE_LEN + 5000); // 9096 < PRE_REDACT_SLICE ゆえ branch1/branch2 が全マスク
+    const V = gen2(MAX_VALUE_LEN + 5000); // 9096 < PRE_REDACT_SLICE ゆえ全マスク
     assertNoSurvival("single-line-unterminated", redactString(`password="${V}`), V);
     assertNoSurvival("in-window-newline-split", redactString(`password="l1\n${V}"`), V);
   });
 
-  // 開示済み残差 (SEC-1/QA-1・task 019f5ca4): window 内にクレデンシャル自身の行の閉じクォート皆無 (真の
-  //   多行未終端 / >window 改行分断 / 後続別 credential の merge) では branch2 が 1 行目のみマスクし継続行が
-  //   raw 残存しうる。ここでは **anchor 行がマスクされること (branch2 が発火し続けること = partial-closure の
-  //   下限保証)** を pin する。継続行の raw は accepted residual ゆえ assert しない (leak を assert するのは
-  //   脆い)。branch2 が壊れて anchor 行すら素通りしたら RED。恒久 fix (keyword-anchor 非依存) は task 019f5ca4。
-  it("残差: >window 改行分断 / CR 分断 / merge でも anchor 行はマスクされる (partial-closure 下限)", () => {
+  // 旧残差の閉塞 (ADR 019fd5d0): 旧 tripwire は「anchor 行のみマスク (partial-closure 下限)」を pin して
+  //   いたが、構造 scanner (maskMultilineQuotedCredentials) の導入で継続行も閉塞した。ここからは
+  //   **full-closure (継続行/後続値も ≥8 字断片が生存しない)** を assert する。
+  //   反証: scanner の redactString 配線を外す (旧挙動へ戻す) と B1/B1'/A1 全 case が RED になる。
+  it("B1: 多行かつ真に未終端の継続行を window 末尾まで greedy にマスクする", () => {
+    const cont = gen2(VALUE_LEN, 7); // 継続行の低エントロピー値 (2-class・backstop 不発)
+    assertNoSurvival(
+      "b1-continuation",
+      redactString(`password="l1\n${cont}\n${gen2(200, 9)}`),
+      cont,
+    );
+  });
+
+  it("B1': >window 改行分断 / CR-only 分断の in-window 継続部をマスクする", () => {
     const big = gen2(PRE_REDACT_SLICE + 5000); // > window: 閉じクォートが window 外へ落ちる
-    const cases: ReadonlyArray<readonly [string, string]> = [
-      ["over-window-newline-split", `password="l1\n${big}"`],
-      ["cr-split-over-window", `password="l1\r${big}"`],
-      ["merge-following-credential", `password="l1\napi_key="${gen2(50, 5)}`],
-    ];
-    for (const [label, input] of cases) {
-      expect(redactString(input), `${label}: anchor 行が非マスク (branch2 regression)`).toContain(
-        "[REDACTED:credential-assignment]",
-      );
-    }
+    assertNoSurvival("over-window-newline-split", redactString(`password="l1\n${big}"`), big);
+    assertNoSurvival("cr-split-over-window", redactString(`password="l1\r${big}"`), big);
+  });
+
+  it("A1: 未終端 + 後続の別未終端 credential の低エントロピー値をマスクする (suspicious-close chain)", () => {
+    const second = gen2(50, 5);
+    assertNoSurvival(
+      "merge-following-credential",
+      redactString(`password="l1\napi_key="${second}`),
+      second,
+    );
+  });
+
+  // over-redaction 意味論の pin: 未終端 opener 以降は構造的に「文字列内部」として単一 marker に飲まれる
+  //   (private-key/jwt の terminator 欠落 greedy fallback と同一意味論・redactor.ts scanner docstring 開示)。
+  it("未終端 opener 以降の後続テキストは marker に飲まれる (greedy 意味論の pin)", () => {
+    expect(redactString(`password="x\nfollowing line`)).toBe(
+      `password="[REDACTED:credential-assignment]"`,
+    );
   });
 });
