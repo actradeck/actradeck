@@ -501,7 +501,14 @@ export class ApprovalBridge {
   /** SEC-R3-2: redactor に mangle された採番の観測カウンタ (非負整数のみ・原文非依存)。 */
   private unstableRequestIdMints = 0;
 
-  /** re-roll を要した/使い切った採番の累計 (0 が正常。>0 は redaction ルールと採番形式の衝突)。 */
+  /**
+   * 不安定採番の観測数 (0 が正常。>0 は redaction ルールと採番形式の衝突)。
+   * 意味論 (TDA-R4-2): **不安定観測の延べ数** — re-roll 試行ごと + 使い切り時に加算されるため、
+   * 「8 回の良性 re-roll」と「固定部衝突 1 件 (9 加算)」を値だけでは区別しない (>0 = 要調査)。
+   * 正直な開示 (SEC-R4-4): 現状 **runtime 側の consumer は未配線** (bridge API として query 可能な
+   * だけで hello/ログ/テレメトリに出ない)。runtime の縮退は無兆候であり、本命の防衛線は CI の
+   * 構造 metatest (INV-APPROVAL-REQUEST-ID-STABLE)。増分挙動は同 INV の re-roll 単体テストが pin。
+   */
   get unstableRequestIdCount(): number {
     return this.unstableRequestIdMints;
   }

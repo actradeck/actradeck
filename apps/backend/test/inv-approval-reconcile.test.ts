@@ -29,11 +29,11 @@ import {
   RECONCILE_WATERMARK_MS,
 } from "../src/approval-reconciler.js";
 import { IngestStore } from "../src/ingest-store.js";
+import { MAX_ACTIVE_PENDING_IDS } from "@actradeck/event-model";
 import {
   SidecarRegistry,
   type ApprovalReconcileSignal,
   type SidecarLink,
-  MAX_ACTIVE_PENDING_IDS,
   MAX_RECONCILE_SESSIONS,
 } from "../src/sidecar-registry.js";
 import { cleanupSessions, dbReachable, makeEvent } from "./helpers.js";
@@ -66,12 +66,20 @@ describe("A. SidecarRegistry: hello 宣言 → ApprovalReconcileSignal", () => {
       control_token: "t",
       session_ids: ["s1", "s2"],
       runtime_epoch: EPOCH_UUID,
-      active_pending_request_ids: ["s1:apr-a", "s2:apr-b"],
+      // SEC-R4-8: 宣言 id は正準 APPROVAL_REQUEST_ID_RE 準拠が必須 (非適合は宣言ごと破棄)。
+      active_pending_request_ids: [
+        "s0123456789ab:apr-00000000000000000000000000000001",
+        "s0123456789ab:apr-00000000000000000000000000000002",
+      ],
     });
     expect(signals).toHaveLength(1);
     expect([...signals[0]!.sessionIds].sort()).toEqual(["s1", "s2"]);
-    expect(signals[0]!.activeRequestIds.has("s1:apr-a")).toBe(true);
-    expect(signals[0]!.activeRequestIds.has("s2:apr-b")).toBe(true);
+    expect(
+      signals[0]!.activeRequestIds.has("s0123456789ab:apr-00000000000000000000000000000001"),
+    ).toBe(true);
+    expect(
+      signals[0]!.activeRequestIds.has("s0123456789ab:apr-00000000000000000000000000000002"),
+    ).toBe(true);
     expect(signals[0]!.runtimeEpoch).toBe(EPOCH_UUID);
     // QA-1/TDA-5 (R2): watermark の基準時刻 = hello 受信時刻。
     expect(signals[0]!.receivedAt).toBeGreaterThanOrEqual(before);
@@ -509,6 +517,30 @@ describe.skipIf(!reachable)("INV-APPROVAL-RECONCILE 受入#6/#7 (real Postgres)"
     );
     expect(rows).toHaveLength(1);
     expect((rows[0].payload as Record<string, unknown>).resolution_origin).toBe("operator");
+  });
+
+  it("TDA-R4-6: 合成 cancel は sessions.source を書換えず liveness を live にしない (ADR 前提の T1 pin)", async () => {
+    // ADR R4 節の「verified harmless」は次の 2 事実に依存する — どちらも CI 未強制だった:
+    //  (a) 合成 producer は source:"external" を名乗るが、ingest upsert は sessions.source を
+    //      更新しない (更新すると外部 session 扱い = Wall recency-proxy 候補化の経路が開く)。
+    //  (b) 合成 ingest 直後に liveness が relay_lost 除外つきで再計算される (除外を怠ると
+    //      timestamp=now の合成イベントが stale session を live に見せる)。
+    const sid = newSession("sess_reconcile_src");
+    const requestId = "s0123456789ab:apr-000000000000000000000000000000a6";
+    await ingestRequested(sid, requestId); // timestamp = now-60s (live 窓の外)。
+    const src0 = await pool.query(`SELECT source FROM sessions WHERE session_id = $1`, [sid]);
+    expect(src0.rows[0].source).toBe("hooks");
+
+    await reconciler.reconcile(liveSignal(sid, []));
+    // (a) source は不変 (upsert の DO UPDATE SET に source が入ると RED)。
+    const src1 = await pool.query(`SELECT source FROM sessions WHERE session_id = $1`, [sid]);
+    expect(src1.rows[0].source).toBe("hooks");
+    // (b) 合成 cancel (timestamp=now) の後も live ではない (活動除外が製造 activity を遮断)。
+    const lv = await pool.query(
+      `SELECT liveness->>'state' AS s FROM session_state WHERE session_id = $1`,
+      [sid],
+    );
+    expect(lv.rows[0].s).not.toBe("live");
   });
 
   it("QA-R2-1 (R3): hello 受信直後に生まれた pending は実 DB 経路でも消えない (watermark 実データ pin)", async () => {

@@ -15,6 +15,7 @@ import {
   gateRedactionCountByKind,
   REDACTION_KINDS,
   REDACTION_MARKER_PATTERN,
+  isSyntheticRetireOrigin,
   REDACTION_MARKER_PREFIX,
   REDACTION_MARKER_SUFFIX,
   redactionMarker,
@@ -142,7 +143,8 @@ function foldApprovals(rows: readonly ApprovalGroupRow[]): {
       total += r.n;
       if (r.risk_level !== null && HIGH_RISK_LEVELS.has(r.risk_level)) highRisk += r.n;
     } else if (r.event_type === "tool.permission.resolved") {
-      if (r.resolution_origin === "relay_lost") {
+      // TDA-R4-5: 行値は string|null (型システム外) — 正準 predicate で判定 (リテラル再打鍵禁止)。
+      if (isSyntheticRetireOrigin(r.resolution_origin)) {
         syntheticRetired += r.n;
         continue;
       }

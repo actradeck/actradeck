@@ -904,7 +904,7 @@ export async function aggregateObservationSql(
          -- daemon 再起動/消失時にこそ発火するため、除外しないと backend 自身の書込みが
          -- 「fresh event 観測」の根拠を製造し stale session を live に見せる (REAL DATA ONLY 違反)。
          -- ->> の text 化: JSON 文字列 "relay_lost" のみ一致 (キー不在は NULL → COALESCE false)。
-         -- TS observeFromEvents の origin === "relay_lost" (厳密文字列比較) と鏡写し
+         -- TS observeFromEvents の isSyntheticRetireOrigin (正準 predicate・厳密一致) と鏡写し
          -- (INV-LIVENESS-PARITY が対で pin)。
          max(extract(epoch from timestamp) * 1000)
            FILTER (WHERE NOT (event_type = 'heartbeat'

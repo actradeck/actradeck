@@ -340,7 +340,7 @@ describe("TDA-1: range formatter cross-format 列 parity (ドリフト防止)", 
   // 増減させると監査成果物が不一致になるため、列数の一致を構造的に固定する (decision 019f235a)。
   const cellCount = (mdRow: string) => mdRow.split("|").filter((c) => c.trim() !== "").length;
 
-  it("CSV / HTML / Markdown の per-session 列数が一致し header==row (18 列)", () => {
+  it("CSV / HTML / Markdown の per-session 列数が一致し header==row (20 列)", () => {
     const report = rangeReport([sampleSummary(), sampleSummary({ session_id: "sess_b" })]);
     // CSV: header 行 / data 行のセル数 (sampleSummary はカンマ非含ゆえ split(',') が正確)。
     const csvLines = auditReportToCsv(report).split("\r\n");

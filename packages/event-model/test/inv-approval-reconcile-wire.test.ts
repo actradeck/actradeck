@@ -11,6 +11,7 @@ import {
   buildApprovalReconcileHelloFields,
   MAX_ACTIVE_PENDING_IDS,
   MAX_REQUEST_ID_LEN,
+  mintApprovalRequestId,
   parseActivePendingRequestIds,
   parseRuntimeEpoch,
   RUNTIME_EPOCH_FIELD,
@@ -18,9 +19,14 @@ import {
 
 const EPOCH = "0199f0a1-2b3c-7d4e-8f01-23456789abcd";
 
+/** 正準 RE 準拠のテスト id (SEC-R4-8: parser は APPROVAL_REQUEST_ID_RE を要求する)。 */
+const tid = (n: number): string => `s${"0".repeat(12)}:apr-${n.toString(16).padStart(32, "0")}`;
+
 describe("parseActivePendingRequestIds (受信検証・fail-safe)", () => {
   it("有効な宣言は Set へ (空配列は空 Set = 正当な pending ゼロ宣言・undefined と区別)", () => {
-    expect([...parseActivePendingRequestIds(["a", "b"])!].sort()).toEqual(["a", "b"]);
+    expect([...parseActivePendingRequestIds([tid(1), tid(2)])!].sort()).toEqual(
+      [tid(1), tid(2)].sort(),
+    );
     const empty = parseActivePendingRequestIds([]);
     expect(empty).toBeInstanceOf(Set);
     expect(empty!.size).toBe(0);
@@ -35,12 +41,23 @@ describe("parseActivePendingRequestIds (受信検証・fail-safe)", () => {
     expect(
       parseActivePendingRequestIds(Array.from({ length: MAX_ACTIVE_PENDING_IDS + 1 }, () => "r")),
     ).toBeUndefined();
-    // 境界: 上限ちょうどは有効。
+    // 境界: 上限ちょうど (正準形 id) は有効。
     expect(
       parseActivePendingRequestIds(
-        Array.from({ length: MAX_ACTIVE_PENDING_IDS }, (_, i) => `r${i}`),
+        Array.from({ length: MAX_ACTIVE_PENDING_IDS }, (_, i) => tid(i)),
       ),
     ).toBeInstanceOf(Set);
+  });
+
+  it("SEC-R4-8: 正準 APPROVAL_REQUEST_ID_RE 非適合が 1 件でもあれば宣言ごと undefined", () => {
+    // 旧 R2 形 (base64url token)・raw session prefix 形・任意文字列 — いずれも宣言単位で拒否
+    // (id 単位で落とすと当該 pending が「宣言に無い」扱いで合成 cancel される fail-unsafe)。
+    expect(parseActivePendingRequestIds(["s1:apr-F9aSKs-LnHcbygXAZ16NLQ"])).toBeUndefined();
+    expect(parseActivePendingRequestIds(["sess_0199-x:apr-1"])).toBeUndefined();
+    expect(parseActivePendingRequestIds([tid(1), "not-canonical"])).toBeUndefined();
+    // 実 mint 産は当然通る (送受対称性)。
+    const minted = mintApprovalRequestId("sess_wire_re_gate");
+    expect([...parseActivePendingRequestIds([minted])!]).toEqual([minted]);
   });
 });
 
@@ -77,7 +94,7 @@ describe("buildApprovalReconcileHelloFields (送信・受信と対称の fail-sa
   });
 
   it("round-trip: build した field を parse すると同一集合へ戻る (送受対称性)", () => {
-    const ids = ["s1:apr-a", "s2:apr-b"];
+    const ids = [mintApprovalRequestId("s1"), mintApprovalRequestId("s2")];
     const fields = buildApprovalReconcileHelloFields(EPOCH, ids);
     const parsed = parseActivePendingRequestIds(fields[ACTIVE_PENDING_FIELD]);
     expect([...parsed!].sort()).toEqual([...ids].sort());

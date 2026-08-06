@@ -21,8 +21,9 @@
  * redaction-stable) のみ。runtime_epoch は uuid shape のみ受理 (SEC-6: 任意文字列を
  * conn メタとして保持しない)。
  *
- * 純粋・依存ゼロ・fs/net 非アクセス。
+ * 純粋・fs/net 非アクセス (依存は同 package の正準 APPROVAL_REQUEST_ID_RE のみ)。
  */
+import { APPROVAL_REQUEST_ID_RE } from "./approval-request-id.js";
 
 /**
  * 1 hello 宣言に載せられる pending request_id の上限 (超過は宣言ごと無効 = reconcile しない)。
@@ -69,12 +70,23 @@ export function buildApprovalReconcileHelloFields(
 /**
  * hello frame (untrusted) の `active_pending_request_ids` を検証射影する正準パーサ。
  * 有効なら Set (空 Set = 正当な「pending ゼロ」宣言)、欠落/malformed は undefined (reconcile しない)。
+ *
+ * SEC-R4-8: 各 id は正準 `APPROVAL_REQUEST_ID_RE` (bridge 採番形) を要求し、非適合が 1 件でも
+ * あれば**宣言ごと**捨てる (security-gate-reuse-canonical-parser)。id 単位で落とすと「宣言に無い」
+ * 扱いになった生存 pending が合成 cancel される (fail-unsafe) ため、必ず宣言単位で拒否する。
+ * rollout 注意: 旧形式 (R2 base64url 以前) の id を宣言する旧 dist daemon は宣言が無効化され
+ * reconcile 対象外になる (= stale pending が残る従来挙動へ縮退・安全方向。coordinated deploy で解消)。
  */
 export function parseActivePendingRequestIds(raw: unknown): Set<string> | undefined {
   if (!Array.isArray(raw) || raw.length > MAX_ACTIVE_PENDING_IDS) return undefined;
   const out = new Set<string>();
   for (const id of raw) {
-    if (typeof id !== "string" || id.length === 0 || id.length > MAX_REQUEST_ID_LEN) {
+    if (
+      typeof id !== "string" ||
+      id.length === 0 ||
+      id.length > MAX_REQUEST_ID_LEN ||
+      !APPROVAL_REQUEST_ID_RE.test(id)
+    ) {
       return undefined; // malformed → 宣言全体を捨てる (fail-safe)
     }
     out.add(id);

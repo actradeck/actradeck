@@ -30,6 +30,13 @@ export type RiskLevel = z.infer<typeof RiskLevel>;
 /** 承認の決定 (Codex: accept/acceptForSession/decline/cancel, Claude: allow/deny を正規化)。 */
 export const ApprovalDecision = z.enum(["allow", "allow_for_session", "deny", "cancel"]);
 export type ApprovalDecision = z.infer<typeof ApprovalDecision>;
+/**
+ * decision の正準 closed-set 配列 (TDA-R4-3・Phase 4 R4 監査)。監査集計 (backend audit-contract)
+ * と表示層 (webui) の membership/tally はこの配列を消費する — 手書きミラーを作らない
+ * (decision 追加時に片側が黙って落とし、署名済み manifest が誤った台帳を attest する drift の
+ * 構造遮断)。
+ */
+export const APPROVAL_DECISIONS: readonly ApprovalDecision[] = ApprovalDecision.options;
 
 /**
  * ADR 0014 Phase 4 (decision 019fd705): 承認解決の **出所 (誰が/何が解決したか)**。
@@ -60,6 +67,18 @@ export type ResolutionOrigin = z.infer<typeof ResolutionOrigin>;
  * 未知値を落とし、operator success トーンへ誤縮退する drift の構造遮断)。
  */
 export const RESOLUTION_ORIGINS: readonly ResolutionOrigin[] = ResolutionOrigin.options;
+/**
+ * backend 合成 retire を示す sentinel の正準定数 (TDA-R4-5・Phase 4 R4 監査)。
+ * この値の比較は「synthetic_retired vs by_decision (→hard_gate)」の分類・liveness/coverage の
+ * 活動除外を決める境界判定であり、リテラルの再打鍵を禁止する (rename/第二 synthetic origin 追加で
+ * 合成 retire が operator 決定へ silent 再分類される drift の構造遮断)。TS 消費点は
+ * `isSyntheticRetireOrigin` を、SQL リテラルは INV metatest (backend) がこの定数との一致を pin する。
+ */
+export const SYNTHETIC_RETIRE_ORIGIN = "relay_lost" satisfies ResolutionOrigin;
+/** resolution_origin が backend 合成 retire かの正準判定 (unknown 受け・型システム外の行値にも安全)。 */
+export function isSyntheticRetireOrigin(v: unknown): v is typeof SYNTHETIC_RETIRE_ORIGIN {
+  return v === SYNTHETIC_RETIRE_ORIGIN;
+}
 
 /**
  * ADR 0014 Phase 4: 決定が **agent へ実際に届いたか** (書込結果から導出・偽らない)。

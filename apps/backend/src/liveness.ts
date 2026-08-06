@@ -18,6 +18,7 @@
 import {
   FILE_EVENT_TYPES,
   HEARTBEAT_EVENT_TYPE,
+  isSyntheticRetireOrigin,
   MODEL_STREAM_EVENT_TYPES,
   PROCESS_ALIVE_PAYLOAD_KEY,
   STDOUT_EVENT_TYPES,
@@ -235,7 +236,7 @@ export function observeFromEvents(events: readonly NormalizedEvent[]): LivenessO
       // 厳密文字列比較 = SQL 側 `payload->>'resolution_origin' = 'relay_lost'` (JSON 文字列のみ
       // text 一致・キー不在 NULL→COALESCE false) と鏡写し (INV-LIVENESS-PARITY が対で pin)。
       const origin = (ev.payload as Record<string, unknown>).resolution_origin;
-      if (origin === "relay_lost") countsAsActivity = false;
+      if (isSyntheticRetireOrigin(origin)) countsAsActivity = false;
     }
 
     if (countsAsActivity) event = max(event, t);

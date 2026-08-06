@@ -14,6 +14,9 @@ import { WebSocket } from "ws";
 
 import type { AgentVisibilityWire, PolicyCategory } from "@actradeck/event-model";
 import { buildApprovalReconcileHelloFields } from "@actradeck/event-model";
+import { tokenEquals } from "@actradeck/redaction";
+
+import type { EventStore } from "./store.js";
 
 /**
  * ApprovalBridge → pendingApprovalIdsProvider の正準配線 (QA-R2-4 R3・単一出所)。
@@ -29,9 +32,6 @@ export function pendingIdsFromBridge(
 ): () => readonly string[] | undefined {
   return () => getBridge()?.pendingRequestIds();
 }
-import { tokenEquals } from "@actradeck/redaction";
-
-import type { EventStore } from "./store.js";
 
 export type ApprovalDecisionMsg = {
   readonly type: "approval";

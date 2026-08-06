@@ -4,13 +4,14 @@
  * 監査レポート export に **改竄検知 manifest** を埋め込む。脅威モデルは **配布後の改竄検知**:
  * 署名済みレポートを受け取った側が、内容が export 後に書き換えられていないことを検証できる。
  *
- * ## SEC-1 (H) 対応: manifest は「表示投影の authoritative complete record」
- * レポートが**人間に見せる監査事実の全て**を binding する — summary メタ / redaction 件数(+by-kind) /
- * approvals tally(全 decision + high_risk) / per-event の可視フィールド(timestamp/kind/event_type/
- * risk/decision/exit/ms/**可視 command 列 = command??path??subject**) / diff(件数 + 本文 sha256)。
- * root(ハッシュ連鎖の最終値)は summary→events→diff+events_truncated を順に畳んで全投影を覆い、署名は root を binding
- * する。ゆえに **表示のどれか一つでも書換えると verify が ok=false**(旧実装は per-event の狭小集合しか
- * 覆わず、可視 command 列・redaction 件数・approval 判定を改竄しても "verified" を返す欠陥があった)。
+ * ## SEC-1 (H) 対応: manifest は「HTML/MD が表示する監査事実の authoritative record」
+ * HTML/MD レポートが**人間に見せる監査事実**を binding する — summary メタ / redaction 件数(+by-kind) /
+ * approvals tally(全 decision + synthetic_retired + high_risk) / per-event の可視フィールド
+ * (timestamp/kind/event_type/risk/decision/exit/ms/**可視 command 列 = command??path??subject**) /
+ * diff(件数 + 本文 sha256)。root(ハッシュ連鎖の最終値)は summary→events→diff+events_truncated を順に
+ * 畳んで投影を覆い、署名は root を binding する。ゆえに **HTML/MD 表示のどれか一つでも書換えると
+ * verify が ok=false**(旧実装は per-event の狭小集合しか覆わず、可視 command 列・redaction 件数・
+ * approval 判定を改竄しても "verified" を返す欠陥があった)。
  *
  * ## 単射エンコード (SEC-3)
  * canonical 直列化は `JSON.stringify([...fields])`。文字列は quote+escape され配列で区切られるため、
@@ -34,6 +35,13 @@
  *    これは **安全な方向**の非対称: manifest は表示より厳密で「真に欠損(`""`)」と「実値 `"-"`」を区別する
  *    (逆に表示へ合わせ `"-"` を binding すると両者が衝突し、その 2 状態間の改竄が検知不能になる)。
  *    受け手が表示⇔manifest を突合するときは、表示の `"-"` を manifest の `""`(または実値)と読み替える。
+ *  - **`summary.entries[]` は非 binding (SEC-R4-1)**: 承認 1 件ごとの itemized 列 (command/decision/
+ *    resolution_origin) は **JSON / packet JSON tier のみ**が搬送し、manifest の binding 対象外
+ *    (HTML/MD は entries を描画しない)。集計 tally + packet の flagged (denied/cancel + high_risk +
+ *    relay_lost) は binding 済みゆえ**総量の偽造と review 重要項目の偽造は検知される**が、JSON を
+ *    証跡として配布する場合、受け手は entries を tally / timeline events と突合すること。
+ *    INV-AUDIT-INTEGRITY の境界 pin テストがこの範囲を意図として固定する (entries を binding へ
+ *    拡張するなら canonical form 変更 = version bump + full 監査)。
  *  - **at-rest 改竄 (export 前に DB を書換える攻撃)** は対象外 = ingest 時イベント連鎖(モデル B・follow-up)。
  *  - 未署名(鍵未設定)は内部整合(chain)のみ。署名+pin で初めて tamper-evidence を主張できる。
  *  - NO-RAW: 投影は既に redaction 済みの表示値のみ(raw command/secret を再導入しない)。
@@ -429,9 +437,17 @@ export function encodeManifestBase64(manifest: AuditManifest): string {
   return Buffer.from(JSON.stringify(manifest), "utf8").toString("base64");
 }
 
-export function decodeManifestBase64(b64: string): AuditManifest | undefined {
+/**
+ * SEC-R4-2: decode は任意 string version を透過する (SEC-R3-1) ため、返り値型の version を
+ * literal から string へ広げた decoded 型を返す — 「型が現行版を保証している」と誤読した
+ * consumer が runtime チェックを省く unsoundness を封じる (現行版の確定は verify のみが行う)。
+ */
+export type DecodedAuditManifest = Omit<AuditManifest, "version"> & { readonly version: string };
+export type DecodedPacketManifest = Omit<PacketManifest, "version"> & { readonly version: string };
+
+export function decodeManifestBase64(b64: string): DecodedAuditManifest | undefined {
   try {
-    const obj = JSON.parse(Buffer.from(b64, "base64").toString("utf8")) as AuditManifest;
+    const obj = JSON.parse(Buffer.from(b64, "base64").toString("utf8")) as DecodedAuditManifest;
     // SEC-R3-1: version は「manifest らしい形か」のみここで見る (string であること)。現行版との
     // 一致判定は verifyAuditManifest に委ねる — 旧版 (v0.6.0 出荷済み v2 等) をここで undefined に
     // 潰すと route が 400 を返し「改竄」と「旧ビルド産」が区別不能になる (evidence-continuity 欠陥)。
@@ -442,6 +458,29 @@ export function decodeManifestBase64(b64: string): AuditManifest | undefined {
   }
 }
 
+/**
+ * SEC-R3-1 / TDA-R4-4 共有 version gate: family marker prefix を持つ**別版**なら distinct reason の
+ * fail-closed 結果を返す (本製品の別ビルド産と識別できる形のみ・任意の壊れ文字列は malformed へ)。
+ * 2 family (session / packet) の marker は互いに prefix 関係に無い (probe 確認済み) ため非交差。
+ * 注: 各 boolean は「宣言」でなく「確立できたか」— version 非対応では署名検証に到達しないため
+ * signed も false を返す (SEC-R4-6・AuditVerifyResult の doc 参照)。
+ */
+function unsupportedVersionResult(
+  manifest: unknown,
+  currentVersion: string,
+  familyMarker: string,
+  reason: string,
+): AuditVerifyResult | undefined {
+  const v: unknown =
+    manifest !== null && typeof manifest === "object"
+      ? (manifest as { version?: unknown }).version
+      : undefined;
+  if (typeof v === "string" && v !== currentVersion && v.startsWith(`${familyMarker}/`)) {
+    return { ok: false, chain_valid: false, signed: false, reason };
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Verify.
 // ---------------------------------------------------------------------------
@@ -449,6 +488,11 @@ export function decodeManifestBase64(b64: string): AuditManifest | undefined {
 export interface AuditVerifyResult {
   /** 総合判定 (chain 整合 かつ 署名済みなら署名有効 + fingerprint pin 成立)。 */
   readonly ok: boolean;
+  /**
+   * SEC-R4-6: 各 boolean は入力の「宣言」でなく「検証で**確立できたか**」。
+   * unsupported-*-version / malformed では署名検証に到達しないため、署名 field を持つ入力でも
+   * signed=false を返す (「署名されていなかった」の意味ではない — 安全方向の縮退)。
+   */
   readonly chain_valid: boolean;
   readonly signed: boolean;
   readonly signature_valid?: boolean;
@@ -492,32 +536,20 @@ function isWellFormedManifest(m: AuditManifest): boolean {
  * を値返し (SEC-4)。`expectedFingerprint` 未指定で署名済みは ok=false (未 pin は tamper-evidence 不成立)。
  */
 export function verifyAuditManifest(
-  manifest: AuditManifest,
+  manifest: AuditManifest | DecodedAuditManifest,
   opts: { expectedFingerprint?: string } = {},
 ): AuditVerifyResult {
   // SEC-R3-1: 旧バージョン manifest (v0.6.0 が出荷した v2 等) は「非対応バージョン」として
   // 明示的に区別して返す (改竄・破損と見分けが付かない malformed へ潰さない)。fail-closed は
   // 不変 — 旧版が ok=true になる経路は無い (現行 canonical form でしか chain を再計算しない)。
-  // 区別は family prefix を持つ別版のみ (本製品の別ビルド産と識別できる形)。それ以外の
-  // 壊れ値 (`version: "wrong"` 等) は従来どおり malformed。
-  // (version は literal 型宣言ゆえ !== 比較で never へ narrowing される — unknown で受けて判定)
-  const declaredVersion: unknown =
-    manifest !== null && typeof manifest === "object"
-      ? (manifest as { version?: unknown }).version
-      : undefined;
-  if (
-    typeof declaredVersion === "string" &&
-    declaredVersion !== AUDIT_MANIFEST_VERSION &&
-    declaredVersion.startsWith(`${AUDIT_MANIFEST_MARKER}/`)
-  ) {
-    return {
-      ok: false,
-      chain_valid: false,
-      signed: false,
-      reason: "unsupported-manifest-version",
-    };
-  }
-  if (!isWellFormedManifest(manifest)) {
+  const unsupported = unsupportedVersionResult(
+    manifest,
+    AUDIT_MANIFEST_VERSION,
+    AUDIT_MANIFEST_MARKER,
+    "unsupported-manifest-version",
+  );
+  if (unsupported !== undefined) return unsupported;
+  if (!isWellFormedManifest(manifest as AuditManifest)) {
     return { ok: false, chain_valid: false, signed: false, reason: "malformed-manifest" };
   }
 
@@ -626,10 +658,16 @@ export function verifyAuditManifest(
 //   reason(enum)/risk/decision(enum)/subject=redacted command??path)のみ。生 secret を再導入しない。
 // ===========================================================================
 
-/** packet manifest フォーマットのバージョン。 */
-export const AUDIT_PACKET_MANIFEST_VERSION = "actradeck-audit-packet-manifest/v1";
-/** packet ハッシュ連鎖のドメイン分離定数 (単一 manifest と別領域)。 */
-const PACKET_CHAIN_DOMAIN = "actradeck-audit-packet-manifest/v1/sha256-chain";
+/**
+ * packet manifest フォーマットのバージョン。
+ * TDA-R4-4 (Phase 4 R4): governance 投影の意味論が Phase 4 で変わった (hard_gate から relay_lost
+ * 合成 retire を除外・FlaggedItem.reason に relay_lost 追加) ため v1→v2 へ bump — 同一 version
+ * の下で異なる governance 意味論の署名済み packet が並ぶ解釈曖昧性を排除する。旧 v1 は
+ * `unsupported-packet-manifest-version` の distinct reason で fail-closed に区別される。
+ */
+export const AUDIT_PACKET_MANIFEST_VERSION = "actradeck-audit-packet-manifest/v2";
+/** packet ハッシュ連鎖のドメイン分離定数 (単一 manifest と別領域・version と同時に bump)。 */
+const PACKET_CHAIN_DOMAIN = "actradeck-audit-packet-manifest/v2/sha256-chain";
 /** HTML コメント / MD fence へ埋め込む packet manifest マーカー (単一 manifest と別)。 */
 export const AUDIT_PACKET_MANIFEST_MARKER = "actradeck-audit-packet-manifest";
 
@@ -778,10 +816,12 @@ export function encodePacketManifestBase64(manifest: PacketManifest): string {
   return Buffer.from(JSON.stringify(manifest), "utf8").toString("base64");
 }
 
-export function decodePacketManifestBase64(b64: string): PacketManifest | undefined {
+export function decodePacketManifestBase64(b64: string): DecodedPacketManifest | undefined {
   try {
-    const obj = JSON.parse(Buffer.from(b64, "base64").toString("utf8")) as PacketManifest;
-    if (obj.version !== AUDIT_PACKET_MANIFEST_VERSION || !Array.isArray(obj.sessions)) {
+    const obj = JSON.parse(Buffer.from(b64, "base64").toString("utf8")) as DecodedPacketManifest;
+    // TDA-R4-4: session manifest (SEC-R3-1) と同一契約 — version 一致判定は verify に委ね、
+    // 旧版を「改竄」と区別不能な undefined へ潰さない。
+    if (typeof obj?.version !== "string" || !Array.isArray(obj.sessions)) {
       return undefined;
     }
     return obj;
@@ -826,10 +866,18 @@ function isWellFormedPacketManifest(m: PacketManifest): boolean {
  * ok=false を値返し。`expectedFingerprint` 未指定で署名済みは ok=false (未 pin)。
  */
 export function verifyPacketManifest(
-  manifest: PacketManifest,
+  manifest: PacketManifest | DecodedPacketManifest,
   opts: { expectedFingerprint?: string } = {},
 ): AuditVerifyResult {
-  if (!isWellFormedPacketManifest(manifest)) {
+  // TDA-R4-4: session manifest と同一契約 — 旧 v1 (governance 意味論が異なる) は distinct reason。
+  const unsupported = unsupportedVersionResult(
+    manifest,
+    AUDIT_PACKET_MANIFEST_VERSION,
+    AUDIT_PACKET_MANIFEST_MARKER,
+    "unsupported-packet-manifest-version",
+  );
+  if (unsupported !== undefined) return unsupported;
+  if (!isWellFormedPacketManifest(manifest as PacketManifest)) {
     return { ok: false, chain_valid: false, signed: false, reason: "malformed-packet-manifest" };
   }
 

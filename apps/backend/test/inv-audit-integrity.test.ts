@@ -26,6 +26,7 @@ import {
   AUDIT_MANIFEST_VERSION,
   AUDIT_MANIFEST_MARKER,
   type AuditManifest,
+  type DecodedAuditManifest,
 } from "../src/audit-integrity.js";
 import { sessionReportToHtml, sessionReportToMarkdown } from "../src/audit-report.js";
 import type { AuditSessionReport, AuditSessionReportDiff } from "../src/audit-report.js";
@@ -139,7 +140,7 @@ function ed25519Pem(): string {
 }
 const signer = resolveAuditSignerFromEnv({ ACTRADECK_AUDIT_SIGNING_KEY: ed25519Pem() });
 /** 署名済み manifest を pin 付きで verify (信頼を確立した受け手を模す)。 */
-function verifyPinned(m: AuditManifest) {
+function verifyPinned(m: AuditManifest | DecodedAuditManifest) {
   return verifyAuditManifest(m, { expectedFingerprint: m.signature!.public_key_fingerprint });
 }
 
@@ -561,5 +562,44 @@ describe("INV-AUDIT-INTEGRITY manifest version 区別 (SEC-R3-1)", () => {
     const r = verifyAuditManifest(buildAuditManifest(SAMPLE));
     expect(r.ok).toBe(true);
     expect(r.reason).not.toBe("unsupported-manifest-version");
+  });
+});
+
+/**
+ * SEC-R4-1: 保証範囲の境界 pin。`summary.entries[]` (承認 1 件ごとの itemized 列・JSON/packet JSON
+ * tier のみ搬送・HTML/MD は非描画) は manifest の binding **対象外** — これは意図された範囲であり
+ * module doc の「正直な保証範囲」節が開示する。本テストはその境界を**意図として**固定する:
+ * entries を binding へ拡張する変更はここを赤くする = canonical form 変更 (version bump + full 監査)
+ * を明示的に踏ませる。総量 (tally) と review 重要項目 (packet flagged) は binding 済み。
+ */
+describe("INV-AUDIT-INTEGRITY 保証範囲の境界 (SEC-R4-1)", () => {
+  it("summary.entries だけ異なる 2 report の root は一致する (entries は非 binding・開示済み範囲)", () => {
+    const entry = {
+      event_id: "e-ent",
+      timestamp: "2026-07-03T12:00:05.000Z",
+      tool_name: "Bash",
+      risk_level: "high",
+      command: "rm -rf /tmp/actradeck-demo/build",
+      path: undefined,
+      decision: "deny" as const,
+      resolution_origin: undefined,
+      auto_allowed: undefined,
+    };
+    const withEntries: AuditSessionReport = {
+      ...SAMPLE,
+      summary: { ...sampleSummary(), entries: [entry] },
+    };
+    const withForgedEntries: AuditSessionReport = {
+      ...SAMPLE,
+      summary: {
+        ...sampleSummary(),
+        entries: [{ ...entry, command: "ls (forged)", decision: "allow" as const }],
+      },
+    };
+    const rootA = buildAuditManifest(withEntries).root;
+    const rootB = buildAuditManifest(withForgedEntries).root;
+    const rootNone = buildAuditManifest(SAMPLE).root;
+    expect(rootA).toBe(rootB);
+    expect(rootA).toBe(rootNone);
   });
 });

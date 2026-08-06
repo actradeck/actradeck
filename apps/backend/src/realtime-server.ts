@@ -58,6 +58,8 @@ import {
   decodeManifestBase64,
   decodePacketManifestBase64,
   type AuditManifest,
+  type DecodedAuditManifest,
+  type DecodedPacketManifest,
   type PacketManifest,
 } from "./audit-integrity.js";
 import {
@@ -715,7 +717,8 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
   }>("/realtime/audit/verify", { bodyLimit: AUDIT_VERIFY_BODY_LIMIT }, async (req, reply) => {
     try {
       const body = req.body ?? {};
-      let manifest: AuditManifest | undefined;
+      // SEC-R4-2: decode は version を string へ広げた Decoded 型を返す (現行版の確定は verify)。
+      let manifest: AuditManifest | DecodedAuditManifest | undefined;
       if (typeof body.manifest_b64 === "string") {
         manifest = decodeManifestBase64(body.manifest_b64);
       } else if (body.manifest !== null && typeof body.manifest === "object") {
@@ -803,7 +806,7 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
     async (req, reply) => {
       try {
         const body = req.body ?? {};
-        let manifest: PacketManifest | undefined;
+        let manifest: PacketManifest | DecodedPacketManifest | undefined;
         if (typeof body.manifest_b64 === "string") {
           manifest = decodePacketManifestBase64(body.manifest_b64);
         } else if (body.manifest !== null && typeof body.manifest === "object") {

@@ -353,8 +353,8 @@ export type ApprovalReconcileListener = (signal: ApprovalReconcileSignal) => voi
 
 // 宣言の受理上限 (MAX_ACTIVE_PENDING_IDS / MAX_REQUEST_ID_LEN) と検証は event-model の
 // approval-reconcile-wire (正準実装) を送信側 (sidecar ws-client) と共有する (TDA-2 R2:
-// 手書きミラー禁止・field 改名の silent-off を構造遮断)。
-export { MAX_ACTIVE_PENDING_IDS } from "@actradeck/event-model";
+// 手書きミラー禁止・field 改名の silent-off を構造遮断)。定数は event-model から直接 import
+// すること (TDA-R4-9: 消費者ゼロの再 export は置かない)。
 
 /**
  * SEC-3 (R2): 1 signal が対象にできる session 数の上限。hello の session claim 自体は無制限
@@ -701,8 +701,8 @@ export class SidecarRegistry {
    * 判定は fanOutPolicyMutation と同一 (link.open && controlToken)。**approve/interrupt 等の
    * session-semantic relay には使わない** (INV-REALTIME-RELAY-SCOPE は session-scoped 維持)。
    */
-  connectedDaemons(): { id: string; spawn_capable: boolean }[] {
-    const out: { id: string; spawn_capable: boolean }[] = [];
+  connectedDaemons(): { id: string; spawn_capable: boolean; runtime_epoch?: string }[] {
+    const out: { id: string; spawn_capable: boolean; runtime_epoch?: string }[] = [];
     for (const conn of this.conns.values()) {
       // open + controlToken (relay 認可) に加え policyCapable を要求する。policy.request を処理しない
       // observe-only daemon (codex-rollout) を除外し、UI が policy 非対応 daemon を addressing して
@@ -710,7 +710,14 @@ export class SidecarRegistry {
       if (conn.link.open && typeof conn.controlToken === "string" && conn.policyCapable) {
         // ADR 019f4206 A段: spawn_capable を併記し、cockpit の spawn 導線が spawn 対応 daemon のみを
         // 宛先候補にできるようにする (非対応 daemon への spawn addressing timeout を UI 側で防ぐ)。NO-RAW boolean。
-        out.push({ id: conn.daemonId, spawn_capable: conn.spawnCapable });
+        // TDA-R4-1 (Phase 4 R4): runtime_epoch (uuid gate 済・非 credential 診断メタ) を併記し
+        // 「同一 daemon の再起動」を operator が識別できるようにする — Phase 4 が hello に載せた
+        // 診断 field の唯一の consumer (dead protocol surface の解消)。
+        out.push({
+          id: conn.daemonId,
+          spawn_capable: conn.spawnCapable,
+          ...(conn.runtimeEpoch !== undefined ? { runtime_epoch: conn.runtimeEpoch } : {}),
+        });
       }
     }
     return out;

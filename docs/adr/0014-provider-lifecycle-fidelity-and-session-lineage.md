@@ -290,7 +290,6 @@ origin=relay_lost, delivery=not_sent`).
     pre-watermark behaviour; deny-direction, loopback makes it improbable). Carrying a
     `declared_at` timestamp in the hello would close the window exactly — tracked in the
     phase sweep with the other L follow-ups.
-
   - **Accepted-risk / tracked disclosures (deadline v0.7):** (a) SEC-2: a peer holding
     INGEST_TOKEN can claim any session with one hello and retire its pendings — same
     single-operator/loopback trust boundary as the existing claim-based relay takeover; a
@@ -337,8 +336,11 @@ origin=relay_lost, delivery=not_sent`).
   - **Re-roll defence class corrected + structural metatest (SEC-R3-2, M).** The bridge re-roll
     only mitigates token-dependent redaction rules; the tag and the `:apr-` literal are
     invariant across re-rolls, so a fixed-portion rule defeats all 8 attempts
-    deterministically. The docstring now says so; exhaustion is observable via a non-negative
-    `unstableRequestIdCount` (NO-RAW); and the real gate is the new structural metatest — all
+    deterministically. The docstring now says so; a non-negative `unstableRequestIdCount`
+    (NO-RAW) is queryable on the bridge API — honestly: **no runtime consumer is wired yet**,
+    so runtime degradation stays silent (round 5 pins the increment behaviour in a unit test
+    and discloses this; surfacing the counter is tracked follow-up work); the real gate is
+    the structural metatest — all
     `REDACTION_RULES` × an adversarial + fuzz id corpus must produce zero matches, so adding a
     colliding rule of either class goes red in CI the same day.
   - **Exclusion scope boundary disclosed (TDA-R3-1/SEC-R3-7, M/L).** The relay_lost activity
@@ -358,6 +360,58 @@ origin=relay_lost, delivery=not_sent`).
     version/variant), down from R2's 128-bit `randomBytes(16)` — still far beyond the 3#SEC-1
     requirement; docstrings updated (including the demo-id rationale: the operative guard is
     the per-connection controlToken, not "backend-internal" execution).
+
+  **Audit round 5 hardening (2026-08-07, full SEC/QA/TDA re-audit of the R4 landing — no H):**
+
+  - **Decision vocabulary is single-sourced (TDA-R4-3, M).** `AUDIT_DECISIONS` (backend) and
+    the webui tally/membership arrays now consume the canonical `APPROVAL_DECISIONS`
+    (`ApprovalDecision.options`) from event-model — the R4 enum sweep had stopped at the
+    origin list while identical hand mirrors of the *decision* list remained, which would
+    have let a 5th decision silently vanish from `by_decision` and be absorbed into
+    `pending`, cryptographically attested by the signed manifest.
+  - **The relay_lost sentinel is single-sourced (TDA-R4-5, M).** `SYNTHETIC_RETIRE_ORIGIN` +
+    `isSyntheticRetireOrigin` live in event-model; the classification fold (audit-store), the
+    liveness TS mirror, the packet reason and the webui modal consume the predicate, and
+    `INV-SYNTHETIC-RETIRE-SENTINEL` pins the SQL literals (outside the type system) to the
+    canonical value by source coupling — a rename or a second synthetic origin can no longer
+    silently reclassify synthetic retires as operator decisions.
+  - **Packet manifests are versioned for the governance semantics change (TDA-R4-4, M).**
+    `AUDIT_PACKET_MANIFEST_VERSION` v1→v2 (+ chain domain), because Phase 4 changed what
+    `hard_gate` means under an unchanged v1; the packet verify gate now shares the session
+    manifest's version-gate helper and reports old v1 packets as the distinct
+    `unsupported-packet-manifest-version` (CHANGELOG carries the breaking note).
+  - **The "verified harmless" preconditions are now CI-enforced (TDA-R4-6, M).** Real-PG pins:
+    the ingest upsert never updates `sessions.source` (the synthetic producer deliberately
+    claims `source:"external"`), and a synthetic relay_lost cancel on a stale session leaves
+    `session_state.liveness.state` non-live — this second pin also names the load-bearing
+    dependency the R4 prose omitted: liveness is **recomputed on the synthetic ingest** with
+    the relay_lost exclusion applied; a frozen liveness value plus the advanced
+    `last_event_at` would render live through the webui freshness branch.
+  - **The manifest's non-binding surface is disclosed and pinned (SEC-R4-1, M).**
+    `summary.entries[]` (per-approval itemized rows; JSON/packet-JSON tiers only, never
+    rendered in HTML/MD) is **outside** the manifest binding: forging an entry does not fail
+    verification. Totals and packet flagged items are bound, so aggregate forgery and
+    review-item forgery are detected. The module doc now says so instead of claiming "every
+    displayed fact", and a boundary pin test fixes the scope as intended — extending the
+    binding to entries is a canonical-form change (version bump + full audit). Recipients
+    distributing JSON as evidence must cross-check entries against the bound tally/timeline.
+  - **The hello declaration parser requires the canonical id shape (SEC-R4-8, L→code).**
+    `parseActivePendingRequestIds` projects each id through `APPROVAL_REQUEST_ID_RE` and
+    rejects the whole declaration on any non-conforming id (per-id dropping would fail
+    unsafe: a live pending absent from the parsed set gets synthetically cancelled). Rollout:
+    daemons on older dists declaring legacy-shape ids fall back to "no reconcile" (stale
+    cards persist until the coordinated upgrade — the pre-Phase-4 behaviour, safe direction).
+  - **Dead surfaces resolved (TDA-R4-1/R4-2, M).** `runtime_epoch` gained its consumer: the
+    daemons listing (`GET /realtime/daemons`) now carries it as a non-credential diagnostic
+    (restart discrimination), pinned by a route test. `unstableRequestIdCount` stays a
+    queryable bridge API: the docstring/ADR wording is corrected to say no runtime consumer
+    is wired (CI's structural metatest is the enforcement), and a unit test pins the bounded
+    re-roll + counter semantics under a worst-case always-mangling redactor mock.
+  - **Daemon-tier wiring is pinned (QA-R4-1, M).** A real-ws test fixes that the attach
+    daemon's hello carries `active_pending_request_ids` (empty array = a meaningful
+    zero-pending declaration) and that the observe-only codex-rollout daemon does not; the
+    managed sidecar's wiring to the shared `pendingIdsFromBridge` helper is source-pinned.
+    Previously deleting the provider wiring survived the full sidecar suite (silent-off).
 
 **Phase 5 — Adapter capability manifest + UI.**
 **Absorbed by ADR 0015 (§D7).** The closed vocabulary {`authoritative`, `observed`, `inferred`,

@@ -22,6 +22,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   tampering. Re-export reports to obtain v3 manifests. Approval request ids also use a new
   canonical shape (`s<hash12>:apr-<32 hex>`); pendings persisted by older daemons are retired
   as `relay_lost` on the first hello after a coordinated upgrade (designed recovery).
+- **Breaking: audit review-packet manifest bumped to v2**
+  (`actradeck-audit-packet-manifest/v2`). The packet governance semantics changed in the same
+  release (`hard_gate` no longer counts relay-lost synthetic retires as operator denials, and
+  flagged items may carry `reason: relay_lost`), so packets are versioned to keep two signed
+  packets with different governance semantics distinguishable. Packets exported by v0.6.0
+  (v1) report the distinct `unsupported-packet-manifest-version` on verify (fail-closed, not
+  "tampered"). Re-export review packets to obtain v2.
 
 ## [0.6.0] - 2026-08-05
 

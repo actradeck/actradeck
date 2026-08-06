@@ -99,6 +99,8 @@ describe("INV-APPROVAL-REQUEST-ID-STABLE (SEC-1 R2): request_id は redaction �
     // 宣言値をそのまま requested イベントに載せて実 redactor を通しても不変 =
     // hello 宣言 (raw) と DB pending (at-rest) が突合可能。
     expect(redactedRequestId(SYNTHETIC_SESSION_ID, requestId)).toBe(requestId);
+    // SEC-R4-4: 正常経路 (実 redactor・正準形式) では re-roll が発生せずカウンタ 0 のまま。
+    expect(bridge.unstableRequestIdCount).toBe(0);
     await done; // timeout deny で回収 (リーク防止)
   });
 
@@ -119,9 +121,14 @@ describe("INV-APPROVAL-REQUEST-ID-STABLE (SEC-1 R2): request_id は redaction �
 /**
  * SEC-R3-2 構造 metatest: 「hex charset ゆえ redaction ルールと構造的に非衝突」を prose でなく
  * T1 にする。全 REDACTION_RULES × (worst-case 決定論 token + 乱択 mint corpus) で 0 マッチを
- * 全数 assert する。固定部 (`s<hash12>:apr-`) にマッチするルール・token にマッチし得るルールの
- * どちらを追加しても、その日にここが赤くなる (bridge re-roll は固定部マッチに無力 — 本 metatest
- * が唯一の CI ゲート)。
+ * 全数 assert する。
+ *
+ * 被覆範囲の正直な開示 (SEC-R4-3): 検知できるのは**決定論的・構造的に id 形状へ当たる**ルール
+ * (固定部 `s<hash12>` / `:apr-` リテラル / token 全体形 / token の稠密な部分一致) — SEC R4 の
+ * 独立反証で 4 クラスとも RED 化を確認済み。**稀な特定リテラル (例 /cafebabe…/) に確率的に当たる
+ * だけの sparse ルールは corpus では捕まらない** — そのクラスは runtime の bridge re-roll が緩和層
+ * (token 依存ゆえ再採番で回避可能)。逆に固定部マッチは re-roll が無力で、本 metatest が唯一の
+ * CI ゲート。
  */
 describe("INV-APPROVAL-REQUEST-ID-STABLE (SEC-R3-2): REDACTION_RULES × id 形状の構造非衝突", () => {
   /** 決定論 worst-case token (charset の端 + vendor-prefix に最も近い並び)。 */

@@ -13,6 +13,7 @@
  * allow-list DTO の集計値・enum・メタのみで原文秘匿を含まない (INV-AUDIT-EXPORT-NO-RAW)。
  * 既存 .ad-modal__* スタイルを再利用 (ActionDetailModal と同規約)。閉じたら pull 済み state を破棄。
  */
+import { isSyntheticRetireOrigin } from "@actradeck/event-model";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { decisionLabel, formatClock, riskTone } from "./action-units-display";
@@ -465,7 +466,7 @@ export function AuditDetailModal({
                           // operator の cancel/deny は danger のまま (hard gate)。
                           <Tag
                             tone={
-                              e.resolution_origin === "relay_lost"
+                              isSyntheticRetireOrigin(e.resolution_origin)
                                 ? "muted"
                                 : e.decision === "deny" || e.decision === "cancel"
                                   ? "danger"
@@ -473,7 +474,7 @@ export function AuditDetailModal({
                             }
                             size="sm"
                           >
-                            {e.resolution_origin === "relay_lost"
+                            {isSyntheticRetireOrigin(e.resolution_origin)
                               ? t("audit.detail.relayLostRetired")
                               : decisionLabel(e.decision, locale)}
                           </Tag>

@@ -31,6 +31,7 @@ import {
   AUDIT_MANIFEST_MARKER,
   AUDIT_PACKET_MANIFEST_VERSION,
   AUDIT_PACKET_MANIFEST_MARKER,
+  type DecodedPacketManifest,
   type PacketManifest,
 } from "../src/audit-integrity.js";
 import {
@@ -121,7 +122,7 @@ function entry(s: AuditSessionSummary, events: ReplayEventDTO[]) {
   return { report: r, manifest: buildAuditManifest(r) };
 }
 
-function verifyPinned(m: PacketManifest) {
+function verifyPinned(m: PacketManifest | DecodedPacketManifest) {
   return verifyPacketManifest(m, { expectedFingerprint: m.signature!.public_key_fingerprint });
 }
 
@@ -679,5 +680,51 @@ describe("INV-AUDIT-PACKET SEC-2: HTML/MD per-session body verifiability", () =>
     const html = renderReviewPacketHtml(spoofed);
     expect(html).toContain(realFp);
     expect(html).not.toContain("0".repeat(64));
+  });
+});
+
+/**
+ * TDA-R4-4: packet manifest version の区別。governance 意味論 (hard_gate から relay_lost 除外・
+ * reason 語彙) が Phase 4 で変わったため v1→v2 へ bump した — 旧 v1 は「改竄」と区別可能な
+ * distinct reason で fail-closed に返す (session manifest の SEC-R3-1 と同一契約・共有 helper)。
+ */
+describe("INV-AUDIT-PACKET version 区別 (TDA-R4-4)", () => {
+  it("旧 v1 は malformed でなく unsupported-packet-manifest-version (fail-closed 維持)", () => {
+    const v1 = {
+      ...samplePacket().manifest,
+      version: "actradeck-audit-packet-manifest/v1",
+    } as unknown as Parameters<typeof verifyPacketManifest>[0];
+    const r = verifyPacketManifest(v1);
+    expect(r.ok).toBe(false);
+    expect(r.chain_valid).toBe(false);
+    expect(r.reason).toBe("unsupported-packet-manifest-version");
+  });
+
+  it("壊れ version は従来どおり malformed・現行版は ok (positive control)", () => {
+    const bad = {
+      ...samplePacket().manifest,
+      version: "wrong",
+    } as unknown as Parameters<typeof verifyPacketManifest>[0];
+    expect(verifyPacketManifest(bad).reason).toBe("malformed-packet-manifest");
+    expect(verifyPacketManifest(samplePacket().manifest).ok).toBe(true);
+  });
+
+  it("decodePacketManifestBase64 は旧 version を透過し verify が同 reason を返す", () => {
+    const v1 = {
+      ...samplePacket().manifest,
+      version: "actradeck-audit-packet-manifest/v1",
+    } as unknown as Parameters<typeof encodePacketManifestBase64>[0];
+    const decoded = decodePacketManifestBase64(encodePacketManifestBase64(v1));
+    expect(decoded).toBeDefined();
+    expect(verifyPacketManifest(decoded!).reason).toBe("unsupported-packet-manifest-version");
+  });
+
+  it("session family の manifest を packet verify に渡すと malformed (family 非交差)", () => {
+    // 2 family の marker は互いに prefix 関係に無い — cross-family は unsupported でなく malformed。
+    const cross = {
+      ...samplePacket().manifest,
+      version: `${AUDIT_MANIFEST_MARKER}/v3`,
+    } as unknown as Parameters<typeof verifyPacketManifest>[0];
+    expect(verifyPacketManifest(cross).reason).toBe("malformed-packet-manifest");
   });
 });

@@ -8,7 +8,9 @@
  *
  * ## ガバナンス集計 (EU AI Act Art.12 hook)
  * 各承認介入を hard/soft/auto の 3 分類で集約する:
- *  - **hard gate (denied/blocked)** = `approvals.by_decision.deny + cancel` (timeout→deny 含む)。
+ *  - **hard gate (denied/blocked)** = `approvals.by_decision.deny + cancel` (timeout→deny 含む。
+ *    SEC-R4-7 開示: child_exit/shutdown 由来の deny も含む — agent へは not_sent だが安全側 deny の
+ *    発動として計上する。除外は origin=relay_lost の単一値のみ)。
  *    TDA-1 (Phase 4 R2): backend 合成の relay_lost retire は by_decision に**含まれない**
  *    (audit-store foldApprovals が origin で分離・summary.approvals.synthetic_retired に別立て) —
  *    誰も決定していない取消を「実施した gate」と数えない。what-to-review では reason=relay_lost
@@ -28,6 +30,8 @@
  * per-session の描画は audit-report.ts の body renderer を再利用し (全値 htmlEscape/mdCell 済)、
  * 新 redaction 面をゼロに保つ。
  */
+
+import { isSyntheticRetireOrigin, SYNTHETIC_RETIRE_ORIGIN } from "@actradeck/event-model";
 
 import type { AuditSessionSummary } from "./audit-contract.js";
 import { foldByKind } from "./audit-contract.js";
@@ -131,7 +135,7 @@ function deriveFlagged(summary: AuditSessionSummary): FlaggedItem[] {
         // TDA-1 (Phase 4 R2): relay_lost 合成 retire は「誰も決定していない・agent へ何も届いて
         // いない」— operator の denied と偽らず別 reason で itemize する (hard_gate 計上は
         // by_decision 側で既に除外済み)。
-        reason: e.resolution_origin === "relay_lost" ? "relay_lost" : "denied",
+        reason: isSyntheticRetireOrigin(e.resolution_origin) ? SYNTHETIC_RETIRE_ORIGIN : "denied",
         risk_level: e.risk_level ?? "",
         decision: e.decision,
         subject,

@@ -21,11 +21,15 @@
  */
 
 import {
+  APPROVAL_DECISIONS,
+  type ApprovalDecision,
   isKnownRedactionKind,
   type RedactionKind,
   ResolutionOrigin,
-  type ResolutionOrigin as ResolutionOriginT,
 } from "@actradeck/event-model";
+
+// TDA-R4-9 (Phase 4 R4): ResolutionOrigin は値 import が型も供給する (二重 import を廃止)。
+type ResolutionOriginT = ResolutionOrigin;
 
 /**
  * TDA-1 (Phase 4 監査 R2): resolved payload の resolution_origin を監査層へ投影する closed gate。
@@ -38,9 +42,13 @@ export function asResolutionOrigin(raw: string | null | undefined): ResolutionOr
   return parsed.success ? parsed.data : undefined;
 }
 
-/** 承認 decision の closed-enum (event-model ApprovalDecision と同値・監査表示用に複製)。 */
-export const AUDIT_DECISIONS = ["allow", "allow_for_session", "deny", "cancel"] as const;
-export type AuditDecision = (typeof AUDIT_DECISIONS)[number];
+/**
+ * 承認 decision の closed-enum。TDA-R4-3 (Phase 4 R4): 手書き複製を廃し event-model の正準
+ * `APPROVAL_DECISIONS` (ApprovalDecision.options) を消費する — decision 追加時に監査集計が
+ * 黙って落とし signed manifest が誤った台帳を attest する drift の構造遮断。
+ */
+export const AUDIT_DECISIONS: readonly ApprovalDecision[] = APPROVAL_DECISIONS;
+export type AuditDecision = ApprovalDecision;
 
 /** decision 別件数 (全 decision キーを 0 埋めで持つ・集計の決定論化)。 */
 export type AuditDecisionTally = Record<AuditDecision, number>;
@@ -67,8 +75,11 @@ export interface AuditApprovalEntry {
   readonly decision: AuditDecision | undefined;
   /**
    * TDA-1 (Phase 4 R2): 解決の出所 (closed enum・未知/欠落は undefined)。`relay_lost` は
-   * backend 合成の retire (誰も決定していない・agent へ何も届いていない) であり、operator の
-   * hard gate と区別して表示・集計する。
+   * backend 合成の retire (誰も決定していない) であり、operator の hard gate と区別して
+   * 表示・集計する。実装規則の正直な開示 (SEC-R4-7): by_decision からの除外は
+   * **origin=relay_lost の単一値除外**のみ — child_exit/shutdown の deny も agent へは未配信
+   * (not_sent) だが「安全側 deny が発動した」事実として by_decision.deny (→hard_gate) に
+   * 計上される (delivery_status の監査面への投影は追跡 task・現状未到達)。
    */
   readonly resolution_origin: ResolutionOriginT | undefined;
   readonly auto_allowed: boolean | undefined;

@@ -5,17 +5,26 @@
  * を defensive parse し、表示用ヘルパと export URL 構築を提供する。token はここに現れない
  * (same-origin path のみ・BFF が server-side で付与する)。
  */
-import { gateRedactionCountByKind, RESOLUTION_ORIGINS } from "@actradeck/event-model";
-import type { ResolutionOrigin } from "@actradeck/event-model";
+import {
+  APPROVAL_DECISIONS,
+  gateRedactionCountByKind,
+  RESOLUTION_ORIGINS,
+} from "@actradeck/event-model";
+import type { ApprovalDecision, ResolutionOrigin } from "@actradeck/event-model";
 
 import { shortSessionId } from "./wall-display";
 
-export type AuditDecision = "allow" | "allow_for_session" | "deny" | "cancel";
+/**
+ * decision の closed set。TDA-R4-3 (Phase 4 R4 監査): 手書きミラーを廃し event-model の正準
+ * `APPROVAL_DECISIONS` を消費する (decision 追加時に表示層 tally が黙って落とす drift の構造遮断)。
+ */
+export type AuditDecision = ApprovalDecision;
 
 /**
- * resolution_origin の closed set。TDA-R3-2/SEC-R3-3: 手書きミラーを廃し event-model の正準
- * enum を消費する (backend で origin が追加されたとき表示層が黙って落とし operator success
- * トーンへ誤縮退する drift の構造遮断・membership 判定も正準 RESOLUTION_ORIGINS を使う)。
+ * resolution_origin の closed set。Phase 4 R3 監査所見 TDA-R3-2/SEC-R3-3: 手書きミラーを廃し
+ * event-model の正準 enum を消費する (backend で origin が追加されたとき表示層が黙って落とし
+ * operator success トーンへ誤縮退する drift の構造遮断・membership 判定も正準 RESOLUTION_ORIGINS
+ * を使う)。
  */
 export type AuditResolutionOrigin = ResolutionOrigin;
 
@@ -86,7 +95,8 @@ export interface AuditRangeReport {
 }
 
 const AUDIT_BASE = "/realtime/audit/sessions";
-const DECISIONS: readonly AuditDecision[] = ["allow", "allow_for_session", "deny", "cancel"];
+// TDA-R4-3: membership/tally の走査も正準配列を消費 (手書き列挙を残さない)。
+const DECISIONS: readonly AuditDecision[] = APPROVAL_DECISIONS;
 
 /** 期間集計 export の出力形式 (json/csv は既存・html/md は P2・ADR 019f2326)。 */
 export type AuditExportFormat = "json" | "csv" | "html" | "md";

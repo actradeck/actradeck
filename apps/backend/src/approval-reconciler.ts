@@ -44,7 +44,7 @@
  * Landed 節に開示・合成行は「backend reconciliation の観測」であり「元要求が未解決だった」ことの
  * 断定ではない、と読み手契約を固定する)。
  */
-import { EventPayload, newEventId } from "@actradeck/event-model";
+import { EventPayload, newEventId, SYNTHETIC_RETIRE_ORIGIN } from "@actradeck/event-model";
 
 import type { ApprovalReconcileSignal } from "./sidecar-registry.js";
 
@@ -98,7 +98,7 @@ export function buildSyntheticApprovalCancel(
       kind: "tool.permission.resolved",
       request_id: requestId,
       decision: "cancel",
-      resolution_origin: "relay_lost",
+      resolution_origin: SYNTHETIC_RETIRE_ORIGIN,
       delivery_status: "not_sent",
     },
   };
