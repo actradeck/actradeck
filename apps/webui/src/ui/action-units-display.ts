@@ -197,6 +197,11 @@ export function decisionLabel(decision: string, locale: Locale = "ja"): string {
       return t(locale, "action.decision.allow");
     case "deny":
       return t(locale, "action.decision.deny");
+    case "allow_for_session":
+      return t(locale, "action.decision.allowForSession");
+    case "cancel":
+      // TDA-R2-2: cancel が生 enum 文字列で出ていた取り残し (relay_lost 合成の初出で顕在化)。
+      return t(locale, "action.decision.cancel");
     default:
       return decision;
   }

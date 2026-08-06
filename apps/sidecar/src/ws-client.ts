@@ -14,6 +14,21 @@ import { WebSocket } from "ws";
 
 import type { AgentVisibilityWire, PolicyCategory } from "@actradeck/event-model";
 import { buildApprovalReconcileHelloFields } from "@actradeck/event-model";
+
+/**
+ * ApprovalBridge → pendingApprovalIdsProvider の正準配線 (QA-R2-4 R3・単一出所)。
+ *
+ * bridge 未生成 (コンストラクタ内の生成順序窓 / teardown 中) は **undefined** を返し hello から
+ * field を省略させる (backend は reconcile しない = fail-safe)。ここで `?? []` に倒すことは
+ * **禁止**: 空配列は「pending ゼロ宣言」= 当該 daemon の全 DB pending を stale とみなす最も
+ * 破壊的な値で、TDA-8 が指摘した fail-unsafe 方向 (両 daemon の手書き配線に `?? []` が居た)。
+ * daemon はこの helper を経由して配線し、意味論は単体テストが pin する。
+ */
+export function pendingIdsFromBridge(
+  getBridge: () => { pendingRequestIds(): string[] } | undefined,
+): () => readonly string[] | undefined {
+  return () => getBridge()?.pendingRequestIds();
+}
 import { tokenEquals } from "@actradeck/redaction";
 
 import type { EventStore } from "./store.js";

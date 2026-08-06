@@ -607,10 +607,15 @@ export class AuditStore {
        ),
        ev AS (
          -- 権威クロック: サーバ受信時刻 ingested_at の provider 別 MAX。timestamp(adapter 申告)は表示補助。
+         -- SEC-R2-2 (Phase 4 R3): backend 合成の relay_lost retire は「provider からの受信」では
+         -- ないため除外する (合成 ingest が当該 provider の受信 gap を覆い隠さない)。判定は
+         -- liveness 側 (aggregateObservationSql / observeFromEvents) の除外と同一の申告 field。
          SELECT provider,
                 max(extract(epoch from ingested_at) * 1000) AS max_ingested_ms,
                 max(extract(epoch from timestamp) * 1000) AS max_ts_ms
            FROM events
+          WHERE NOT (event_type = 'tool.permission.resolved'
+                     AND COALESCE(payload->>'resolution_origin' = 'relay_lost', false))
           GROUP BY provider
        ),
        seqagg AS (

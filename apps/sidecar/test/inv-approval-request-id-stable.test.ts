@@ -18,7 +18,9 @@ import { describe, expect, it } from "vitest";
 
 import { redactEventWithAuthoritativeCounts } from "@actradeck/redaction";
 
-import { ApprovalBridge, mintApprovalRequestId } from "../src/approval-bridge.js";
+import { APPROVAL_REQUEST_ID_RE, mintApprovalRequestId } from "@actradeck/event-model";
+
+import { ApprovalBridge } from "../src/approval-bridge.js";
 import type { HookCommonInput } from "../src/normalize.js";
 
 /** SEC-1 再現ベクタ: mintSyntheticSessionId 形 (sess_ + uuidv7 = 41 文字の単一 charset run)。 */
@@ -58,8 +60,9 @@ describe("INV-APPROVAL-REQUEST-ID-STABLE (SEC-1 R2): request_id は redaction �
   it("(a) mintApprovalRequestId の産物は全 session id shape で redaction 不変", () => {
     for (const sessionId of SESSION_ID_VECTORS) {
       const requestId = mintApprovalRequestId(sessionId);
-      // 形式: s<12hex>:apr-<base64url> — どの charset run も high-entropy 閾値 (40) 未満。
-      expect(requestId).toMatch(/^s[0-9a-f]{12}:apr-[A-Za-z0-9_-]{20,}$/);
+      // 形式 (R3): s<12hex>:apr-<32 lowercase hex> — run < 40 (high-entropy 構造排除) かつ
+      // hex charset (vendor-prefix 構造排除: xox/AKIA/ghp_ 等は hex 外文字を要する)。
+      expect(requestId).toMatch(APPROVAL_REQUEST_ID_RE);
       expect(redactedRequestId(sessionId, requestId)).toBe(requestId);
     }
   });

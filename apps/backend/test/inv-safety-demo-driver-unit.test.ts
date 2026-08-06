@@ -13,6 +13,8 @@ import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
 
+import { deriveDemoApprovalRequestId } from "@actradeck/event-model";
+
 import {
   denySafeResolveHold,
   normalizeDecision,
@@ -184,7 +186,7 @@ describe("QA-R2-1: finally backstop の実 emit 分岐 (requested 後の異常 u
     const resolved = received.filter((e) => e.event_type === "tool.permission.resolved");
     expect(resolved.length).toBe(1);
     expect(resolved[0]?.payload?.decision).toBe("deny");
-    expect(resolved[0]?.payload?.request_id).toBe(`${sessionId}:apr-1`);
+    expect(resolved[0]?.payload?.request_id).toBe(deriveDemoApprovalRequestId(sessionId));
     // 正常路はこの後の redact/end 脚に到達していない (異常 unwind の証跡)。
     expect(types).not.toContain("command.completed");
     expect(types).not.toContain("session.ended");

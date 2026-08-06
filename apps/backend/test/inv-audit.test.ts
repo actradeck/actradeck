@@ -40,6 +40,9 @@ const S4 = "sess_audit_delta";
 // S5 も窓外 (BASE+70_000)。TDA-1 (Phase 4 R2): relay_lost 合成 retire は operator の hard gate と
 // 同一計上しない (by_decision 非含・synthetic_retired 別立て・operator cancel は従来どおり計上)。
 const S5 = "sess_audit_epsilon";
+// S6 も窓外 (BASE+80_000)。QA-R2-3 (R3): ingress は loose ゆえ未知 resolution_origin が at-rest に
+// 着地しうる — read 層 closed gate (asResolutionOrigin) が未知値を entry へ通さないことを実 PG で pin。
+const S6 = "sess_audit_zeta";
 // write-gate を迂回した dirty by-kind を模す secret 形 phantom。test 間で共有し gate 健在性を route まで固定。
 const PHANTOM_KIND = "ghp_FAKEphantomSECRETkind0123456789";
 
@@ -52,7 +55,7 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
   let app: FastifyInstance;
   let store: IngestStore;
   let audit: AuditStore;
-  const sessions = [S1, S2, S3, S4, S5];
+  const sessions = [S1, S2, S3, S4, S5, S6];
 
   beforeAll(async () => {
     pool = new Pool({ connectionString: DATABASE_URL, max: 4 });
@@ -212,6 +215,24 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
         // operator の明示 cancel (origin 付き・従来どおり hard gate に計上される)。
         payload: { request_id: "q2", decision: "cancel", resolution_origin: "operator" },
       }),
+      // S6 (窓外・QA-R2-3): 未知/敵対 resolution_origin は ingress (loose) を素通りして永続する。
+      makeEvent({
+        session_id: S6,
+        event_type: "tool.permission.requested",
+        state: "waiting.approval",
+        timestamp: iso(BASE, 80_000),
+        payload: { request_id: "z1", tool_name: "Bash", risk_level: "high", command: "ls" },
+      }),
+      makeEvent({
+        session_id: S6,
+        event_type: "tool.permission.resolved",
+        timestamp: iso(BASE, 80_100),
+        payload: {
+          request_id: "z1",
+          decision: "deny",
+          resolution_origin: "bogus-[REDACTED-like]-injected",
+        },
+      }),
     ];
     for (const ev of evs) await store.ingest(ev);
   });
@@ -269,6 +290,21 @@ describe.skipIf(!reachable)("INV-AUDIT: 監査ビュー集約 + export (real PG)
     expect(q1?.resolution_origin).toBe("relay_lost");
     const q2 = s.entries?.find((e) => e.command === "curl x");
     expect(q2?.resolution_origin).toBe("operator");
+  });
+
+  it("QA-R2-3 (R3): 未知 resolution_origin は closed gate で entry へ通さない (undefined 投影・decision は通常計上)", async () => {
+    const s = (await audit.sessionSummary(S6, { detail: true })) as AuditSessionSummary;
+    expect(s).toBeDefined();
+    // 未知 origin の resolved: decision (closed enum 内) は従来どおり計上・relay_lost でないので
+    // synthetic_retired へは入らない。
+    expect(s.approvals.by_decision.deny).toBe(1);
+    expect(s.approvals.synthetic_retired).toBe(0);
+    // entry の resolution_origin は closed gate (asResolutionOrigin) が未知値を落とし undefined —
+    // 敵対文字列が HTTP 面 (entries 投影) へ到達しない (NO-RAW を CI で固定)。
+    const z1 = s.entries?.find((e) => e.command === "ls");
+    expect(z1?.decision).toBe("deny");
+    expect(z1?.resolution_origin).toBeUndefined();
+    expect(JSON.stringify(s.entries)).not.toContain("bogus-");
   });
 
   it("approvalEntries: command 無し承認は path を投影し file_path にフォールバックする (QA-1)", async () => {

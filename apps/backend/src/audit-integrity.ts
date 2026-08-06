@@ -52,9 +52,9 @@ import type { AuditSessionReport, AuditSessionReportDiff } from "./audit-report.
 import type { ReplayEventDTO } from "./replay-contract.js";
 
 /** manifest フォーマットのバージョン。 */
-export const AUDIT_MANIFEST_VERSION = "actradeck-audit-manifest/v2";
+export const AUDIT_MANIFEST_VERSION = "actradeck-audit-manifest/v3";
 /** ハッシュ連鎖のドメイン分離定数。 */
-const CHAIN_DOMAIN = "actradeck-audit-manifest/v2/sha256-chain";
+const CHAIN_DOMAIN = "actradeck-audit-manifest/v3/sha256-chain";
 
 // ---------------------------------------------------------------------------
 // Manifest 型 (表示投影の authoritative record・全て redaction 済み文字列)。
@@ -99,6 +99,8 @@ export interface AuditManifestSummary {
   readonly approval_allow_for_session: string;
   readonly approval_deny: string;
   readonly approval_cancel: string;
+  /** SEC-R2-1: relay_lost 合成 retire (by_decision 非含・保存則 total = Σdecision + pending + retired)。 */
+  readonly approval_synthetic_retired: string;
   readonly approval_pending: string;
   readonly high_risk_op_count: string;
 }
@@ -214,6 +216,7 @@ export function canonicalizeSummary(s: AuditManifestSummary): string {
     s.approval_allow_for_session,
     s.approval_deny,
     s.approval_cancel,
+    s.approval_synthetic_retired,
     s.approval_pending,
     s.high_risk_op_count,
   ]);
@@ -284,6 +287,7 @@ export function normalizeSummaryForManifest(s: AuditSessionSummary): AuditManife
     approval_allow_for_session: str(a.by_decision.allow_for_session),
     approval_deny: str(a.by_decision.deny),
     approval_cancel: str(a.by_decision.cancel),
+    approval_synthetic_retired: str(a.synthetic_retired),
     approval_pending: str(a.pending),
     high_risk_op_count: str(s.high_risk_op_count),
   };

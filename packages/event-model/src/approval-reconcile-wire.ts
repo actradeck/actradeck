@@ -24,13 +24,23 @@
  * 純粋・依存ゼロ・fs/net 非アクセス。
  */
 
-/** 1 hello 宣言に載せられる pending request_id の上限 (超過は宣言ごと無効 = reconcile しない)。 */
+/**
+ * 1 hello 宣言に載せられる pending request_id の上限 (超過は宣言ごと無効 = reconcile しない)。
+ * 根拠 (TDA-R2-4): 宣言は **daemon 単位** (全 session 分)。projection の per-session cap は
+ * MAX_PENDING_APPROVALS=64 (packages/projection) ゆえ、1024 = 64/session × 16 sessions 相当。
+ * 正規 daemon の同時 session はこの遥か下で、超過は malformed とみなし fail-safe (消さない)。
+ */
 export const MAX_ACTIVE_PENDING_IDS = 1024;
 
 /** 宣言 request_id 1 件の長さ上限 (bridge 採番形は数十文字・十分な余裕)。 */
 export const MAX_REQUEST_ID_LEN = 256;
 
-/** hello frame 上の field 名 (送受で共有する唯一のリテラル出所)。 */
+/**
+ * hello frame 上の field 名。正直な scope (TDA-R2-3): 送信側 (buildApprovalReconcileHelloFields)
+ * はこの定数を消費するが、受信側 (backend HelloFrame) は型付き named field で読むため
+ * 「構造的な単一出所」は cap と検証ロジックのみ。field 名の改名 drift は両側のテスト
+ * (egress-handshake P4-* / backend inv-approval-reconcile A 群) のリテラル pin が赤化で防ぐ。
+ */
 export const ACTIVE_PENDING_FIELD = "active_pending_request_ids";
 export const RUNTIME_EPOCH_FIELD = "runtime_epoch";
 

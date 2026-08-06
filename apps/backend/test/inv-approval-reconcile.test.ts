@@ -18,7 +18,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { EventPayload, parseEvent } from "@actradeck/event-model";
+import { EventPayload, mintApprovalRequestId, parseEvent } from "@actradeck/event-model";
 import { redactEventWithAuthoritativeCounts } from "@actradeck/redaction";
 import { Pool } from "pg";
 
@@ -511,17 +511,53 @@ describe.skipIf(!reachable)("INV-APPROVAL-RECONCILE 受入#6/#7 (real Postgres)"
     expect((rows[0].payload as Record<string, unknown>).resolution_origin).toBe("operator");
   });
 
+  it("QA-R2-1 (R3): hello 受信直後に生まれた pending は実 DB 経路でも消えない (watermark 実データ pin)", async () => {
+    // R2 の watermark は fake store でのみ検証されていた。実 ingest (redaction 床 → parseEvent →
+    // store.ingest → projection fold) が requested_at を正しく運ぶことを実 PG で pin する。
+    // requested_at を偽装 (epoch 0 等) すると全 pending が太古扱いになり watermark が無効化される
+    // — その falsification はこのテストが RED にする。
+    const sid = newSession("sess_reconcile_wm");
+    const requestId = "s0123456789ab:apr-0123456789abcdef0123456789abcdef";
+    // timestamp = 今 (watermark 余裕幅の内側) の requested を実 ingest。
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        state: "waiting.approval",
+        event_type: "tool.permission.requested",
+        payload: {
+          kind: "tool.permission.requested",
+          request_id: requestId,
+          tool_name: "Bash",
+          command: "rm -rf /tmp/x",
+          risk_level: "high",
+        },
+      }),
+    );
+    // pending ゼロ宣言でも fresh pending は生存する (宣言スナップショットに載る機会が無かっただけ)。
+    await reconciler.reconcile(liveSignal(sid, []));
+    const kept = await store.pendingApprovalsForSessions([sid]);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.requests.map((r) => r.request_id)).toEqual([requestId]);
+    // 合成 resolved は書かれていない。
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM events WHERE session_id = $1 AND event_type = 'tool.permission.resolved'`,
+      [sid],
+    );
+    expect(rows[0].n).toBe(0);
+  });
+
   it("受入#6 (SEC-1 R2 ベクタ): sess_<uuidv7> 形 session の pending も宣言との突合で維持される", async () => {
     // SEC-1 の再現形: session_id が redaction high-entropy 形 (41 文字単一 run) でも、
-    // 採番形 (s<hash12>:apr-…・raw session_id 非含) は ingress 床で不変 → 宣言 (raw) と DB
-    // (at-rest) が同一空間で突合できる。旧採番 (`${sessionId}:apr-…`) ではここが RED になる
-    // (prefix が [REDACTED:…] 化し宣言と不一致 → 誤って合成 cancel)。
+    // 正準採番 (event-model mintApprovalRequestId・raw session_id 非含) は ingress 床で不変 →
+    // 宣言 (raw) と DB (at-rest) が同一空間で突合できる。QA-R2-5 (R3): 採番は手書き固定値でなく
+    // **実際に正準 minter を呼ぶ** (backend からも import 可能になったため) — minter が
+    // redaction 不安定な形へ drift すればここが RED になる (結合が本物になった)。
     // mintSyntheticSessionId の実在形そのまま (sess_ + uuid = 41 文字の単一 run)。newSession の
     // suffix を付けると相関 field 救済 shape を外れ top-level session_id ごと redaction されるため
     // 使わない (このベクタの狙いは「session_id は救済され request_id 内 prefix だけ壊れる」非対称)。
     const sid = `sess_${crypto.randomUUID()}`;
     sessions.push(sid);
-    const requestId = "s0123456789ab:apr-F9aSKs-LnHcbygXAZ16NLQ"; // mintApprovalRequestId 形
+    const requestId = mintApprovalRequestId(sid);
     await store.ingest(
       parseEvent(
         redactEventWithAuthoritativeCounts(

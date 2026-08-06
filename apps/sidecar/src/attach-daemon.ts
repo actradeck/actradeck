@@ -34,7 +34,7 @@ import { HookReceiver } from "./hook-receiver.js";
 import { generateHookToken } from "./settings-injection.js";
 import { EventSink, type OutOfOrderObservation } from "./sink.js";
 import { EventStore } from "./store.js";
-import { WsClient } from "./ws-client.js";
+import { pendingIdsFromBridge, WsClient } from "./ws-client.js";
 
 export interface AttachDaemonOptions {
   readonly wsUrl: string;
@@ -131,7 +131,7 @@ export class AttachDaemon {
       // approvalBridge は本コンストラクタで後続生成されるため provider は遅延参照する (hello 送出は
       // connect 後 = 構築完了後のみ)。未生成ガードは防御的 (構造上到達しない)。
       runtimeEpoch: this.runtimeEpoch,
-      pendingApprovalIdsProvider: () => this.approvalBridge?.pendingRequestIds(), // bridge 未生成は undefined = field 省略 (TDA-8: 空宣言へ倒さない)
+      pendingApprovalIdsProvider: pendingIdsFromBridge(() => this.approvalBridge), // 正準配線 (QA-R2-4: undefined=省略・?? [] 禁止)
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }
         : {}),

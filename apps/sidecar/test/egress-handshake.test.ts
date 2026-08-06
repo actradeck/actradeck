@@ -23,7 +23,7 @@ import { MAX_ACTIVE_PENDING_IDS } from "@actradeck/event-model";
 
 import { buildEvent } from "../src/event-factory.js";
 import { EventStore } from "../src/store.js";
-import { WsClient } from "../src/ws-client.js";
+import { pendingIdsFromBridge, WsClient } from "../src/ws-client.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -510,6 +510,14 @@ describe("ADR 0014 Phase 4: hello runtime_epoch + active_pending_request_ids", (
     const hello = cap.frames[0] as Record<string, unknown>;
     expect(hello.type).toBe("hello");
     expect("active_pending_request_ids" in hello).toBe(false);
+  });
+
+  it("(P4-6) pendingIdsFromBridge (daemon 正準配線): bridge 未生成は undefined — [] へ倒さない (QA-R2-4 R3)", () => {
+    // 両 daemon (sidecar/attach-daemon) はこの helper を経由して provider を配線する。
+    // `?? []` (空宣言 = 全 pending stale) への変異はここが RED にする。
+    expect(pendingIdsFromBridge(() => undefined)()).toBeUndefined();
+    const bridge = { pendingRequestIds: () => ["a", "b"] };
+    expect(pendingIdsFromBridge(() => bridge)()).toEqual(["a", "b"]);
   });
 
   it("(P4-5) cap 超過は切り詰めでなく field 省略 (TDA-9 R2: 偽 stale を作らない)", async () => {

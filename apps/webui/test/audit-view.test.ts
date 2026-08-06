@@ -37,6 +37,7 @@ function mkSession(
     approvals: {
       total: 0,
       by_decision: { allow: 0, allow_for_session: 0, deny: 0, cancel: 0 },
+      synthetic_retired: 0,
       pending: 0,
     },
     high_risk_op_count: 0,
@@ -132,6 +133,7 @@ describe("parseAuditReport (defensive)", () => {
           approvals: {
             total: 2,
             by_decision: { allow: 1, allow_for_session: 0, deny: 0, cancel: 0 },
+            synthetic_retired: 0,
             pending: 1,
           },
           high_risk_op_count: 1,
@@ -272,6 +274,7 @@ describe("display helpers", () => {
       decidedTotal({
         total: 5,
         by_decision: { allow: 2, allow_for_session: 1, deny: 1, cancel: 0 },
+        synthetic_retired: 0,
         pending: 1,
       }),
     ).toBe(4);
@@ -368,6 +371,7 @@ describe("client-side filters (project / text / aggregate)", () => {
       approvals: {
         total: 3,
         by_decision: { allow: 1, allow_for_session: 1, deny: 1, cancel: 0 },
+        synthetic_retired: 0,
         pending: 0,
       },
     }),

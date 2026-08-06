@@ -897,9 +897,18 @@ export async function aggregateObservationSql(
          -- 3値論理ガード: naked heartbeat は payload->'process_alive' が NULL となり、
          -- NULL = 'false'::jsonb は UNKNOWN → FILTER(WHERE NULL) で誤って除外されるため、
          -- COALESCE(..., false) で「boolean false に一致したときだけ true」へ畳む。
+         -- SEC-R2-2 (Phase 4 R3): backend 合成の relay_lost retire (tool.permission.resolved +
+         -- resolution_origin=relay_lost) も「観測された活動」ではないため除外する。reconcile は
+         -- daemon 再起動/消失時にこそ発火するため、除外しないと backend 自身の書込みが
+         -- 「fresh event 観測」の根拠を製造し stale session を live に見せる (REAL DATA ONLY 違反)。
+         -- ->> の text 化: JSON 文字列 "relay_lost" のみ一致 (キー不在は NULL → COALESCE false)。
+         -- TS observeFromEvents の origin === "relay_lost" (厳密文字列比較) と鏡写し
+         -- (INV-LIVENESS-PARITY が対で pin)。
          max(extract(epoch from timestamp) * 1000)
            FILTER (WHERE NOT (event_type = 'heartbeat'
-                              AND COALESCE(payload->'process_alive' = 'false'::jsonb, false)))
+                              AND COALESCE(payload->'process_alive' = 'false'::jsonb, false))
+                     AND NOT (event_type = 'tool.permission.resolved'
+                              AND COALESCE(payload->>'resolution_origin' = 'relay_lost', false)))
              AS event_ms,
          max(extract(epoch from timestamp) * 1000)
            FILTER (WHERE event_type = ANY($4::text[])) AS stdout_ms,

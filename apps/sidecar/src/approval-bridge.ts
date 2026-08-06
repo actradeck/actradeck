@@ -14,7 +14,7 @@
  * MVP の土台: UI 接続 (WsClient.approval) を resolve 経路として配線。UI 未接続時は
  * タイムアウト → 安全側 (deny)。これは Phase 3/4 で UI が来るまでの最小実装。
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type {
   ApprovalDecision,
@@ -26,6 +26,7 @@ import {
   DEFAULT_GATED_CATEGORIES,
   isKnownRedactionKind,
   isPathWithinScope,
+  mintApprovalRequestId,
 } from "@actradeck/event-model";
 
 import type { ApprovalAllowlistStore } from "./approval-allowlist-store.js";
@@ -175,31 +176,9 @@ export function resolutionOriginSuffix(origin: ResolutionOrigin | undefined): st
   }
 }
 
-/**
- * 承認 request_id の採番 (単一出所・redaction-stable 契約)。
- *
- * 形式: `s<sha256(session_id) 先頭12hex>:apr-<128bit 乱数 base64url>`。
- *
- * SEC-1 (Phase 4 監査 R2): 旧形式 `${sessionId}:apr-…` は **raw session_id を payload.request_id へ
- * 露出**していた。`sess_<uuidv7>` 形 (41 文字の単一 charset run) の session_id は redaction の
- * high-entropy ルール (40 文字以上 + 複数 class) に合致し、ingress 床で request_id の prefix が
- * `[REDACTED:…]` へ置換される。結果 at-rest (DB/UI カード) の request_id と bridge Map の raw キーが
- * **別空間**になり、①UI approve relay が resolve で no-op ②Phase 4 reconcile が生存 pending を
- * 「宣言に無い」と誤判定して合成 cancel、の両方が起きる (top-level session_id は相関 field 救済で
- * 保持されるため session 自体は無事＝request_id 内だけが壊れる非対称)。
- *
- * 対策: raw session_id を id に含めない。短縮ハッシュ tag (13 文字) + `:` 区切り + 乱数部 (26 文字)
- * で **どの charset run も high-entropy 閾値 (40) を大きく下回る** = redaction 非誘発 by construction。
- * INV-APPROVAL-REQUEST-ID-STABLE がこれを実 redactor で回帰固定する (id 形式や redaction 閾値を
- * 変える場合はそのテストが赤くなる)。
- *
- * 予測不能性 (3#SEC-1) は 128bit 乱数部が担う。foreign request_id 拒否 (SEC-2) は bridge Map lookup
- * で行われ prefix 解析には依存しない (tag は per-session 相関のデバッグ補助のみ)。
- */
-export function mintApprovalRequestId(sessionId: string): string {
-  const tag = createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
-  return `s${tag}:apr-${randomBytes(16).toString("base64url")}`;
-}
+// 承認 request_id の採番は event-model の正準 `mintApprovalRequestId` (approval-request-id.ts) を
+// 使う (TDA-R2-1: sidecar/backend 両ティアの単一出所。redaction-stability の根拠 — hex charset で
+// vendor-prefix 構造排除 + 全 run < 40 で high-entropy 構造排除 — は正準側 docstring 参照)。
 
 /**
  * cwd → repo スコープ解決器の型 (ADR 019ee0c0 永続 allowlist / ADR 019f0eca per-repo policy 共有)。
@@ -498,11 +477,20 @@ export class ApprovalBridge {
   }
 
   /**
-   * request_id を高エントロピーで採番する (3#SEC-1)。実装は module-level の
-   * `mintApprovalRequestId` (redaction-stable 契約の単一出所) — docstring 参照。
+   * request_id を高エントロピーで採番する (3#SEC-1)。実装は event-model の正準
+   * `mintApprovalRequestId` (redaction-stable 契約の単一出所)。
+   *
+   * SEC-R2-3 (belt-and-braces): 正準形式は charset 構造で redaction 非誘発だが、将来の
+   * ルール追加 (固定リテラル `apr-` を跨ぐ形等) への防衛線として、採番直後に実 redactor で
+   * 不変性を確認し、万一 mangle されるなら再採番する (有界 8 回・系統的な全滅は
+   * INV-APPROVAL-REQUEST-ID-STABLE が CI で先に赤くする)。
    */
   private nextRequestId(sessionId: string): string {
-    return mintApprovalRequestId(sessionId);
+    let id = mintApprovalRequestId(sessionId);
+    for (let i = 0; i < 8 && redactString(id) !== id; i++) {
+      id = mintApprovalRequestId(sessionId);
+    }
+    return id;
   }
 
   /**

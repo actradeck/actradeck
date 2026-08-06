@@ -157,6 +157,51 @@ describe.skipIf(!reachable)(
       expect(tsObs.process).toEqual({ alive: false, atMs: NOW - 2_000 });
     });
 
+    it("SEC-R2-2 R3: relay_lost synthetic resolved — excluded from event activity in BOTH", async () => {
+      const sid = newSession("sess_par_relaylost");
+      const events = [
+        makeEvent({
+          session_id: sid,
+          event_type: "command.started",
+          state: "running.command_executing",
+          timestamp: iso(NOW, -90_000),
+          payload: { kind: "command.started", command: "npm test" },
+        }),
+        // backend reconcile の合成 cancel (relay_lost)。活動に数えると backend 自身の書込みが
+        // fresh event 根拠を製造する (REAL DATA ONLY 違反) — SQL/TS 両側で除外が鏡写しであること。
+        makeEvent({
+          session_id: sid,
+          source: "external",
+          event_type: "tool.permission.resolved",
+          timestamp: iso(NOW, -1_000),
+          payload: {
+            kind: "tool.permission.resolved",
+            request_id: "s0123456789ab:apr-0123456789abcdef0123456789abcdef",
+            decision: "cancel",
+            resolution_origin: "relay_lost",
+            delivery_status: "not_sent",
+          },
+        }),
+        // 対照: operator resolved は活動として数える (過剰除外しない)。
+        makeEvent({
+          session_id: sid,
+          event_type: "tool.permission.resolved",
+          timestamp: iso(NOW, -50_000),
+          payload: {
+            kind: "tool.permission.resolved",
+            request_id: "s0123456789ab:apr-fedcba9876543210fedcba9876543210",
+            decision: "allow",
+            resolution_origin: "operator",
+            delivery_status: "sent",
+          },
+        }),
+      ];
+      await assertParity("relay-lost-synthetic", events);
+      const tsObs = observeFromEvents(events);
+      // 合成 (-1s) は寄与せず、最後の活動は operator resolved (-50s)。
+      expect(tsObs.event?.atMs).toBe(NOW - 50_000);
+    });
+
     it("alive heartbeat (process_alive:true) — counts as activity in BOTH", async () => {
       const sid = newSession("sess_par_alive");
       const events = [

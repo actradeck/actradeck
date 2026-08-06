@@ -48,7 +48,9 @@ describe.skipIf(!reachable)(
       if (pool) await pool.end();
     });
 
-    async function waitFor(cond: () => Promise<boolean>, ms = 5_000): Promise<void> {
+    // QA-R2-7: vitest 既定 testTimeout (5s) より小さい予算にし、失敗時は生 timeout でなく
+    // waitFor の診断メッセージへ到達させる。
+    async function waitFor(cond: () => Promise<boolean>, ms = 4_000): Promise<void> {
       const deadline = Date.now() + ms;
       while (Date.now() < deadline) {
         if (await cond()) return;

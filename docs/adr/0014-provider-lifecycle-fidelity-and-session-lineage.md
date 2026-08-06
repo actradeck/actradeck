@@ -232,6 +232,63 @@ origin=relay_lost, delivery=not_sent`).
   - **Production wiring gate (TDA-3, M).** `INV-APPROVAL-RECONCILE-WIRING` drives
     `buildIngestionServer` end-to-end (real WS hello → synthetic cancel → fold) so deleting
     the `onApprovalReconcile` registration goes red.
+  **Audit round 3 hardening (2026-08-06, full SEC/QA/TDA re-audit of the R2 landing):**
+
+  - **Canonical request-id minting for both tiers (TDA-R2-1/SEC-R2-4/QA-R2-5, M).** The minter
+    moved to event-model (`approval-request-id.ts`): `s<sha256(sid)[0..12]>:apr-<32 lowercase
+    hex>`. The hex token charset structurally excludes every vendor-prefix redaction rule
+    (they all need non-hex letters, uppercase or `_`), upgrading redaction-stability from
+    probabilistic (SEC-R2-3 measured ~4.5e-9/id under base64url) to structural; the sidecar
+    bridge additionally re-rolls (bounded) against the real redactor as belt-and-braces.
+    `safety-demo-driver` — the second legacy-shape minting site R2 missed — now derives its
+    deterministic id via the shared `deriveDemoApprovalRequestId`. The backend real-PG
+    acceptance vector calls the shared minter (the R2 comment claiming that coupling was
+    false).
+  - **Ledger completeness for `synthetic_retired` (SEC-R2-1/QA-R2-2/TDA-R2-2, M).** R2 removed
+    relay_lost cancels from `by_decision` but only the JSON API carried the reconciling term,
+    silently breaking `total = Σby_decision + pending` in every shipped export. The column/row
+    now appears in CSV, HTML and Markdown (per-session and range totals), the signed manifest
+    projection (`AUDIT_MANIFEST_VERSION` bumped to v3 — the canonical form changed), and the
+    webui (parse + totals chip + entry tag: relay_lost renders muted with its own label, never
+    the operator success/danger tones). A conservation test pins
+    `total = allow+afs+deny+cancel+synthetic_retired+pending` across formatters.
+  - **Synthetic events are not observed activity (SEC-R2-2, M; introduced in R1).** The
+    synthetic cancel carries `timestamp = now`, and both freshness aggregations (SQL
+    `aggregateObservationSql` and TS `observeFromEvents`, mirrored under INV-LIVENESS-PARITY)
+    as well as the audit-coverage per-provider `MAX(ingested_at)` now exclude
+    `resolution_origin=relay_lost` resolved events — the backend must not manufacture "fresh
+    event observed" evidence at exactly the moment a daemon vanished (REAL DATA ONLY).
+  - **Test-gap closures (QA-R2-1/3/4/6/7, M/L).** Real-PG pins for: the watermark's real data
+    path (a fresh pending survives an empty declaration through actual ingest), and the
+    `asResolutionOrigin` closed gate (an adversarial origin string ingested through the loose
+    ingress projects to `undefined`, never reaching the HTTP surface). The daemon provider
+    wiring is now a shared `pendingIdsFromBridge` helper whose "undefined, never `[]`"
+    semantics is unit-pinned. All `skipIf(!reachable)` backend files must be registered in the
+    `REAL_PG_TESTS` serialization list, enforced structurally by the tripwire metatest.
+  - **Honest-scope corrections (TDA-R2-3/4/5, SEC-R2-6, L).** Wire-module docstring no longer
+    claims field names are structurally single-sourced (caps and validation are; names are
+    pinned by both tiers' tests); the 1024 cap documents its per-daemon derivation (64/session
+    × 16); `synthetic_retired` documents that it counts resolved *events* (a double-audit-row
+    request contributes to both terms, shrinking `pending` by clamp) and that
+    `resolution_origin` is producer-claimed — there is no server-authoritative synthetic
+    marker, which inside the INGEST_TOKEN boundary is the pre-existing trust model, not a new
+    escalation.
+  - **Coordinated rollout for the request-id change (TDA-R2-6).** The SEC-1 fix takes effect
+    only when the sidecar dist is rebuilt and both daemons restarted alongside the backend.
+    Until a resident attach daemon restarts it keeps minting legacy-shape ids, so the H
+    symptoms (approve no-op, live pendings retired as relay_lost for `sess_<uuidv7>`-shaped
+    sessions) persist for that daemon; the R2/R3 backend changes only mitigate and honestly
+    account for the residue. Deploy sidecar + daemons + backend together (same requirement as
+    the strict-enum vocabulary). Legacy pendings persisted before the upgrade no longer match
+    any new declaration and are retired as relay_lost on the first hello — that is the
+    designed recovery, not data loss.
+  - **Watermark heuristic disclosure (SEC-R2-5, L).** The 2s watermark is anchored to the
+    backend's hello *receipt* time; the sidecar's snapshot time is unknown, so a transport lag
+    above the margin could still retire a just-created live pending (degrades to the
+    pre-watermark behaviour; deny-direction, loopback makes it improbable). Carrying a
+    `declared_at` timestamp in the hello would close the window exactly — tracked in the
+    phase sweep with the other L follow-ups.
+
   - **Accepted-risk / tracked disclosures (deadline v0.7):** (a) SEC-2: a peer holding
     INGEST_TOKEN can claim any session with one hello and retire its pendings — same
     single-operator/loopback trust boundary as the existing claim-based relay takeover; a

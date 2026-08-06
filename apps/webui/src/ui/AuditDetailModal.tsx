@@ -453,8 +453,22 @@ export function AuditDetailModal({
                           </Tag>
                         ) : null}
                         {e.decision !== undefined ? (
-                          <Tag tone={e.decision === "deny" ? "danger" : "success"} size="sm">
-                            {decisionLabel(e.decision, locale)}
+                          // TDA-R2-2: relay_lost 合成 retire は「誰も決定していない」— operator の
+                          // allow (success) とも deny (danger) とも混同しない muted + 専用ラベル。
+                          // operator の cancel/deny は danger のまま (hard gate)。
+                          <Tag
+                            tone={
+                              e.resolution_origin === "relay_lost"
+                                ? "muted"
+                                : e.decision === "deny" || e.decision === "cancel"
+                                  ? "danger"
+                                  : "success"
+                            }
+                            size="sm"
+                          >
+                            {e.resolution_origin === "relay_lost"
+                              ? t("audit.detail.relayLostRetired")
+                              : decisionLabel(e.decision, locale)}
                           </Tag>
                         ) : null}
                         {e.auto_allowed === true ? (

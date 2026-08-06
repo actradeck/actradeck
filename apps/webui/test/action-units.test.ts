@@ -45,7 +45,7 @@ function ev(o: Partial<ReplayEventDTO> = {}): ReplayEventDTO {
   };
 }
 
-/** 実観測の request_id 形 (`<session_id>:apr-<id>`)。 */
+/** 承認キー空間の request_id (fold は完全一致相関で形式非依存・現行実観測形は `s<hash12>:apr-<hex>`)。 */
 function reqId(session: string, id: string): string {
   return `${session}:apr-${id}`;
 }

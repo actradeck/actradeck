@@ -226,6 +226,14 @@ export function observeFromEvents(events: readonly NormalizedEvent[]): LivenessO
         // naked heartbeat (process_alive 無し) は alive 不明 → 活動として数える。
         if (alive === false) countsAsActivity = false;
       }
+    } else if (ev.event_type === "tool.permission.resolved") {
+      // SEC-R2-2 (Phase 4 R3): backend 合成の relay_lost retire は「観測された活動」ではない。
+      // reconcile は daemon 再起動/消失時に発火するため、これを活動に数えると backend 自身の
+      // 書込みが「fresh event」根拠を製造し stale session を live に見せる (REAL DATA ONLY 違反)。
+      // 厳密文字列比較 = SQL 側 `payload->>'resolution_origin' = 'relay_lost'` (JSON 文字列のみ
+      // text 一致・キー不在 NULL→COALESCE false) と鏡写し (INV-LIVENESS-PARITY が対で pin)。
+      const origin = (ev.payload as Record<string, unknown>).resolution_origin;
+      if (origin === "relay_lost") countsAsActivity = false;
     }
 
     if (countsAsActivity) event = max(event, t);

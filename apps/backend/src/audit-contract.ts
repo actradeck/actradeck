@@ -86,6 +86,14 @@ export interface AuditApprovalSummary {
    * TDA-1 (Phase 4 R2): backend 合成 (resolution_origin=relay_lost) で retire された件数。
    * 「daemon 再起動等で中継が失われ、operator が決定できないまま非 actionable 化された」観測で
    * あり、gate 実施と偽らないための別立て集計。
+   *
+   * 意味論の正直な開示 (TDA-R2-5/SEC-R2-6 R3):
+   *  - 集計単位は **resolved イベント数** (by_decision と同じ)。同一 request_id に合成 cancel と
+   *    実 resolved が両方残る既知エッジ (ADR 0014 開示) では両方が各々の枠に 1 ずつ数えられ、
+   *    pending がその分過少 (clamp 0) になりうる — request 単位 dedup は entries 側のみ。
+   *  - 判定は producer 申告の resolution_origin による。「backend が合成した」ことのサーバ権威
+   *    marker は無く、INGEST_TOKEN 境界の内側では申告ベース (relay_lost を申告した resolved の
+   *    件数) — 境界内で任意イベントを書ける前提は従来と同じで新たな権限昇格ではない。
    */
   readonly synthetic_retired: number;
   /** 要求されたが decision が記録されていない件数 (= total - Σby_decision - synthetic_retired, clamp ≥0)。 */
@@ -279,6 +287,7 @@ export function auditReportToCsv(report: AuditRangeReport): string {
     "allow_for_session",
     "deny",
     "cancel",
+    "synthetic_retired",
     "approvals_pending",
     "high_risk_op_count",
     "auto_allowed_count",
@@ -304,6 +313,7 @@ export function auditReportToCsv(report: AuditRangeReport): string {
         csvCell(s.approvals.by_decision.allow_for_session),
         csvCell(s.approvals.by_decision.deny),
         csvCell(s.approvals.by_decision.cancel),
+        csvCell(s.approvals.synthetic_retired),
         csvCell(s.approvals.pending),
         csvCell(s.high_risk_op_count),
         csvCell(s.auto_allowed_count),

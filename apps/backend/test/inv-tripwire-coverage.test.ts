@@ -57,4 +57,26 @@ describe("INV-TRIPWIRE-COVERAGE: real-DB suite は全て assert-inv-ran の back
         uncovered.map((s) => `[${s.file}] "${s.title}"`).join(" / "),
     ).toEqual([]);
   });
+
+  it("QA-R2-6 (R3): 全 real-DB test file が vitest.config の REAL_PG_TESTS (直列化) に登録済み", () => {
+    // 同じ再発クラスの片割れ: assert-inv-ran 側は上のテストが守るが、REAL_PG_TESTS (共有 PG への
+    // 並行書込み競合を防ぐ直列化リスト) には守りが無く 4 ファイルが漏れて |unit| (並列) で
+    // 走っていた。skipIf(!reachable) を持つファイルは一律登録を強制する (read-only でも直列化
+    // コストは小さく、writer/reader の静的判別は脆いため一律が正)。
+    const configSrc = fs.readFileSync(path.join(TEST_DIR, "..", "vitest.config.ts"), "utf8");
+    const listMatch = configSrc.match(/const REAL_PG_TESTS = \[([\s\S]*?)\];/);
+    expect(
+      listMatch,
+      "vitest.config.ts に REAL_PG_TESTS が見つからない (抽出 regex rot)",
+    ).not.toBeNull();
+    const registered = new Set([...listMatch![1]!.matchAll(/"test\/([^"]+)"/g)].map((m) => m[1]!));
+    expect(registered.size).toBeGreaterThanOrEqual(20); // 非空虚ガード。
+    const files = [...new Set(suites.map((s) => s.file))];
+    const missing = files.filter((f) => !registered.has(f));
+    expect(
+      missing,
+      `REAL_PG_TESTS 未登録の real-DB test file: ${missing.join(", ")} — ` +
+        `apps/backend/vitest.config.ts の REAL_PG_TESTS へ追加してください`,
+    ).toEqual([]);
+  });
 });

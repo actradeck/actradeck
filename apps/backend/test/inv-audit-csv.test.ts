@@ -122,6 +122,35 @@ describe("auditReportToCsv", () => {
     expect(lines[1]).toContain("aws-access-key-id:1");
   });
 
+  it("SEC-R2-1/QA-R2-2 (R3): 台帳保存則 — total = allow+afs+deny+cancel+synthetic_retired+pending が CSV 列で成立", () => {
+    // R2 は relay_lost 合成を by_decision から外したが、export 面へ synthetic_retired 列を
+    // 追随させなかったため CSV 上で total ≠ Σ列 の「無説明の欠け」が生じた (R2 導入の退行)。
+    // 本テストは列の存在と保存則を機械固定する (列を落とす退行で RED)。
+    const s = sampleSession({
+      approvals: {
+        total: 5,
+        by_decision: { allow: 1, allow_for_session: 1, deny: 1, cancel: 0 },
+        synthetic_retired: 1,
+        pending: 1,
+      },
+    });
+    const csv = auditReportToCsv(report([s]));
+    const lines = csv.split("\r\n");
+    const header = lines[0]!.split(",");
+    const row = lines[1]!.split(",");
+    expect(header).toContain("synthetic_retired");
+    const col = (name: string): number => Number(row[header.indexOf(name)]);
+    expect(
+      col("approve") +
+        col("allow_for_session") +
+        col("deny") +
+        col("cancel") +
+        col("synthetic_retired") +
+        col("approvals_pending"),
+    ).toBe(col("approvals_total"));
+    expect(col("synthetic_retired")).toBe(1);
+  });
+
   it("repo/branch の formula injection payload を CSV 出力時に中和する", () => {
     const csv = auditReportToCsv(
       report([

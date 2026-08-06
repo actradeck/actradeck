@@ -11,9 +11,28 @@ import { shortSessionId } from "./wall-display";
 
 export type AuditDecision = "allow" | "allow_for_session" | "deny" | "cancel";
 
+/** resolution_origin の closed set (backend ResolutionOrigin と同値・表示用に複製)。 */
+export type AuditResolutionOrigin =
+  | "operator"
+  | "timeout"
+  | "policy"
+  | "shutdown"
+  | "child_exit"
+  | "relay_lost";
+const RESOLUTION_ORIGINS: readonly AuditResolutionOrigin[] = [
+  "operator",
+  "timeout",
+  "policy",
+  "shutdown",
+  "child_exit",
+  "relay_lost",
+];
+
 export interface AuditApprovalSummary {
   readonly total: number;
   readonly by_decision: Record<AuditDecision, number>;
+  /** TDA-R2-2: relay_lost 合成 retire (by_decision 非含・operator gate と混同しない別立て)。 */
+  readonly synthetic_retired: number;
   readonly pending: number;
 }
 
@@ -27,6 +46,8 @@ export interface AuditApprovalEntry {
   /** 承認対象パス (redaction 済み)。 */
   readonly path?: string;
   readonly decision?: AuditDecision;
+  /** TDA-R2-2: 解決の出所 (closed set・relay_lost は operator 決定と別表示にする根拠)。 */
+  readonly resolution_origin?: AuditResolutionOrigin;
   readonly auto_allowed?: boolean;
 }
 
@@ -56,6 +77,7 @@ export interface AuditRangeTotals {
   readonly secret_redaction_count: number;
   readonly secret_redaction_count_by_kind: Record<string, number>;
   readonly approvals_by_decision: Record<AuditDecision, number>;
+  readonly synthetic_retired: number;
   readonly approval_total: number;
   readonly high_risk_op_count: number;
   readonly sessions_with_secret: number;
@@ -160,6 +182,7 @@ function parseApprovals(v: unknown): AuditApprovalSummary {
   return {
     total: nonNegInt(rec.total),
     by_decision: decisionTally(rec.by_decision),
+    synthetic_retired: nonNegInt(rec.synthetic_retired),
     pending: nonNegInt(rec.pending),
   };
 }
@@ -180,6 +203,10 @@ function parseEntry(v: unknown): AuditApprovalEntry | undefined {
     ...(str(rec.path) !== undefined ? { path: str(rec.path) } : {}),
     ...(decision !== undefined && (DECISIONS as readonly string[]).includes(decision)
       ? { decision: decision as AuditDecision }
+      : {}),
+    ...(typeof rec.resolution_origin === "string" &&
+    (RESOLUTION_ORIGINS as readonly string[]).includes(rec.resolution_origin)
+      ? { resolution_origin: rec.resolution_origin as AuditResolutionOrigin }
       : {}),
     ...(typeof rec.auto_allowed === "boolean" ? { auto_allowed: rec.auto_allowed } : {}),
   };
@@ -237,6 +264,7 @@ export function parseAuditReport(raw: unknown): AuditRangeReport {
       secret_redaction_count: nonNegInt(totalsRec.secret_redaction_count),
       secret_redaction_count_by_kind: kindCounts(totalsRec.secret_redaction_count_by_kind),
       approvals_by_decision: decisionTally(totalsRec.approvals_by_decision),
+      synthetic_retired: nonNegInt(totalsRec.synthetic_retired),
       approval_total: nonNegInt(totalsRec.approval_total),
       high_risk_op_count: nonNegInt(totalsRec.high_risk_op_count),
       sessions_with_secret: nonNegInt(totalsRec.sessions_with_secret),
