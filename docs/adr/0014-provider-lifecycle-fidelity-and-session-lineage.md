@@ -525,8 +525,20 @@ origin=relay_lost, delivery=not_sent`).
     `decision`, a higher-value forgery target) and `canonicalizeDiff` (6 fields), verified
     by mutants surviving 728/728. The pin now sweeps every `events[i]` key (except `hash`,
     the chain output) and every `diff` key with the same auto-extending loops and
-    non-vacuity floors (9 / 6). No unbound field exists today in any projection (23/23,
-    9/9, 6/6 measured) — the pins close the latent class.
+    non-vacuity floors (9 / 6). Honest scope (TDA-R9-1 ≡ SEC-R9-1): the swept tiers are the
+    **three projections** (summary 23/23, events 9/9, diff 6/6 — no unbound field exists in
+    them today); the **top-level envelope is not swept**, and its `algorithm` field is
+    declared, rendered in the shipped integrity tables, yet bound by neither the chain, the
+    signature header, nor well-formedness — a signed manifest with a tampered `algorithm`
+    still verifies `ok=true`. Today it has zero branching consumers (display-only; the
+    verifier's own reason string names the real algorithm), but it falsifies the module
+    doc's "any displayed value" claim and becomes an algorithm-confusion surface the day a
+    second algorithm branches on it. The fix (fail-closed `algorithm` well-formedness gate
+    + a fourth envelope sweep loop; no version bump — the canonical form is unchanged) is a
+    scan-scope change and lands as a dated v0.7 task under a full audit. The key-template
+    limitation of the auto-extending loops (only unconditionally-present keys are swept;
+    optional projection fields would escape — none exist today, and the normalize object
+    literals compile-force non-optional props) is disclosed with it (SEC-R9-2).
   - **Present→forwarded direction pinned (QA-R8-1/R8-2, L).** The gate tests only emitted
     frames omitting `reason`/`persist`, so discarding the operator's rationale or forcing
     the persistent-allowlist flag permanently off survived the full suite (fail-safe

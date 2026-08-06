@@ -49,6 +49,14 @@ function listSrcFiles(dir: string): string[] {
  *    非該当)。限界の正直な開示: 文字列リテラル内に ` // ` や `/*` を含むコードは以降が
  *    落ちうる (現 backend src に該当なし・禁止形スキャンには「隠す」方向の理論穴だが、
  *    そのようなコードを書く時点で本 metatest の走査対象追随が必要)。
+ *
+ * SEC-R9-3 (残渣の正直な開示): (a) `code;//comment` (空白なし `//`) は除去されないが、
+ * prettier (CI blocking) が `; //` へ正規化するため非永続。(b) コメントでない素の文字列定数が
+ * pattern を含む形は lexical ガードの構造的天井 — 本 metatest はリテラル値の defense-in-depth
+ * であり、実 SQL 除外句の削除は real-PG の意味論テスト (inv-liveness-parity の
+ * aggregateObservationSql parity / inv-audit-coverage の providerCoverage / inv-audit の
+ * fold・いずれも positive control 付き) が直接殺す。それら DB テストは describe.skipIf ゆえ
+ * CI (DATABASE_URL 供給) 条件付き backstop である点も含めて開示する。
  */
 function stripComments(src: string): string {
   return src
