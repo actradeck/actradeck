@@ -53,6 +53,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { WebSocket } from "ws";
 import { buildIngestionServer } from "@actradeck/backend";
+import { APPROVAL_REQUEST_ID_RE } from "@actradeck/event-model";
 
 import { Sidecar } from "../src/sidecar.js";
 import { HOOK_TOKEN_HEADER } from "../src/settings-injection.js";
@@ -363,7 +364,7 @@ describe.skipIf(!reachable)(
 
       // 2→3→4. backend 投影 detail に現れた **実 request_id** を読む。
       const requestId = await ui.waitForPending();
-      expect(requestId).toMatch(/:apr-/); // bridge 採番形 (sessionId:apr-<base64url>)。
+      expect(requestId).toMatch(APPROVAL_REQUEST_ID_RE); // bridge 採番形 (正準 s<hash12>:apr-<32hex>)。
 
       // 5. UI が approve(allow) → relay(control_token) → resolve → hook 応答が解ける。
       ui.sendApprove(requestId, "allow");
@@ -492,7 +493,7 @@ describe.skipIf(!reachable)(
       const hookResp = postHighRiskHook(sidecar, canonical, "rm -rf /tmp/timeout-case");
       // pending が一旦投影されること (UI には承認カードが見えていた = 無応答での timeout)。
       const requestId = await ui.waitForPending();
-      expect(requestId).toMatch(/:apr-/);
+      expect(requestId).toMatch(APPROVAL_REQUEST_ID_RE);
 
       // approve を送らない → bridge timeout → 安全側 deny。
       const out = await hookResp;

@@ -1,0 +1,175 @@
+/**
+ * INV-APPROVAL-REQUEST-ID-STABLE — 承認 request_id の redaction-stable 契約 (SEC-1・Phase 4 監査 R2)。
+ *
+ * 背景: 旧採番 `${sessionId}:apr-…` は raw session_id を payload.request_id へ露出していた。
+ * `sess_<uuidv7>` 形 (41 文字の単一 charset run) の session_id は redaction high-entropy ルール
+ * (40 文字以上 + 複数 class) に合致し、ingress 床が request_id の prefix を `[REDACTED:…]` に置換。
+ * at-rest (DB/UI) と bridge Map (raw) の id 空間が割れ、①UI approve relay の resolve no-op
+ * ②Phase 4 reconcile の「宣言に無い」誤判定 → 生存 pending の合成 cancel、を引き起こした。
+ *
+ * 本テストは **実 redactor** (合成 regex でない) を通して:
+ *  (a) mintApprovalRequestId の産物が redaction を透過する (全 session id shape で不変)
+ *  (b) 旧形式が sess_<uuidv7> で実際に壊れることの再現 (この hazard が消えたら (a) は vacuous
+ *      になるため、redaction 側の閾値変更を検知する coupling pin)
+ *  (c) pendingRequestIds() 宣言と at-rest の空間一致 (bridge 実採番 → 実 redactor 透過)
+ * を回帰固定する。id 形式・redaction 閾値のどちらを変えてもここが赤くなる。
+ */
+import { describe, expect, it } from "vitest";
+
+import {
+  REDACTION_RULES,
+  redactEventWithAuthoritativeCounts,
+  redactString,
+} from "@actradeck/redaction";
+
+import {
+  APPROVAL_REQUEST_ID_RE,
+  deriveDemoApprovalRequestId,
+  mintApprovalRequestId,
+} from "@actradeck/event-model";
+
+import { ApprovalBridge } from "../src/approval-bridge.js";
+import type { HookCommonInput } from "../src/normalize.js";
+
+/** SEC-1 再現ベクタ: mintSyntheticSessionId 形 (sess_ + uuidv7 = 41 文字の単一 charset run)。 */
+const SYNTHETIC_SESSION_ID = "sess_0199f0a1-2b3c-7d4e-8f01-23456789abcd";
+
+const SESSION_ID_VECTORS: readonly string[] = [
+  "0199f0a1-2b3c-7d4e-8f01-23456789abcd", // 素の uuid (attach 実 session)
+  SYNTHETIC_SESSION_ID, // mintSyntheticSessionId 形 (旧形式で redaction を踏む)
+  "s1", // テスト/デモの短い id
+  "a".repeat(64), // 異常に長い id でも tag 化で安定
+];
+
+function requestedEvent(sessionId: string, requestId: string): Record<string, unknown> {
+  return {
+    event_id: "e1",
+    session_id: sessionId,
+    ts: "2026-08-06T00:00:00Z",
+    source: "hook",
+    provider: "claude-code",
+    payload: {
+      kind: "tool.permission.requested",
+      request_id: requestId,
+      tool_name: "Bash",
+      summary: "approval request",
+    },
+  };
+}
+
+function redactedRequestId(sessionId: string, requestId: string): unknown {
+  const out = redactEventWithAuthoritativeCounts(requestedEvent(sessionId, requestId)) as {
+    payload?: { request_id?: unknown };
+  };
+  return out.payload?.request_id;
+}
+
+describe("INV-APPROVAL-REQUEST-ID-STABLE (SEC-1 R2): request_id は redaction を透過する", () => {
+  it("(a) mintApprovalRequestId の産物は全 session id shape で redaction 不変", () => {
+    for (const sessionId of SESSION_ID_VECTORS) {
+      const requestId = mintApprovalRequestId(sessionId);
+      // 形式 (R3): s<12hex>:apr-<32 lowercase hex> — run < 40 (high-entropy 構造排除) かつ
+      // hex charset (vendor-prefix 構造排除: xox/AKIA/ghp_ 等は hex 外文字を要する)。
+      expect(requestId).toMatch(APPROVAL_REQUEST_ID_RE);
+      expect(redactedRequestId(sessionId, requestId)).toBe(requestId);
+    }
+  });
+
+  it("(b) 旧形式 (raw session_id prefix) は sess_<uuidv7> で実際に redaction を踏む (hazard 再現 pin)", () => {
+    const legacyId = `${SYNTHETIC_SESSION_ID}:apr-F9aSKs-LnHcbygXAZ16NLQ`;
+    const atRest = redactedRequestId(SYNTHETIC_SESSION_ID, legacyId);
+    // 旧形式が壊れなくなったら (redaction 閾値変更等)、(a) の保証根拠が変わったということ —
+    // このテストを更新する前に mintApprovalRequestId の契約を再監査すること。
+    expect(atRest).not.toBe(legacyId);
+    expect(String(atRest)).toContain("[REDACTED:");
+  });
+
+  it("(c) bridge 実採番の pendingRequestIds() 宣言は at-rest と同一空間 (実 redactor 透過)", async () => {
+    const bridge = new ApprovalBridge({ timeoutMs: 50 });
+    const input: HookCommonInput = {
+      session_id: SYNTHETIC_SESSION_ID,
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "rm -rf /tmp/x" },
+    };
+    const done = bridge.requestApproval(input, () => {});
+    const declared = bridge.pendingRequestIds();
+    expect(declared).toHaveLength(1);
+    const requestId = declared[0]!;
+    // 宣言値をそのまま requested イベントに載せて実 redactor を通しても不変 =
+    // hello 宣言 (raw) と DB pending (at-rest) が突合可能。
+    expect(redactedRequestId(SYNTHETIC_SESSION_ID, requestId)).toBe(requestId);
+    // SEC-R4-4: 正常経路 (実 redactor・正準形式) では re-roll が発生せずカウンタ 0 のまま。
+    expect(bridge.unstableRequestIdCount).toBe(0);
+    await done; // timeout deny で回収 (リーク防止)
+  });
+
+  it("(d) QA-R3-2: deriveDemoApprovalRequestId も正準形式 + 決定論 + redaction 不変 (旧形回帰で RED)", () => {
+    for (const sessionId of SESSION_ID_VECTORS) {
+      const demoId = deriveDemoApprovalRequestId(sessionId);
+      // 旧形 `${sessionId}:apr-1` へ戻す退行はこの RE 非マッチで決定論的に赤くなる
+      // (demo テスト群は同一 helper で期待値を再計算するため tautological — ここが T1 pin)。
+      expect(demoId).toMatch(APPROVAL_REQUEST_ID_RE);
+      expect(deriveDemoApprovalRequestId(sessionId)).toBe(demoId); // 決定論
+      expect(redactedRequestId(sessionId, demoId)).toBe(demoId); // 実 redactor 透過
+    }
+    // session が異なれば id も異なる (tag + token とも session 由来)。
+    expect(deriveDemoApprovalRequestId("s1")).not.toBe(deriveDemoApprovalRequestId("s2"));
+  });
+});
+
+/**
+ * SEC-R3-2 構造 metatest: 「hex charset ゆえ redaction ルールと構造的に非衝突」を prose でなく
+ * T1 にする。全 REDACTION_RULES × (worst-case 決定論 token + 乱択 mint corpus) で 0 マッチを
+ * 全数 assert する。
+ *
+ * 被覆範囲の正直な開示 (SEC-R4-3): 検知できるのは**決定論的・構造的に id 形状へ当たる**ルール
+ * (固定部 `s<hash12>` / `:apr-` リテラル / token 全体形 / token の稠密な部分一致) — SEC R4 の
+ * 独立反証で 4 クラスとも RED 化を確認済み。**稀な特定リテラル (例 /cafebabe…/) に確率的に当たる
+ * だけの sparse ルールは corpus では捕まらない** — そのクラスは runtime の bridge re-roll が緩和層
+ * (token 依存ゆえ再採番で回避可能)。逆に固定部マッチは re-roll が無力で、本 metatest が唯一の
+ * CI ゲート。
+ */
+describe("INV-APPROVAL-REQUEST-ID-STABLE (SEC-R3-2): REDACTION_RULES × id 形状の構造非衝突", () => {
+  /** 決定論 worst-case token (charset の端 + vendor-prefix に最も近い並び)。 */
+  const ADVERSARIAL_TOKENS: readonly string[] = [
+    "0".repeat(32),
+    "f".repeat(32),
+    "deadbeef".repeat(4),
+    "0123456789abcdef".repeat(2),
+    "abcdefabcdefabcdefabcdefabcdefab", // 英字のみ hex
+  ];
+  const corpus: string[] = [];
+  for (const tag of ["0".repeat(12), "f".repeat(12), "a1b2c3d4e5f6"]) {
+    for (const token of ADVERSARIAL_TOKENS) corpus.push(`s${tag}:apr-${token}`);
+  }
+  for (let i = 0; i < 2000; i++) corpus.push(mintApprovalRequestId(`fuzz-session-${i}`));
+
+  it("corpus が id 形状を満たす (非空虚ガード)", () => {
+    expect(corpus.length).toBeGreaterThan(2000);
+    for (const id of corpus) expect(id).toMatch(APPROVAL_REQUEST_ID_RE);
+  });
+
+  it("最長 charset run は 40 未満 (high-entropy ルールの構造排除・実測)", () => {
+    for (const id of corpus) {
+      const runs = id.match(/[A-Za-z0-9+/_-]+/g) ?? [];
+      const longest = Math.max(...runs.map((r) => r.length));
+      expect(longest).toBeLessThan(40);
+    }
+  });
+
+  it("全 REDACTION_RULES が corpus のどの id にもマッチしない (ルール追加日に RED)", () => {
+    expect(REDACTION_RULES.length).toBeGreaterThanOrEqual(30); // 非空虚ガード
+    for (const rule of REDACTION_RULES) {
+      // global flag の lastIndex 汚染を避けるため flags から g を落として再構築。
+      const re = new RegExp(rule.pattern.source, rule.pattern.flags.replace("g", ""));
+      for (const id of corpus) {
+        expect(re.test(id), `rule "${rule.kind}" が request_id 形状にマッチ: ${id}`).toBe(false);
+      }
+    }
+  });
+
+  it("redactString は corpus 全体で恒等 (rule 単体でなく end-to-end 経路でも不変)", () => {
+    for (const id of corpus) expect(redactString(id)).toBe(id);
+  });
+});

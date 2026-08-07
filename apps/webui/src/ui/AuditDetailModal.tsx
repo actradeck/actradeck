@@ -13,6 +13,7 @@
  * allow-list DTO の集計値・enum・メタのみで原文秘匿を含まない (INV-AUDIT-EXPORT-NO-RAW)。
  * 既存 .ad-modal__* スタイルを再利用 (ActionDetailModal と同規約)。閉じたら pull 済み state を破棄。
  */
+import { isSyntheticRetireOrigin } from "@actradeck/event-model";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { decisionLabel, formatClock, riskTone } from "./action-units-display";
@@ -364,6 +365,13 @@ export function AuditDetailModal({
                     {t("audit.pending")} ×{summary.approvals.pending}
                   </Tag>
                 ) : null}
+                {/* TDA-R3-6: relay_lost 合成 retire のサマリチップ (エントリ表示と同じ muted トーン・
+                    operator 決定チップと混同しない別立て)。 */}
+                {summary.approvals.synthetic_retired > 0 ? (
+                  <Tag tone="muted" size="sm">
+                    {t("audit.relayLostRetired")} ×{summary.approvals.synthetic_retired}
+                  </Tag>
+                ) : null}
                 {summary.high_risk_op_count > 0 ? (
                   <Tag tone="warn" size="sm">
                     {t("audit.highRisk")} ×{summary.high_risk_op_count}
@@ -453,8 +461,22 @@ export function AuditDetailModal({
                           </Tag>
                         ) : null}
                         {e.decision !== undefined ? (
-                          <Tag tone={e.decision === "deny" ? "danger" : "success"} size="sm">
-                            {decisionLabel(e.decision, locale)}
+                          // TDA-R2-2: relay_lost 合成 retire は「誰も決定していない」— operator の
+                          // allow (success) とも deny (danger) とも混同しない muted + 専用ラベル。
+                          // operator の cancel/deny は danger のまま (hard gate)。
+                          <Tag
+                            tone={
+                              isSyntheticRetireOrigin(e.resolution_origin)
+                                ? "muted"
+                                : e.decision === "deny" || e.decision === "cancel"
+                                  ? "danger"
+                                  : "success"
+                            }
+                            size="sm"
+                          >
+                            {isSyntheticRetireOrigin(e.resolution_origin)
+                              ? t("audit.detail.relayLostRetired")
+                              : decisionLabel(e.decision, locale)}
                           </Tag>
                         ) : null}
                         {e.auto_allowed === true ? (

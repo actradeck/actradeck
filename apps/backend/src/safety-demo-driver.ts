@@ -35,6 +35,7 @@ import {
   ApprovalDecision,
   type NormalizedEvent,
   type State,
+  deriveDemoApprovalRequestId,
   newEventId,
   parseEvent,
 } from "@actradeck/event-model";
@@ -95,7 +96,7 @@ export interface DemoDriverOptions {
 export interface DemoDriverResult {
   /** 使い捨てデモ session id。 */
   readonly sessionId: string;
-  /** 承認カードの request_id (承認キー空間 `<session_id>:apr-…`・INV-REQUEST-ID-NAMESPACE)。 */
+  /** 承認カードの request_id (承認キー空間 `…:apr-…`・INV-REQUEST-ID-NAMESPACE)。 */
   readonly requestId: string;
   /** 承認モード。 */
   readonly approvalMode: SafetyDemoApprovalMode;
@@ -199,8 +200,10 @@ export async function runSafetyDemoDriver(opts: DemoDriverOptions = {}): Promise
   const url = resolveDriverWsUrl(opts.wsUrl);
   // per-connection 制御トークン (server 側は付与しないが sidecar と同じ SEC-1 認可境界を driver 側でも張る)。
   const controlToken = randomBytes(32).toString("hex");
-  // 承認キー空間 (INV-REQUEST-ID-NAMESPACE の `<session_id>:apr-…`)。
-  const requestId = `${sessionId}:apr-1`;
+  // 承認キー空間 (INV-REQUEST-ID-NAMESPACE の `…:apr-…`)。決定論的 (テストが再計算可能) かつ
+  // redaction-stable な正準採番 (TDA-R2-1/SEC-R2-4: 旧 `${sessionId}:apr-1` は任意 session id
+  // 注入 (ACTRADECK_DEMO_SESSION_ID) で SEC-1 hazard を再現した — 正準へ集約)。
+  const requestId = deriveDemoApprovalRequestId(sessionId);
 
   const ws =
     ingestToken !== undefined && ingestToken.length > 0

@@ -195,6 +195,72 @@ describe.skipIf(!reachable)("INV-AUDIT-COVERAGE: 監査欠落の検知 (real PG)
     expect(c!.last_received_at).toBe(new Date(NOW_MS - 15 * MIN).toISOString());
   });
 
+  it("(b') QA-R3-3: relay_lost 合成 retire は last_received を前進させない (SEC-R2-2 第3面の pin)", async () => {
+    // 消えた provider の唯一の「最近のイベント」が backend 合成の relay_lost cancel でも、
+    // 受信 gap は隠れない。SQL FILTER (liveness) / observeFromEvents (TS) は R3 で pin 済み —
+    // 3 面のうち未 pin だった coverage の WHERE 除外をここで固定する (除外句を消すと RED)。
+    const provider = newProvider("rl");
+    const sid = await seedSession(provider, {
+      adapterTsMs: NOW_MS - 50 * MIN,
+      ingestedAtMs: NOW_MS - 50 * MIN, // provider からの真の最終受信
+    });
+    // backend 合成の relay_lost cancel を通常 ingress で追加し、ingested_at を「最近」へ。
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        provider,
+        event_type: "tool.permission.resolved",
+        timestamp: new Date(NOW_MS - 1 * MIN).toISOString(),
+        payload: {
+          request_id: "q-rl",
+          decision: "cancel",
+          resolution_origin: "relay_lost",
+          delivery_status: "not_sent",
+        },
+      }),
+    );
+    await pool.query(
+      `UPDATE events SET ingested_at = $1 WHERE session_id = $2 AND event_type = 'tool.permission.resolved'`,
+      [new Date(NOW_MS - 1 * MIN).toISOString(), sid],
+    );
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    // 合成 retire を受信扱いすると gap≈1 分に潰れる (mutant で RED)。真の受信 = 50 分前。
+    expect(c!.last_received_at).toBe(new Date(NOW_MS - 50 * MIN).toISOString());
+    expect(c!.gap_candidate_ms).toBe(50 * MIN);
+  });
+
+  it("(b'') positive control: operator 解決は受信として last_received を前進させる (除外の過剰適用防止)", async () => {
+    const provider = newProvider("op");
+    const sid = await seedSession(provider, {
+      adapterTsMs: NOW_MS - 50 * MIN,
+      ingestedAtMs: NOW_MS - 50 * MIN,
+    });
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        provider,
+        event_type: "tool.permission.resolved",
+        timestamp: new Date(NOW_MS - 1 * MIN).toISOString(),
+        payload: {
+          request_id: "q-op",
+          decision: "cancel",
+          resolution_origin: "operator",
+          delivery_status: "sent",
+        },
+      }),
+    );
+    await pool.query(
+      `UPDATE events SET ingested_at = $1 WHERE session_id = $2 AND event_type = 'tool.permission.resolved'`,
+      [new Date(NOW_MS - 1 * MIN).toISOString(), sid],
+    );
+    const c = await coverageFor(provider);
+    expect(c).toBeDefined();
+    // operator 解決は provider 経路の実受信 — 除外してはならない (過剰除外 mutant で RED)。
+    expect(c!.last_received_at).toBe(new Date(NOW_MS - 1 * MIN).toISOString());
+    expect(c!.gap_candidate_ms).toBe(1 * MIN);
+  });
+
   it("(c) NO-RAW — 応答に生 cwd/パス/secret が出ず closed shape のみ", async () => {
     const provider = newProvider("noraw");
     const secretCwd = "/home/user/covsecret-project-xyz";

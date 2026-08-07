@@ -36,6 +36,7 @@ import Fastify, {
   type FastifyServerOptions,
 } from "fastify";
 
+import { ApprovalReconciler } from "./approval-reconciler.js";
 import { installErrorScrubbing } from "./error-scrub.js";
 import { IngestStore } from "./ingest-store.js";
 import { RealtimeHub } from "./realtime-hub.js";
@@ -273,6 +274,24 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
   // registry: presence membership 変化 → 当該 session のみ delta.list。
   sidecarRegistry.onPresenceChange((sid) => {
     void pushPresenceDelta(sid);
+  });
+
+  // ADR 0014 Phase 4 (decision 019fd705 D6): hello の pending 宣言 → stale pending の合成 cancel。
+  // 合成イベントは通常 ingest 経路 (ingestOne = ingress redaction 床 + parseEvent + store.ingest) を
+  // 通し、成功時は pushAfterIngest で UI へ即反映する (専用の裏口を作らない)。
+  const approvalReconciler = new ApprovalReconciler({
+    store,
+    ingestEvent: async (event) => {
+      const ack = await ingestOne(store, event);
+      if (ack.ok && ack.inserted && ack.event_id) {
+        const sid = sessionIdOf(event);
+        if (sid) await pushAfterIngest(sid);
+      }
+      return ack.ok;
+    },
+  });
+  sidecarRegistry.onApprovalReconcile((signal) => {
+    void approvalReconciler.reconcile(signal);
   });
 
   // --- WS ingestion (sidecar→backend) ------------------------------------

@@ -55,6 +55,18 @@ export default defineConfig({
         //   ベクタ + UTF-8 マルチバイト/surrogate/lone-surrogate 分岐を worst 100/100/100/100 まで固定
         //   → floor 95/90/90/95 (QA-3)。誤エンコード/未到達分岐が入ると trip する (id サイレント破壊防止)。
         "src/hash.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
+        // approval-request-id.ts (redaction-stable 採番の T1 単一出所・TDA-R4-12) = 小ファイル
+        //   tripwire。INV-APPROVAL-REQUEST-ID (shape/決定論) が worst 100/100/100/100 まで網羅
+        //   → floor 95/90/90/95 (per-file-coverage-floor-below-worst-not-best・erosion tripwire)。
+        "src/approval-request-id.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
+        // approval-reconcile-wire.ts (hello 宣言の cap/検証・fail-safe 境界・TDA-R4-12) = 同上。
+        //   INV-APPROVAL-RECONCILE-WIRE が worst 100/100/100/100 まで網羅 → floor 95/90/90/95。
+        "src/approval-reconcile-wire.ts": {
+          statements: 95,
+          branches: 90,
+          functions: 90,
+          lines: 95,
+        },
       },
     },
   },

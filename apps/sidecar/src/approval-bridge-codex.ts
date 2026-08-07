@@ -22,7 +22,7 @@
  *   sink.emit の choke (redactDeep) を通る。本モジュールは raw command/cwd を payload へ
  *   そのまま渡してよい (sink が担保)。
  */
-import type { ApprovalDecision } from "@actradeck/event-model";
+import type { ApprovalDecision, DeliveryStatus, ResolutionOrigin } from "@actradeck/event-model";
 
 import type { ApprovalBridge, ApprovalResult, GuardReason } from "./approval-bridge.js";
 import type { CodexRequestId } from "./codex-jsonrpc.js";
@@ -150,7 +150,17 @@ export interface CodexApprovalBridgeOptions {
    * claude (hook-receiver.ts) と同一契約で ①Approval Inbox カードの clear ②決定の監査証跡 を成立させる。
    * NO-RAW: payload は kind/request_id/decision(enum) のみ (raw command 非再掲)。redaction は sink が担保。
    */
-  readonly emitResolved: (requestId: string, decision: ApprovalDecision | "deny") => void;
+  readonly emitResolved: (
+    requestId: string,
+    decision: ApprovalDecision | "deny",
+    /**
+     * ADR 0014 Phase 4 (decision 019fd705): 解決の出所 (operator/timeout/shutdown/child_exit)。
+     * ApprovalResult.origin から透過する (undefined = 想定外経路・payload field 省略)。
+     */
+    origin: ResolutionOrigin | undefined,
+    /** ADR 0014 Phase 4: 配送結果。sendResponse の実結果 (suppressed/送信失敗=not_sent) から導出。 */
+    delivery: DeliveryStatus,
+  ) => void;
   /** 解決した decision を codex へ JSON-RPC Response として送る。 */
   readonly sendResponse: (id: CodexRequestId, result: Record<string, unknown>) => void;
 }
@@ -242,11 +252,12 @@ export class CodexApprovalBridge {
         // timeout/drain(behavior:"deny") / defer は undefined のまま → 安全側 decline。
         const decision: ApprovalDecision | undefined =
           result.decision ?? (result.behavior === "allow" ? "allow" : undefined);
-        this.finish(id, key, kind, decision);
+        // ADR 0014 Phase 4: 解決の出所 (operator/timeout/shutdown) を ApprovalResult から透過する。
+        this.finish(id, key, kind, decision, result.origin);
       })
       .catch(() => {
         // 異常時も安全側 (deny=decline/denied) で codex に応答し、turn を宙吊りにしない。
-        this.finish(id, key, kind, undefined);
+        this.finish(id, key, kind, undefined, undefined);
       });
     return true;
   }
@@ -262,21 +273,33 @@ export class CodexApprovalBridge {
     key: string,
     kind: CodexApprovalKind,
     decision: ApprovalDecision | undefined,
+    origin: ResolutionOrigin | undefined,
   ): void {
     if (!this.inFlight.has(key)) return; // 既に応答済み / cancelInFlight 済み (idempotent)
     this.inFlight.delete(key);
     const requestId = this.forward.get(key);
     this.forward.delete(key);
     if (requestId !== undefined) this.reverse.delete(requestId);
+    // R4: child 消失後は死 pipe へ書かない (sendResponse 抑止)。primary な bridge 解決は既に済んでいる。
+    // ADR 0014 Phase 4 (D4): **送信を先に試み、実結果から delivery を導出**する (「送った」と偽らない)。
+    //   suppressed (child 消失) = not_sent。同期 throw (死 pipe 等・従来は .catch 経由の二重 finish
+    //   no-op に流れていた) も not_sent として局所吸収する。
+    let delivery: DeliveryStatus = "not_sent";
+    if (!this.suppressed) {
+      try {
+        this.opts.sendResponse(id, buildApprovalResultBody(kind, decision));
+        delivery = "sent";
+      } catch {
+        delivery = "not_sent";
+      }
+    }
     // TDA-1 (ADR 019f2476): 解決を tool.permission.resolved として対称 emit (カード clear + 監査証跡)。
     //   正常な operator 決定 + timeout/drain (decision undefined → deny) を覆う。これは sink 監査
-    //   イベント (codex への write でない) ゆえ suppressed と独立 = suppressed ガードより **前** に emit し、
-    //   finish が inFlight ガードを通過したときは常に監査行が出る (正常経路では suppressed=false)。
+    //   イベント (codex への write でない) ゆえ suppressed と独立に **常に** emit し、finish が inFlight
+    //   ガードを通過したときは必ず監査行が出る (delivery が sent/not_sent を正直に区別する)。
     //   requestId 未確定 (稀: card emit 前の異常経路) は突合対象が無いため emit しない。
-    if (requestId !== undefined) this.opts.emitResolved(requestId, decision ?? "deny");
-    // R4: child 消失後は死 pipe へ書かない (sendResponse 抑止)。primary な bridge 解決は既に済んでいる。
-    if (this.suppressed) return;
-    this.opts.sendResponse(id, buildApprovalResultBody(kind, decision));
+    if (requestId !== undefined)
+      this.opts.emitResolved(requestId, decision ?? "deny", origin, delivery);
   }
 
   /**
@@ -307,9 +330,16 @@ export class CodexApprovalBridge {
         this.reverse.delete(requestId);
         // TDA-1 (ADR 019f2476): child-exit deny を tool.permission.resolved(deny) として emit し、
         //   監査証跡へ記録 + Approval Inbox カードを clear する (finish 経路と対称)。
-        this.opts.emitResolved(requestId, "deny");
+        //   ADR 0014 Phase 4: origin="child_exit"・delivery="not_sent" (死 pipe へ書かない=届いていない)。
+        this.opts.emitResolved(requestId, "deny", "child_exit", "not_sent");
         // bridge pending を安全側 deny へ解決 (UI terminal + 監査 deny)。pending 無ければ false (無害)。
-        this.bridge.resolve(requestId, "deny", "codex child exited (safe default: deny)");
+        // ADR 0014 Phase 4: resolve() (origin="operator") でなく cancelPending(origin="child_exit") を
+        //   使い、解決の出所を偽らない (UI 決定と child 消失を監査で区別する)。
+        this.bridge.cancelPending(
+          requestId,
+          "child_exit",
+          "codex child exited (safe default: deny)",
+        );
       }
     }
   }

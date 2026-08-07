@@ -4,7 +4,10 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { APPROVAL_DECISIONS, RESOLUTION_ORIGINS } from "@actradeck/event-model";
+
 import {
+  DECISIONS,
   aggregateSessions,
   buildAuditUrl,
   buildSessionAuditUrl,
@@ -37,12 +40,27 @@ function mkSession(
     approvals: {
       total: 0,
       by_decision: { allow: 0, allow_for_session: 0, deny: 0, cancel: 0 },
+      synthetic_retired: 0,
       pending: 0,
     },
     high_risk_op_count: 0,
     ...over,
   };
 }
+
+describe("INV-APPROVAL-DECISION-VOCAB (webui 面・QA-R5-1)", () => {
+  it("DECISIONS は正準 APPROVAL_DECISIONS と同一参照 (手書きミラー復活で RED)", () => {
+    // TDA-R4-3 の単一出所化は代入の現形にのみ依存し回帰テストが無かった (同値の手書き literal へ
+    // 戻しても suite 緑 — mutation probe P3c と同クラス)。参照同一性 pin で構造固定する。
+    expect(DECISIONS).toBe(APPROVAL_DECISIONS);
+  });
+
+  it("RESOLUTION_ORIGINS は frozen (TDA-R8-2: 実行時 membership ゲートの依存は不変)", () => {
+    // audit-view の origin membership 判定 (RESOLUTION_ORIGINS.includes) はこの配列の実行時依存。
+    // APPROVAL_DECISIONS 側の isFrozen pin (backend) と対で、非 frozen `.options` へ戻す退行を RED にする。
+    expect(Object.isFrozen(RESOLUTION_ORIGINS)).toBe(true);
+  });
+});
 
 describe("buildAuditUrl", () => {
   it("空指定は base path・from/to/limit/format を query へ (token なし)", () => {
@@ -132,6 +150,7 @@ describe("parseAuditReport (defensive)", () => {
           approvals: {
             total: 2,
             by_decision: { allow: 1, allow_for_session: 0, deny: 0, cancel: 0 },
+            synthetic_retired: 0,
             pending: 1,
           },
           high_risk_op_count: 1,
@@ -272,6 +291,7 @@ describe("display helpers", () => {
       decidedTotal({
         total: 5,
         by_decision: { allow: 2, allow_for_session: 1, deny: 1, cancel: 0 },
+        synthetic_retired: 0,
         pending: 1,
       }),
     ).toBe(4);
@@ -368,6 +388,7 @@ describe("client-side filters (project / text / aggregate)", () => {
       approvals: {
         total: 3,
         by_decision: { allow: 1, allow_for_session: 1, deny: 1, cancel: 0 },
+        synthetic_retired: 0,
         pending: 0,
       },
     }),
@@ -442,5 +463,81 @@ describe("entryPrimaryText (何を承認したか)", () => {
     );
     expect(entryPrimaryText({ event_id: "e", timestamp: "t", tool_name: "Edit" })).toBe("Edit");
     expect(entryPrimaryText({ event_id: "e9", timestamp: "t" })).toBe("e9");
+  });
+});
+
+/**
+ * QA-R3-4: resolution_origin / synthetic_retired の表示層 parse 回帰保護。
+ * relay_lost を operator success トーンへ誤縮退させないための最終防御層 (closed-set gate) と、
+ * 台帳別立て件数 (synthetic_retired) の透過を pin する (バイパス/0-clamp mutant で RED)。
+ */
+describe("resolution_origin / synthetic_retired の defensive parse (QA-R3-4)", () => {
+  const raw = {
+    generated_at: "2026-08-06T00:00:00.000Z",
+    session_count: 1,
+    totals: {
+      secret_redaction_count: 0,
+      secret_redaction_count_by_kind: {},
+      approvals_by_decision: { allow: 1, cancel: 2 },
+      synthetic_retired: 5,
+      approval_total: 8,
+      high_risk_op_count: 0,
+      sessions_with_secret: 0,
+    },
+    sessions: [
+      {
+        session_id: "s-rl",
+        provider: "claude_code",
+        source: "hooks",
+        secret_detected: false,
+        secret_redaction_count: 0,
+        secret_redaction_count_by_kind: {},
+        approvals: {
+          total: 3,
+          by_decision: { cancel: 1 },
+          synthetic_retired: 2,
+          pending: 0,
+        },
+        high_risk_op_count: 0,
+        entries: [
+          {
+            event_id: "e1",
+            timestamp: "2026-08-06T00:00:01.000Z",
+            decision: "cancel",
+            resolution_origin: "relay_lost",
+          },
+          {
+            event_id: "e2",
+            timestamp: "2026-08-06T00:00:02.000Z",
+            decision: "cancel",
+            resolution_origin: "operator",
+          },
+          {
+            event_id: "e3",
+            timestamp: "2026-08-06T00:00:03.000Z",
+            decision: "cancel",
+            resolution_origin: "bogus-[REDACTED:x]-injected",
+          },
+        ],
+      },
+    ],
+    limit: 50,
+    has_more: false,
+  };
+
+  it("relay_lost / operator は保持・語彙外 origin は落とす (closed-set 最終防御層)", () => {
+    const report = parseAuditReport(raw);
+    const entries = report.sessions[0]!.entries!;
+    expect(entries).toHaveLength(3);
+    expect(entries[0]!.resolution_origin).toBe("relay_lost");
+    expect(entries[1]!.resolution_origin).toBe("operator");
+    // 敵対 origin は field ごと落とす (undefined)。生文字列を型へ通さない。
+    expect(entries[2]!.resolution_origin).toBeUndefined();
+  });
+
+  it("synthetic_retired>0 を per-session と totals の両方で保持 (0-clamp mutant で RED)", () => {
+    const report = parseAuditReport(raw);
+    expect(report.sessions[0]!.approvals.synthetic_retired).toBe(2);
+    expect(report.totals.synthetic_retired).toBe(5);
   });
 });

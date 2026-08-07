@@ -22,6 +22,8 @@ import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 import { WebSocket } from "ws";
 
+import { deriveDemoApprovalRequestId } from "@actradeck/event-model";
+
 import { buildIngestionServer } from "../src/index.js";
 import { runSafetyDemoDriver, type DemoDriverResult } from "../src/safety-demo-driver.js";
 import { DEMO_AWS_ACCESS_KEY_ID, DEMO_GITHUB_TOKEN } from "../src/safety-demo-script.js";
@@ -105,7 +107,7 @@ describe.skipIf(!reachable)(
       // ── 経路B: hold + UI relay Deny (realtime WS approve frame) ───────────────────
       const holdSessionId = `demo-safety-relay-${Date.now().toString(16)}`;
       createdSessions.push(holdSessionId);
-      const holdRequestId = `${holdSessionId}:apr-1`; // driver の決定論的 request_id。
+      const holdRequestId = deriveDemoApprovalRequestId(holdSessionId); // driver の決定論的 request_id (正準採番)。
       // driver を hold で起動 (await しない・relay を待つ)。timeout は十分長く取り relay で解決させる。
       const driverPromise = runSafetyDemoDriver({
         wsUrl,
@@ -155,7 +157,7 @@ describe.skipIf(!reachable)(
       //   (state override running.tool_preparing) に一意の teeth が付く。relay 無視化 mutation で RED。
       const allowSessionId = `demo-safety-allow-${Date.now().toString(16)}`;
       createdSessions.push(allowSessionId);
-      const allowRequestId = `${allowSessionId}:apr-1`;
+      const allowRequestId = deriveDemoApprovalRequestId(allowSessionId);
       const allowPromise = runSafetyDemoDriver({
         wsUrl,
         ingestToken: INGEST_TOKEN,
@@ -220,7 +222,9 @@ describe.skipIf(!reachable)(
       expect(Array.isArray(pendingDuringHold)).toBe(true);
       const arr = pendingDuringHold as Array<Record<string, unknown>>;
       expect(arr.length).toBeGreaterThanOrEqual(1);
-      const card = arr.find((c) => c.request_id === `${relayResult.sessionId}:apr-1`);
+      const card = arr.find(
+        (c) => c.request_id === deriveDemoApprovalRequestId(relayResult.sessionId),
+      );
       expect(card, "pending card が当該 request_id で存在する").toBeTruthy();
       expect(card?.risk_level).toBe("high");
     });

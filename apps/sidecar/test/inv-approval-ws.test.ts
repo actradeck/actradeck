@@ -10,7 +10,7 @@
  * 対策後の不変条件:
  * (a) token 無し/誤 token の approval injection は WsClient で破棄され resolve に至らない。
  * (b) interrupt も同様。
- * (c) request_id が予測可能な連番 (Date.now/seq) でない (crypto.randomBytes 由来)。
+ * (c) request_id が予測可能な連番 (Date.now/seq) でない (CSPRNG 由来・正準 mintApprovalRequestId)。
  * (d) decision が enum (allow/deny) 以外なら sidecar 配線で破棄される。
  * 既存 SEC-2 scope テスト (foreign request_id 拒否) は緑維持。
  */
@@ -18,7 +18,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
+import { APPROVAL_DECISIONS } from "@actradeck/event-model";
+
 import { ApprovalBridge } from "../src/approval-bridge.js";
+import { AttachDaemon } from "../src/attach-daemon.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
 import { WsClient } from "../src/ws-client.js";
@@ -157,9 +160,9 @@ describe("INV-APPROVAL-WS (3#SEC-1): request_id entropy + decision enum", () => 
         ids.push(id),
       );
     }
-    // sessionId プレフィックスは温存 (SEC-2 scope)。
-    for (const id of ids) expect(id).toMatch(/^s1:apr-/);
-    const randomParts = ids.map((id) => id.replace(/^s1:apr-/, ""));
+    // SEC-1 (Phase 4 R2): raw session_id は含めない。短縮ハッシュ tag (redaction-stable)。
+    for (const id of ids) expect(id).toMatch(/^s[0-9a-f]{12}:apr-/);
+    const randomParts = ids.map((id) => id.replace(/^s[0-9a-f]{12}:apr-/, ""));
     // 連番でない: 隣接 id が数値インクリメントでない。
     for (let i = 1; i < randomParts.length; i++) {
       expect(randomParts[i]).not.toBe(randomParts[i - 1]);
@@ -188,6 +191,94 @@ describe("INV-APPROVAL-WS (3#SEC-1): request_id entropy + decision enum", () => 
     });
     expect(resolveSpy, "non-enum decision must not reach resolve").not.toHaveBeenCalled();
     sidecar.store.close();
+  });
+
+  /**
+   * (d')/(d''): gate の set-equivalence + **引数忠実性** (QA-R6-1)。
+   * 到達回数だけの assert では「検証済み decision を捨てて "allow" を渡す」強制置換 mutant
+   * (deny→allow 反転 = INV-APPROVAL 中核の破壊) が suite 緑で生存した — 各 emit 直後に
+   * resolve が **その decision のまま** 呼ばれたことを toHaveBeenLastCalledWith で pin する。
+   * 対象は Sidecar (managed) と AttachDaemon (既定モード・TDA-R6-1 の第 5 コピー跡地) の両配線。
+   */
+  function assertGateSetEquivalence(target: {
+    approvalBridge: { resolve: (...a: never[]) => unknown };
+    wsClient: { emit: (ev: "approval", msg: unknown) => unknown };
+  }): void {
+    // QA-R6-3: 空語彙なら両ループが空振りして偽緑になる — 非空虚ガード。
+    expect(APPROVAL_DECISIONS.length).toBeGreaterThanOrEqual(4);
+    const resolveSpy = vi.spyOn(target.approvalBridge, "resolve");
+    for (const decision of APPROVAL_DECISIONS) {
+      target.wsClient.emit("approval", {
+        type: "approval",
+        request_id: "s1:apr-anything",
+        decision,
+      });
+      // QA-R6-1: 忠実性 — request_id/decision が改変されず reason=undefined/persist=false で届く。
+      expect(resolveSpy).toHaveBeenLastCalledWith("s1:apr-anything", decision, undefined, false);
+    }
+    expect(resolveSpy, "every canonical decision must reach resolve").toHaveBeenCalledTimes(
+      APPROVAL_DECISIONS.length,
+    );
+    // QA-R8-1/R8-2: 「present → forwarded」方向 — reason/persist が付いた frame は値のまま届く
+    // (省略時 default の pin だけでは reason 破棄 / persist 永久 OFF の mutant が生存した)。
+    target.wsClient.emit("approval", {
+      type: "approval",
+      request_id: "s1:apr-anything",
+      decision: "allow_for_session",
+      reason: "operator-rationale-x",
+      persist: true,
+    });
+    expect(resolveSpy).toHaveBeenLastCalledWith(
+      "s1:apr-anything",
+      "allow_for_session",
+      "operator-rationale-x",
+      true,
+    );
+    resolveSpy.mockClear();
+    for (const bad of [
+      "ALLOW",
+      "",
+      "allow ",
+      "allow_for_session_x",
+      "denyy",
+      42,
+      null,
+      undefined,
+    ]) {
+      target.wsClient.emit("approval", {
+        type: "approval",
+        request_id: "s1:apr-anything",
+        decision: bad as unknown as "allow",
+      });
+    }
+    expect(resolveSpy, "non-members must never reach resolve").not.toHaveBeenCalled();
+    resolveSpy.mockRestore();
+  }
+
+  it("(d') Sidecar gate は正準 APPROVAL_DECISIONS と set-equivalent + 引数忠実 (TDA-R5-1/QA-R6-1)", () => {
+    const sidecar = new Sidecar({
+      sessionId: "s1",
+      wsUrl: "ws://127.0.0.1:1/never",
+      dbPath: ":memory:",
+    });
+    assertGateSetEquivalence(sidecar);
+    sidecar.store.close();
+  });
+
+  it("(d'') AttachDaemon gate も同一契約 (TDA-R6-1: 第 5 の手書きコピー跡地・既定モードに tripwire)", () => {
+    const daemon = new AttachDaemon({
+      wsUrl: "ws://127.0.0.1:1/never",
+      dbPath: ":memory:",
+      hookToken: "tok-d2",
+      host: "127.0.0.1",
+      approvalTimeoutMs: 30,
+    });
+    try {
+      assertGateSetEquivalence(daemon);
+    } finally {
+      daemon.wsClient.close();
+      daemon.store.close();
+    }
   });
 
   it("SEC-2 regression stays green: foreign request_id is rejected by resolve()", () => {

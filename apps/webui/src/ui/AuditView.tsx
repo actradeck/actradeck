@@ -350,6 +350,13 @@ export function AuditView({
                               {decidedTotal(s.approvals) - s.approvals.by_decision.deny}
                             </Tag>
                           ) : null}
+                          {s.approvals.synthetic_retired > 0 ? (
+                            // TDA-R2-2: relay_lost 合成 retire は allow/deny のどちらでもない
+                            // (誰も決定していない) — muted 別立てで台帳恒等式を画面でも保つ。
+                            <Tag tone="muted" size="sm">
+                              {t("audit.relayLostRetired")} ×{s.approvals.synthetic_retired}
+                            </Tag>
+                          ) : null}
                           {s.approvals.pending > 0 ? (
                             <Tag tone="neutral" size="sm">
                               {t("audit.pending")} ×{s.approvals.pending}

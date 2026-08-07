@@ -6,7 +6,9 @@
  *   GitWatcher ────┘                                            ▲
  *                                                  ApprovalBridge ◄── WsClient.approval (UI 決定)
  */
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+
+import { APPROVAL_DECISIONS, type ApprovalDecision } from "@actradeck/event-model";
 
 import { computeAgentVisibilityWire } from "./agent-visibility.js";
 import { generateRedactedDiff } from "./diff-provider.js";
@@ -23,7 +25,7 @@ import { EventSink, type OutOfOrderObservation } from "./sink.js";
 import { EventStore } from "./store.js";
 import { startManagedClaude, type ManagedSession } from "./managed-runner.js";
 import { startManagedCodex, type CodexManagedSession } from "./codex-runner.js";
-import { WsClient } from "./ws-client.js";
+import { pendingIdsFromBridge, WsClient } from "./ws-client.js";
 
 export interface SidecarOptions {
   /**
@@ -82,6 +84,11 @@ export class Sidecar {
   private readonly hookToken: string;
   /** 3#SEC-1: per-session 制御チャネルトークン (inbound approval/interrupt の認証)。 */
   private readonly controlToken: string;
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D5): daemon プロセスの runtime epoch (起動時採番・寿命内不変)。
+   * hello の runtime_epoch に載せる (診断用・credential でない・NO-RAW uuid のみ)。
+   */
+  private readonly runtimeEpoch: string = randomUUID();
   private gitWatcher: GitWatcher | undefined;
   /**
    * 段階2 (ADR 019ea4ba D2-B): diff 本文 on-demand 生成の repo root。start() で findRepoRoot
@@ -128,6 +135,11 @@ export class Sidecar {
       // ADR 019f1972 §2b: agent 観測可能性を hello に相乗り (machine-global 純ローカル検査・fresh per send・
       // fail-safe undefined)。computeAgentVisibilityWire は CODEX_HOME 等を process.env から正準解決する。
       agentVisibilityProvider: () => computeAgentVisibilityWire(),
+      // ADR 0014 Phase 4 (decision 019fd705 D5): daemon プロセスの runtime epoch + 生存 pending 宣言。
+      // approvalBridge は本コンストラクタで後続生成されるため provider は遅延参照する (hello 送出は
+      // connect 後 = 構築完了後のみ)。未生成ガードは防御的 (構造上到達しない)。
+      runtimeEpoch: this.runtimeEpoch,
+      pendingApprovalIdsProvider: pendingIdsFromBridge(() => this.approvalBridge), // 正準配線 (QA-R2-4: undefined=省略・?? [] 禁止)
       // SEC-2 (egress): env 由来の Bearer トークン (未設定なら付けない = 後方互換)。
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }
@@ -167,23 +179,24 @@ export class Sidecar {
     // SEC-2: resolve は自 sidecar の sessionId スコープの request_id のみ受理する。
     // foreign / unknown request_id は ApprovalBridge.resolve が false を返し無視される。
     // 3#SEC-1: WsClient が token 検証済みのメッセージのみ emit する。さらに decision を
-    //   T1 ApprovalDecision (4 値) で enum 検証し、enum 外 (型崩れ・任意文字列) は破棄する。
+    //   T1 ApprovalDecision で enum 検証し、enum 外 (型崩れ・任意文字列) は破棄する。
+    //   TDA-R5-1: 判定は正準 `APPROVAL_DECISIONS` (event-model) を消費する — 手書き `!==` 連鎖の
+    //   ミラーを残さない (security-gate-reuse-canonical-parser・受理集合は set-equivalent)。
     // 段階③: allow_for_session/cancel を honor (allow_for_session→allow+署名登録、cancel→deny)。
     this.wsClient.on(
       "approval",
       (msg: { request_id: string; decision: unknown; reason?: string; persist?: unknown }) => {
         if (typeof msg.request_id !== "string") return;
         if (
-          msg.decision !== "allow" &&
-          msg.decision !== "allow_for_session" &&
-          msg.decision !== "deny" &&
-          msg.decision !== "cancel"
+          typeof msg.decision !== "string" ||
+          !(APPROVAL_DECISIONS as readonly string[]).includes(msg.decision)
         ) {
           return; // enum 外は破棄 (fail-safe)
         }
+        const decision = msg.decision as ApprovalDecision;
         // ADR 019ee0c0: persist は boolean のときのみ honor (型崩れは false 扱い=fail-safe)。
         const persist = msg.persist === true;
-        this.approvalBridge.resolve(msg.request_id, msg.decision, msg.reason, persist);
+        this.approvalBridge.resolve(msg.request_id, decision, msg.reason, persist);
       },
     );
     // SEC-2: interrupt は **自セッション宛のみ** managed を stop する。

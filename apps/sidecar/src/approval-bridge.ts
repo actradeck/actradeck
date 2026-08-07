@@ -14,13 +14,19 @@
  * MVP の土台: UI 接続 (WsClient.approval) を resolve 経路として配線。UI 未接続時は
  * タイムアウト → 安全側 (deny)。これは Phase 3/4 で UI が来るまでの最小実装。
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 
-import type { ApprovalDecision, ApprovalTrigger, PolicyCategory } from "@actradeck/event-model";
+import type {
+  ApprovalDecision,
+  ApprovalTrigger,
+  PolicyCategory,
+  ResolutionOrigin,
+} from "@actradeck/event-model";
 import {
   DEFAULT_GATED_CATEGORIES,
   isKnownRedactionKind,
   isPathWithinScope,
+  mintApprovalRequestId,
 } from "@actradeck/event-model";
 
 import type { ApprovalAllowlistStore } from "./approval-allowlist-store.js";
@@ -68,6 +74,13 @@ export interface ApprovalResult {
    * 観測イベントに persist_grant マーカーを付けて「再起動跨ぎ grant 由来」を監査識別可能にする。
    */
   readonly persistGrant?: boolean;
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705): この解決の **出所** (operator / timeout / shutdown /
+   * child_exit)。pending を解決する全経路が必ず設定し、hook-receiver / codex emitResolved が
+   * tool.permission.resolved payload の `resolution_origin` へ透過する (「deny を送った」と偽らない)。
+   * defer / auto-allow (resolved を emit しない経路) では未設定。
+   */
+  readonly origin?: ResolutionOrigin;
 }
 
 /**
@@ -140,6 +153,32 @@ export function encodeOperationSignature(kind: string, risk: string, operand: st
     .update(JSON.stringify([kind, risk, operand]))
     .digest("hex");
 }
+
+/**
+ * ADR 0014 Phase 4: resolved イベント summary の出所ラベル (日本語・観測性)。
+ * hook-receiver (CC) と codex-runner が共有する単一出所 (2 経路の表示 drift 防止)。
+ * operator は従来表示を変えない空文字 (後方互換)。
+ */
+export function resolutionOriginSuffix(origin: ResolutionOrigin | undefined): string {
+  switch (origin) {
+    case "timeout":
+      return " (タイムアウト)";
+    case "shutdown":
+      return " (シャットダウン)";
+    case "child_exit":
+      return " (プロセス消失)";
+    case "relay_lost":
+      return " (中継喪失)";
+    case "policy":
+      return " (ポリシー)";
+    default:
+      return "";
+  }
+}
+
+// 承認 request_id の採番は event-model の正準 `mintApprovalRequestId` (approval-request-id.ts) を
+// 使う (TDA-R2-1: sidecar/backend 両ティアの単一出所。redaction-stability の根拠 — hex charset で
+// vendor-prefix 構造排除 + 全 run < 40 で high-entropy 構造排除 — は正準側 docstring 参照)。
 
 /**
  * cwd → repo スコープ解決器の型 (ADR 019ee0c0 永続 allowlist / ADR 019f0eca per-repo policy 共有)。
@@ -438,16 +477,40 @@ export class ApprovalBridge {
   }
 
   /**
-   * request_id を高エントロピーで採番する (3#SEC-1)。
+   * request_id を高エントロピーで採番する (3#SEC-1)。実装は event-model の正準
+   * `mintApprovalRequestId` (redaction-stable 契約の単一出所)。
    *
-   * 旧実装は `${sessionId}:apr-${Date.now()}-${seq}` で Date.now/連番が予測容易だった。
-   * inbound 制御チャネル (WsClient) は同チャネルに request_id を observable にするため、
-   * 予測可能な id は「foreign request_id 拒否 (SEC-2)」ゲートを総当たりで突破されうる。
-   * 16 byte (128bit) の暗号乱数を base64url 化し、sessionId プレフィックスは「自セッション
-   * スコープ判定 (SEC-2)」のために残す (突合は乱数部で行う)。
+   * SEC-R2-3 → SEC-R3-2 (防衛クラスの正直な開示): re-roll が緩和できるのは **token (32hex)
+   * 依存で確率的にマッチする**ルールだけ。tag `s<hash12>` と固定リテラル `:apr-` は再採番で
+   * 変わらないため、固定部にマッチするルールには 8 回全て決定論的に失敗し、そのまま
+   * 不安定 id を返す (deny へ落とすと該当ルール追加時に承認機能が全停止するため、runtime は
+   * `unstableRequestIdCount` (非負整数・NO-RAW) で観測可能にするに留める)。本命の防衛線は
+   * 構造 metatest (INV-APPROVAL-REQUEST-ID-STABLE: 全 REDACTION_RULES × id 形状 corpus で
+   * 0 マッチ) — 固定部/token いずれのマッチ形ルールも追加した日に CI で赤くなる。
    */
   private nextRequestId(sessionId: string): string {
-    return `${sessionId}:apr-${randomBytes(16).toString("base64url")}`;
+    let id = mintApprovalRequestId(sessionId);
+    for (let i = 0; i < 8 && redactString(id) !== id; i++) {
+      this.unstableRequestIdMints += 1;
+      id = mintApprovalRequestId(sessionId);
+    }
+    if (redactString(id) !== id) this.unstableRequestIdMints += 1;
+    return id;
+  }
+
+  /** SEC-R3-2: redactor に mangle された採番の観測カウンタ (非負整数のみ・原文非依存)。 */
+  private unstableRequestIdMints = 0;
+
+  /**
+   * 不安定採番の観測数 (0 が正常。>0 は redaction ルールと採番形式の衝突)。
+   * 意味論 (TDA-R4-2): **不安定観測の延べ数** — re-roll 試行ごと + 使い切り時に加算されるため、
+   * 「8 回の良性 re-roll」と「固定部衝突 1 件 (9 加算)」を値だけでは区別しない (>0 = 要調査)。
+   * 正直な開示 (SEC-R4-4): 現状 **runtime 側の consumer は未配線** (bridge API として query 可能な
+   * だけで hello/ログ/テレメトリに出ない)。runtime の縮退は無兆候であり、本命の防衛線は CI の
+   * 構造 metatest (INV-APPROVAL-REQUEST-ID-STABLE)。増分挙動は同 INV の re-roll 単体テストが pin。
+   */
+  get unstableRequestIdCount(): number {
+    return this.unstableRequestIdMints;
   }
 
   /**
@@ -761,7 +824,12 @@ export class ApprovalBridge {
     return new Promise<ApprovalResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        resolve({ behavior: "deny", reason: "approval timeout (safe default: deny)" });
+        // ADR 0014 Phase 4: origin="timeout" を明示 (resolved payload の resolution_origin へ透過)。
+        resolve({
+          behavior: "deny",
+          reason: "approval timeout (safe default: deny)",
+          origin: "timeout",
+        });
       }, this.timeoutMs);
       // D5: secret-trigger は resolve で allow_for_session が来ても署名を登録しない
       // (cacheable=false)。destructive-only のみ後で cache 登録しうる。
@@ -876,13 +944,45 @@ export class ApprovalBridge {
         );
       }
     }
-    p.resolve({ behavior, decision, ...(reason !== undefined ? { reason } : {}) });
+    // ADR 0014 Phase 4: resolve() 経由は UI の人間決定 = origin="operator"。
+    p.resolve({
+      behavior,
+      decision,
+      origin: "operator",
+      ...(reason !== undefined ? { reason } : {}),
+    });
+    return true;
+  }
+
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D3): pending を **外部要因** (agent プロセス消失等) で
+   * 安全側 deny へ即解決する。origin を呼び元が指定する (CC hook クライアント切断 / codex child exit
+   * = "child_exit")。UI 決定 (resolve) と区別され、resolved payload の resolution_origin に載る。
+   * pending 不在 (解決済み / timeout 済み) は no-op で false (冪等・二重解決しない)。
+   */
+  cancelPending(requestId: string, origin: ResolutionOrigin, reason?: string): boolean {
+    const p = this.pending.get(requestId);
+    if (!p) return false;
+    clearTimeout(p.timer);
+    this.pending.delete(requestId);
+    p.resolve({ behavior: "deny", origin, ...(reason !== undefined ? { reason } : {}) });
     return true;
   }
 
   /** 保留中の承認件数 (検証・shutdown 用)。 */
   get pendingCount(): number {
     return this.pending.size;
+  }
+
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D5): 現在保留中の承認 request_id 一覧。
+   * hello frame の `active_pending_request_ids` provider が送信直前に毎回呼ぶ (backend の
+   * 再起動跨ぎ reconciliation で「まだ生きている pending」を宣言し、宣言に無い DB stale pending を
+   * backend が合成 cancel で非 actionable 化する)。id は bridge 採番の高エントロピー相関 id のみ
+   * (NO-RAW: コマンド/パス/秘匿値を含まない・既存 event payload と同じ公開面)。
+   */
+  pendingRequestIds(): string[] {
+    return [...this.pending.keys()];
   }
 
   /**
@@ -1110,7 +1210,12 @@ export class ApprovalBridge {
   drain(): void {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.resolve({ behavior: "deny", reason: "sidecar shutdown (safe default: deny)" });
+      // ADR 0014 Phase 4: origin="shutdown" を明示 (graceful shutdown 由来の deny と分かる監査行)。
+      p.resolve({
+        behavior: "deny",
+        reason: "sidecar shutdown (safe default: deny)",
+        origin: "shutdown",
+      });
     }
     this.pending.clear();
     // TDA-1 (ADR 019e9b7a): session-allow 署名キャッシュも破棄する。allow_for_session は

@@ -16,6 +16,7 @@ import { type NormalizedEvent } from "@actradeck/event-model";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 
+import { AUDIT_MANIFEST_VERSION } from "../src/audit-integrity.js";
 import { buildIngestionServer } from "../src/ingestion-server.js";
 import { IngestStore } from "../src/ingest-store.js";
 import { cleanupSessions, dbReachable, iso, makeEvent } from "./helpers.js";
@@ -193,12 +194,37 @@ describe.skipIf(!reachable)("INV-AUDIT-REPORT: 単一セッション詳細レポ
       method: "POST",
       url: "/realtime/audit/verify",
       headers: { ...auth(), "content-type": "application/json" },
-      payload: { manifest: { version: "actradeck-audit-manifest/v1", session_id: "x", root: "y" } },
+      // 現行 version + events 欠落 (SEC-R3-1: 別版は unsupported へ分岐するため、構造ガードの
+      // 検証は現行 version で行う)。
+      payload: { manifest: { version: AUDIT_MANIFEST_VERSION, session_id: "x", root: "y" } },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { ok: boolean; reason: string };
     expect(body.ok).toBe(false);
     expect(body.reason).toContain("malformed");
+  });
+
+  it("verify route: 旧 version manifest (b64) → 400 でなく 200 + unsupported-manifest-version (SEC-R4-5)", async () => {
+    // SEC-R3-1 の主眼 = route が旧版を 400 (missing or invalid) へ潰さない。decode→verify の合成を
+    // route レベルで pin する (decode 側の version 拒否が復活すると 400 へ退行しここが RED)。
+    const v2 = {
+      version: "actradeck-audit-manifest/v2",
+      session_id: "x",
+      generated_at: "t",
+      root: "y",
+      events: [],
+    };
+    const b64 = Buffer.from(JSON.stringify(v2), "utf8").toString("base64");
+    const res = await app.inject({
+      method: "POST",
+      url: "/realtime/audit/verify",
+      headers: { ...auth(), "content-type": "application/json" },
+      payload: { manifest_b64: b64 },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { ok: boolean; reason: string };
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("unsupported-manifest-version");
   });
 
   it("verify route: 1MiB 超の大型 manifest を受理 (AUDIT-VERIFY-SIZE: app 既定 1MiB を per-route override)", async () => {

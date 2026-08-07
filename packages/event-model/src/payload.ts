@@ -30,6 +30,77 @@ export type RiskLevel = z.infer<typeof RiskLevel>;
 /** 承認の決定 (Codex: accept/acceptForSession/decline/cancel, Claude: allow/deny を正規化)。 */
 export const ApprovalDecision = z.enum(["allow", "allow_for_session", "deny", "cancel"]);
 export type ApprovalDecision = z.infer<typeof ApprovalDecision>;
+/**
+ * decision の正準 closed-set 配列 (TDA-R4-3・Phase 4 R4 監査)。監査集計 (backend audit-contract)
+ * と表示層 (webui) の membership/tally はこの配列を消費する — 手書きミラーを作らない
+ * (decision 追加時に片側が黙って落とし、署名済み manifest が誤った台帳を attest する drift の
+ * 構造遮断)。
+ *
+ * SEC-R6-4: sidecar 承認ゲートの実行時依存になったため **frozen copy** で export する
+ * (zod 内部配列 `ApprovalDecision.options` を直接晒すと in-process mutation で受理集合が広がる —
+ * single-operator 境界内ゆえ新規 exploit class ではないが、gate 依存の正準値は不変にする)。
+ * `.options` 自体は zod 内部の可変配列のまま (backend の `new Set(ApprovalDecision.options)` 派生は
+ * import 時 snapshot で独立)。
+ */
+export const APPROVAL_DECISIONS: readonly ApprovalDecision[] = Object.freeze([
+  ...ApprovalDecision.options,
+]);
+
+/**
+ * ADR 0014 Phase 4 (decision 019fd705): 承認解決の **出所 (誰が/何が解決したか)**。
+ * 「deny を送った」と偽らないための正直性メタデータ (closed enum・NO-RAW)。
+ * - "operator":   UI の人間決定 (allow/allow_for_session/deny/cancel)。
+ * - "timeout":    承認タイムアウトの安全側 deny (30s 既定)。
+ * - "policy":     ポリシー由来の自動解決 (語彙のみ確保・現行 emitter は未使用 — auto-allow 経路は
+ *                 requested 自体を emit しない設計を維持。projection の request_id 無し resolved
+ *                 全消し挙動と衝突させないため)。
+ * - "shutdown":   sidecar graceful shutdown の drain (安全側 deny)。
+ * - "child_exit": agent プロセス消失 (codex child exit / CC hook クライアント切断) の安全側 deny。
+ * - "relay_lost": daemon crash 等で中継が失われ、backend が stale pending を **合成 cancel** で
+ *                 非 actionable 化したもの (誰も決定していない・deny を偽装しない)。
+ * additive optional。未設定は「(旧 sidecar) 出所情報なし」の後方互換値。
+ */
+export const ResolutionOrigin = z.enum([
+  "operator",
+  "timeout",
+  "policy",
+  "shutdown",
+  "child_exit",
+  "relay_lost",
+]);
+export type ResolutionOrigin = z.infer<typeof ResolutionOrigin>;
+/**
+ * resolution_origin の正準 closed-set 配列 (TDA-R3-2/SEC-R3-3・いずれも Phase 4 R3 監査所見)。
+ * 表示層 (webui) の membership gate はこの配列を import する — 手書きミラーを作らない
+ * (origin 追加時に表示層が黙って未知値を落とし、operator success トーンへ誤縮退する drift の
+ * 構造遮断)。frozen copy の理由は APPROVAL_DECISIONS (SEC-R6-4) と同じ。
+ */
+export const RESOLUTION_ORIGINS: readonly ResolutionOrigin[] = Object.freeze([
+  ...ResolutionOrigin.options,
+]);
+/**
+ * backend 合成 retire を示す sentinel の正準定数 (TDA-R4-5・Phase 4 R4 監査)。
+ * この値の比較は「synthetic_retired vs by_decision (→hard_gate)」の分類・liveness/coverage の
+ * 活動除外を決める境界判定であり、リテラルの再打鍵を禁止する (rename/第二 synthetic origin 追加で
+ * 合成 retire が operator 決定へ silent 再分類される drift の構造遮断)。TS 消費点は
+ * `isSyntheticRetireOrigin` を、SQL リテラルは INV metatest (backend) がこの定数との一致を pin する。
+ */
+export const SYNTHETIC_RETIRE_ORIGIN = "relay_lost" satisfies ResolutionOrigin;
+/** resolution_origin が backend 合成 retire かの正準判定 (unknown 受け・型システム外の行値にも安全)。 */
+export function isSyntheticRetireOrigin(v: unknown): v is typeof SYNTHETIC_RETIRE_ORIGIN {
+  return v === SYNTHETIC_RETIRE_ORIGIN;
+}
+
+/**
+ * ADR 0014 Phase 4: 決定が **agent へ実際に届いたか** (書込結果から導出・偽らない)。
+ * - "sent":     応答書込がソケット/transport 層に受理された (CC: hook HTTP 応答 write 成功、
+ *               codex: JSON-RPC Response 送出成功)。「相手が読んだ」までは主張しない。
+ * - "not_sent": 書けなかった / 書かなかった (クライアント切断・suppressed・合成 cancel)。
+ * - "unknown":  送信を試みたが成否を判定できない。
+ * additive optional。未設定は「(旧 sidecar) 配送情報なし」の後方互換値。
+ */
+export const DeliveryStatus = z.enum(["sent", "not_sent", "unknown"]);
+export type DeliveryStatus = z.infer<typeof DeliveryStatus>;
 
 /**
  * 自動ガード (ADR 019ecc70 段階1): 承認 pause の **理由 (trigger)**。
@@ -266,8 +337,10 @@ const ToolFailed = variant("tool.failed", {
 /**
  * INV-REQUEST-ID-NAMESPACE (T1 契約・TDA-1 decision 019ebc07):
  * `request_id` フィールドには **2 つの非交差キー空間** が同居する:
- *  1. **承認キー** (`<session_id>:apr-…` 等、sidecar 承認ブリッジが採番):
- *     tool.permission.requested / tool.permission.resolved のみが持つ。
+ *  1. **承認キー** (`s<hash12>:apr-…`。採番の正準は event-model `approval-request-id.ts` の
+ *     `mintApprovalRequestId` (sidecar 承認ブリッジ) / `deriveDemoApprovalRequestId`
+ *     (backend safety-demo) — raw session_id は含めない。redaction-stable 契約は同ファイルの
+ *     docstring 参照): tool.permission.requested / tool.permission.resolved のみが持つ。
  *  2. **`tu:<tool_use_id>`** (CC hook の tool_use_id 由来・`tu:` prefix で構造分離):
  *     command.started / command.completed / tool.failed が持つ。
  * 両者は同一フィールドを共有して下流 (projection / replay-store / UI) へ混在して流れるのが
@@ -298,6 +371,15 @@ const ToolPermissionResolved = variant("tool.permission.resolved", {
   // 該当 request_id を除去するために必要 (ADR 019e9999)。
   request_id: z.string().optional(),
   decision: ApprovalDecision,
+  // ADR 0014 Phase 4 (decision 019fd705): 解決の出所と配送結果 (正直性メタデータ)。
+  // additive optional (trigger/secret_kinds と同じ後方互換パターン)。closed enum のみ (NO-RAW)。
+  // 読まない consumer は無影響。語彙は coordinated deploy 前提。
+  // SEC-4 (Phase 4 監査 R2) 正直な開示: この strict enum が未知値を拒否するのは **EventPayload を
+  // 実際に parse する境界** (sidecar producer の assertPayloadConsistency / backend 合成 producer の
+  // 検証 / 型付き consumer) のみ。backend ingress の `parseEvent` は payload を looseObject で
+  // 素通しするため、ingress 単体では未知値は落ちない (INV テストが両実態を pin する)。
+  resolution_origin: ResolutionOrigin.optional(),
+  delivery_status: DeliveryStatus.optional(),
 });
 
 // --- コマンド実行 -------------------------------------------------------

@@ -16,9 +16,14 @@
  * - INV-ATTACH-REDACTION: 全 emit (hook 正規化 / git diff) は sink.emit choke を通る。
  * - INV-ATTACH-MULTIPLEX: registry が session_id ごとに独立 identity/projection を持つ。
  */
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
-import { parseCodexSpawnRequest, type CodexSpawnResult } from "@actradeck/event-model";
+import {
+  APPROVAL_DECISIONS,
+  parseCodexSpawnRequest,
+  type ApprovalDecision,
+  type CodexSpawnResult,
+} from "@actradeck/event-model";
 
 import { computeAgentVisibilityWire } from "./agent-visibility.js";
 import { AttachSessionRegistry } from "./attach-session-registry.js";
@@ -34,7 +39,7 @@ import { HookReceiver } from "./hook-receiver.js";
 import { generateHookToken } from "./settings-injection.js";
 import { EventSink, type OutOfOrderObservation } from "./sink.js";
 import { EventStore } from "./store.js";
-import { WsClient } from "./ws-client.js";
+import { pendingIdsFromBridge, WsClient } from "./ws-client.js";
 
 export interface AttachDaemonOptions {
   readonly wsUrl: string;
@@ -89,6 +94,11 @@ export class AttachDaemon {
   private readonly hookToken: string;
   /** inbound 制御チャネルトークン (approval は honor、interrupt は no-kill)。 */
   private readonly controlToken: string;
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D5): daemon プロセスの runtime epoch (起動時採番・寿命内不変)。
+   * hello の runtime_epoch に載せる (診断用・credential でない・NO-RAW uuid のみ)。
+   */
+  private readonly runtimeEpoch: string = randomUUID();
   private readonly onInterruptIgnored: ((sessionId: string | undefined) => void) | undefined;
   private readonly onSpawnHandled: ((ok: boolean, code?: string) => void) | undefined;
   private started = false;
@@ -122,6 +132,11 @@ export class AttachDaemon {
       ],
       // ADR 019f1972 §2b: agent 観測可能性を hello に相乗り (machine-global・fresh per send・fail-safe)。
       agentVisibilityProvider: () => computeAgentVisibilityWire(),
+      // ADR 0014 Phase 4 (decision 019fd705 D5): daemon プロセスの runtime epoch + 生存 pending 宣言。
+      // approvalBridge は本コンストラクタで後続生成されるため provider は遅延参照する (hello 送出は
+      // connect 後 = 構築完了後のみ)。未生成ガードは防御的 (構造上到達しない)。
+      runtimeEpoch: this.runtimeEpoch,
+      pendingApprovalIdsProvider: pendingIdsFromBridge(() => this.approvalBridge), // 正準配線 (QA-R2-4: undefined=省略・?? [] 禁止)
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }
         : {}),
@@ -202,17 +217,18 @@ export class AttachDaemon {
       "approval",
       (msg: { request_id: string; decision: unknown; reason?: string; persist?: unknown }) => {
         if (typeof msg.request_id !== "string") return;
+        // TDA-R6-1: 判定は正準 `APPROVAL_DECISIONS` (event-model) を消費する — sidecar.ts と同一の
+        // set-equivalent ゲート (第 5 の手書き `!==` 連鎖ミラーを残さない・受理集合不変)。
         if (
-          msg.decision !== "allow" &&
-          msg.decision !== "allow_for_session" &&
-          msg.decision !== "deny" &&
-          msg.decision !== "cancel"
+          typeof msg.decision !== "string" ||
+          !(APPROVAL_DECISIONS as readonly string[]).includes(msg.decision)
         ) {
           return; // enum 外は破棄 (fail-safe)
         }
+        const decision = msg.decision as ApprovalDecision;
         // ADR 019ee0c0: persist は boolean のときのみ honor (型崩れは false 扱い=fail-safe)。
         const persist = msg.persist === true;
-        this.approvalBridge.resolve(msg.request_id, msg.decision, msg.reason, persist);
+        this.approvalBridge.resolve(msg.request_id, decision, msg.reason, persist);
       },
     );
 

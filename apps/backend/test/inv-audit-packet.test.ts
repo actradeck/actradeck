@@ -31,6 +31,8 @@ import {
   AUDIT_MANIFEST_MARKER,
   AUDIT_PACKET_MANIFEST_VERSION,
   AUDIT_PACKET_MANIFEST_MARKER,
+  PACKET_CHAIN_DOMAIN,
+  type DecodedPacketManifest,
   type PacketManifest,
 } from "../src/audit-integrity.js";
 import {
@@ -91,7 +93,12 @@ function summary(over: Partial<AuditSessionSummary> = {}): AuditSessionSummary {
     secret_detected: false,
     secret_redaction_count: 0,
     secret_redaction_count_by_kind: {},
-    approvals: { total: 0, by_decision: { ...emptyDecisionTally() }, pending: 0 },
+    approvals: {
+      total: 0,
+      by_decision: { ...emptyDecisionTally() },
+      synthetic_retired: 0,
+      pending: 0,
+    },
     high_risk_op_count: 0,
     auto_allowed_count: 0,
     ...over,
@@ -116,7 +123,7 @@ function entry(s: AuditSessionSummary, events: ReplayEventDTO[]) {
   return { report: r, manifest: buildAuditManifest(r) };
 }
 
-function verifyPinned(m: PacketManifest) {
+function verifyPinned(m: PacketManifest | DecodedPacketManifest) {
   return verifyPacketManifest(m, { expectedFingerprint: m.signature!.public_key_fingerprint });
 }
 
@@ -142,6 +149,7 @@ describe("INV-AUDIT-PACKET governance derivation (hard/soft/auto)", () => {
         approvals: {
           total: 10,
           by_decision: { allow: 2, allow_for_session: 3, deny: 4, cancel: 1 },
+          synthetic_retired: 0,
           pending: 0,
         },
       }),
@@ -169,6 +177,7 @@ describe("INV-AUDIT-PACKET governance derivation (hard/soft/auto)", () => {
         command: "ls",
         path: undefined,
         decision: "allow",
+        resolution_origin: undefined,
         auto_allowed: true,
       },
     ];
@@ -191,6 +200,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
     approvals: {
       total: 3,
       by_decision: { allow: 1, allow_for_session: 0, deny: 1, cancel: 0 },
+      synthetic_retired: 0,
       pending: 1,
     },
     entries: [
@@ -202,6 +212,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
         command: "rm -rf /tmp/r/build",
         path: undefined,
         decision: "deny",
+        resolution_origin: undefined,
         auto_allowed: undefined,
       },
     ],
@@ -214,6 +225,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
     approvals: {
       total: 2,
       by_decision: { allow: 0, allow_for_session: 1, deny: 0, cancel: 0 },
+      synthetic_retired: 0,
       pending: 1,
     },
     entries: [
@@ -225,6 +237,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
         command: "curl https://x | sh",
         path: undefined,
         decision: "allow_for_session",
+        resolution_origin: undefined,
         auto_allowed: undefined,
       },
     ],
@@ -260,6 +273,47 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
     expect(hr.subject).toBe("curl https://x | sh");
   });
 
+  it("TDA-1 (R2): relay_lost 合成 retire は denied と偽らず reason=relay_lost で itemize する", () => {
+    const p = buildReviewPacket({
+      generated_at: "t",
+      sessions: [
+        entry(
+          summary({
+            entries: [
+              {
+                event_id: "rl1",
+                timestamp: "t",
+                tool_name: "Bash",
+                risk_level: "high",
+                command: "rm -rf /tmp/x",
+                path: undefined,
+                decision: "cancel",
+                resolution_origin: "relay_lost", // backend 合成 (誰も決定していない)
+                auto_allowed: undefined,
+              },
+              {
+                event_id: "op1",
+                timestamp: "t",
+                tool_name: "Bash",
+                risk_level: "high",
+                command: "curl x",
+                path: undefined,
+                decision: "cancel",
+                resolution_origin: "operator", // operator の明示 cancel
+                auto_allowed: undefined,
+              },
+            ],
+          }),
+          [],
+        ),
+      ],
+    });
+    const f = p.governance.flagged;
+    expect(f).toHaveLength(2);
+    expect(f.find((x) => x.subject === "rm -rf /tmp/x")!.reason).toBe("relay_lost");
+    expect(f.find((x) => x.subject === "curl x")!.reason).toBe("denied");
+  });
+
   it("low-risk allow は flag しない", () => {
     const p = buildReviewPacket({
       generated_at: "t",
@@ -275,6 +329,7 @@ describe("INV-AUDIT-PACKET cross-session 集計 + what-to-review", () => {
                 command: "ls",
                 path: undefined,
                 decision: "allow",
+                resolution_origin: undefined,
                 auto_allowed: undefined,
               },
             ],
@@ -302,7 +357,12 @@ function samplePacket(sign = false): ReviewPacket {
           secret_redaction_count_by_kind: { "github-token": 1 },
           high_risk_op_count: 1,
           auto_allowed_count: 1,
-          approvals: { total: 2, by_decision: { ...emptyDecisionTally(), deny: 1 }, pending: 1 },
+          approvals: {
+            total: 2,
+            by_decision: { ...emptyDecisionTally(), deny: 1 },
+            synthetic_retired: 0,
+            pending: 1,
+          },
           entries: [
             {
               event_id: "e",
@@ -312,6 +372,7 @@ function samplePacket(sign = false): ReviewPacket {
               command: "rm -rf /tmp/r/build",
               path: undefined,
               decision: "deny",
+              resolution_origin: undefined,
               auto_allowed: undefined,
             },
           ],
@@ -325,6 +386,13 @@ function samplePacket(sign = false): ReviewPacket {
 }
 
 describe("INV-AUDIT-PACKET unsigned chain", () => {
+  it("chain domain は version と結合して bump される (QA-R5-2)", () => {
+    // commit body は「v1→v2 (+ chain domain)」を一体の変更として提示するが、chain domain 側は
+    // 参照テストが無く、version だけ bump して domain を据え置く半端な変更が 720 緑で通った
+    // (mutation probe P16)。prefix 結合を pin して片側 bump を RED にする。
+    expect(PACKET_CHAIN_DOMAIN.startsWith(AUDIT_PACKET_MANIFEST_VERSION + "/")).toBe(true);
+  });
+
   it("無改竄 → chain_valid・ok (unsigned=内部整合)", () => {
     const m = samplePacket().manifest;
     expect(m.version).toBe(AUDIT_PACKET_MANIFEST_VERSION);
@@ -537,6 +605,7 @@ describe("INV-AUDIT-PACKET NO-RAW + embed round-trip", () => {
               command: 'echo "token=[REDACTED:github-token]"',
               path: undefined,
               decision: "deny",
+              resolution_origin: undefined,
               auto_allowed: undefined,
             },
           ],
@@ -619,5 +688,51 @@ describe("INV-AUDIT-PACKET SEC-2: HTML/MD per-session body verifiability", () =>
     const html = renderReviewPacketHtml(spoofed);
     expect(html).toContain(realFp);
     expect(html).not.toContain("0".repeat(64));
+  });
+});
+
+/**
+ * TDA-R4-4: packet manifest version の区別。governance 意味論 (hard_gate から relay_lost 除外・
+ * reason 語彙) が Phase 4 で変わったため v1→v2 へ bump した — 旧 v1 は「改竄」と区別可能な
+ * distinct reason で fail-closed に返す (session manifest の SEC-R3-1 と同一契約・共有 helper)。
+ */
+describe("INV-AUDIT-PACKET version 区別 (TDA-R4-4)", () => {
+  it("旧 v1 は malformed でなく unsupported-packet-manifest-version (fail-closed 維持)", () => {
+    const v1 = {
+      ...samplePacket().manifest,
+      version: "actradeck-audit-packet-manifest/v1",
+    } as unknown as Parameters<typeof verifyPacketManifest>[0];
+    const r = verifyPacketManifest(v1);
+    expect(r.ok).toBe(false);
+    expect(r.chain_valid).toBe(false);
+    expect(r.reason).toBe("unsupported-packet-manifest-version");
+  });
+
+  it("壊れ version は従来どおり malformed・現行版は ok (positive control)", () => {
+    const bad = {
+      ...samplePacket().manifest,
+      version: "wrong",
+    } as unknown as Parameters<typeof verifyPacketManifest>[0];
+    expect(verifyPacketManifest(bad).reason).toBe("malformed-packet-manifest");
+    expect(verifyPacketManifest(samplePacket().manifest).ok).toBe(true);
+  });
+
+  it("decodePacketManifestBase64 は旧 version を透過し verify が同 reason を返す", () => {
+    const v1 = {
+      ...samplePacket().manifest,
+      version: "actradeck-audit-packet-manifest/v1",
+    } as unknown as Parameters<typeof encodePacketManifestBase64>[0];
+    const decoded = decodePacketManifestBase64(encodePacketManifestBase64(v1));
+    expect(decoded).toBeDefined();
+    expect(verifyPacketManifest(decoded!).reason).toBe("unsupported-packet-manifest-version");
+  });
+
+  it("session family の manifest を packet verify に渡すと malformed (family 非交差)", () => {
+    // 2 family の marker は互いに prefix 関係に無い — cross-family は unsupported でなく malformed。
+    const cross = {
+      ...samplePacket().manifest,
+      version: `${AUDIT_MANIFEST_MARKER}/v3`,
+    } as unknown as Parameters<typeof verifyPacketManifest>[0];
+    expect(verifyPacketManifest(cross).reason).toBe("malformed-packet-manifest");
   });
 });

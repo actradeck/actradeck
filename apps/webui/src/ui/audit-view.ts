@@ -5,15 +5,34 @@
  * を defensive parse し、表示用ヘルパと export URL 構築を提供する。token はここに現れない
  * (same-origin path のみ・BFF が server-side で付与する)。
  */
-import { gateRedactionCountByKind } from "@actradeck/event-model";
+import {
+  APPROVAL_DECISIONS,
+  gateRedactionCountByKind,
+  RESOLUTION_ORIGINS,
+} from "@actradeck/event-model";
+import type { ApprovalDecision, ResolutionOrigin } from "@actradeck/event-model";
 
 import { shortSessionId } from "./wall-display";
 
-export type AuditDecision = "allow" | "allow_for_session" | "deny" | "cancel";
+/**
+ * decision の closed set。TDA-R4-3 (Phase 4 R4 監査): 手書きミラーを廃し event-model の正準
+ * `APPROVAL_DECISIONS` を消費する (decision 追加時に表示層 tally が黙って落とす drift の構造遮断)。
+ */
+export type AuditDecision = ApprovalDecision;
+
+/**
+ * resolution_origin の closed set。Phase 4 R3 監査所見 TDA-R3-2/SEC-R3-3: 手書きミラーを廃し
+ * event-model の正準 enum を消費する (backend で origin が追加されたとき表示層が黙って落とし
+ * operator success トーンへ誤縮退する drift の構造遮断・membership 判定も正準 RESOLUTION_ORIGINS
+ * を使う)。
+ */
+export type AuditResolutionOrigin = ResolutionOrigin;
 
 export interface AuditApprovalSummary {
   readonly total: number;
   readonly by_decision: Record<AuditDecision, number>;
+  /** TDA-R2-2: relay_lost 合成 retire (by_decision 非含・operator gate と混同しない別立て)。 */
+  readonly synthetic_retired: number;
   readonly pending: number;
 }
 
@@ -27,6 +46,8 @@ export interface AuditApprovalEntry {
   /** 承認対象パス (redaction 済み)。 */
   readonly path?: string;
   readonly decision?: AuditDecision;
+  /** TDA-R2-2: 解決の出所 (closed set・relay_lost は operator 決定と別表示にする根拠)。 */
+  readonly resolution_origin?: AuditResolutionOrigin;
   readonly auto_allowed?: boolean;
 }
 
@@ -56,6 +77,7 @@ export interface AuditRangeTotals {
   readonly secret_redaction_count: number;
   readonly secret_redaction_count_by_kind: Record<string, number>;
   readonly approvals_by_decision: Record<AuditDecision, number>;
+  readonly synthetic_retired: number;
   readonly approval_total: number;
   readonly high_risk_op_count: number;
   readonly sessions_with_secret: number;
@@ -73,7 +95,9 @@ export interface AuditRangeReport {
 }
 
 const AUDIT_BASE = "/realtime/audit/sessions";
-const DECISIONS: readonly AuditDecision[] = ["allow", "allow_for_session", "deny", "cancel"];
+// TDA-R4-3: membership/tally の走査も正準配列を消費 (手書き列挙を残さない)。
+// QA-R5-1: export は identity pin テスト用 (`DECISIONS === APPROVAL_DECISIONS` を回帰固定)。
+export const DECISIONS: readonly AuditDecision[] = APPROVAL_DECISIONS;
 
 /** 期間集計 export の出力形式 (json/csv は既存・html/md は P2・ADR 019f2326)。 */
 export type AuditExportFormat = "json" | "csv" | "html" | "md";
@@ -160,6 +184,7 @@ function parseApprovals(v: unknown): AuditApprovalSummary {
   return {
     total: nonNegInt(rec.total),
     by_decision: decisionTally(rec.by_decision),
+    synthetic_retired: nonNegInt(rec.synthetic_retired),
     pending: nonNegInt(rec.pending),
   };
 }
@@ -180,6 +205,10 @@ function parseEntry(v: unknown): AuditApprovalEntry | undefined {
     ...(str(rec.path) !== undefined ? { path: str(rec.path) } : {}),
     ...(decision !== undefined && (DECISIONS as readonly string[]).includes(decision)
       ? { decision: decision as AuditDecision }
+      : {}),
+    ...(typeof rec.resolution_origin === "string" &&
+    (RESOLUTION_ORIGINS as readonly string[]).includes(rec.resolution_origin)
+      ? { resolution_origin: rec.resolution_origin as AuditResolutionOrigin }
       : {}),
     ...(typeof rec.auto_allowed === "boolean" ? { auto_allowed: rec.auto_allowed } : {}),
   };
@@ -237,6 +266,7 @@ export function parseAuditReport(raw: unknown): AuditRangeReport {
       secret_redaction_count: nonNegInt(totalsRec.secret_redaction_count),
       secret_redaction_count_by_kind: kindCounts(totalsRec.secret_redaction_count_by_kind),
       approvals_by_decision: decisionTally(totalsRec.approvals_by_decision),
+      synthetic_retired: nonNegInt(totalsRec.synthetic_retired),
       approval_total: nonNegInt(totalsRec.approval_total),
       high_risk_op_count: nonNegInt(totalsRec.high_risk_op_count),
       sessions_with_secret: nonNegInt(totalsRec.sessions_with_secret),

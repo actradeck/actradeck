@@ -70,6 +70,45 @@ describe("ADR 019f1582 daemon-addressed policy relay", () => {
     expect(reg.canRelay("s-none")).toBe(false);
   });
 
+  it("TDA-R4-1: hello の runtime_epoch を connectedDaemons が診断メタとして載せる (再起動識別・唯一の consumer)", () => {
+    const reg = new SidecarRegistry({ policyTimeoutMs: 5000 });
+    const withEpoch = new FakeLink();
+    const withoutEpoch = new FakeLink();
+    reg.add(withEpoch);
+    reg.add(withoutEpoch);
+    const epoch = "0199f0a1-2b3c-7d4e-8f01-23456789abcd";
+    reg.handleHello(withEpoch, {
+      type: "hello",
+      control_token: "ctl-e1",
+      session_ids: [],
+      policy_capable: true,
+      runtime_epoch: epoch,
+    });
+    reg.handleHello(withoutEpoch, {
+      type: "hello",
+      control_token: "ctl-e2",
+      session_ids: [],
+      policy_capable: true,
+    });
+    const daemons = reg.connectedDaemons();
+    expect(daemons).toHaveLength(2);
+    const epochs = daemons.map((d) => d.runtime_epoch).sort();
+    // epoch を広告した daemon は uuid をそのまま (uuid gate 済み)・旧 dist は field 省略。
+    expect(epochs).toEqual([epoch, undefined].sort());
+    // 非 uuid の epoch は parse 段で捨てられ載らない (SEC-6 gate との結合)。
+    const bogus = new FakeLink();
+    reg.add(bogus);
+    reg.handleHello(bogus, {
+      type: "hello",
+      control_token: "ctl-e3",
+      session_ids: [],
+      policy_capable: true,
+      runtime_epoch: "not-a-uuid",
+    });
+    const afterBogus = reg.connectedDaemons();
+    expect(afterBogus.filter((d) => d.runtime_epoch !== undefined)).toHaveLength(1);
+  });
+
   it("connectedDaemons は observe-only (controlToken 未受領) / 切断 daemon を除外する", () => {
     const reg = new SidecarRegistry({ policyTimeoutMs: 5000 });
     const live = new FakeLink();

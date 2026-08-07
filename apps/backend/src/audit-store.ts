@@ -15,6 +15,7 @@ import {
   gateRedactionCountByKind,
   REDACTION_KINDS,
   REDACTION_MARKER_PATTERN,
+  isSyntheticRetireOrigin,
   REDACTION_MARKER_PREFIX,
   REDACTION_MARKER_SUFFIX,
   redactionMarker,
@@ -23,6 +24,7 @@ import {
 import type { AuditCoverageReport } from "@actradeck/event-model";
 
 import {
+  asResolutionOrigin,
   emptyDecisionTally,
   AUDIT_DECISIONS,
   type AuditApprovalEntry,
@@ -97,6 +99,8 @@ interface ApprovalGroupRow {
   session_id: string;
   event_type: string;
   decision: string | null;
+  /** TDA-1 (Phase 4 R2): relay_lost 合成 retire を operator gate と分離集計するための出所。 */
+  resolution_origin: string | null;
   risk_level: string | null;
   n: number;
 }
@@ -118,30 +122,47 @@ function asDecision(raw: string | null): AuditDecision | undefined {
     : undefined;
 }
 
-/** approval グループ行 (1 session 分) を summary へ畳む。 */
+/**
+ * approval グループ行 (1 session 分) を summary へ畳む。
+ * TDA-1 (Phase 4 R2): resolution_origin=relay_lost の resolved は backend 合成の retire
+ * (誰も決定していない・agent へ何も届いていない) ゆえ by_decision (→ hard/soft gate) へ**含めず**
+ * syntheticRetired へ別立て計上する — 実施していないゲートを実施したと数えない。
+ */
 function foldApprovals(rows: readonly ApprovalGroupRow[]): {
   total: number;
   byDecision: AuditDecisionTally;
   highRisk: number;
+  syntheticRetired: number;
 } {
   const byDecision = emptyDecisionTally();
   let total = 0;
   let highRisk = 0;
+  let syntheticRetired = 0;
   for (const r of rows) {
     if (r.event_type === "tool.permission.requested") {
       total += r.n;
       if (r.risk_level !== null && HIGH_RISK_LEVELS.has(r.risk_level)) highRisk += r.n;
     } else if (r.event_type === "tool.permission.resolved") {
+      // TDA-R4-5: 行値は string|null (型システム外) — 正準 predicate で判定 (リテラル再打鍵禁止)。
+      if (isSyntheticRetireOrigin(r.resolution_origin)) {
+        syntheticRetired += r.n;
+        continue;
+      }
       const d = asDecision(r.decision);
       if (d !== undefined) byDecision[d] += r.n;
     }
   }
-  return { total, byDecision, highRisk };
+  return { total, byDecision, highRisk, syntheticRetired };
 }
 
 function metaToSummary(
   r: SessionMetaRow,
-  approvals: { total: number; byDecision: AuditDecisionTally; highRisk: number },
+  approvals: {
+    total: number;
+    byDecision: AuditDecisionTally;
+    highRisk: number;
+    syntheticRetired: number;
+  },
   autoAllowedCount: number,
   entries?: readonly AuditApprovalEntry[],
 ): AuditSessionSummary {
@@ -166,7 +187,9 @@ function metaToSummary(
     approvals: {
       total: approvals.total,
       by_decision: approvals.byDecision,
-      pending: Math.max(0, approvals.total - decidedTotal),
+      synthetic_retired: approvals.syntheticRetired,
+      // TDA-1 (R2): 合成 retire 済みは「未解決」でも「gate 済み」でもない — pending から除く。
+      pending: Math.max(0, approvals.total - decidedTotal - approvals.syntheticRetired),
     },
     high_risk_op_count: approvals.highRisk,
     auto_allowed_count: autoAllowedCount,
@@ -242,11 +265,12 @@ export class AuditStore {
       `SELECT session_id,
               event_type,
               payload->>'decision' AS decision,
+              payload->>'resolution_origin' AS resolution_origin,
               payload->>'risk_level' AS risk_level,
               count(*)::int AS n
          FROM events
         WHERE session_id = $1 AND event_type = ANY($2::text[])
-        GROUP BY session_id, event_type, decision, risk_level`,
+        GROUP BY session_id, event_type, decision, resolution_origin, risk_level`,
       [sessionId, APPROVAL_EVENT_TYPES],
     );
     const approvals = foldApprovals(groupRows);
@@ -297,28 +321,45 @@ export class AuditStore {
     const { rows: resRows } = await this.pool.query<{
       request_id: string | null;
       decision: string | null;
+      resolution_origin: string | null;
     }>(
-      `SELECT payload->>'request_id' AS request_id, payload->>'decision' AS decision
+      `SELECT payload->>'request_id' AS request_id,
+              payload->>'decision' AS decision,
+              payload->>'resolution_origin' AS resolution_origin
          FROM events
         WHERE session_id = $1 AND event_type = 'tool.permission.resolved'
         ORDER BY timestamp ASC, event_id ASC`,
       [sessionId],
     );
-    const decisionByRequest = new Map<string, AuditDecision>();
+    // TDA-1 (R2): decision と併せて resolution_origin (closed gate 済み) を持ち回り、packet の
+    // what-to-review が relay_lost 合成 retire を operator の denied と別 reason で表示できるようにする。
+    const decisionByRequest = new Map<
+      string,
+      { decision: AuditDecision; origin: ReturnType<typeof asResolutionOrigin> }
+    >();
     for (const r of resRows) {
       const d = asDecision(r.decision);
-      if (r.request_id !== null && d !== undefined) decisionByRequest.set(r.request_id, d);
+      if (r.request_id !== null && d !== undefined) {
+        decisionByRequest.set(r.request_id, {
+          decision: d,
+          origin: asResolutionOrigin(r.resolution_origin),
+        });
+      }
     }
-    return reqRows.map((r) => ({
-      event_id: r.event_id,
-      timestamp: r.timestamp.toISOString(),
-      tool_name: r.tool_name ?? undefined,
-      risk_level: r.risk_level ?? undefined,
-      command: r.command ?? undefined,
-      path: r.path ?? undefined,
-      decision: r.request_id !== null ? decisionByRequest.get(r.request_id) : undefined,
-      auto_allowed: r.auto_allowed ?? undefined,
-    }));
+    return reqRows.map((r) => {
+      const resolved = r.request_id !== null ? decisionByRequest.get(r.request_id) : undefined;
+      return {
+        event_id: r.event_id,
+        timestamp: r.timestamp.toISOString(),
+        tool_name: r.tool_name ?? undefined,
+        risk_level: r.risk_level ?? undefined,
+        command: r.command ?? undefined,
+        path: r.path ?? undefined,
+        decision: resolved?.decision,
+        resolution_origin: resolved?.origin,
+        auto_allowed: r.auto_allowed ?? undefined,
+      };
+    });
   }
 
   /**
@@ -531,9 +572,11 @@ export class AuditStore {
    * SQL の `max/min/count(DISTINCT)` は非負・safe-integer 域の値を扱う (負値混入は CHECK が構造遮断)。
    *
    * ## NO-RAW (INV-AUDIT-COVERAGE-NO-RAW)
-   * SELECT は **provider slug + 時刻 + 件数 (seq 集計含む・原文非依存) のみ** (cwd/path/payload/secret を
-   * 一切読まない)。行は `buildCoverageReport` → `projectProviderCoverageRow` で provider を
-   * `PROVIDER_SLUG_RE` 再ゲートし余剰 field を構造的に落とす (生パス混入 row は drop)。
+   * **SELECT 投影**は provider slug + 時刻 + 件数 (seq 集計含む・原文非依存) のみで、cwd/path/secret
+   * を一切読まない (SEC-R3-5: WHERE 句は `payload->>'resolution_origin'` を固定リテラル比較で参照
+   * するが、payload 由来の値が投影・応答へ到達する経路は無い)。行は `buildCoverageReport` →
+   * `projectProviderCoverageRow` で provider を `PROVIDER_SLUG_RE` 再ゲートし余剰 field を構造的に
+   * 落とす (生パス混入 row は drop)。
    *
    * events を provider で GROUP BY 集約する (ingested_at と timestamp の MAX を同スキャンで併算)。planner は
    * これを **seq-scan** で実行する — `(provider, ingested_at)` 索引を足しても MAX(timestamp) の heap 参照が
@@ -568,10 +611,17 @@ export class AuditStore {
        ),
        ev AS (
          -- 権威クロック: サーバ受信時刻 ingested_at の provider 別 MAX。timestamp(adapter 申告)は表示補助。
+         -- SEC-R2-2 (Phase 4 R3): relay_lost retire は「provider からの受信」ではないため除外する
+         -- (合成 ingest が当該 provider の受信 gap を覆い隠さない)。判定は producer 申告の
+         -- resolution_origin (正当な産出者は backend reconciler のみ・SEC-R3-4: in-boundary の詐称は
+         -- 自分を stale に見せる安全方向のみ)。liveness 側 (aggregateObservationSql /
+         -- observeFromEvents) の除外と同一の申告 field。
          SELECT provider,
                 max(extract(epoch from ingested_at) * 1000) AS max_ingested_ms,
                 max(extract(epoch from timestamp) * 1000) AS max_ts_ms
            FROM events
+          WHERE NOT (event_type = 'tool.permission.resolved'
+                     AND COALESCE(payload->>'resolution_origin' = 'relay_lost', false))
           GROUP BY provider
        ),
        seqagg AS (
@@ -676,11 +726,12 @@ export class AuditStore {
         `SELECT session_id,
                 event_type,
                 payload->>'decision' AS decision,
+                payload->>'resolution_origin' AS resolution_origin,
                 payload->>'risk_level' AS risk_level,
                 count(*)::int AS n
            FROM events
           WHERE session_id = ANY($1::text[]) AND event_type = ANY($2::text[])
-          GROUP BY session_id, event_type, decision, risk_level`,
+          GROUP BY session_id, event_type, decision, resolution_origin, risk_level`,
         [sessionIds, APPROVAL_EVENT_TYPES],
       );
       for (const r of groupRows) {
@@ -697,6 +748,7 @@ export class AuditStore {
     let secretRedactionCount = 0;
     const byKind: Record<string, number> = Object.create(null) as Record<string, number>;
     const byDecision = emptyDecisionTally();
+    let syntheticRetired = 0;
     let approvalTotal = 0;
     let highRiskOpCount = 0;
     let autoAllowedCount = 0;
@@ -712,6 +764,7 @@ export class AuditStore {
       for (const d of AUDIT_DECISIONS) {
         byDecision[d] += summary.approvals.by_decision[d];
       }
+      syntheticRetired += summary.approvals.synthetic_retired;
       approvalTotal += summary.approvals.total;
       highRiskOpCount += summary.high_risk_op_count;
       autoAllowedCount += summary.auto_allowed_count;
@@ -721,6 +774,7 @@ export class AuditStore {
       secret_redaction_count: secretRedactionCount,
       secret_redaction_count_by_kind: byKind,
       approvals_by_decision: byDecision,
+      synthetic_retired: syntheticRetired,
       approval_total: approvalTotal,
       high_risk_op_count: highRiskOpCount,
       auto_allowed_count: autoAllowedCount,

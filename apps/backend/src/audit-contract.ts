@@ -20,11 +20,35 @@
  *    backend は再 redaction しない (sidecar choke を唯一の権威として維持する)。
  */
 
-import { isKnownRedactionKind, type RedactionKind } from "@actradeck/event-model";
+import {
+  APPROVAL_DECISIONS,
+  type ApprovalDecision,
+  isKnownRedactionKind,
+  type RedactionKind,
+  ResolutionOrigin,
+} from "@actradeck/event-model";
 
-/** 承認 decision の closed-enum (event-model ApprovalDecision と同値・監査表示用に複製)。 */
-export const AUDIT_DECISIONS = ["allow", "allow_for_session", "deny", "cancel"] as const;
-export type AuditDecision = (typeof AUDIT_DECISIONS)[number];
+// TDA-R4-9 (Phase 4 R4): ResolutionOrigin は値 import が型も供給する (二重 import を廃止)。
+type ResolutionOriginT = ResolutionOrigin;
+
+/**
+ * TDA-1 (Phase 4 監査 R2): resolved payload の resolution_origin を監査層へ投影する closed gate。
+ * 未知値 / 欠落は undefined (ingress parseEvent は looseObject 素通しゆえ、監査 read 層で
+ * closed-enum に落とすのが本 gate の役割)。
+ */
+export function asResolutionOrigin(raw: string | null | undefined): ResolutionOriginT | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const parsed = ResolutionOrigin.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * 承認 decision の closed-enum。TDA-R4-3 (Phase 4 R4): 手書き複製を廃し event-model の正準
+ * `APPROVAL_DECISIONS` (ApprovalDecision.options) を消費する — decision 追加時に監査集計が
+ * 黙って落とし signed manifest が誤った台帳を attest する drift の構造遮断。
+ */
+export const AUDIT_DECISIONS: readonly ApprovalDecision[] = APPROVAL_DECISIONS;
+export type AuditDecision = ApprovalDecision;
 
 /** decision 別件数 (全 decision キーを 0 埋めで持つ・集計の決定論化)。 */
 export type AuditDecisionTally = Record<AuditDecision, number>;
@@ -49,15 +73,41 @@ export interface AuditApprovalEntry {
   readonly path: string | undefined;
   /** 解決済みの decision。requested のみで未解決なら undefined。 */
   readonly decision: AuditDecision | undefined;
+  /**
+   * TDA-1 (Phase 4 R2): 解決の出所 (closed enum・未知/欠落は undefined)。`relay_lost` は
+   * backend 合成の retire (誰も決定していない) であり、operator の hard gate と区別して
+   * 表示・集計する。実装規則の正直な開示 (SEC-R4-7): by_decision からの除外は
+   * **origin=relay_lost の単一値除外**のみ — child_exit/shutdown の deny も agent へは未配信
+   * (not_sent) だが「安全側 deny が発動した」事実として by_decision.deny (→hard_gate) に
+   * 計上される (delivery_status の監査面への投影は追跡 task・現状未到達)。
+   */
+  readonly resolution_origin: ResolutionOriginT | undefined;
   readonly auto_allowed: boolean | undefined;
 }
 
 export interface AuditApprovalSummary {
   /** 承認要求 (tool.permission.requested) の件数。 */
   readonly total: number;
-  /** decision 別の解決件数。 */
+  /**
+   * decision 別の解決件数。TDA-1 (Phase 4 R2): backend 合成の relay_lost retire は**含めない**
+   * (operator の決定でも agent へ届いた deny でもないため hard/soft gate へ計上しない)。
+   */
   readonly by_decision: AuditDecisionTally;
-  /** 要求されたが decision が記録されていない件数 (= total - Σby_decision, clamp ≥0)。 */
+  /**
+   * TDA-1 (Phase 4 R2): backend 合成 (resolution_origin=relay_lost) で retire された件数。
+   * 「daemon 再起動等で中継が失われ、operator が決定できないまま非 actionable 化された」観測で
+   * あり、gate 実施と偽らないための別立て集計。
+   *
+   * 意味論の正直な開示 (TDA-R2-5/SEC-R2-6 R3):
+   *  - 集計単位は **resolved イベント数** (by_decision と同じ)。同一 request_id に合成 cancel と
+   *    実 resolved が両方残る既知エッジ (ADR 0014 開示) では両方が各々の枠に 1 ずつ数えられ、
+   *    pending がその分過少 (clamp 0) になりうる — request 単位 dedup は entries 側のみ。
+   *  - 判定は producer 申告の resolution_origin による。「backend が合成した」ことのサーバ権威
+   *    marker は無く、INGEST_TOKEN 境界の内側では申告ベース (relay_lost を申告した resolved の
+   *    件数) — 境界内で任意イベントを書ける前提は従来と同じで新たな権限昇格ではない。
+   */
+  readonly synthetic_retired: number;
+  /** 要求されたが decision が記録されていない件数 (= total - Σby_decision - synthetic_retired, clamp ≥0)。 */
   readonly pending: number;
 }
 
@@ -96,6 +146,8 @@ export interface AuditRangeTotals {
   readonly secret_redaction_count: number;
   readonly secret_redaction_count_by_kind: Record<string, number>;
   readonly approvals_by_decision: AuditDecisionTally;
+  /** TDA-1 (Phase 4 R2): relay_lost 合成 retire の range 合計 (by_decision 非含・別立て)。 */
+  readonly synthetic_retired: number;
   readonly approval_total: number;
   readonly high_risk_op_count: number;
   /** 無プロンプト自動許可 (auto_allowed=true) の range 合計。high_risk_op_count と対称 (QA-1)。 */
@@ -246,6 +298,7 @@ export function auditReportToCsv(report: AuditRangeReport): string {
     "allow_for_session",
     "deny",
     "cancel",
+    "synthetic_retired",
     "approvals_pending",
     "high_risk_op_count",
     "auto_allowed_count",
@@ -271,6 +324,7 @@ export function auditReportToCsv(report: AuditRangeReport): string {
         csvCell(s.approvals.by_decision.allow_for_session),
         csvCell(s.approvals.by_decision.deny),
         csvCell(s.approvals.by_decision.cancel),
+        csvCell(s.approvals.synthetic_retired),
         csvCell(s.approvals.pending),
         csvCell(s.high_risk_op_count),
         csvCell(s.auto_allowed_count),

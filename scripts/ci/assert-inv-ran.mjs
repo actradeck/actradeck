@@ -56,7 +56,9 @@ export const SUITES = {
       "INV-LINEAGE-DTO|INV-AUDIT|INV-CONTRACT-GOLDEN|INV-DEMO-STATE-REAP|INV-DETAIL-PULL|" +
       "INV-INBOX|INV-INGRESS-REDACTION|INV-PROJECT-SCOPE|Realtime /realtime/ws|" +
       "INV-REDACTION-READLAYER-SYMMETRY|Replay history API|INV-SAFETY-DEMO-BACKEND-E2E|" +
-      "INV-WALL|INV-WORKITEMS-WIRING",
+      "INV-WALL|INV-WORKITEMS-WIRING|" +
+      // ADR 0014 Phase 4 (decision 019fd705): approval restart reconciliation の受入#6/#7。
+      "INV-APPROVAL-RECONCILE",
   },
   "sidecar-egress": { label: "sidecar egress e2e (INV-EGRESS-E2E)", pattern: "INV-EGRESS-E2E" },
 };

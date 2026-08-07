@@ -12,16 +12,32 @@ import { EventEmitter } from "node:events";
 
 import { WebSocket } from "ws";
 
-import type { AgentVisibilityWire, PolicyCategory } from "@actradeck/event-model";
+import type { AgentVisibilityWire, ApprovalDecision, PolicyCategory } from "@actradeck/event-model";
+import { buildApprovalReconcileHelloFields } from "@actradeck/event-model";
 import { tokenEquals } from "@actradeck/redaction";
 
 import type { EventStore } from "./store.js";
 
+/**
+ * ApprovalBridge → pendingApprovalIdsProvider の正準配線 (QA-R2-4 R3・単一出所)。
+ *
+ * bridge 未生成 (コンストラクタ内の生成順序窓 / teardown 中) は **undefined** を返し hello から
+ * field を省略させる (backend は reconcile しない = fail-safe)。ここで `?? []` に倒すことは
+ * **禁止**: 空配列は「pending ゼロ宣言」= 当該 daemon の全 DB pending を stale とみなす最も
+ * 破壊的な値で、TDA-8 が指摘した fail-unsafe 方向 (両 daemon の手書き配線に `?? []` が居た)。
+ * daemon はこの helper を経由して配線し、意味論は単体テストが pin する。
+ */
+export function pendingIdsFromBridge(
+  getBridge: () => { pendingRequestIds(): string[] } | undefined,
+): () => readonly string[] | undefined {
+  return () => getBridge()?.pendingRequestIds();
+}
+
 export type ApprovalDecisionMsg = {
   readonly type: "approval";
   readonly request_id: string;
-  /** 段階③: T1 ApprovalDecision の 4 値 (allow/allow_for_session/deny/cancel)。enum 検証は sidecar.ts。 */
-  readonly decision: "allow" | "allow_for_session" | "deny" | "cancel";
+  /** 段階③: T1 ApprovalDecision (正準型を直接消費・TDA-R5-1 で union ミラー廃止)。enum 検証は sidecar.ts。 */
+  readonly decision: ApprovalDecision;
   readonly reason?: string;
   /**
    * ADR 019ee0c0: allow_for_session に併せ true なら **再起動跨ぎ永続** allowlist へ登録する
@@ -299,6 +315,25 @@ export interface WsClientOptions {
    * (computeAgentVisibilityWire が throw を握る)。
    */
   readonly agentVisibilityProvider?: () => AgentVisibilityWire | undefined;
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705 D5): この daemon **プロセス**の runtime epoch (起動時に
+   * randomUUID で採番・プロセス寿命内不変)。hello の `runtime_epoch` に載せ、backend が「同一 daemon の
+   * 再接続」と「daemon の再起動」を診断区別できるようにする。credential でない (controlToken とは別)・
+   * NO-RAW (uuid のみ)。未指定なら field 省略 (旧 daemon 互換)。
+   */
+  readonly runtimeEpoch?: string;
+  /**
+   * ADR 0014 Phase 4 (D5): 送信時点で **まだ生きている** 承認 pending の request_id 群を返す provider
+   * (ApprovalBridge.pendingRequestIds を daemon が配線)。hello の `active_pending_request_ids` に載せ、
+   * backend の再起動跨ぎ reconciliation が「宣言に無い DB stale pending」を合成 cancel で非 actionable 化
+   * する (受入#7)。**空配列も意味を持つ** (pending ゼロの宣言) ため、provider があれば常に field を載せる。
+   * 未指定 (observe-only codex-rollout daemon / 旧 daemon)、または provider が **undefined を返す**
+   * (bridge 未生成・teardown 中・TDA-8: `?? []` の空宣言は「全 pending stale」の最も破壊的な値ゆえ禁止)
+   * は field 省略 = backend は reconcile しない (安全側・後方互換)。agentVisibilityProvider と同じ
+   * 送信直前解決パターン (buildHelloFrame 単一出所で connect/reannounce 一様・TDA-1: 片方欠落だと
+   * reannounce で宣言が落ち偽 stale 化する)。
+   */
+  readonly pendingApprovalIdsProvider?: () => readonly string[] | undefined;
   /** 再接続バックオフ初期値 (ms)。 */
   readonly reconnectBaseMs?: number;
   readonly reconnectMaxMs?: number;
@@ -333,6 +368,8 @@ export class WsClient extends EventEmitter {
   private readonly policyCapable: boolean;
   private readonly spawnCapable: boolean;
   private readonly agentVisibilityProvider: (() => AgentVisibilityWire | undefined) | undefined;
+  private readonly runtimeEpoch: string | undefined;
+  private readonly pendingApprovalIdsProvider: (() => readonly string[] | undefined) | undefined;
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
   private reconnectAttempts = 0;
@@ -351,6 +388,8 @@ export class WsClient extends EventEmitter {
     this.policyCapable = opts.policyCapable ?? false;
     this.spawnCapable = opts.spawnCapable ?? false;
     this.agentVisibilityProvider = opts.agentVisibilityProvider;
+    this.runtimeEpoch = opts.runtimeEpoch;
+    this.pendingApprovalIdsProvider = opts.pendingApprovalIdsProvider;
     this.reconnectBaseMs = opts.reconnectBaseMs ?? 500;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 10_000;
   }
@@ -561,6 +600,10 @@ export class WsClient extends EventEmitter {
     // ADR 019f1972 §2b: 送信直前に毎回 visibility を解決 (provider 未注入 / undefined なら field 省略)。
     // provider が fs I/O を担い (fail-safe に undefined)、buildHelloFrame は純粋なまま。
     const agentVisibility = this.agentVisibilityProvider?.();
+    // ADR 0014 Phase 4 (D5): 送信直前に生きている pending request_id 群を解決する (provider 未注入 /
+    // provider が undefined を返す (bridge 未生成・TDA-8) なら field 省略 = backend は reconcile しない)。
+    // **空配列は送る** (pending ゼロの宣言が stale 判定の根拠)。
+    const pendingIds = this.pendingApprovalIdsProvider?.();
     return JSON.stringify({
       type: "hello",
       control_token: this.controlToken,
@@ -576,6 +619,12 @@ export class WsClient extends EventEmitter {
       // ADR 019f1972 §2b: agent 観測可能性 (NO-RAW boolean 4 個)。policy_capable と同じ conditional field
       // (値があるときだけ載せる)。connect/reannounce 両経路を本 builder が単一出所として通る。
       ...(agentVisibility !== undefined ? { agent_visibility: agentVisibility } : {}),
+      // ADR 0014 Phase 4 (D5): daemon プロセスの runtime epoch (uuid・診断用) と、送信時点で生きている
+      // 承認 pending の宣言 (backend 再起動跨ぎ reconciliation の根拠)。connect/reannounce 両経路を本
+      // builder が単一出所として通る (TDA-1: 片方欠落だと reannounce で宣言が落ち偽 stale 化する)。
+      // field 名・cap は event-model の正準実装と共有 (TDA-2: 手書きミラー禁止)。cap 超過は切り詰め
+      // でなく field 省略 (TDA-9: 切り詰めは偽 stale を作る・省略は「reconcile しない」= fail-safe)。
+      ...buildApprovalReconcileHelloFields(this.runtimeEpoch, pendingIds),
     });
   }
 

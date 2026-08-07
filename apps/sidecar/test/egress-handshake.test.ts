@@ -19,9 +19,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket as WsServerSocket, type RawData } from "ws";
 import type { IncomingMessage } from "node:http";
 
+import { MAX_ACTIVE_PENDING_IDS } from "@actradeck/event-model";
+
 import { buildEvent } from "../src/event-factory.js";
 import { EventStore } from "../src/store.js";
-import { WsClient } from "../src/ws-client.js";
+import { pendingIdsFromBridge, WsClient } from "../src/ws-client.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -389,5 +391,154 @@ describe("INV egress: Bearer auth + hello handshake (real ws server)", () => {
     }[];
     expect(helloFrames.length).toBeGreaterThanOrEqual(2);
     expect(helloFrames[helloFrames.length - 1]?.control_token).toBe(CTL);
+  });
+});
+
+/**
+ * ADR 0014 Phase 4 (decision 019fd705 D5): hello の runtime_epoch / active_pending_request_ids。
+ *
+ * 不変条件:
+ *  (P4-1) runtimeEpoch / pendingApprovalIdsProvider 設定時、hello に runtime_epoch と
+ *         active_pending_request_ids が載る。**空配列も載る** (pending ゼロの宣言が stale 判定の根拠)。
+ *  (P4-2) 未設定 (旧 daemon / observe-only codex-rollout) では両 field を載せない (後方互換 =
+ *         backend は reconcile しない)。
+ *  (P4-3) reannounce も同一 builder を通り、provider を **送信ごとに再評価** した最新 pending 集合を
+ *         載せる (TDA-1: 片方欠落だと reannounce で宣言が落ち偽 stale 化する H 回帰と同型)。
+ */
+describe("ADR 0014 Phase 4: hello runtime_epoch + active_pending_request_ids", () => {
+  it("(P4-1) hello carries runtime_epoch and active_pending_request_ids (empty array included)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4",
+      sessionIds: ["s1"],
+      runtimeEpoch: "0199f0a1-2b3c-7d4e-8f01-234567890001",
+      pendingApprovalIdsProvider: () => [],
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+
+    const hello = cap.frames[0] as {
+      type?: string;
+      runtime_epoch?: unknown;
+      active_pending_request_ids?: unknown;
+    };
+    expect(hello.type).toBe("hello");
+    expect(hello.runtime_epoch).toBe("0199f0a1-2b3c-7d4e-8f01-234567890001");
+    // 空配列でも field を載せる (「pending ゼロ」の宣言は省略と意味が異なる)。
+    expect(hello.active_pending_request_ids).toEqual([]);
+  });
+
+  it("(P4-2) hello omits both fields when not configured (backward compat / observe-only daemon)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4-omit",
+      sessionIds: ["s1"],
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+
+    const hello = cap.frames[0] as Record<string, unknown>;
+    expect(hello.type).toBe("hello");
+    expect("runtime_epoch" in hello).toBe(false);
+    expect("active_pending_request_ids" in hello).toBe(false);
+  });
+
+  it("(P4-3) reannounce re-sends hello with per-send re-evaluated pending ids (single-source builder)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    let pending: string[] = ["sess:apr-1"];
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4-re",
+      sessionIds: ["s1"],
+      runtimeEpoch: "0199f0a1-2b3c-7d4e-8f01-234567890002",
+      pendingApprovalIdsProvider: () => pending,
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+    expect(
+      (cap.frames[0] as { active_pending_request_ids?: unknown }).active_pending_request_ids,
+    ).toEqual(["sess:apr-1"]);
+
+    // pending が解決されて空になった状況を模して reannounce → 最新 (空) 集合 + epoch 維持。
+    pending = [];
+    client.reannounce();
+    for (
+      let i = 0;
+      i < 100 && cap.frames.filter((f) => (f as { type?: string }).type === "hello").length < 2;
+      i++
+    )
+      await sleep(10);
+    const hellos = cap.frames.filter((f) => (f as { type?: string }).type === "hello") as {
+      runtime_epoch?: unknown;
+      active_pending_request_ids?: unknown;
+    }[];
+    const last = hellos[hellos.length - 1]!;
+    expect(last.runtime_epoch).toBe("0199f0a1-2b3c-7d4e-8f01-234567890002"); // epoch はプロセス寿命内不変で毎回載る。
+    expect(last.active_pending_request_ids).toEqual([]); // 送信ごとに provider を再評価。
+  });
+
+  it("(P4-4) provider undefined (bridge 未生成) では field 省略 — 空宣言へ倒さない (TDA-8 R2)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4-undef",
+      sessionIds: ["s1"],
+      // 旧実装の `?? []` は「pending ゼロ宣言」= 全 pending stale の最も破壊的な値だった。
+      // undefined は「宣言不能」= field 省略 = backend は reconcile しない (fail-safe)。
+      pendingApprovalIdsProvider: () => undefined,
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+    const hello = cap.frames[0] as Record<string, unknown>;
+    expect(hello.type).toBe("hello");
+    expect("active_pending_request_ids" in hello).toBe(false);
+  });
+
+  it("(P4-6) pendingIdsFromBridge (daemon 正準配線): bridge 未生成は undefined — [] へ倒さない (QA-R2-4 R3)", () => {
+    // 両 daemon (sidecar/attach-daemon) はこの helper を経由して provider を配線する。
+    // `?? []` (空宣言 = 全 pending stale) への変異はここが RED にする。
+    expect(pendingIdsFromBridge(() => undefined)()).toBeUndefined();
+    const bridge = { pendingRequestIds: () => ["a", "b"] };
+    expect(pendingIdsFromBridge(() => bridge)()).toEqual(["a", "b"]);
+  });
+
+  it("(P4-5) cap 超過は切り詰めでなく field 省略 (TDA-9 R2: 偽 stale を作らない)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    const over = Array.from({ length: MAX_ACTIVE_PENDING_IDS + 1 }, (_, i) => `s1:apr-${i}`);
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-p4-cap",
+      sessionIds: ["s1"],
+      pendingApprovalIdsProvider: () => over,
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+    const hello = cap.frames[0] as Record<string, unknown>;
+    expect(hello.type).toBe("hello");
+    // 切り詰めて送ると「載らなかった生存 pending」が backend で偽 stale になる。省略なら
+    // 受信側 (parseActivePendingRequestIds) の欠落扱いと同じ「reconcile しない」= fail-safe。
+    expect("active_pending_request_ids" in hello).toBe(false);
   });
 });

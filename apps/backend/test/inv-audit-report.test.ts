@@ -51,6 +51,7 @@ function sampleSummary(overrides: Partial<AuditSessionSummary> = {}): AuditSessi
     approvals: {
       total: 4,
       by_decision: { allow: 2, allow_for_session: 1, deny: 1, cancel: 0 },
+      synthetic_retired: 0,
       pending: 0,
     },
     high_risk_op_count: 1,
@@ -107,6 +108,7 @@ function rangeReport(sessions: readonly AuditSessionSummary[]): AuditRangeReport
       secret_redaction_count: 3,
       secret_redaction_count_by_kind: { "github-token": 2, "aws-access-key-id": 1 },
       approvals_by_decision: { allow: 2, allow_for_session: 1, deny: 1, cancel: 0 },
+      synthetic_retired: 0,
       approval_total: 4,
       high_risk_op_count: 1,
       auto_allowed_count: 2,
@@ -338,7 +340,7 @@ describe("TDA-1: range formatter cross-format 列 parity (ドリフト防止)", 
   // 増減させると監査成果物が不一致になるため、列数の一致を構造的に固定する (decision 019f235a)。
   const cellCount = (mdRow: string) => mdRow.split("|").filter((c) => c.trim() !== "").length;
 
-  it("CSV / HTML / Markdown の per-session 列数が一致し header==row (18 列)", () => {
+  it("CSV / HTML / Markdown の per-session 列数が一致し header==row (20 列)", () => {
     const report = rangeReport([sampleSummary(), sampleSummary({ session_id: "sess_b" })]);
     // CSV: header 行 / data 行のセル数 (sampleSummary はカンマ非含ゆえ split(',') が正確)。
     const csvLines = auditReportToCsv(report).split("\r\n");
@@ -356,8 +358,8 @@ describe("TDA-1: range formatter cross-format 列 parity (ドリフト防止)", 
     const mdHeaderCols = cellCount(mdLines[h]!);
     const mdRowCols = cellCount(mdLines[h + 2]!); // header(+0), separator(+1), data(+2)
 
-    expect(csvHeaderCols).toBe(19); // + auto_allowed_count (high_risk_op_count と対称・QA-1)
-    // 6 計測 (3 formatter × header/row) がすべて 19 で一致 (1 formatter に列追加すると Set>1 で赤)。
+    expect(csvHeaderCols).toBe(20); // + synthetic_retired (SEC-R2-1 R3・relay_lost retire の台帳列)
+    // 6 計測 (3 formatter × header/row) がすべて 20 で一致 (1 formatter に列追加すると Set>1 で赤)。
     const counts = new Set([
       csvHeaderCols,
       csvRowCols,
@@ -366,7 +368,7 @@ describe("TDA-1: range formatter cross-format 列 parity (ドリフト防止)", 
       mdHeaderCols,
       mdRowCols,
     ]);
-    expect(counts).toEqual(new Set([19]));
+    expect(counts).toEqual(new Set([20]));
   });
 
   it("auto_allowed_count が range totals (HTML/MD) と CSV per-session に surface する (high_risk_op_count と対称・QA-1)", () => {
@@ -407,5 +409,36 @@ describe("TDA-1: range formatter cross-format 列 parity (ドリフト防止)", 
       //   この negative assert が捕捉する (canonical `;` を残す他 cell が toContain を満たす masking を塞ぐ)。
       expect(out).not.toContain("github-token:2; aws-access-key-id:1");
     }
+  });
+});
+
+describe("SEC-R2-1/QA-R2-2 (R3): synthetic_retired の export 面追随 (HTML/MD 台帳保存則)", () => {
+  const withRetired = sampleSummary({
+    approvals: {
+      total: 5,
+      by_decision: { allow: 1, allow_for_session: 1, deny: 1, cancel: 0 },
+      synthetic_retired: 1,
+      pending: 1,
+    },
+  });
+
+  it("per-session HTML/MD の承認表に synthetic_retired 行が出る", () => {
+    const html = sessionReportToHtml(sessionReport({ summary: withRetired }));
+    expect(html).toContain("synthetic_retired");
+    const md = sessionReportToMarkdown(sessionReport({ summary: withRetired }));
+    expect(md).toContain("| synthetic_retired (relay_lost) | 1 |");
+  });
+
+  it("range HTML/MD の totals と session 表に synthetic_retired が出る (欠けの無説明化を防ぐ)", () => {
+    const r = {
+      ...rangeReport([withRetired]),
+      totals: { ...rangeReport([withRetired]).totals, synthetic_retired: 1 },
+    };
+    const html = auditReportToHtml(r);
+    expect(html).toContain("synthetic_retired");
+    expect(html).toContain("<th>retired</th>");
+    const md = auditReportToMarkdown(r);
+    expect(md).toContain("| synthetic_retired | 1 |");
+    expect(md).toContain("| retired |");
   });
 });

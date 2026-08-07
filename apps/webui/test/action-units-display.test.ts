@@ -11,6 +11,7 @@ import {
   actionResult,
   actionVerb,
   commandOutcomeBadge,
+  decisionLabel,
   formatClock,
   formatElapsed,
   isUnresolvedAttention,
@@ -186,5 +187,33 @@ describe("フォーマッタ (決定性)", () => {
     expect(formatClock("2026-06-12T01:02:03.000Z")).toBe("01:02:03");
     // non-ISO は素通し (壊さない)。
     expect(formatClock("weird")).toBe("weird");
+  });
+});
+
+/**
+ * QA-R3-4: decisionLabel の enum 網羅。cancel / allow_for_session が生 enum 文字列のまま
+ * 出る取り残し (TDA-R2-2 で修正) の回帰を pin する。
+ */
+describe("decisionLabel (QA-R3-4)", () => {
+  it("cancel / allow_for_session を両 locale でローカライズ (生 enum 露出で RED)", () => {
+    expect(decisionLabel("cancel", "ja")).toBe("取消");
+    expect(decisionLabel("cancel", "en")).toBe("cancelled");
+    expect(decisionLabel("allow_for_session", "ja")).toBe("セッション許可");
+    expect(decisionLabel("allow_for_session", "en")).toBe("allowed for session");
+  });
+
+  it("既知 decision (allow/deny) も引き続きローカライズ・未知値は素通し (安全側)", () => {
+    expect(decisionLabel("allow", "en")).not.toBe("allow");
+    expect(decisionLabel("deny", "en")).not.toBe("deny");
+    expect(decisionLabel("mystery", "ja")).toBe("mystery");
+  });
+
+  it("prototype チェーン member も素通し (SEC-R6-3: 素 index access は undefined を返し表示が消えた)", () => {
+    // Record lookup が Object.prototype へ抜けると `"constructor"` 等で key に関数が入り
+    // t() が undefined を返す (戻り型 string の嘘)。hasOwn ガードで寛容表示契約を全入力へ拡張。
+    for (const v of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      expect(decisionLabel(v, "ja")).toBe(v);
+      expect(decisionLabel(v, "en")).toBe(v);
+    }
   });
 });

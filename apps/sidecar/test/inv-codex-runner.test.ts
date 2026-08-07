@@ -478,11 +478,15 @@ describe("startManagedCodex: SESSION-ID + REDACTION-TRANSPARENCY", () => {
     // TDA-1 (=QA-1): 実 builder (codex-runner.ts ~:286) の allow→state 写像を wired path で固定する。
     //   mutation: allow-state を別の valid state (例 running.model_wait) に変える → ここが赤。
     expect(ev.state).toBe("running.tool_preparing");
-    // NO-RAW: resolved payload は 3 フィールドのみ (raw command/cwd 非再掲)。
+    // NO-RAW: resolved payload は closed field のみ (raw command/cwd 非再掲)。
+    // ADR 0014 Phase 4 (decision 019fd705): resolution_origin/delivery_status が加わった
+    // (いずれも closed enum・operator 決定は origin=operator + 実送出成功で delivery=sent)。
     expect(ev.payload).toEqual({
       kind: "tool.permission.resolved",
       request_id: requestId,
       decision: "allow",
+      resolution_origin: "operator",
+      delivery_status: "sent",
     });
     // 実 projection (provider 非依存 foldPendingApprovals) が pending を clear。
     expect(projectStore(rig).pending_approvals).toEqual([]);

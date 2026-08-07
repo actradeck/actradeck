@@ -13,22 +13,26 @@
 import { describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 
+import { APPROVAL_DECISIONS } from "@actradeck/event-model";
+
 import {
   buildAuditManifest,
   verifyAuditManifest,
   canonicalizeEventFields,
   fingerprintOfPublicKey,
   normalizeEventForManifest,
+  normalizeSummaryForManifest,
   resolveAuditSignerFromEnv,
   decodeManifestBase64,
   encodeManifestBase64,
   AUDIT_MANIFEST_VERSION,
   AUDIT_MANIFEST_MARKER,
   type AuditManifest,
+  type DecodedAuditManifest,
 } from "../src/audit-integrity.js";
 import { sessionReportToHtml, sessionReportToMarkdown } from "../src/audit-report.js";
 import type { AuditSessionReport, AuditSessionReportDiff } from "../src/audit-report.js";
-import { emptyDecisionTally } from "../src/audit-contract.js";
+import { AUDIT_DECISIONS, emptyDecisionTally } from "../src/audit-contract.js";
 import type { AuditSessionSummary } from "../src/audit-contract.js";
 import type { ReplayEventDTO } from "../src/replay-contract.js";
 
@@ -85,7 +89,12 @@ function sampleSummary(): AuditSessionSummary {
     secret_detected: true,
     secret_redaction_count: 2,
     secret_redaction_count_by_kind: { "aws-access-key-id": 1, "github-token": 1 },
-    approvals: { total: 1, by_decision: { ...emptyDecisionTally(), deny: 1 }, pending: 0 },
+    approvals: {
+      total: 1,
+      by_decision: { ...emptyDecisionTally(), deny: 1 },
+      synthetic_retired: 0,
+      pending: 0,
+    },
     high_risk_op_count: 1,
     auto_allowed_count: 0,
   };
@@ -133,7 +142,7 @@ function ed25519Pem(): string {
 }
 const signer = resolveAuditSignerFromEnv({ ACTRADECK_AUDIT_SIGNING_KEY: ed25519Pem() });
 /** 署名済み manifest を pin 付きで verify (信頼を確立した受け手を模す)。 */
-function verifyPinned(m: AuditManifest) {
+function verifyPinned(m: AuditManifest | DecodedAuditManifest) {
   return verifyAuditManifest(m, { expectedFingerprint: m.signature!.public_key_fingerprint });
 }
 
@@ -450,5 +459,283 @@ describe("INV-AUDIT-INTEGRITY embed round-trip + NO-RAW", () => {
     const html = sessionReportToHtml(SAMPLE, spoofed);
     expect(html).toContain(realFp); // 実鍵由来 fp を表示
     expect(html).not.toContain("0".repeat(64)); // 詐称値は表示しない
+  });
+});
+
+/**
+ * QA-R3-1: summary 投影の値結合。fixture 値が mutant 定数 (0/"") と一致すると定数化 mutation が
+ * 生き残るため、**全 field を distinct な非ゼロ値**で与え、投影が各 field を実際に反映することを
+ * 一括で固定する (manifest は投影値へ暗号署名する — 台帳値と投影の fidelity がここの契約)。
+ */
+describe("INV-AUDIT-INTEGRITY summary 投影の値結合 (QA-R3-1)", () => {
+  it("normalizeSummaryForManifest は全 field を distinct 値で反映 (定数化 mutant で RED)", () => {
+    const s: AuditSessionSummary = {
+      session_id: "sid-vb",
+      provider: "p-vb",
+      source: "src-vb",
+      agent_id: "agent-vb",
+      repo: "repo-vb",
+      branch: "branch-vb",
+      cwd: "/cwd-vb",
+      capture_mode: "managed",
+      permission_mode: "pm-vb",
+      state: "state-vb",
+      started_at: "2026-01-01T00:00:01.000Z",
+      ended_at: "2026-01-01T00:00:02.000Z",
+      last_event_at: "2026-01-01T00:00:03.000Z",
+      secret_detected: true,
+      secret_redaction_count: 11,
+      secret_redaction_count_by_kind: { "github-token": 13, "aws-access-key-id": 12 },
+      approvals: {
+        total: 21,
+        by_decision: { allow: 3, allow_for_session: 4, deny: 5, cancel: 6 },
+        synthetic_retired: 7,
+        pending: 8,
+      },
+      high_risk_op_count: 9,
+      auto_allowed_count: 10,
+    };
+    expect(normalizeSummaryForManifest(s)).toEqual({
+      provider: "p-vb",
+      source: "src-vb",
+      agent_id: "agent-vb",
+      repo: "repo-vb",
+      branch: "branch-vb",
+      cwd: "/cwd-vb",
+      capture_mode: "managed",
+      permission_mode: "pm-vb",
+      state: "state-vb",
+      started_at: "2026-01-01T00:00:01.000Z",
+      ended_at: "2026-01-01T00:00:02.000Z",
+      last_event_at: "2026-01-01T00:00:03.000Z",
+      secret_detected: "true",
+      secret_redaction_count: "11",
+      redaction_by_kind: [
+        ["aws-access-key-id", "12"],
+        ["github-token", "13"],
+      ],
+      approval_total: "21",
+      approval_allow: "3",
+      approval_allow_for_session: "4",
+      approval_deny: "5",
+      approval_cancel: "6",
+      approval_synthetic_retired: "7",
+      approval_pending: "8",
+      high_risk_op_count: "9",
+    });
+  });
+});
+
+/**
+ * SEC-R3-1: manifest version の区別。v2→v3 bump は v0.6.0 出荷済み artifact の breaking であり、
+ * 旧版を「malformed (改竄と同じ見え方)」へ潰すと evidence-continuity と honest-signalling を欠く。
+ * 旧版は fail-closed のまま **distinct reason** で返す (ok=true になる経路は存在しない)。
+ */
+describe("INV-AUDIT-INTEGRITY manifest version 区別 (SEC-R3-1)", () => {
+  it("旧 version (v2) は malformed でなく unsupported-manifest-version (fail-closed 維持)", () => {
+    const v2 = {
+      ...buildAuditManifest(SAMPLE),
+      version: "actradeck-audit-manifest/v2",
+    } as unknown as AuditManifest;
+    const r = verifyAuditManifest(v2);
+    expect(r.ok).toBe(false);
+    expect(r.chain_valid).toBe(false);
+    expect(r.reason).toBe("unsupported-manifest-version");
+  });
+
+  it("旧 version は decodeManifestBase64 を透過し verify が同 reason を返す (route 400 に潰れない)", () => {
+    const v2 = {
+      ...buildAuditManifest(SAMPLE),
+      version: "actradeck-audit-manifest/v2",
+    } as unknown as AuditManifest;
+    const decoded = decodeManifestBase64(encodeManifestBase64(v2));
+    expect(decoded).toBeDefined();
+    expect(verifyAuditManifest(decoded!).reason).toBe("unsupported-manifest-version");
+  });
+
+  it("version 非 string / events 非配列は decode で undefined (manifest ですらない)", () => {
+    const noVersion = { ...buildAuditManifest(SAMPLE), version: 3 } as unknown as AuditManifest;
+    expect(decodeManifestBase64(encodeManifestBase64(noVersion))).toBeUndefined();
+    const noEvents = { ...buildAuditManifest(SAMPLE), events: "x" } as unknown as AuditManifest;
+    expect(decodeManifestBase64(encodeManifestBase64(noEvents))).toBeUndefined();
+  });
+
+  it("現行 version の verify は不変 (positive control)", () => {
+    const r = verifyAuditManifest(buildAuditManifest(SAMPLE));
+    expect(r.ok).toBe(true);
+    expect(r.reason).not.toBe("unsupported-manifest-version");
+  });
+});
+
+/**
+ * SEC-R4-1: 保証範囲の境界 pin。`summary.entries[]` (承認 1 件ごとの itemized 列・JSON/packet JSON
+ * tier のみ搬送・HTML/MD は非描画) は manifest の binding **対象外** — これは意図された範囲であり
+ * module doc の「正直な保証範囲」節が開示する。本テストはその境界を**意図として**固定する:
+ * entries を binding へ拡張する変更はここを赤くする = canonical form 変更 (version bump + full 監査)
+ * を明示的に踏ませる。総量 (tally) と review 重要項目 (packet flagged) は binding 済み。
+ */
+describe("INV-AUDIT-INTEGRITY 保証範囲の境界 (SEC-R4-1)", () => {
+  it("summary.entries だけ異なる 2 report の root は一致する (entries は非 binding・開示済み範囲)", () => {
+    const entry = {
+      event_id: "e-ent",
+      timestamp: "2026-07-03T12:00:05.000Z",
+      tool_name: "Bash",
+      risk_level: "high",
+      command: "rm -rf /tmp/actradeck-demo/build",
+      path: undefined,
+      decision: "deny" as const,
+      resolution_origin: undefined,
+      auto_allowed: undefined,
+    };
+    const withEntries: AuditSessionReport = {
+      ...SAMPLE,
+      summary: { ...sampleSummary(), entries: [entry] },
+    };
+    const withForgedEntries: AuditSessionReport = {
+      ...SAMPLE,
+      summary: {
+        ...sampleSummary(),
+        entries: [{ ...entry, command: "ls (forged)", decision: "allow" as const }],
+      },
+    };
+    const rootA = buildAuditManifest(withEntries).root;
+    const rootB = buildAuditManifest(withForgedEntries).root;
+    const rootNone = buildAuditManifest(SAMPLE).root;
+    expect(rootA).toBe(rootB);
+    expect(rootA).toBe(rootNone);
+  });
+
+  it("HTML/MD renderer は entries を描画しない (QA-R5-4: 非 binding 境界の補完・renderer 側 pin)", () => {
+    // SEC-R4-1 の root 一致 pin は「entries は binding 外」の片側のみ。module doc の
+    // 「manifest は HTML/MD が表示する監査事実の authoritative record」が成立するには
+    // **renderer が entries を表示しない**ことも必要 (表示するなら binding へ拡張 = version bump
+    // + full 監査を踏ませる)。entries だけ異なる 2 report の描画が byte 一致することで固定する。
+    const entry = {
+      event_id: "e-ent-r5",
+      timestamp: "2026-07-03T12:00:05.000Z",
+      tool_name: "Bash",
+      risk_level: "high",
+      command: "forged-cmd-QA-R5-4-marker",
+      path: undefined,
+      decision: "deny" as const,
+      resolution_origin: undefined,
+      auto_allowed: undefined,
+    };
+    const withEntries: AuditSessionReport = {
+      ...SAMPLE,
+      summary: { ...sampleSummary(), entries: [entry] },
+    };
+    for (const render of [sessionReportToHtml, sessionReportToMarkdown]) {
+      const withOut = render(SAMPLE);
+      const withIn = render(withEntries);
+      expect(withIn).toBe(withOut); // entries の有無で描画が変わらない = 非表示。
+      expect(withIn).not.toContain("forged-cmd-QA-R5-4-marker");
+    }
+  });
+});
+
+/**
+ * INV-APPROVAL-DECISION-VOCAB (SEC-R5-1 + QA-R5-1・R5 監査):
+ * decision 語彙の単一出所を**参照同一性 + manifest 投影**の両面で固定する。
+ *  - QA-R5-1: `AUDIT_DECISIONS = APPROVAL_DECISIONS` は代入の現形にのみ依存し回帰テストが
+ *    無かった (同値の手書き literal へ戻しても 720 緑 — mutation probe P3c で実証)。参照同一性
+ *    pin で手書きミラーの復活を RED にする。
+ *  - SEC-R5-1: 署名 manifest の正準形 (`normalizeSummaryForManifest`) は decision 別計数を
+ *    `approval_<d>` キーで手書き投影しており、正準語彙へ 5 番目の decision が入っても投影されず
+ *    その計数が Ed25519 binding の外に落ちる。本 pin は語彙拡張の日に RED になり、意図的な
+ *    manifest version bump (+ full 監査) を強制する。
+ */
+describe("INV-APPROVAL-DECISION-VOCAB: decision 語彙の単一出所 (SEC-R5-1/QA-R5-1)", () => {
+  it("AUDIT_DECISIONS は正準 APPROVAL_DECISIONS と同一参照 (手書きミラー復活で RED)", () => {
+    expect(AUDIT_DECISIONS).toBe(APPROVAL_DECISIONS);
+  });
+
+  it("manifest 正準形は全 decision を approval_<d> キーで投影する (語彙拡張で RED → version bump を強制)", () => {
+    const keys = Object.keys(normalizeSummaryForManifest(sampleSummary()));
+    for (const d of APPROVAL_DECISIONS) {
+      expect(keys, `approval_${d} が manifest 正準形に投影されていない`).toContain(`approval_${d}`);
+    }
+  });
+
+  it("正準配列は frozen (SEC-R6-4: ゲートの実行時依存になった正準値は不変)", () => {
+    expect(Object.isFrozen(APPROVAL_DECISIONS)).toBe(true);
+  });
+});
+
+/**
+ * INV-AUDIT-BINDING-COMPLETENESS (SEC-R6-1・R6 監査):
+ * 上の投影 pin は **normalize 段のみ**を固定する — interface + normalize へ field を足しても
+ * `canonicalizeSummary` の位置列挙に加え忘れれば「宣言したのに root に畳まれない」field が生まれ、
+ * その値は verify ok=true のまま偽造可能になる (SEC-R5-1 の本体 hazard が tripwire 緑のまま再現)。
+ * interface→normalize は object literal の欠落 property で compile 結合するが、
+ * interface→canonicalize は無結合 — この空隙を **root-sensitivity の全数 assert** で閉じる:
+ * manifest.summary の全 key について「その 1 field だけ改変すると verify が落ちる」を検査する
+ * (key 追加時に自動拡張し、canonicalize 漏れの当日に RED)。
+ */
+describe("INV-AUDIT-BINDING-COMPLETENESS: 全投影 field の root-sensitivity (SEC-R6-1/SEC-R8-1)", () => {
+  it("manifest.summary の全 field は改変で verify が落ちる (canonicalize 漏れで RED)", () => {
+    const base = buildAuditManifest(SAMPLE);
+    const entries = Object.entries(base.summary);
+    expect(entries.length).toBeGreaterThanOrEqual(23); // 非空虚ガード (現行 23 field)。
+    for (const [key, value] of entries) {
+      const mutated = Array.isArray(value)
+        ? [...value, ["zz-probe-kind", "1"]]
+        : `${String(value)}-probe`;
+      const tampered = {
+        ...base,
+        summary: { ...base.summary, [key]: mutated },
+      } as unknown as AuditManifest;
+      const r = verifyAuditManifest(tampered);
+      expect(r.ok, `summary.${key} の改変が検知されない (canonicalizeSummary から漏れている)`).toBe(
+        false,
+      );
+    }
+  });
+
+  it("manifest.events[i] の全 field (hash 除く) は改変で verify が落ちる (SEC-R8-1: 兄弟投影)", () => {
+    // SEC-R8-1: summary だけ閉じても events/diff の位置列挙 (canonicalizeEventFields/Diff) に
+    // 同一の「宣言したのに畳まれない」クラスが残る。events は command/decision を運ぶため
+    // summary より価値の高い偽造標的 — 同型の全数 assert で閉じる。hash は連鎖の出力値ゆえ除外
+    // (改変は連鎖照合そのもので検知される)。
+    const base = buildAuditManifest(SAMPLE);
+    const keys = Object.keys(base.events[0]!).filter((k) => k !== "hash");
+    expect(keys.length).toBeGreaterThanOrEqual(9); // 非空虚ガード (現行 9 field)。
+    for (const key of keys) {
+      const ev0 = base.events[0]! as unknown as Record<string, unknown>;
+      const tamperedEvents = [
+        { ...ev0, [key]: `${String(ev0[key])}-probe` },
+        ...base.events.slice(1),
+      ];
+      const tampered = { ...base, events: tamperedEvents } as unknown as AuditManifest;
+      const r = verifyAuditManifest(tampered);
+      expect(
+        r.ok,
+        `events[0].${key} の改変が検知されない (canonicalizeEventFields から漏れている)`,
+      ).toBe(false);
+    }
+  });
+
+  it("manifest.diff の全 field は改変で verify が落ちる (SEC-R8-1: 兄弟投影)", () => {
+    const withDiff = buildAuditManifest(
+      report([ev({ event_id: "e-bind-diff" })], {
+        available: true,
+        body: "@@ -1 +1 @@\n-a\n+b",
+        truncated: false,
+        secret_detected: false,
+        redaction_count: 0,
+      }),
+    );
+    const entries = Object.entries(withDiff.diff!);
+    expect(entries.length).toBeGreaterThanOrEqual(6); // 非空虚ガード (現行 6 field)。
+    for (const [key, value] of entries) {
+      const tampered = {
+        ...withDiff,
+        diff: { ...withDiff.diff!, [key]: `${String(value)}-probe` },
+      } as unknown as AuditManifest;
+      const r = verifyAuditManifest(tampered);
+      expect(r.ok, `diff.${key} の改変が検知されない (canonicalizeDiff から漏れている)`).toBe(
+        false,
+      );
+    }
   });
 });

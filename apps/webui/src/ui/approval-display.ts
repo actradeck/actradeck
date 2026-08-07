@@ -8,7 +8,7 @@
  * SEC: ここは PendingApproval (backend が redaction 済みで載せた DTO) の値をそのまま見せ方に
  * 落とすだけ。生 tool_input を独自取得しない・新規の秘匿情報を描かない (security.md)。
  */
-import { isTerminalStateValue } from "@actradeck/event-model";
+import { isTerminalStateValue, type ApprovalDecision } from "@actradeck/event-model";
 
 import { t, type Locale, type MessageKey } from "./i18n/messages";
 import { isKnownKind, redactionKindLabelKey } from "./redaction-display";
@@ -17,16 +17,15 @@ import type { ClientFrame, PendingApproval, ServerFrame } from "../realtime/cont
 
 /**
  * UI が送る承認判断 (ADR 019e9999 段階③: 4 値へ拡張)。
- * T1 正典は `@actradeck/event-model` の `ApprovalDecision`
- * (`["allow","allow_for_session","deny","cancel"]`)。UI はこれに **一方向追従** する
- * (逆ドリフト禁止)。
+ * T1 正典 `@actradeck/event-model` の `ApprovalDecision` を **直接 re-export** する
+ * (TDA-R5-1: 以前の手書き union「一方向追従」ミラーを廃止 — 正典拡張時に compile で追従する)。
  * - allow              … この 1 回のみ許可。
  * - allow_for_session  … 以降このセッションで **同一署名 (tool+risk+command/path) のみ** 自動許可。
  *                        sidecar が署名一致のみ honor する (過剰 allow しない)。
  * - deny               … この 1 回を拒否。
  * - cancel             … 取消 (sidecar は安全側で deny として honor する)。
  */
-export type ApprovalDecision = "allow" | "allow_for_session" | "deny" | "cancel";
+export type { ApprovalDecision };
 
 /** approve frame の ack を request_id 単位で保持するクライアント状態 1 件分。 */
 export interface AckState {

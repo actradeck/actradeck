@@ -74,6 +74,12 @@ export {
   RiskLevel,
   ApprovalDecision,
   ApprovalTrigger,
+  ResolutionOrigin,
+  RESOLUTION_ORIGINS,
+  SYNTHETIC_RETIRE_ORIGIN,
+  isSyntheticRetireOrigin,
+  APPROVAL_DECISIONS,
+  DeliveryStatus,
   SecretKind,
   PolicyCategory,
   DEFAULT_GATED_CATEGORIES,
@@ -113,6 +119,24 @@ export { normalizeScopePath, isPathWithinScope, sanitizeRepoLabel } from "./path
 // agent-visibility wire 射影 + 受信検証 + 集約 (T1 single source: sidecar 射影 / backend 検証+集約 / webui parse)
 export { parseAgentVisibilityWire, aggregateAgentReadiness } from "./agent-visibility-wire.js";
 export type { AgentVisibilityWire } from "./agent-visibility-wire.js";
+
+// 承認 request_id 採番の正準実装 (T1 single source: sidecar bridge / backend safety-demo が共有・Phase 4 R3)
+export {
+  APPROVAL_REQUEST_ID_RE,
+  mintApprovalRequestId,
+  deriveDemoApprovalRequestId,
+} from "./approval-request-id.js";
+
+// approval reconcile hello 宣言の wire 構築 + 受信検証 (T1 single source: sidecar 送信 / backend 検証・ADR 0014 Phase 4)
+export {
+  MAX_ACTIVE_PENDING_IDS,
+  MAX_REQUEST_ID_LEN,
+  ACTIVE_PENDING_FIELD,
+  RUNTIME_EPOCH_FIELD,
+  buildApprovalReconcileHelloFields,
+  parseActivePendingRequestIds,
+  parseRuntimeEpoch,
+} from "./approval-reconcile-wire.js";
 
 // audit-coverage 導出 (per-provider 最終受信・gap 候補) の T1 single source
 //   (backend SQL 射影 / route / webui parse が共有・ingested_at 権威 + 非稼働≠gap + NO-RAW・ADR 019f4cdb)

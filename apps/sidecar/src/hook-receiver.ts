@@ -21,6 +21,7 @@ import type { RunIdentity, SessionIdentity } from "./session-identity.js";
 import { HOOK_TOKEN_HEADER } from "./settings-injection.js";
 import type { EventSink } from "./sink.js";
 import type { ApprovalBridge } from "./approval-bridge.js";
+import { resolutionOriginSuffix } from "./approval-bridge.js";
 
 export interface HookReceiverOptions {
   readonly sink: EventSink;
@@ -319,21 +320,44 @@ export class HookReceiver {
     // reducer が pending_approvals から該当 request_id を除去できるようにする (ADR 019e9999)。
     // low-risk (defer) では emitRequest が呼ばれず undefined のまま (resolved も emit しない)。
     let capturedRequestId: string | undefined;
-    const decision = await this.approvalBridge.requestApproval(input, (requestId, reason) => {
-      capturedRequestId = requestId;
-      // 承認要求イベントを正規化して emit (UI が承認カードを出せる)。ADR 0014: lineage (canonical /
-      // provider_session_id / run 起点) を全 ingest に相乗りさせる (承認カードも同一 run へ属す)。
-      // 自動ガード (ADR 019ecc70 D4): guard 理由 (trigger / secret_kinds) を ingest へ渡し、
-      // normalize が tool.permission.requested payload に載せる。INV-AUTOGUARD-NO-RAW: kind 名のみ。
-      this.ingest(input, {
-        ...lineage,
-        approvalRequestId: requestId,
-        guardTrigger: reason.trigger,
-        ...(reason.secretKinds.length > 0 ? { guardSecretKinds: reason.secretKinds } : {}),
-        // ADR 019ee0c0: 永続化可能なときのみ UI へ persistable を伝える。
-        ...(reason.persistable ? { guardPersistable: true } : {}),
+    // ADR 0014 Phase 4 (decision 019fd705 D3): hook クライアント (CC プロセス) が応答未送信のまま
+    // 切断したら、当該 pending を **即** 安全側 deny へ解決する (origin="child_exit")。従来は 30s
+    // timeout まで宙吊りになり、その後「誰も受け取っていない deny」が emit されていた不正直を閉じる。
+    // 'close' は正常応答後にも発火するため writableEnded で「未応答のままの切断」のみを判定する。
+    // capturedRequestId 未確定 (defer / auto-allow / emitRequest 前) は no-op。cancelPending は
+    // pending 不在で no-op (冪等) ゆえ、timeout / UI 決定との race も二重解決しない。
+    const onClientGone = (): void => {
+      if (!res.writableEnded && capturedRequestId !== undefined) {
+        this.approvalBridge.cancelPending(
+          capturedRequestId,
+          "child_exit",
+          "hook client disconnected (safe default: deny)",
+        );
+      }
+    };
+    res.on("close", onClientGone);
+    let decision: Awaited<ReturnType<ApprovalBridge["requestApproval"]>>;
+    try {
+      decision = await this.approvalBridge.requestApproval(input, (requestId, reason) => {
+        capturedRequestId = requestId;
+        // 承認要求イベントを正規化して emit (UI が承認カードを出せる)。ADR 0014: lineage (canonical /
+        // provider_session_id / run 起点) を全 ingest に相乗りさせる (承認カードも同一 run へ属す)。
+        // 自動ガード (ADR 019ecc70 D4): guard 理由 (trigger / secret_kinds) を ingest へ渡し、
+        // normalize が tool.permission.requested payload に載せる。INV-AUTOGUARD-NO-RAW: kind 名のみ。
+        this.ingest(input, {
+          ...lineage,
+          approvalRequestId: requestId,
+          guardTrigger: reason.trigger,
+          ...(reason.secretKinds.length > 0 ? { guardSecretKinds: reason.secretKinds } : {}),
+          // ADR 019ee0c0: 永続化可能なときのみ UI へ persistable を伝える。
+          ...(reason.persistable ? { guardPersistable: true } : {}),
+        });
       });
-    });
+    } finally {
+      // 解決後 (throw 経路含む・SEC-7 R2) は切断検知を外す (pending は解決済みで cancelPending は
+      // no-op だが、listener を残さない)。
+      res.removeListener("close", onClientGone);
+    }
 
     // defer はゲート対象外 (low-risk)。承認イベントを出さず、通常 permission flow に委ねる。
     // ⚠️ force-allow しない (INV-APPROVAL): 空 JSON を返す。
@@ -387,8 +411,28 @@ export class HookReceiver {
       return;
     }
 
-    // ここに来るのは UI 承認 (allow/allow_for_session) / 拒否・タイムアウト (deny/cancel) のみ。
+    // ここに来るのは UI 承認 (allow/allow_for_session) / 拒否・タイムアウト・切断 (deny/cancel) のみ。
     const allowed = decision.behavior === "allow";
+
+    // hook 種別ごとの応答形式 (WebFetch code.claude.com/docs/en/hooks 2026-06)。
+    // ADR 0014 Phase 4 (decision 019fd705 D4): **応答を先に書いてから** resolved を emit する。
+    // delivery_status を応答書込の実結果から導出し「deny を送った」と偽らない (child_exit /
+    // 切断済みソケットへの書込失敗は not_sent として監査行に残る)。
+    const delivered =
+      input.hook_event_name === "PermissionRequest"
+        ? this.respondCaptured(res, 200, {
+            hookSpecificOutput: {
+              hookEventName: "PermissionRequest",
+              decision: { behavior: allowed ? "allow" : "deny" },
+            },
+          })
+        : this.respondCaptured(res, 200, {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: allowed ? "allow" : "deny",
+              permissionDecisionReason: decision.reason ?? "ActraDeck approval bridge",
+            },
+          });
 
     // 解決イベントを emit (waiting.approval の解消)。
     // event-factory (buildEvent) に統一: event_id 採番 / provider / source / timestamp /
@@ -402,33 +446,35 @@ export class HookReceiver {
         state: allowed ? "running.tool_preparing" : "running.model_wait",
         ...(this.captureMode !== undefined ? { capture_mode: this.captureMode } : {}),
         ...(input.cwd ? { cwd: input.cwd } : {}),
-        summary: `承認 ${allowed ? "許可" : "拒否"}`,
+        summary: `承認 ${allowed ? "許可" : "拒否"}${resolutionOriginSuffix(decision.origin)}`,
         payload: {
           kind: "tool.permission.resolved",
           ...(capturedRequestId !== undefined ? { request_id: capturedRequestId } : {}),
           // 段階③: UI が選んだ実 4 値 decision を載せる (allow_for_session/cancel を表示で区別)。
           // timeout/drain など decision 不在時は effective な allow/deny に倒す。
           decision: decision.decision ?? (allowed ? "allow" : "deny"),
+          // ADR 0014 Phase 4: 出所 + 配送結果 (closed enum のみ・NO-RAW)。origin は bridge の解決
+          // 経路が設定 (operator/timeout/shutdown/child_exit)。未設定 (想定外) は field 省略。
+          ...(decision.origin !== undefined ? { resolution_origin: decision.origin } : {}),
+          delivery_status: delivered ? "sent" : "not_sent",
         },
       }),
     );
+  }
 
-    // hook 種別ごとの応答形式 (WebFetch code.claude.com/docs/en/hooks 2026-06)。
-    if (input.hook_event_name === "PermissionRequest") {
-      this.respond(res, 200, {
-        hookSpecificOutput: {
-          hookEventName: "PermissionRequest",
-          decision: { behavior: allowed ? "allow" : "deny" },
-        },
-      });
-    } else {
-      this.respond(res, 200, {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: allowed ? "allow" : "deny",
-          permissionDecisionReason: decision.reason ?? "ActraDeck approval bridge",
-        },
-      });
+  /**
+   * ADR 0014 Phase 4 (D4): 承認応答を書き、書込がソケット層に受理されたかを返す。
+   * "sent" 意味論 = 切断済みでないソケットへ writeHead/end が同期成功した (相手プロセスが読んだ
+   * ことまでは主張しない)。クライアント切断済み (destroyed/writableEnded)・同期 throw は false
+   * (= delivery_status "not_sent")。通常 hook の respond() は従来どおり (成否を使わない)。
+   */
+  private respondCaptured(res: ServerResponse, status: number, body: unknown): boolean {
+    if (res.writableEnded || res.destroyed) return false;
+    try {
+      this.respond(res, status, body);
+      return !res.destroyed;
+    } catch {
+      return false;
     }
   }
 

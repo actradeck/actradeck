@@ -277,3 +277,57 @@ describe("INV-STALLED: observeFromEvents derives per-kind last-seen from event s
     expect(r.evidence.stdout).toBeUndefined(); // stdout は観測されていない
   });
 });
+
+describe("INV-STALLED (SEC-R2-2 R3): relay_lost 合成は「観測された活動」に数えない", () => {
+  const SID = "sess_stalled_synthetic";
+
+  it("stale session への合成 cancel (relay_lost) は event 鮮度を更新せず live 化しない", () => {
+    const events = [
+      // 実観測は 10 分前で全 stale。
+      makeEvent({
+        session_id: SID,
+        event_type: "command.output.delta",
+        timestamp: iso(NOW, -600_000),
+        payload: { kind: "command.output.delta", stream: "stdout", delta: "x" },
+      }),
+      // backend reconcile の合成 cancel (今)。daemon 再起動/消失時にこそ発火するため、
+      // これを活動に数えると backend 自身の書込みが「fresh event」根拠を製造してしまう。
+      makeEvent({
+        session_id: SID,
+        source: "external",
+        event_type: "tool.permission.resolved",
+        timestamp: iso(NOW, 0),
+        payload: {
+          kind: "tool.permission.resolved",
+          request_id: "s0123456789ab:apr-0123456789abcdef0123456789abcdef",
+          decision: "cancel",
+          resolution_origin: "relay_lost",
+          delivery_status: "not_sent",
+        },
+      }),
+    ];
+    const obs = observeFromEvents(events);
+    expect(obs.event?.atMs).toBe(NOW - 600_000); // 合成は event 鮮度に寄与しない。
+    const r = synthesizeLiveness(obs, { nowMs: NOW });
+    expect(r.state).not.toBe("live"); // 合成だけで live に反転しない (REAL DATA ONLY)。
+  });
+
+  it("実 operator resolved (relay_lost でない) は従来どおり活動として数える (過剰除外しない)", () => {
+    const events = [
+      makeEvent({
+        session_id: SID,
+        event_type: "tool.permission.resolved",
+        timestamp: iso(NOW, -1_000),
+        payload: {
+          kind: "tool.permission.resolved",
+          request_id: "s0123456789ab:apr-0123456789abcdef0123456789abcdef",
+          decision: "allow",
+          resolution_origin: "operator",
+          delivery_status: "sent",
+        },
+      }),
+    ];
+    const obs = observeFromEvents(events);
+    expect(obs.event?.atMs).toBe(NOW - 1_000);
+  });
+});

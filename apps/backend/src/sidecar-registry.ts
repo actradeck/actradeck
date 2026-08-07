@@ -28,7 +28,9 @@ import {
   type AgentVisibilityWire,
   aggregateAgentReadiness,
   asCodexSpawnErrorCode,
+  parseActivePendingRequestIds,
   parseAgentVisibilityWire,
+  parseRuntimeEpoch,
   type PolicyCategory,
   projectPolicyCategories,
 } from "@actradeck/event-model";
@@ -78,6 +80,13 @@ interface SidecarConn {
    * セッション出現で panel が消えること)。
    */
   agentVisibility?: AgentVisibilityWire;
+  /**
+   * ADR 0014 Phase 4 (decision 019fd705): sidecar daemon **プロセス**の runtime epoch (sidecar 起動時
+   * randomUUID・寿命内不変・hello で申告)。daemonId (per-connection churn) と異なり同一プロセスの
+   * 再接続で不変ゆえ「再接続 vs 再起動」を診断区別できる。credential でない・NO-RAW (uuid のみ)。
+   * 未申告 (旧 dist / observe-only daemon) は undefined。
+   */
+  runtimeEpoch?: string;
   /** この接続が所有する session_id 群 (hello + ingest 観測で学習)。 */
   readonly sessions: Set<string>;
 }
@@ -105,6 +114,14 @@ interface HelloFrame {
    * parseAgentVisibilityWire で検証射影する (wire を盲信しない・多層防御)。
    */
   agent_visibility?: unknown;
+  /** ADR 0014 Phase 4: sidecar プロセスの runtime epoch (uuid 申告・診断用)。unknown 受け。 */
+  runtime_epoch?: unknown;
+  /**
+   * ADR 0014 Phase 4: 送信時点で sidecar 側に **生きている** 承認 pending の request_id 宣言。
+   * 空配列も意味を持つ (pending ゼロの宣言)。field 欠落 = 旧 sidecar / observe-only daemon で
+   * reconcile 対象外 (安全側)。unknown 受け — handleHello が型/上限を検証する。
+   */
+  active_pending_request_ids?: unknown;
 }
 
 /** sidecar handshake か判定する (ingest event と区別)。 */
@@ -311,6 +328,41 @@ export const PRESENCE_GRACE_MS = 5000;
 /** presence(接続在席) membership 変化の通知。live=true で in、false で out(grace 満了後)。 */
 export type PresenceListener = (sessionId: string, live: boolean) => void;
 
+/**
+ * ADR 0014 Phase 4 (decision 019fd705 D6): hello の pending 宣言シグナル。
+ * sessionIds = この hello を送った接続が **現に所有する** session 群 (sessionOwner 一致のみ)。
+ * activeRequestIds = sidecar 側で生きている pending の宣言。宣言に無い DB pending は stale
+ * (sidecar が再起動して in-memory pending を失った等) であり、reconciler が合成 cancel
+ * (relay_lost/not_sent) で非 actionable 化する (受入#7)。宣言に在る pending は維持 (受入#6)。
+ */
+export interface ApprovalReconcileSignal {
+  readonly sessionIds: readonly string[];
+  readonly activeRequestIds: ReadonlySet<string>;
+  /**
+   * この hello を backend が受信した時刻 (epoch ms)。QA-1/TDA-5 (R2) watermark: 宣言は hello 構築
+   * 時点のスナップショットゆえ、これ以降 (直前の余裕幅込み) に requested された pending は
+   * 「宣言に載る機会が無かった」だけで stale ではない — reconciler が合成対象から除外する。
+   */
+  readonly receivedAt: number;
+  /** 申告された runtime epoch (診断用・reconcile 判定には使わない)。 */
+  readonly runtimeEpoch?: string;
+}
+
+/** ADR 0014 Phase 4: pending 宣言つき hello を受けたときの通知 (ingestion-server が reconciler を配線)。 */
+export type ApprovalReconcileListener = (signal: ApprovalReconcileSignal) => void;
+
+// 宣言の受理上限 (MAX_ACTIVE_PENDING_IDS / MAX_REQUEST_ID_LEN) と検証は event-model の
+// approval-reconcile-wire (正準実装) を送信側 (sidecar ws-client) と共有する (TDA-2 R2:
+// 手書きミラー禁止・field 改名の silent-off を構造遮断)。定数は event-model から直接 import
+// すること (TDA-R4-9: 消費者ゼロの再 export は置かない)。
+
+/**
+ * SEC-3 (R2): 1 signal が対象にできる session 数の上限。hello の session claim 自体は無制限
+ * (既存 presence 意味論) だが、reconcile の DB 読取り (`= ANY($1)`) を無制限 fan-in させない。
+ * 超過は reconcile スキップ (fail-safe: 消さない方向・正規 daemon の session 数はこの遥か下)。
+ */
+export const MAX_RECONCILE_SESSIONS = 1024;
+
 /** policy relay 操作種別 (get/set/unset/list/resolve)。 */
 export type PolicyRelayOp = "get" | "set" | "unset" | "list" | "resolve";
 
@@ -348,6 +400,8 @@ export class SidecarRegistry {
   private readonly graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** presence membership 変化リスナ (delta.list 発火源)。 */
   private readonly presenceListeners: PresenceListener[] = [];
+  /** ADR 0014 Phase 4: pending 宣言つき hello のリスナ (approval reconciler の駆動源)。 */
+  private readonly approvalReconcileListeners: ApprovalReconcileListener[] = [];
   /** grace 期間 (ms)。既定 PRESENCE_GRACE_MS。テスト/統合で短縮注入可能。 */
   private readonly graceMs: number;
   /**
@@ -459,7 +513,51 @@ export class SidecarRegistry {
         if (!next.has(sid)) this.releaseSession(conn, sid);
       }
     }
+    // ADR 0014 Phase 4 (decision 019fd705): runtime epoch (診断用) と pending 宣言を処理する。
+    // epoch は event-model 正準パーサで uuid shape のみ受理 (SEC-6 R2: 任意文字列を conn メタとして
+    // 保持しない・latent raw 面の遮断)。
+    const epoch = parseRuntimeEpoch(frame.runtime_epoch);
+    if (epoch !== undefined) conn.runtimeEpoch = epoch;
+    this.maybeEmitApprovalReconcile(conn, frame.active_pending_request_ids);
     return true;
+  }
+
+  /**
+   * ADR 0014 Phase 4 (D6): hello の `active_pending_request_ids` 宣言を検証し、reconcile シグナルを
+   * リスナ (ingestion-server が配線する ApprovalReconciler) へ通知する。
+   *
+   * fail-safe (消さない方向) の判定:
+   *  - field 欠落 (旧 sidecar / observe-only codex-rollout daemon) → シグナルなし (reconcile しない)。
+   *  - 非配列 / 要素に非 string / 上限超過 → malformed とみなしシグナルなし (検証は event-model の
+   *    正準パーサ parseActivePendingRequestIds・送信側と cap を共有・TDA-2 R2)。
+   *  - 対象 session は **この接続が現に所有する** もののみ (sessionOwner 一致)。後勝ち再接続で他接続へ
+   *    移った session の pending を、古い接続の宣言で消さない (multiplex 安全)。
+   *  - 所有 session 数が MAX_RECONCILE_SESSIONS 超 → スキップ (SEC-3 R2: DB 読取りの無制限 fan-in 防止)。
+   *  - 空配列は正当な「pending ゼロ」宣言 (当該 session 群の DB pending は全て stale = 受入#7 の根拠)。
+   */
+  private maybeEmitApprovalReconcile(conn: SidecarConn, declared: unknown): void {
+    const active = parseActivePendingRequestIds(declared);
+    if (active === undefined) return; // 欠落 / malformed → reconcile しない (fail-safe)
+    const sessionIds = [...conn.sessions].filter((sid) => this.sessionOwner.get(sid) === conn);
+    if (sessionIds.length === 0 || sessionIds.length > MAX_RECONCILE_SESSIONS) return;
+    const signal: ApprovalReconcileSignal = {
+      sessionIds,
+      activeRequestIds: active,
+      receivedAt: Date.now(),
+      ...(conn.runtimeEpoch !== undefined ? { runtimeEpoch: conn.runtimeEpoch } : {}),
+    };
+    for (const cb of this.approvalReconcileListeners) {
+      try {
+        cb(signal);
+      } catch {
+        // リスナ側の失敗は handshake 処理に波及させない (reconcile は best-effort・次 hello で再試行)。
+      }
+    }
+  }
+
+  /** ADR 0014 Phase 4: pending 宣言つき hello を購読する (ingestion-server が reconciler を配線)。 */
+  onApprovalReconcile(cb: ApprovalReconcileListener): void {
+    this.approvalReconcileListeners.push(cb);
   }
 
   /**
@@ -573,6 +671,7 @@ export class SidecarRegistry {
     for (const timer of this.graceTimers.values()) clearTimeout(timer);
     this.graceTimers.clear();
     this.presenceListeners.length = 0;
+    this.approvalReconcileListeners.length = 0;
     // 未解決の round-trip 4 面を安全側 reject し、タイマを解放する (応答は貯めていない)。
     // spawn のみ transient を付ける (呼び元 HTTP は 503)。
     this.pendingDiffs.rejectAll(() => ({ ok: false, error: "server shutting down" }));
@@ -602,8 +701,8 @@ export class SidecarRegistry {
    * 判定は fanOutPolicyMutation と同一 (link.open && controlToken)。**approve/interrupt 等の
    * session-semantic relay には使わない** (INV-REALTIME-RELAY-SCOPE は session-scoped 維持)。
    */
-  connectedDaemons(): { id: string; spawn_capable: boolean }[] {
-    const out: { id: string; spawn_capable: boolean }[] = [];
+  connectedDaemons(): { id: string; spawn_capable: boolean; runtime_epoch?: string }[] {
+    const out: { id: string; spawn_capable: boolean; runtime_epoch?: string }[] = [];
     for (const conn of this.conns.values()) {
       // open + controlToken (relay 認可) に加え policyCapable を要求する。policy.request を処理しない
       // observe-only daemon (codex-rollout) を除外し、UI が policy 非対応 daemon を addressing して
@@ -611,7 +710,14 @@ export class SidecarRegistry {
       if (conn.link.open && typeof conn.controlToken === "string" && conn.policyCapable) {
         // ADR 019f4206 A段: spawn_capable を併記し、cockpit の spawn 導線が spawn 対応 daemon のみを
         // 宛先候補にできるようにする (非対応 daemon への spawn addressing timeout を UI 側で防ぐ)。NO-RAW boolean。
-        out.push({ id: conn.daemonId, spawn_capable: conn.spawnCapable });
+        // TDA-R4-1 (Phase 4 R4): runtime_epoch (uuid gate 済・非 credential 診断メタ) を併記し
+        // 「同一 daemon の再起動」を operator が識別できるようにする — Phase 4 が hello に載せた
+        // 診断 field の唯一の consumer (dead protocol surface の解消)。
+        out.push({
+          id: conn.daemonId,
+          spawn_capable: conn.spawnCapable,
+          ...(conn.runtimeEpoch !== undefined ? { runtime_epoch: conn.runtimeEpoch } : {}),
+        });
       }
     }
     return out;
