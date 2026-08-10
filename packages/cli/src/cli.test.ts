@@ -31,7 +31,7 @@ describe("run — dispatch", () => {
     for (const argv of [[], ["help"], ["-h"], ["--help"]]) {
       const f = makeFakeDeps();
       expect(await run(f.deps, argv)).toBe(0);
-      expect(f.out.join("\n")).toMatch(/actradeck — bootstrap CLI/);
+      expect(f.out.join("\n")).toMatch(/put risky coding-agent actions/);
     }
   });
 
@@ -41,7 +41,11 @@ describe("run — dispatch", () => {
     expect(f.out).toEqual(["0.4.0"]);
   });
 
-  it("routes to up and doctor", async () => {
+  it("routes to demo, up, and doctor", async () => {
+    const f0 = makeFakeDeps();
+    expect(await run(f0.deps, ["demo"])).toBe(0);
+    expect(f0.out.join("\n")).toContain("SAFE SIMULATION");
+
     const f1 = makeFakeDeps();
     expect(await run(f1.deps, ["up"])).toBe(0);
     expect(f1.out.join("\n")).toContain("docker run --rm");
@@ -54,7 +58,7 @@ describe("run — dispatch", () => {
     const f = makeFakeDeps();
     expect(await run(f.deps, ["frobnicate"])).toBe(2);
     expect(f.err.join("\n")).toMatch(/Unknown command: frobnicate/);
-    expect(f.out.join("\n")).toMatch(/actradeck — bootstrap CLI/);
+    expect(f.out.join("\n")).toMatch(/put risky coding-agent actions/);
   });
 
   it("catches a command error and returns exit code 1 (no throw)", async () => {

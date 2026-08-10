@@ -13,6 +13,7 @@ import {
   DEFAULT_WEBUI_HOST,
   DEFAULT_WEBUI_PORT,
   REALTIME_WS_PATH,
+  isSameOriginBrowserUpgrade,
   redactUpstreamForLog,
   resolveBindHost,
   resolveWebuiPort,
@@ -51,6 +52,80 @@ describe("shouldRelayUpgrade: /realtime/ws のみ BFF が掴む", () => {
 
   it("path constant matches publicClientConfig path", () => {
     expect(REALTIME_WS_PATH).toBe("/realtime/ws");
+  });
+});
+
+describe("isSameOriginBrowserUpgrade: realtime BFF は同一 Origin のみ", () => {
+  it("accepts an exact same-origin browser upgrade", () => {
+    expect(
+      isSameOriginBrowserUpgrade({
+        host: "127.0.0.1:55400",
+        origin: "http://127.0.0.1:55400",
+        "sec-fetch-site": "same-origin",
+      }),
+    ).toBe(true);
+    expect(
+      isSameOriginBrowserUpgrade({
+        host: "ActraDeck.Example:443",
+        origin: "https://actradeck.example",
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects cross-origin and same-site-but-different-origin upgrades", () => {
+    expect(
+      isSameOriginBrowserUpgrade({
+        host: "127.0.0.1:55400",
+        origin: "https://evil.example",
+        "sec-fetch-site": "cross-site",
+      }),
+    ).toBe(false);
+    expect(
+      isSameOriginBrowserUpgrade({
+        host: "cockpit.example",
+        origin: "https://other.example",
+        "sec-fetch-site": "same-site",
+      }),
+    ).toBe(false);
+    // Fetch Metadata is defense in depth: an attacker cannot win by forging/omitting it when the
+    // Origin authority still differs.
+    expect(
+      isSameOriginBrowserUpgrade({
+        host: "127.0.0.1:55400",
+        origin: "https://evil.example",
+        "sec-fetch-site": "same-origin",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects missing, null, duplicate, or malformed Origin/Host", () => {
+    expect(isSameOriginBrowserUpgrade({ host: "127.0.0.1:55400" })).toBe(false);
+    expect(isSameOriginBrowserUpgrade({ host: "127.0.0.1:55400", origin: "null" })).toBe(false);
+    expect(
+      isSameOriginBrowserUpgrade({
+        host: "127.0.0.1:55400",
+        origin: ["http://127.0.0.1:55400", "https://evil.example"],
+      }),
+    ).toBe(false);
+    expect(isSameOriginBrowserUpgrade({ host: "bad/path", origin: "http://bad" })).toBe(false);
+    expect(isSameOriginBrowserUpgrade({ host: "127.0.0.1:55400", origin: "http://[::bad" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects origin URL material beyond an authority", () => {
+    expect(
+      isSameOriginBrowserUpgrade({
+        host: "127.0.0.1:55400",
+        origin: "http://127.0.0.1:55400/path",
+      }),
+    ).toBe(false);
+    expect(
+      isSameOriginBrowserUpgrade({
+        host: "127.0.0.1:55400",
+        origin: "http://user@127.0.0.1:55400",
+      }),
+    ).toBe(false);
   });
 });
 

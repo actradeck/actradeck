@@ -1,9 +1,9 @@
 {
   "name": "actradeck",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "license": "Apache-2.0",
-  "description": "ActraDeck — local-first audit cockpit for coding agents",
+  "description": "ActraDeck — put risky Claude Code and Codex actions back in front of a human",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "engines": {
@@ -43,7 +43,8 @@
       "fast-uri@<3.1.5": ">=3.1.5 <4",
       "find-my-way@<=9.6.0": ">=9.7.0 <10",
       "immutable@>=5.0.0-beta.1 <5.1.8": ">=5.1.8 <6",
-      "sharp@<0.35.0": ">=0.35.0 <0.36"
+      "sharp@<0.35.0": ">=0.35.0 <0.36",
+      "nanoid@<3.3.17": ">=3.3.17 <4"
     },
     "patchedDependencies": {
       "minimatch@3.1.5": "patches/minimatch@3.1.5.patch"

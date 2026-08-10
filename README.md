@@ -6,290 +6,262 @@
 [![GHCR](https://img.shields.io/badge/GHCR-multi--arch%20image-2496ED?logo=docker&logoColor=white)](https://github.com/actradeck/actradeck/pkgs/container/actradeck)
 [![License](https://img.shields.io/github/license/actradeck/actradeck)](LICENSE)
 
-**A local-first audit cockpit for coding agents — observe across agents, redact secrets before persistence, and keep one replayable audit trail. Approval relay is available for Claude Code in Attach and Codex in Managed Mode.**
+**Put risky coding-agent actions back in front of a human.**
 
-ActraDeck sits beside your coding agents — Claude Code, Codex, and whatever comes
-next — and gives you **one place to watch what they do, stop detected secrets
-before they are stored, and keep a replayable audit trail across vendors**. Approvals
-relay to the cockpit where the mode supports it: Claude Code in Attach out of the box,
-and Codex in Managed Mode (see the [support matrix](#vendor--mode-support)). It is
-local-first: a sidecar on your machine collects structured events, redacts secrets
-_before_ anything is persisted, and serves a web cockpit you control.
+ActraDeck is a local cockpit for Claude Code and Codex. It surfaces detected high-risk
+actions for review where the agent mode supports approval relay, masks detected secrets
+before ActraDeck stores them, and keeps each session replayable across agents.
 
-> Status: **early / active development (pre-1.0).** The pieces below work today; the
-> declarative policy engine and team features are on the roadmap. Expect rough edges
-> and breaking changes.
+```text
+Claude Code requests:
+  rm -rf ./important-directory
 
-## See it in action
+[HIGH RISK] recursive filesystem delete detected
+[HELD]      waiting for your decision
+[DENIED]    no approval received; safe-side timeout
+```
 
-A walkthrough of the cockpit, recorded against a **live stack with real sessions**
-(secrets are already masked at the sidecar before anything is shown):
+No cloud account is required. ActraDeck runs on your machine and binds to loopback by
+default.
+
+> **Status:** early, active development (pre-1.0). Detection is best-effort, not a
+> sandbox or an absolute security boundary. Read the [honest limits](#honest-limits)
+> before relying on approval or redaction behavior.
+
+## See the outcome, not the feature list
+
+The first job is simple: **stop approving agent actions blindly**. When ActraDeck
+recognizes a risky request, it puts the decision and its context in one approval inbox.
+From there the same event becomes useful for more than the immediate decision:
+
+1. **Review** — allow, deny, or allow-for-session where approval relay is supported.
+2. **Redact** — mask recognized credentials before ActraDeck persists observed events.
+3. **Replay** — inspect what the agent attempted and how the operator responded.
+4. **Unify** — keep Claude Code and Codex sessions in one local audit trail.
 
 ![ActraDeck cockpit walkthrough](docs/media/usage.gif)
 
-▶ **Full walkthrough (~90s):** [`docs/media/usage.mp4`](./docs/media/usage.mp4) —
-live wall, liveness-by-evidence, secret redaction with per-kind counts, cross-vendor
-audit (Claude Code **and** Codex in one trail), the approval inbox, and session
-replay. The 90-second product-story runbook is in
-[`docs/demo-90s.md`](./docs/demo-90s.md); regenerate this recording from your own
-stack with [`scripts/record-cockpit-cast.mjs`](./scripts/record-cockpit-cast.mjs).
+▶ [Full walkthrough (~90s)](./docs/media/usage.mp4) shows live sessions, the approval
+inbox, redaction counts, and replay using a live stack.
 
-## Why this exists
+## See the decision flow in five seconds
 
-Vendors are already building great single-vendor dashboards (e.g. Claude Code's
-Agent View). ActraDeck deliberately does **not** try to win the "overview of my
-parallel sessions" race for a single vendor. Instead it owns the slice a model
-vendor structurally will not build: **neutral governance across competing agents.**
+```bash
+npx actradeck@latest demo
+```
 
-- **Approval governance, not just a prompt.** A structural risk classifier gates
-  high-risk commands; an opt-in persistent allowlist lets you skip re-approving
-  _safe_ operations without ever auto-allowing dangerous ones. Relay to the cockpit
-  is selective by mode — Claude Code over Attach, Codex in Managed Mode (see the
-  [support matrix](#vendor--mode-support)); external adapters are observe-only.
-- **Secrets are redacted before they are stored — and, for sidecar-observed sessions,
-  before they are transmitted.** A two-layer redactor (INV-REDACTION) masks detected
-  secret keys, tokens, and `.env` contents. Native sessions (Claude Code / Codex observed
-  by the local sidecar) are redacted _before_ an event reaches disk or the network.
-  Events from external adapters travel to the backend as the adapter sent them; the
-  backend ingress floor redacts them unconditionally _before persistence_ (not before
-  that first hop). Per-kind counts are shown in the UI. Detection is best-effort pattern
-  matching (gitleaks-style rules + custom regexes) — a strong safety net, not an absolute
-  guarantee (see [honest limits](./docs/approval-policy.md#honest-limits)). Measured
-  precision/recall on a synthetic corpus:
-  [redaction & risk-classifier benchmark](./docs/benchmarks/redaction-and-risk-classifier.md).
-- **Audit & replay.** Every session can be replayed after the fact for review,
-  incident analysis, or compliance. Session reports export to HTML/Markdown with an
-  embedded integrity manifest (SHA-256 hash chain). Enable `ACTRADECK_AUDIT_SIGNING_KEY`
-  (Ed25519) for a signed, **tamper-evident** report that a recipient can verify was not
-  altered after export; without a key the manifest is chain-only (internal integrity).
-  Detecting tampering of the underlying store _before_ export is out of scope (roadmap).
-- **Cross-vendor.** One event model and one audit trail spanning Claude Code _and_
-  Codex, surfaced in one approval inbox (see the support matrix for what each mode
-  relays — more agents over time).
-- **Public ingestion contract.** Any tool can normalize its own events and `POST /ingest`
-  into the same cockpit and audit trail. The provider dimension is an open slug, while
-  `event_type` stays a closed enum so the state machine remains meaningful. Start with
-  [`docs/ingestion-contract.md`](./docs/ingestion-contract.md) and the zero-dependency
-  example adapter in [`docs/examples/ingest-adapter/`](./docs/examples/ingest-adapter/).
+This prints a clearly labelled, synthetic preview of detect → hold → deny → redact →
+record. It has no network, filesystem, subprocess, install, or agent side effects. Use
+the cockpit demo below when you want to exercise the real application pipeline.
+
+## Try the built-in 30-second demo
+
+Run the cockpit without installing Node, pnpm, or a database:
+
+```bash
+docker run --rm \
+  -p 127.0.0.1:55400:55400 \
+  -v actradeck_pgdata:/data \
+  ghcr.io/actradeck/actradeck:latest
+```
+
+Open <http://localhost:55400>, then click **Run the 30-second safety demo**. A
+throwaway session drives the real ingestion → approval card → redaction → audit pipeline:
+
+- a synthetic destructive command is held for review and never executed;
+- dummy credentials pass through the production redaction floor before storage;
+- the final decision and redacted events appear in replay.
+
+The demo proves ActraDeck's event path, UI, and storage behavior. It does not claim to
+halt a real process; the command is intentionally synthetic and never runs. See the
+[full demo scope](./docs/docker.md#run-the-30-second-safety-demo-no-host-wiring).
+
+## Put it beside your real agents
+
+The native quickstart installs the host-side observer and starts the local cockpit. It
+needs `git`, Node 22.16+, and pnpm; the database is embedded and Docker is not required.
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh | sh
+```
+
+Then launch agents as usual:
+
+```bash
+cd ~/any/project
+claude     # approval relay + observation in Attach Mode
+codex      # observation in Attach Mode; native approvals remain in the Codex TUI
+```
+
+For Codex approval relay, use Managed Mode:
+
+```bash
+./scripts/actradeck codex "refactor the payment module"
+```
+
+Prefer to inspect scripts before running them? Use the
+[manual and verified installation paths](./docs/getting-started.md), or diagnose the
+machine first with `npx actradeck@latest doctor`.
 
 ## What works today
 
-- Observe **Claude Code** (via hooks) and **Codex** (via rollout tailing in Attach
-  Mode, or the App Server in Managed Mode) through a common, normalized event model.
-- **Live session state** — running / waiting-approval / waiting-user / stalled /
-  failed / completed — derived from decomposed heartbeats (process / event /
-  stdout / model-stream), so "stalled" is shown with evidence, not asserted.
-- **Approval inbox** across sessions and agents; allow / deny / allow-for-session,
-  with an opt-in restart-persistent allowlist for safe operations.
-- **Secret redaction before persist**, with per-kind redaction counts in the UI.
-- **Session replay** and an append-only local event log.
-- **External adapters** via the public ingestion contract (`provider=<your slug>`,
-  `source=external`), with backend ingress redaction before persistence.
+| Capability                                             | Claude Code Attach | Codex Attach | Codex Managed |
+| ------------------------------------------------------ | :----------------: | :----------: | :-----------: |
+| Live state, actions, and diffs                         |         ✅         |      ✅      |      ✅       |
+| Detected-secret redaction before ActraDeck persistence |         ✅         |      ✅      |      ✅       |
+| Audit log and replay                                   |         ✅         |      ✅      |      ✅       |
+| Approval relay from the cockpit                        |         ✅         | observe-only |      ✅       |
 
-## Vendor / mode support
+Attach Mode does not change how you launch an agent. Managed Mode lets ActraDeck spawn
+the agent and participate in its approval flow. The precise lifecycle and capability
+limits are documented in [Attach Mode](./docs/attach-mode.md).
 
-What each agent gets depends on the mode you run it in. Attach Mode (the quickstart
-default) needs no change to how you launch agents; Managed Mode (ActraDeck spawns the
-agent) adds approval relay for Codex.
-
-| Capability                                     | Claude Code (Attach) | Codex (Attach)  | Codex (Managed) |
-| ---------------------------------------------- | :------------------: | :-------------: | :-------------: |
-| Observe — state, current action, diffs         |          ✅          |       ✅        |       ✅        |
-| Redaction before persist                       |          ✅          |       ✅        |       ✅        |
-| Audit log + replay                             |          ✅          |       ✅        |       ✅        |
-| Approval relay — allow / deny from the cockpit |          ✅          | ⛔ observe-only |       ✅        |
-
-So **observation, redaction, and audit are cross-vendor today** in the default Attach
-Mode. **Approval relay** works for Claude Code over Attach; for Codex it requires
-Managed Mode — launch it with `./scripts/actradeck codex "<task>"` (a one-command
-wrapper over `agentmon codex -- "<prompt>"`) and its App Server
-approvals relay to the cockpit (allow / deny / allow-for-session). Over Attach, Codex is
-observed and its native approvals still happen in its own TUI. (Claude Code in Managed
-Mode is all ✅, omitted for brevity.)
-
-**Other agents via external adapters.** Any third-party CLI can be observed by mapping
-its events to the public ingestion contract (`provider=<slug>`, `source=external`). Two
-adapters ship today, both dependency-zero and **observe-only** (state, current action,
-command exit codes, diffs; redaction happens at the backend ingress floor; approvals are
-**not** relayed):
-
-- **opencode** (`docs/examples/opencode-adapter/`): a long-lived opencode plugin.
-- **Gemini CLI** (`docs/examples/gemini-adapter/`): a Gemini hook `command` — a short-lived
-  process run once per event — that also **never denies** (its stdout is always `{}`). Tested
-  with Gemini CLI 0.42.0; it can migrate from a Claude Code hook config via
-  `gemini hooks migrate --from-claude`.
-
-Writing your own adapter? Pipe its JSONL output through the **conformance checker** to verify
-it satisfies the contract (schema, ordering, id/seq idempotency, drop detection) before you
-wire it to a backend: `node scripts/check-conformance.mjs < your-output.jsonl` — see
-[ingestion contract §8](./docs/ingestion-contract.md#8-verify-your-adapter-conformance-checker).
-
-| Capability                                     | opencode (external adapter) | Gemini CLI (external adapter) |
-| ---------------------------------------------- | :-------------------------: | :---------------------------: |
-| Observe — state, current action, diffs         |             ✅              |              ✅               |
-| Redaction before persist (backend floor)       |             ✅              |              ✅               |
-| Audit log + replay                             |             ✅              |              ✅               |
-| Approval relay — allow / deny from the cockpit |       ⛔ observe-only       |        ⛔ observe-only        |
-
-## Quickstart
-
-One line — fetch the source and bring up the cockpit (needs `git`, Node 22.16+, and
-pnpm; **no Docker**, the database is embedded):
+Other CLIs can send normalized events through the public ingestion contract. Dependency-
+free example adapters for **opencode** and **Gemini CLI** are included, currently as
+observe-only integrations. Start with the
+[ingestion contract](./docs/ingestion-contract.md) and validate an adapter stream with:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh | sh
+npx actradeck@latest conformance < events.jsonl
 ```
 
-> This downloads a script and runs it. Prefer to read it first (a good habit for anything
-> piped into a shell)? Fetch it, `less` it, then run it — or skip it and use the manual
-> clone below. The installer handles no secrets (quickstart generates a local `.env` at
-> mode `0600`), needs no root, and clones to `~/actradeck` (override with
-> `ACTRADECK_INSTALL_DIR`; pin a ref with `ACTRADECK_REF`).
+## Why use a separate cockpit?
 
-For a release tarball with provenance and digest verification, use the fail-closed
-verified path (requires the GitHub CLI):
+Vendor dashboards are the natural place to optimize one agent. ActraDeck is useful when
+you want the same review vocabulary and history while switching between agents, or when
+the person reviewing a session is not living inside that agent's terminal.
+
+It is aimed at:
+
+- developers using permissive/YOLO modes who still want a catastrophic-action floor;
+- people running Claude Code and Codex side by side;
+- teams evaluating which agent attempted what, and how a human responded;
+- platform or security engineers prototyping local coding-agent governance.
+
+It is not yet a multi-user enterprise control plane, a complete shell sandbox, or proof
+that every possible secret and dangerous command will be recognized.
+
+## What is under the hood
+
+- A structural command-risk classifier and configurable approval categories.
+- A two-layer secret redactor: sidecar before local persistence/transmission, plus an
+  unconditional backend floor before backend persistence.
+- Live state derived from process, event, output, and model-stream evidence.
+- An append-only local event history with session replay.
+- HTML, Markdown, and JSON audit exports with a SHA-256 integrity manifest; optional
+  Ed25519 signing has a deliberately documented binding scope.
+- An open provider slug and closed event vocabulary for third-party adapters.
+
+These mechanisms are documented and benchmarked, but the benchmarks use synthetic
+corpora. They measure the shipped detector; they do not turn pattern matching into a
+guarantee.
+
+## Installation choices
+
+The shortest path is the native installer above. These alternatives are available when
+you need a different trust or runtime model:
+
+<details>
+<summary><strong>Verified signed release</strong></summary>
+
+Requires the GitHub CLI and verifies the release checksum and provenance before
+extraction:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh -o install.sh
-ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.5.2 sh install.sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/actradeck/actradeck/main/scripts/install.sh -o install.sh
+ACTRADECK_VERIFY=1 ACTRADECK_REF=v0.7.0 sh install.sh
 ```
 
-Or bootstrap via npm — a thin, dependency-free [`actradeck`](https://www.npmjs.com/package/actradeck)
-package (no install hooks; `npm install` changes nothing; published with provenance via
-npm Trusted Publishing from this repository's release workflow):
+The npm bootstrapper exposes the same verified path:
 
 ```bash
-npx actradeck@latest doctor     # diagnose prerequisites (git / Node / pnpm / docker)
-npx actradeck@latest install    # verify-and-fetch the latest signed release, then hand off to quickstart
+npx actradeck@latest install
 ```
 
-> `install` is the same fail-closed verified path as above (sha256 + provenance; needs the
-> GitHub CLI) and supports `--dry-run`. `actradeck up` prints the Docker cockpit command;
-> `actradeck version` compares your CLI against the latest release. See
-> [ADR 0013 §Phase 3](docs/adr/0013-release-signing-and-distribution.md#phase-3--npm-bootstrap-cli).
+</details>
 
-Already cloned, or prefer to do it by hand (needs Node 22.16+ and pnpm — **no Docker**):
+<details>
+<summary><strong>Already cloned</strong></summary>
 
 ```bash
-./scripts/quickstart      # .env + embedded DB + all tiers, one command
+./scripts/quickstart
 ```
 
-The database is an embedded PostgreSQL (PGlite) at `~/.actradeck/pgdata` — no Docker, no
-separate service. To use an external Postgres instead (production or an existing DB), set
-`DATABASE_URL` in `.env`, or run `ACTRADECK_DB_MODE=postgres ./scripts/quickstart` to bring
-one up via `docker compose`.
+The command creates a mode-`0600` `.env`, installs missing dependencies, builds the
+workspace, starts the embedded database, and wires supported host agents. It is
+idempotent. See [Getting started](./docs/getting-started.md) for macOS launchd and
+manual setup details.
 
-![ActraDeck first-run: fresh clone → running cockpit, recorded on a clean machine](docs/media/first-run.gif)
+</details>
 
-Then open the cockpit at **http://localhost:55400**. On the empty board you can click
-**Run the 30-second safety demo** to experience block / redact / audit on a throwaway
-session before wiring anything — then run your agents normally, no change to how you
-start them:
+<details>
+<summary><strong>Docker cockpit plus host observer</strong></summary>
 
-```bash
-cd ~/any/project && claude     # or: codex  → shows up in the cockpit
-```
+The image contains the cockpit and embedded database. A sidecar that observes real
+agents must run on the host because agent processes, hooks, and rollout files are on the
+host. Follow [Running ActraDeck in Docker](./docs/docker.md#observing-a-host-agent-wire-the-sidecar)
+to connect them without exposing ingestion beyond loopback.
 
-> Both agents appear immediately. Over Attach (the default), **Codex is observed** —
-> its approvals stay in its own TUI. To relay Codex approvals to the cockpit, launch it
-> in **Managed Mode** instead: `./scripts/actradeck codex "<task>"` (see the
-> [support matrix](#vendor--mode-support)). Claude Code approvals relay over Attach.
+</details>
 
-`quickstart` is idempotent and generates a `.env` with random local secrets on first
-run. On Linux it finishes by daemonizing the four tiers via `systemd --user`. On macOS
-(no systemd) it stops just short of the last step and prints the one command to run —
-`./scripts/actradeck up` — which then picks the supervisor automatically: **launchd
-LaunchAgents** when `launchctl` is present, or a foreground supervisor otherwise.
-The macOS LaunchAgents run in your login session (always-on while logged in, and they
-auto-start on next login); a fully headless, survives-logout daemon would need a root
-`LaunchDaemon`, which is out of scope. On a host with neither systemd nor launchd,
-`up` runs a foreground supervisor (keep the terminal open; Ctrl-C stops it).
+## Honest limits
 
-> **macOS launchd is experimental.** The Linux `systemd` path is used daily; the launchd
-> path is structurally verified (plist generation, secret hygiene, XML well-formedness are
-> covered by the smoke tests) but its runtime — `launchctl bootstrap`, restart-on-crash,
-> and persistence across login — has not yet been exercised on a Mac. Report anything odd.
+- Risk classification and redaction are best-effort pattern/structure matching. Novel,
+  obfuscated, or interpreter-mediated forms can be missed.
+- Approval relay depends on agent and launch mode; Codex Attach remains observe-only.
+- External adapters reach the backend redaction floor only after their first network hop.
+- The default threat model is one operator, local filesystem, and loopback networking.
+- Audit signatures have a documented binding scope, and pre-export database tampering is
+  outside the current model.
 
-Prefer to do it by hand, or hit a snag? See
-[`docs/getting-started.md`](./docs/getting-started.md) (manual steps +
-troubleshooting). The precision/limits of Attach Mode are in
-[`docs/attach-mode.md`](./docs/attach-mode.md).
-
-> Attach Mode is observability + approval/redaction/audit oriented and does not
-> require launching agents through ActraDeck. **Managed Mode** (ActraDeck spawns the
-> agent via the Codex App Server) ships today and is what relays Codex approvals to the
-> cockpit — launch a session with `./scripts/actradeck codex "<task>"`. See
-> [`docs/attach-mode.md`](./docs/attach-mode.md) for its precise limits.
-
-### Or run the cockpit in Docker
-
-If you'd rather not install Node/pnpm, the **cockpit** (backend + webui + embedded
-database) runs from a single image — no external database. A **signed prebuilt image**
-is published to GHCR (since v0.4.0, multi-arch `linux/amd64` + `linux/arm64` since
-v0.5.0; tags `latest` and `0.5.2`):
-
-```bash
-docker run --rm -p 127.0.0.1:55400:55400 -v actradeck_pgdata:/data \
-  ghcr.io/actradeck/actradeck:latest
-# then open http://localhost:55400
-```
-
-Every published image is signed with **cosign keyless** and carries a **SLSA build
-provenance attestation** — the verification commands are in
-[`docs/docker.md`](./docs/docker.md). Prefer building from source? `docker build -t
-actradeck .` uses the same Dockerfile the release workflow signs.
-
-Since `0.5.0` the image (including `latest`) is a multi-arch `linux/amd64` +
-`linux/arm64` manifest list (native Apple Silicon); only the older `0.4.0` tag is
-`linux/amd64`-only — see [`docs/docker.md`](./docs/docker.md) for the exact posture.
-
-The container is the **cockpit stack only**. The sidecar that observes your agents
-watches the _host's_ Claude Code / Codex processes, so it can't run inside a container —
-you run it on the host and point it at the container's ingestion port over loopback. The
-honest support matrix, the exact `docker run` flags, verifying the image's cosign
-signature, and how to wire a host agent are all in
-[`docs/docker.md`](./docs/docker.md).
+Read [SECURITY.md](./SECURITY.md), the
+[approval policy guide](./docs/approval-policy.md), and the reproducible
+[redaction/classifier benchmark](./docs/benchmarks/redaction-and-risk-classifier.md)
+for the exact boundaries.
 
 ## Architecture
 
-```
+```text
 [Claude Code / Codex CLI / Codex App Server]
-        │  hooks / JSON-RPC events
+        │  hooks / rollout files / JSON-RPC events
         ▼
-[Local Sidecar]  process monitor · stdout/stderr · git diff · secret redactor · approval bridge
+[Local Sidecar]  process evidence · diffs · redaction · approval bridge
         │  redact-before-emit → append-only local log
         ▼
-[Ingestion API] → [Event Store + State Engine] → [Realtime WS/SSE] → [Web Cockpit]
+[Ingestion API] → [Event Store + State Engine] → [Realtime] → [Web Cockpit]
 ```
 
-Design principle: the Web UI never connects directly to local CLIs. On the agent
-path the sidecar redacts events before anything is stored or sent; every event —
-including direct POSTs from external adapters via the public ingestion contract —
-also passes an unconditional redaction floor at backend ingress before it is stored.
+The browser never connects directly to a local agent process. The local sidecar observes
+host agents and emits normalized, redacted events; backend ingestion applies its own
+redaction floor before storing anything received through the public contract.
 
-- Product spec: maintainers' internal document (not shipped in this repo) — the public architecture decision records below capture the shipped design
-- Development discipline & contribution guide: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
-- Public ingestion contract: [`docs/ingestion-contract.md`](./docs/ingestion-contract.md)
-- Architecture decision records: [`docs/adr/`](./docs/adr/)
-- 90-second demo runbook: [`docs/demo-90s.md`](./docs/demo-90s.md)
+- Development and contribution guide: [CONTRIBUTING.md](./CONTRIBUTING.md)
+- Public ingestion contract: [docs/ingestion-contract.md](./docs/ingestion-contract.md)
+- Architecture decisions: [docs/adr/](./docs/adr/)
+- Demo recording runbook: [docs/demo-90s.md](./docs/demo-90s.md)
 
 ## Security
 
-Secret redaction before persist is a core invariant, not a feature flag. If you
-believe you have found a vulnerability (a redaction bypass, an approval-gate
-bypass, an SSRF in a connector, etc.), please **do not open a public issue** —
-see [`SECURITY.md`](./SECURITY.md) for responsible disclosure.
+If you find a redaction bypass, approval-gate bypass, credential exposure, or unintended
+network access, do not open a public exploit report. Follow the private reporting process
+in [SECURITY.md](./SECURITY.md).
+
+## Help shape it
+
+ActraDeck is early enough that concrete workflows matter more than abstract feature
+requests. If you try the demo, tell us which agent, mode, and risky action you most want
+reviewed: [open a focused feature request](https://github.com/actradeck/actradeck/issues/new?template=feature_request.yml).
+If this is a problem you want solved, a GitHub star helps other early adopters find the
+project.
 
 ## Contributing
 
-ActraDeck is a monorepo (pnpm workspaces): `apps/sidecar`, `apps/backend`,
-`apps/webui`, and shared `packages/`. TypeScript strict, conventional commits,
-CI on every PR. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for setup, the local
-verification gate, PR guidelines, and the security-sensitive areas that need extra
-care; all participants are expected to follow our
-[`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). For deeper context, the architecture
-decision records under [`docs/adr/`](./docs/adr/) and the guides under [`docs/`](./docs/)
-describe how the system is meant to behave. Issues and pull requests are welcome.
+ActraDeck is a TypeScript pnpm monorepo with shared event, projection, redaction, backend,
+sidecar, and web packages. CI runs on every PR. Issues and pull requests are welcome; see
+[CONTRIBUTING.md](./CONTRIBUTING.md), [GOVERNANCE.md](./GOVERNANCE.md), and the
+[Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## License
 

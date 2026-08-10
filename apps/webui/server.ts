@@ -37,6 +37,7 @@ import { relayToUpstream, type RelaySocket, type UpstreamFactory } from "./src/s
 import { proxyReplayHistory, shouldProxyReplayRequest } from "./src/server/replay-proxy.js";
 import {
   REALTIME_WS_PATH,
+  isSameOriginBrowserUpgrade,
   resolveBindHost,
   resolveWebuiPort,
   shouldRelayUpgrade,
@@ -87,6 +88,13 @@ async function main(): Promise<void> {
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (shouldRelayUpgrade(req.url)) {
+      // SEC-B: WebSocket handshakes do not get fetch CORS protection. Require the cockpit's exact
+      // browser Origin before attaching server-side REALTIME_TOKEN authority; loopback alone does
+      // not stop a hostile public web page from opening ws://127.0.0.1.
+      if (!isSameOriginBrowserUpgrade(req.headers)) {
+        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        return;
+      }
       // /realtime/ws のみ BFF が掴む。ブラウザ socket を確立してから upstream へ中継。
       wss.handleUpgrade(req, socket, head, (browserSocket) => {
         relayToUpstream(browserSocket as RelaySocket, { upstreamFactory: wsUpstreamFactory });

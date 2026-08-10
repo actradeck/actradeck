@@ -2,16 +2,17 @@
 
 Where to go depending on what you need:
 
-| I want to… | Read |
-|---|---|
-| Install and see my first session | [Getting started](./getting-started.md) — one-line install, quickstart, manual steps, troubleshooting |
-| Observe my existing `claude` / `codex` sessions from anywhere | [Attach Mode](./attach-mode.md) — the always-on daemons (`actradeck up` / `ad-attach`), systemd & launchd, constraints |
-| Govern what agents may do (approvals, YOLO gating) | [Approval policy — operations guide](./approval-policy.md) — approval flow, bypass/YOLO gate, category list, per-repo policy, persistent allowlist, kill switches |
-| Add another tool or agent to the cockpit | [Public ingestion contract](./ingestion-contract.md) — normalize events, use `provider=<your slug>` / `source=external`, and POST them into ActraDeck |
-| Look up an environment variable | [Configuration reference](./configuration.md) — every operator-facing setting, defaults, and which tier reads it |
-| See how well redaction / the risk classifier actually detect | [Redaction & risk-classifier benchmark](./benchmarks/redaction-and-risk-classifier.md) — reproducible precision/recall on a synthetic corpus |
-| Demo the product | [90-second demo runbook](./demo-90s.md) |
-| Understand why it's built this way | [Architecture decision records](./adr/) |
+| I want to…                                                    | Read                                                                                                                                                              |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Install and see my first session                              | [Getting started](./getting-started.md) — one-line install, quickstart, manual steps, troubleshooting                                                             |
+| Observe my existing `claude` / `codex` sessions from anywhere | [Attach Mode](./attach-mode.md) — the always-on daemons (`actradeck up` / `ad-attach`), systemd & launchd, constraints                                            |
+| Govern what agents may do (approvals, YOLO gating)            | [Approval policy — operations guide](./approval-policy.md) — approval flow, bypass/YOLO gate, category list, per-repo policy, persistent allowlist, kill switches |
+| Add another tool or agent to the cockpit                      | [Public ingestion contract](./ingestion-contract.md) — normalize events, use `provider=<your slug>` / `source=external`, and POST them into ActraDeck             |
+| Look up an environment variable                               | [Configuration reference](./configuration.md) — every operator-facing setting, defaults, and which tier reads it                                                  |
+| See how well redaction / the risk classifier actually detect  | [Redaction & risk-classifier benchmark](./benchmarks/redaction-and-risk-classifier.md) — reproducible precision/recall on a synthetic corpus                      |
+| Demo the product                                              | [90-second demo runbook](./demo-90s.md)                                                                                                                           |
+| Prepare a public launch                                       | [Launch kit](./launch-kit.md) — honest claims, Show HN/community copy, release notes, and launch checklist                                                        |
+| Understand why it's built this way                            | [Architecture decision records](./adr/)                                                                                                                           |
 
 Quick orientation:
 

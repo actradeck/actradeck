@@ -64,8 +64,8 @@ const BADGE = LANG === "ja" ? /秘匿を[\s\d,]+件検出/ : /Secrets detected i
 const CAPS = {
   en: {
     intro: {
-      t: "Approvals, secrets, and audit for your coding agents",
-      s: "Supervise Claude Code and Codex across vendors from one cockpit",
+      t: "Put risky coding-agent actions back in front of a human",
+      s: "Review first — then keep redacted context and replay across Claude Code and Codex",
     },
     wall: {
       t: "See every running agent at a glance",
@@ -100,14 +100,14 @@ const CAPS = {
       s: "Step through exactly what happened — for review, incident analysis, and compliance",
     },
     outro: {
-      t: "A local-first audit cockpit for coding-agent sessions, secrets & approvals",
+      t: "Review risky agent actions before they disappear into the terminal",
       s: "Start with ./scripts/quickstart, then open http://localhost:55400",
     },
   },
   ja: {
     intro: {
-      t: "コーディングエージェントの「承認・秘匿・監査」を1画面で",
-      s: "Claude Code も Codex も、ベンダーを横断して同じコックピットで監督する",
+      t: "危険なエージェント操作を、人間の判断へ戻す",
+      s: "まずレビューし、その判断・秘匿化された文脈・再生履歴をClaude CodeとCodexで共有する",
     },
     wall: {
       t: "稼働中のエージェントを一目で把握する",
@@ -142,7 +142,7 @@ const CAPS = {
       s: "レビュー・インシデント分析・コンプライアンスのために、実際に起きたことを時系列で再生",
     },
     outro: {
-      t: "「承認・秘匿・監査」を束ねる、ベンダー中立の管制塔",
+      t: "危険な操作をターミナルの中で見失う前にレビューする",
       s: "./scripts/quickstart で起動 → http://localhost:55400 を開くだけ",
     },
   },

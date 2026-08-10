@@ -32,23 +32,23 @@ Categories are a closed, public enum — policies never contain raw commands. Th
 assigns categories to each operation; the gate fires when an operation's categories
 intersect your enabled set.
 
-| Category | Matches | Default |
-|---|---|---|
-| `recursive-rm` | `rm -rf`, `find -delete`/`-exec`, mass file deletion | **ON** |
-| `disk-destroy` | `mkfs`, `dd`, `shred`, `wipefs`, `parted`, block-device writes | **ON** |
-| `history-rewrite` | `git push --force`, `git reset --hard`, `git clean -f` | **ON** |
-| `db-drop` | `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE` | **ON** |
-| `fork-bomb` | self-replicating shell patterns | **ON** |
-| `secret-egress` | network-egress program (`curl`/`wget`/`nc`/`scp`…) with an **inline** secret in the command | **ON** |
-| `high-risk-other` | anything classified high-risk that no named category covers (backstop against silent holes) | **ON** |
-| `perm-change` | `chmod -R`, world-writable chmod, recursive chown | off |
-| `inline-code` | `sh -c`, `python -c`, `eval`, `curl \| sh`, command substitution | off |
-| `secret-file-edit` | edits to `.env`, `*.pem`, `id_rsa`, kubeconfig and similar | off |
-| `external-tool` | MCP calls / WebFetch | off |
-| `migrate-prod` | DB migrations / "production" mentions (ambiguous by nature) | off |
+| Category           | Matches                                                                                                       | Default |
+| ------------------ | ------------------------------------------------------------------------------------------------------------- | ------- |
+| `recursive-rm`     | `rm -rf`, `find -delete`/`-exec`, mass file deletion                                                          | **ON**  |
+| `disk-destroy`     | `mkfs`, `dd`, `shred`, `wipefs`, `parted`, block-device writes                                                | **ON**  |
+| `history-rewrite`  | `git push --force`, `git reset --hard`, `git clean -f`                                                        | **ON**  |
+| `db-drop`          | `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE`                                                             | **ON**  |
+| `fork-bomb`        | self-replicating shell patterns                                                                               | **ON**  |
+| `secret-egress`    | network-egress program (`curl`/`wget`/`nc`/`scp`…) with an **inline** secret in the command                   | **ON**  |
+| `high-risk-other`  | high-risk or structurally unparseable execution that no named category covers (backstop against silent holes) | **ON**  |
+| `perm-change`      | `chmod -R`, world-writable chmod, recursive chown                                                             | off     |
+| `inline-code`      | `sh -c`, `python -c`, `eval`, `curl \| sh`, command substitution, Git shell aliases                           | **ON**  |
+| `secret-file-edit` | edits to `.env`, `*.pem`, `id_rsa`, kubeconfig and similar                                                    | off     |
+| `external-tool`    | MCP calls / WebFetch                                                                                          | off     |
+| `migrate-prod`     | DB migrations / "production" mentions (ambiguous by nature)                                                   | off     |
 
-The seven **ON** rows are the default preset (`DEFAULT_GATED_CATEGORIES`): irreversible,
-large-blast-radius operations only. The five **off** rows lean toward false positives, so
+The eight **ON** rows are the default preset (`DEFAULT_GATED_CATEGORIES`): irreversible,
+large-blast-radius operations plus arbitrary inline code execution. The four **off** rows lean toward false positives, so
 they stay off until you enable them. An empty or malformed policy file **fails safe to the
 default preset** — misconfiguration can never silently disable the gate.
 
@@ -105,12 +105,12 @@ being honored immediately.
 
 ## Kill switches, summarized
 
-| Switch | Effect |
-|---|---|
-| `ACTRADECK_BYPASS_CATASTROPHIC_GATE=0` | Bypass/YOLO gate off — pure observation, nothing gated. |
-| `ACTRADECK_PERSIST_APPROVALS` unset/`0` | Persistent allowlist off — recorded grants are not honored. |
-| Per-repo empty category set | That repo is not gated (explicit, visible in the UI). |
-| Deny on the approval card / let it time out | Single operation blocked (timeout = deny). |
+| Switch                                      | Effect                                                      |
+| ------------------------------------------- | ----------------------------------------------------------- |
+| `ACTRADECK_BYPASS_CATASTROPHIC_GATE=0`      | Bypass/YOLO gate off — pure observation, nothing gated.     |
+| `ACTRADECK_PERSIST_APPROVALS` unset/`0`     | Persistent allowlist off — recorded grants are not honored. |
+| Per-repo empty category set                 | That repo is not gated (explicit, visible in the UI).       |
+| Deny on the approval card / let it time out | Single operation blocked (timeout = deny).                  |
 
 ## Honest limits
 

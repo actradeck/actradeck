@@ -1,19 +1,21 @@
 # 90-second demo runbook
 
-A tight script to record a ~90s demo that shows ActraDeck's wedge (ADR 0001):
-**cross-vendor governance + secrets + audit in one place** — the thing a
-single-vendor dashboard does not do.
+A tight script to record a ~90s demo that starts with ActraDeck's first job:
+**put a risky coding-agent action back in front of a human**. Redaction, replay,
+and cross-vendor history expand the value after that first decision.
 
 What the viewer should walk away believing:
 
-1. One cockpit shows **both** a Claude Code and a Codex session at once.
-2. You **approve/deny from one inbox** — relayed for Claude Code over Attach (the
+1. A detected high-risk Claude Code action is **held for a human decision** instead
+   of disappearing inside the agent terminal.
+2. One cockpit shows **both** a Claude Code and a Codex session at once.
+3. You **approve/deny from one inbox** — relayed for Claude Code over Attach (the
    default). Codex over Attach is **observed** in the same cockpit list (no approval
    cards over Attach); relaying Codex approvals needs **Managed Mode**.
-3. A detected secret is **redacted before it is stored** — you see the masked value
+4. A detected secret is **redacted before it is stored** — you see the masked value
    and a per-kind count in place of the secret (detection is best-effort; measured
    limits are in the [benchmark](benchmarks/redaction-and-risk-classifier.md)).
-4. There is **one audit trail / replay** spanning both agents.
+5. There is **one audit trail / replay** spanning both agents.
 
 > ⚠️ Use **synthetic secrets only** (the values below are public dummies). Never put
 > a real key in a recording. Dry-run once and adjust UI labels — the exact wording
@@ -53,10 +55,10 @@ Synthetic secrets to use on camera (public, non-functional dummies):
 
 ## The script (≈90s)
 
-### 0:00–0:12 — One pane, two vendors
+### 0:00–0:12 — Start with the decision
 
-- Say the line: _"ActraDeck is a local-first audit cockpit for coding agents —
-  observe across agents, redact before persistence, replay everything."_
+- Say the line: _"ActraDeck puts risky coding-agent actions back in front of a
+  human — then keeps the decision, redacted context, and replay in one place."_
 - In the two terminals, start `claude` and `codex` (both in `/tmp/ad-demo`) and give
   each a small task.
 - Cut to the cockpit: **both sessions appear in the live list** — one tagged Claude
@@ -73,11 +75,11 @@ Synthetic secrets to use on camera (public, non-functional dummies):
 - In the cockpit's **Approval Inbox**, the pending card appears (data-testid
   `approval-allow` / `approval-deny`). Show the Codex session's activity in the same
   view.
-- Click **Deny** on the destructive card (`approval-deny`) → the agent is refused.
-- Trigger a second, benign gated action and click **Allow** (`approval-allow`) →
-  it proceeds. The point: _one inbox, decisions enforced, across agents._
+- Click **Deny** on the destructive card (`approval-deny`) → the Claude Code action is refused.
+- Trigger a second, benign gated Claude Code action and click **Allow** (`approval-allow`) →
+  it proceeds. The point: _one cross-agent view, with decisions enforced where relay is supported._
 
-### 0:40–1:05 — A secret is blocked before it hits disk
+### 0:40–1:05 — A detected secret is masked before ActraDeck stores it
 
 - In the Claude Code session, run a command whose text contains a synthetic secret:
   ```

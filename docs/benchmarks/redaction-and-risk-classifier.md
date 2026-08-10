@@ -46,7 +46,8 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   the strict leak gate over the rest of the tree stays hole-free.
 
 Corpus size: **38 redaction positives** across **29 kind families**, **28 hard negatives**, and
-**43 classifier command vectors**.
+**53 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
+Git shell-alias, and dynamic-executable adversarial forms).
 
 ## Results — redaction
 
@@ -142,6 +143,7 @@ metric RED.
 ## Results — risk classifier
 
 Measured against `classifyCommandWithCategories` (`apps/sidecar/src/normalize.ts`).
+Classifier results below were regenerated on 2026-08-10.
 
 **Scope.** This benchmarks the **command-pattern** categories the classifier derives from the
 command string: `recursive-rm`, `disk-destroy`, `history-rewrite`, `db-drop`, `fork-bomb`,
@@ -151,15 +153,16 @@ the tool input (not from the command string alone) and are **out of scope** for 
 
 | Category          | Support | Precision | Recall     |
 | ----------------- | ------- | --------- | ---------- |
-| recursive-rm      | 6       | 100.0%    | 100.0%     |
+| recursive-rm      | 9       | 100.0%    | 100.0%     |
 | disk-destroy      | 4       | 80.0%     | 100.0%     |
-| history-rewrite   | 4       | 100.0%    | 100.0%     |
+| history-rewrite   | 7       | 100.0%    | 100.0%     |
 | db-drop           | 3       | 75.0%     | 100.0%     |
 | fork-bomb         | 1       | 100.0%    | 100.0%     |
 | perm-change       | 3       | 100.0%    | 100.0%     |
-| inline-code       | 4       | 100.0%    | 100.0%     |
+| inline-code       | 5       | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
-| **micro-average** | 27      | **87.1%** | **100.0%** |
+| high-risk-other   | 1       | 100.0%    | 100.0%     |
+| **micro-average** | 35      | **89.7%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
 Precision is below 100% only where a keyword literal fires on a benign near-miss (below). This is
@@ -170,16 +173,16 @@ than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "g
 
 | Policy                              | Precision | Recall | TP / FP / FN / TN |
 | ----------------------------------- | --------- | ------ | ----------------- |
-| default-gated (out-of-box)          | 90.0%     | 100.0% | 18 / 2 / 0 / 23   |
-| strict-all (every category enabled) | 86.7%     | 100.0% | 26 / 4 / 0 / 13   |
+| default-gated (out-of-box)          | 93.5%     | 100.0% | 29 / 2 / 0 / 22   |
+| strict-all (every category enabled) | 89.5%     | 100.0% | 34 / 4 / 0 / 15   |
 
-- Risk-level exact-match accuracy: **86.0%**.
-- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **96.2%**.
+- Risk-level exact-match accuracy: **88.7%**.
+- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **97.1%**.
 
-Under the out-of-box `DEFAULT_GATED_CATEGORIES`, `perm-change` / `inline-code` / `migrate-prod` are
-**off by default** (operator opt-in), which is why their false positives do not affect the
-default-gated precision. This matches the documented default: the most catastrophic, irreversible
-categories gate out of the box; the noisier categories are opt-in.
+Under the out-of-box `DEFAULT_GATED_CATEGORIES`, `inline-code` is **on by default** alongside the
+catastrophic categories: interpreter-mediated operations are held even when the classifier cannot
+prove the inner action's named category. `perm-change` and `migrate-prod` remain operator opt-ins;
+their noisier keyword matches therefore do not affect default-gated precision.
 
 ### Divergences from human labels (findings / calibration notes)
 
@@ -343,11 +346,12 @@ fallback), and Stripe keys shorter than 16 characters.
   would be suppressed. This trades a false-positive risk for a false-negative one; it is the safe
   direction for a "does over-redaction destroy signal" benchmark, but it is a genuine limit. On the
   current corpus, zero true leaks are suppressed (every positive was checked by hand).
-- **Canonical-form classifier vectors.** The command corpus uses canonical shapes of each dangerous
-  pattern. An obfuscated or interpreter-mediated equivalent (e.g. `perl -e 'unlink glob "*"'` as a
-  mass delete) may carry only the `inline-code` category (default-OFF) and miss a named category
-  such as `recursive-rm` — so the measured 100% category recall reflects canonical-form coverage,
-  not robustness to obfuscation.
+- **Bounded adversarial coverage, not a shell proof.** The command corpus now mixes canonical forms
+  with shell-escaped executables, BusyBox/Toybox applets, Git global options and shell aliases, and
+  dynamic executable expansion. It is still finite. An interpreter-mediated equivalent (for
+  example, `perl -e 'unlink glob "*"'`) may carry only the default-ON `inline-code` category and miss
+  the more specific `recursive-rm` label. The measured 100% recall applies to this committed corpus,
+  not every program or shell grammar.
 - **Best-effort, by construction.** New vendor token formats appear constantly; the rule set is
   maintained, not exhaustive. The classifier's category keywords are a denylist-plus-structural
   hybrid, not a complete grammar of dangerous shell. Treat both as a strong safety net layered on

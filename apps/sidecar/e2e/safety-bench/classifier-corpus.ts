@@ -54,6 +54,24 @@ export const COMMANDS: readonly CommandVector[] = [
     note: "privileged root wipe (wrapper-stripped)",
   },
   {
+    command: "r\\m -rf /tmp/escaped",
+    expectRisk: "high",
+    expectCategories: ["recursive-rm"],
+    note: "POSIX shell backslash escape resolves executable to rm",
+  },
+  {
+    command: "busybox rm -rf /tmp/applet",
+    expectRisk: "high",
+    expectCategories: ["recursive-rm"],
+    note: "BusyBox multi-call applet wrapper",
+  },
+  {
+    command: "toybox rm -rf /tmp/applet",
+    expectRisk: "high",
+    expectCategories: ["recursive-rm"],
+    note: "Toybox multi-call applet wrapper",
+  },
+  {
     command: "find . -name '*.log' -delete",
     expectRisk: "medium",
     expectCategories: ["recursive-rm"],
@@ -117,10 +135,28 @@ export const COMMANDS: readonly CommandVector[] = [
     note: "hard reset discards commits",
   },
   {
+    command: "git -C /repo reset --hard HEAD~3",
+    expectRisk: "high",
+    expectCategories: ["history-rewrite"],
+    note: "hard reset after a Git global -C option",
+  },
+  {
+    command: "git -c core.pager=cat reset --hard HEAD~3",
+    expectRisk: "high",
+    expectCategories: ["history-rewrite"],
+    note: "hard reset after a Git global config option",
+  },
+  {
     command: "git clean -fd",
     expectRisk: "high",
     expectCategories: ["history-rewrite"],
     note: "force clean untracked files",
+  },
+  {
+    command: "git -C /repo clean --force -d",
+    expectRisk: "high",
+    expectCategories: ["history-rewrite"],
+    note: "long force option after Git global options",
   },
   // ============================ db-drop ========================================================
   {
@@ -160,7 +196,7 @@ export const COMMANDS: readonly CommandVector[] = [
     expectCategories: ["perm-change"],
     note: "recursive ownership change (irreversible mapping loss)",
   },
-  // ============================ inline-code (default OFF) ======================================
+  // ============================ inline-code (default ON) =======================================
   {
     command: "sh -c 'rm -rf /'",
     expectRisk: "high",
@@ -184,6 +220,19 @@ export const COMMANDS: readonly CommandVector[] = [
     expectRisk: "medium",
     expectCategories: ["inline-code"],
     note: "inline shell (benign body, but dynamic code path)",
+  },
+  {
+    command: "git -c alias.wipe='!rm -rf /tmp/alias-target' wipe",
+    expectRisk: "high",
+    expectCategories: ["inline-code"],
+    note: "Git shell alias can execute arbitrary inline shell code",
+  },
+  // ============================ structurally unparseable (default backstop) ====================
+  {
+    command: "${RM:-rm} -rf /tmp/expanded",
+    expectRisk: "medium",
+    expectCategories: ["high-risk-other"],
+    note: "dynamic executable expansion must not silently defer in YOLO mode",
   },
   // ============================ migrate-prod (default OFF, keyword-based) ======================
   {
@@ -218,6 +267,18 @@ export const COMMANDS: readonly CommandVector[] = [
     note: "prose mentions 'reset'/'hard' but is not git reset --hard",
   },
   { command: "git status", expectRisk: "low", expectCategories: [], note: "read-only git" },
+  {
+    command: "git -C /repo status",
+    expectRisk: "low",
+    expectCategories: [],
+    note: "read-only Git command with a global option",
+  },
+  {
+    command: "busybox ls /tmp",
+    expectRisk: "low",
+    expectCategories: [],
+    note: "benign BusyBox applet",
+  },
   {
     command: "git clean -n",
     expectRisk: "low",

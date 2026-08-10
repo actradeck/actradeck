@@ -138,7 +138,8 @@ export type SecretKind = z.infer<typeof SecretKind>;
  * - secret-file-edit: .env / *.pem / id_rsa / kubeconfig 等の秘匿ファイル編集 (approval-bridge)
  * - external-tool:    MCP 呼び出し / WebFetch (approval-bridge)
  * - migrate-prod:     DB マイグレーション / "production" 言及 (曖昧・既定 OFF)
- * - high-risk-other:  上記 named に該当しないが分類器が high と判定した残余 (silent hole 防止 backstop)
+ * - high-risk-other:  上記 named に該当しない high、または実行形を安全に解析できない残余
+ *                     (silent hole 防止 backstop)
  *
  * 後方互換 additive。値は公開可能 enum (原文非依存・redaction 件数と同カテゴリの安全な enum)。
  */
@@ -161,10 +162,10 @@ export type PolicyCategory = z.infer<typeof PolicyCategory>;
 /**
  * 既定でゲートする (チェック ON) カテゴリ (ADR 019f0c3e). 設定ファイル欠落/不正時の **fail-safe 既定**でもある。
  *
- * 不可逆×ブラスト半径大の「最も危険」群のみ既定 ON。perm-change / inline-code / secret-file-edit /
- * external-tool / migrate-prod は誤検知寄りゆえ既定 OFF (operator が必要なら設定ページで ON)。
- * secret-egress は leak 製品ゆえ既定 ON (operator は外せるが UI が強警告)。high-risk-other は high と
- * 判定された残余を取りこぼさない backstop ゆえ既定 ON。
+ * 不可逆×ブラスト半径大の群に加え、任意コードを内包する inline-code を既定 ON にする。
+ * perm-change / secret-file-edit / external-tool / migrate-prod は誤検知寄りゆえ既定 OFF
+ * (operator が必要なら設定ページで ON)。secret-egress は leak 製品ゆえ既定 ON (operator は外せるが
+ * UI が強警告)。high-risk-other は high または安全に解析不能な残余を取りこぼさない backstop ゆえ既定 ON。
  */
 export const DEFAULT_GATED_CATEGORIES: readonly PolicyCategory[] = [
   "recursive-rm",
@@ -173,6 +174,7 @@ export const DEFAULT_GATED_CATEGORIES: readonly PolicyCategory[] = [
   "db-drop",
   "fork-bomb",
   "secret-egress",
+  "inline-code",
   "high-risk-other",
 ];
 

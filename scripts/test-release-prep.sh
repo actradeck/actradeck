@@ -544,11 +544,13 @@ versions_consistent() {
   return 0
 }
 
-# a tag matching the root version exists in repo <r>
+# a tag matching the working-tree root version exists and its OWN tree carries that version
 tag_matches_version() {
-  local r="$1" v
+  local r="$1" v tagged
   v="$(jq -r '.version' "$r/package.json" 2>/dev/null)"
-  git -C "$r" rev-parse -q --verify "refs/tags/v$v" >/dev/null 2>&1
+  git -C "$r" rev-parse -q --verify "refs/tags/v$v" >/dev/null 2>&1 || return 1
+  tagged="$(git -C "$r" show "v$v:package.json" 2>/dev/null | jq -r '.version' 2>/dev/null)"
+  [ "$tagged" = "$v" ]
 }
 
 # SBOM component names ⊇ every direct EXTERNAL prod dep of the workspace
@@ -930,10 +932,19 @@ git -C "$VR" config user.email test@example.invalid
 git -C "$VR" config user.name  test
 git -C "$VR" add -A && git -C "$VR" commit -qm init
 if "$VR/scripts/version.sh" 0.2.0 >"$WORK/version.log" 2>&1; then
-  if versions_consistent "$VR" >/dev/null 2>&1 && tag_matches_version "$VR"; then
-    ok "INV-TAG-MATCHES-VERSION: version.sh stamped 0.2.0 lockstep AND created tag v0.2.0"
+  if git -C "$VR" rev-parse -q --verify refs/tags/v0.2.0 >/dev/null 2>&1; then
+    ng "INV-TAG-MATCHES-VERSION: stamp phase tagged the pre-commit tree (must be tag-free)"
+  elif ! versions_consistent "$VR" >/dev/null 2>&1; then
+    ng "INV-TAG-MATCHES-VERSION: version.sh did not stamp 0.2.0 lockstep"
   else
-    ng "INV-TAG-MATCHES-VERSION: version.sh ran but tag/version disagree (see $WORK/version.log)"
+    git -C "$VR" add -A && git -C "$VR" commit -qm "release: v0.2.0"
+    if "$VR/scripts/version.sh" 0.2.0 --tag-only >>"$WORK/version.log" 2>&1 &&
+       tag_matches_version "$VR" &&
+       [ "$(git -C "$VR" rev-parse 'v0.2.0^{}')" = "$(git -C "$VR" rev-parse HEAD)" ]; then
+      ok "INV-TAG-MATCHES-VERSION: stamp → commit → --tag-only points v0.2.0 at the 0.2.0 tree"
+    else
+      ng "INV-TAG-MATCHES-VERSION: tag-only did not bind v0.2.0 to the committed 0.2.0 tree (see $WORK/version.log)"
+    fi
   fi
 else
   ng "INV-TAG-MATCHES-VERSION: version.sh failed in isolated repo (see $WORK/version.log)"

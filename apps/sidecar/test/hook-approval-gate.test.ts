@@ -185,6 +185,62 @@ describe("QA-1: handleApprovalGate HTTP round-trip (INV-APPROVAL)", () => {
     }
   });
 
+  it("INV-APPROVAL-FAIL-CLOSED: requested-event sink failure returns explicit PreToolUse deny, never {}", async () => {
+    const bridge = new ApprovalBridge({ timeoutMs: 1000 });
+    const receiver = new HookReceiver({
+      sink: {
+        emit: vi.fn(() => {
+          throw new Error("synthetic sink failure");
+        }),
+      } as unknown as EventSink,
+      approvalBridge: bridge,
+    });
+    const port = await receiver.listen();
+    try {
+      const out = (await postHook(port, {
+        session_id: "s-fail-closed",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf /tmp/fail-closed" },
+      })) as PreToolUseOutput;
+
+      expect(out).not.toEqual({});
+      expect(out.hookSpecificOutput?.hookEventName).toBe("PreToolUse");
+      expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+      expect(out.hookSpecificOutput?.permissionDecisionReason).toBe(
+        "ActraDeck approval gate failed closed",
+      );
+      expect(bridge.pendingCount).toBe(0);
+    } finally {
+      await receiver.close();
+    }
+  });
+
+  it("INV-APPROVAL-FAIL-CLOSED: pre-gate identity failure returns PermissionRequest deny", async () => {
+    const receiver = new HookReceiver({
+      sink: { emit: vi.fn() } as unknown as EventSink,
+      approvalBridge: new ApprovalBridge({ timeoutMs: 1000 }),
+      resolveIdentity: () => {
+        throw new Error("synthetic identity failure");
+      },
+    });
+    const port = await receiver.listen();
+    try {
+      const out = (await postHook(port, {
+        session_id: "s-identity-failure",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "npm install" },
+      })) as PermissionRequestOutput;
+
+      expect(out).not.toEqual({});
+      expect(out.hookSpecificOutput?.hookEventName).toBe("PermissionRequest");
+      expect(out.hookSpecificOutput?.decision?.behavior).toBe("deny");
+    } finally {
+      await receiver.close();
+    }
+  });
+
   it("段階③: allow_for_session auto-allows the SAME command next time WITHOUT a new card or stray resolved", async () => {
     const { emit, events } = makeSink();
     const bridge = new ApprovalBridge({ timeoutMs: 1000 });

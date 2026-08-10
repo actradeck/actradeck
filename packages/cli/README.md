@@ -1,9 +1,10 @@
 # actradeck
 
-> Bootstrap CLI for **ActraDeck** — a local-first audit cockpit for coding agents (Claude
-> Code, Codex, …): observe them, redact secrets before they're stored, keep a tamper-evident
-> audit trail, and relay approvals where supported (Claude Code in Attach, Codex in Managed
-> Mode).
+> Put risky Claude Code and Codex actions back in front of a human.
+
+ActraDeck is a local approval and audit cockpit for coding agents. This package gives you
+a zero-side-effect product preview, diagnoses the machine, and verifies the full product
+before handing off to its quickstart.
 
 This package is a **thin, dependency-free bootstrapper**. It does not contain the product —
 the full four-tier stack ships as a **signed GitHub Release** and a **signed GHCR image**.
@@ -15,22 +16,27 @@ The CLI helps you _get to_ a running cockpit and verify what you download.
 - **Fail-closed verification.** `install` checks the release's sha256 checksum _and_ its
   SLSA build provenance before extracting a single file.
 
+## See the safety story first
+
+```sh
+npx actradeck@latest demo
+```
+
+`demo` prints a five-second **synthetic preview** of detect → hold → deny → redact →
+record. It executes no command, writes no file, starts no subprocess, and makes no network
+request. The output then points to the cockpit's 30-second demo, which exercises the real
+ingestion, redaction, projection, and audit pipeline.
+
 ## Usage
 
 ```sh
+npx actradeck@latest demo          # safe synthetic preview; no side effects or network
 npx actradeck@latest doctor        # diagnose: platform / Node / pnpm / git / Docker (offline-safe)
 npx actradeck@latest install       # verify + fetch the latest signed release, then quickstart
 npx actradeck@latest up            # print the Docker cockpit command (prints only; runs nothing)
 npx actradeck@latest version       # your CLI version + whether a newer stable release exists
-npx actradeck@latest conformance < events.jsonl   # (next release) check an adapter's stream vs the contract
+npx actradeck@latest conformance < events.jsonl   # check an adapter's stream vs the contract
 ```
-
-> **`conformance` is not in the published CLI yet.** The four commands above ship in the current
-> published `actradeck`; `conformance` was added after the latest release and lands in the next
-> tagged one (npm publish is USER-GATED — see ADR 0013). To run the checker today, use the from-clone
-> path in the [ingestion contract §8](../../docs/ingestion-contract.md#8-verify-your-adapter-conformance-checker).
-> The canonical, already-signed way to get the full product is the GitHub Release / GHCR image or
-> `scripts/install.sh`.
 
 ### `install`
 
@@ -40,7 +46,7 @@ provenance (`gh attestation verify`), then extracts and hands off to the repo's 
 `scripts/quickstart`.
 
 ```sh
-npx actradeck@latest install --version v0.4.0     # a specific tag
+npx actradeck@latest install --version v0.7.0     # a specific tag
 npx actradeck@latest install --dry-run            # resolve + verify only; change nothing
 npx actradeck@latest install --skip-provenance    # explicit opt-out (checksum still enforced)
 ```
@@ -53,11 +59,8 @@ GitHub CLI.
 ### `conformance`
 
 Validate that a third-party ingestion adapter's event stream satisfies the ActraDeck ingestion
-contract — **without cloning the monorepo**. (Ships in the next release; the currently published
-CLI predates it — run the checker from a clone today, see the
-[ingestion contract §8](../../docs/ingestion-contract.md#8-verify-your-adapter-conformance-checker).)
-Capture your adapter's emitted NormalizedEvents as **JSONL** (one JSON object per line, in emission
-order) and pipe them in:
+contract — **without cloning the monorepo**. Capture your adapter's emitted NormalizedEvents as
+**JSONL** (one JSON object per line, in emission order) and pipe them in:
 
 ```sh
 npx actradeck@latest conformance < events.jsonl      # read JSONL from stdin
@@ -82,10 +85,10 @@ memory, which suits adapter sample streams rather than an unbounded live feed.
 
 ## Environment
 
-| Variable                | Default              | Meaning                                             |
-| ----------------------- | -------------------- | --------------------------------------------------- |
-| `ACTRADECK_REPO`        | `actradeck/actradeck`| `owner/name` (or git URL) to resolve releases from  |
-| `ACTRADECK_INSTALL_DIR` | `~/actradeck`        | where `install` extracts the verified source        |
+| Variable                | Default               | Meaning                                            |
+| ----------------------- | --------------------- | -------------------------------------------------- |
+| `ACTRADECK_REPO`        | `actradeck/actradeck` | `owner/name` (or git URL) to resolve releases from |
+| `ACTRADECK_INSTALL_DIR` | `~/actradeck`         | where `install` extracts the verified source       |
 
 ## License
 

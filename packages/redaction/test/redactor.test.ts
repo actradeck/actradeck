@@ -1392,8 +1392,20 @@ describe(`INV-REDACTION: 再#5 new-rule ReDoS scaling (t(2n)/t(n) < ${REDOS_RATI
       // 再#5b LEAK 4 経路: object 値の auth-header 専用正規表現 (有界量指定子) が線形であること。
       const build = (n: number) => ({ Authorization: `MysteryScheme ${"A".repeat(n)}` });
       const n = 64 * 1024;
-      const tN = redosBestOfMs(() => redactDeep(build(n)));
-      const t2N = redosBestOfMs(() => redactDeep(build(2 * n)));
+      const inputN = build(n);
+      const input2N = build(2 * n);
+      // A single call is ~0.05ms on a fast runner — below stable scheduler/timer granularity,
+      // where a harmless 0.15ms perturbation can manufacture a >3.5 ratio. Repeat the SAME
+      // operation inside each timed sample to amplify signal; batching multiplies both sides by
+      // the same constant, so O(n)≈2 and O(n²)≈4 remain distinguishable without loosening the
+      // security threshold. Input construction stays outside the timer so this measures redaction.
+      const batch = 32;
+      const tN = redosBestOfMs(() => {
+        for (let i = 0; i < batch; i++) redactDeep(inputN);
+      });
+      const t2N = redosBestOfMs(() => {
+        for (let i = 0; i < batch; i++) redactDeep(input2N);
+      });
       const ratio = t2N / Math.max(tN, 0.05);
       console.log(
         `[INV-REDACTION-REDOS-SCALING 再#5b] object auth-header value: t(n)=${tN.toFixed(3)}ms t(2n)=${t2N.toFixed(3)}ms ratio=${ratio.toFixed(2)}`,

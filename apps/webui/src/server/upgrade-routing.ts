@@ -50,6 +50,66 @@ export function shouldRelayUpgrade(rawUrl: string | undefined): boolean {
   return pathname === REALTIME_WS_PATH;
 }
 
+export interface BrowserUpgradeHeaders {
+  readonly host?: string | readonly string[];
+  readonly origin?: string | readonly string[];
+  readonly "sec-fetch-site"?: string | readonly string[];
+}
+
+/** A security-sensitive singleton header must be present exactly once. */
+function singletonHeader(value: string | readonly string[] | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Browser-facing realtime BFF upgrades are same-origin only.
+ *
+ * A WebSocket connection is not protected by the browser's normal fetch CORS checks. Without an
+ * explicit Origin check, a hostile web page can connect to loopback and inherit the BFF's
+ * server-side REALTIME_TOKEN (cross-site WebSocket hijacking). This path exists solely for the
+ * cockpit browser, so missing / opaque (`null`) Origin is rejected; non-browser automation must
+ * connect to the authenticated backend endpoint instead of borrowing browser credentials.
+ */
+export function isSameOriginBrowserUpgrade(headers: BrowserUpgradeHeaders): boolean {
+  const origin = singletonHeader(headers.origin);
+  const host = singletonHeader(headers.host);
+  if (origin === undefined || host === undefined || origin === "null") return false;
+
+  const fetchSite = singletonHeader(headers["sec-fetch-site"]);
+  if (fetchSite !== undefined && fetchSite !== "same-origin" && fetchSite !== "none") return false;
+
+  let parsedOrigin: URL;
+  let parsedHost: URL;
+  try {
+    parsedOrigin = new URL(origin);
+    if (parsedOrigin.protocol !== "http:" && parsedOrigin.protocol !== "https:") return false;
+    // Parse Host under the Origin scheme so default ports normalize symmetrically (80/443).
+    parsedHost = new URL(`${parsedOrigin.protocol}//${host}`);
+  } catch {
+    return false;
+  }
+
+  // Origin and Host are authorities, never URL paths/userinfo/query fragments.
+  if (
+    parsedOrigin.username !== "" ||
+    parsedOrigin.password !== "" ||
+    parsedOrigin.pathname !== "/" ||
+    parsedOrigin.search !== "" ||
+    parsedOrigin.hash !== "" ||
+    parsedHost.username !== "" ||
+    parsedHost.password !== "" ||
+    parsedHost.pathname !== "/" ||
+    parsedHost.search !== "" ||
+    parsedHost.hash !== ""
+  ) {
+    return false;
+  }
+
+  return parsedOrigin.host.toLowerCase() === parsedHost.host.toLowerCase();
+}
+
 /**
  * env から webui のリッスンポートを解決する純関数。
  * - `ACTRADECK_WEBUI_PORT` が正の整数ならそれを使う。

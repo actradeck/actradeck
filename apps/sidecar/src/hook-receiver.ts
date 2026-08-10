@@ -172,7 +172,10 @@ export class HookReceiver {
   listen(): Promise<number> {
     return new Promise((resolve, reject) => {
       const server = createServer((req, res) => {
-        this.handle(req, res).catch(() => this.respond(res, 200, {}));
+        // Non-gating hook failures remain availability-biased, but never attempt a second write
+        // after a response was already completed. Approval hooks are caught inside handle() and
+        // receive an explicit deny instead (INV-APPROVAL-FAIL-CLOSED).
+        this.handle(req, res).catch(() => this.respondCaptured(res, 200, {}));
       });
       server.on("error", reject);
       server.listen(this.desiredPort, this.host, () => {
@@ -237,66 +240,100 @@ export class HookReceiver {
       return;
     }
 
-    // ADR 019e9462 / ADR 0014 Phase 3b-1: 検証済み hook の session_id を RunIdentity で解決する。
-    // **emit より前**に呼ぶことで、初確定時に held 監視イベント (heartbeat/diff/output) が canonical id で
-    // 発生時刻順 flush され、その後に本 hook イベントが ingest される (順序: 確定 → flush → hook ingest)。
-    //
-    // Attach multiplex (ADR 019ea476 D6): resolveIdentity があれば hook の session_id で per-session
-    // identity を解決 (初出 entry 生成 / GitWatcher 起動は registry 側の副作用)。
-    //
-    // run 境界 (ADR 0014 D2): onHookSession が provider id 変化 / terminal-reopen を判定し、この hook を
-    // どの canonical run へ ingest するか (start_kind / resumed_from を run 起点に載せるか) を返す。
-    // 監視イベントは境界を駆動しない (D3・分裂防止)。
-    // 注釈は run 語彙エイリアス RunIdentity (= SessionIdentity): ここでの用途は run 境界判定
-    // (onHookSession) であり、エイリアスの意図した使用点 (3b-1 sweep TDA-1 で実体化)。
-    // decision 019fd2ac ①: SessionStart フラグを registry へ伝え、reap 跨ぎ resume の初出でのみ
-    // terminal tombstone を consume させる (straggler hook で phantom run を作らない)。
-    const identity: RunIdentity | undefined =
-      this.resolveIdentity !== undefined
-        ? this.resolveIdentity(
-            input.session_id,
-            input.cwd,
-            input.hook_event_name === "SessionStart",
-          )
-        : this.identity;
-    let lineage: NormalizeContext = {};
-    if (identity !== undefined) {
-      const boundary = identity.onHookSession(input.session_id, {
-        isSessionStart: input.hook_event_name === "SessionStart",
-        ...(typeof input.source === "string" ? { source: input.source } : {}),
-      });
-      lineage = {
-        // D5: 全候補の session_id は canonical run id、provider_session_id は provider raw id。
-        canonicalSessionId: boundary.runId,
-        providerSessionId: input.session_id,
-        // D4: 境界 (or generation 0) の run 起点にのみ start_kind / resumed_from を載せる。
-        ...(boundary.startKind !== undefined ? { runStartKind: boundary.startKind } : {}),
-        ...(boundary.resumedFrom !== undefined
-          ? { resumedFromSessionId: boundary.resumedFrom }
-          : {}),
-      };
+    const isApprovalHook =
+      input.hook_event_name === "PermissionRequest" || input.hook_event_name === "PreToolUse";
+    try {
+      // ADR 019e9462 / ADR 0014 Phase 3b-1: 検証済み hook の session_id を RunIdentity で解決する。
+      // **emit より前**に呼ぶことで、初確定時に held 監視イベント (heartbeat/diff/output) が canonical id で
+      // 発生時刻順 flush され、その後に本 hook イベントが ingest される (順序: 確定 → flush → hook ingest)。
+      //
+      // Attach multiplex (ADR 019ea476 D6): resolveIdentity があれば hook の session_id で per-session
+      // identity を解決 (初出 entry 生成 / GitWatcher 起動は registry 側の副作用)。
+      //
+      // run 境界 (ADR 0014 D2): onHookSession が provider id 変化 / terminal-reopen を判定し、この hook を
+      // どの canonical run へ ingest するか (start_kind / resumed_from を run 起点に載せるか) を返す。
+      // 監視イベントは境界を駆動しない (D3・分裂防止)。
+      // 注釈は run 語彙エイリアス RunIdentity (= SessionIdentity): ここでの用途は run 境界判定
+      // (onHookSession) であり、エイリアスの意図した使用点 (3b-1 sweep TDA-1 で実体化)。
+      // decision 019fd2ac ①: SessionStart フラグを registry へ伝え、reap 跨ぎ resume の初出でのみ
+      // terminal tombstone を consume させる (straggler hook で phantom run を作らない)。
+      const identity: RunIdentity | undefined =
+        this.resolveIdentity !== undefined
+          ? this.resolveIdentity(
+              input.session_id,
+              input.cwd,
+              input.hook_event_name === "SessionStart",
+            )
+          : this.identity;
+      let lineage: NormalizeContext = {};
+      if (identity !== undefined) {
+        const boundary = identity.onHookSession(input.session_id, {
+          isSessionStart: input.hook_event_name === "SessionStart",
+          ...(typeof input.source === "string" ? { source: input.source } : {}),
+        });
+        lineage = {
+          // D5: 全候補の session_id は canonical run id、provider_session_id は provider raw id。
+          canonicalSessionId: boundary.runId,
+          providerSessionId: input.session_id,
+          // D4: 境界 (or generation 0) の run 起点にのみ start_kind / resumed_from を載せる。
+          ...(boundary.startKind !== undefined ? { runStartKind: boundary.startKind } : {}),
+          ...(boundary.resumedFrom !== undefined
+            ? { resumedFromSessionId: boundary.resumedFrom }
+            : {}),
+        };
+      }
+
+      this.onHook?.(input.hook_event_name);
+
+      // 承認ゲート: PermissionRequest / PreToolUse は承認ブリッジへ。
+      if (isApprovalHook) {
+        await this.handleApprovalGate(input, res, lineage);
+        return;
+      }
+
+      // 通常 hook: 正規化 → sink。応答は空 (非ブロッキング)。
+      this.ingest(input, lineage);
+      // ADR 0014 D2#2: SessionEnd を ingest した後に run を terminal 化する (以後、同一 provider id の
+      // 再来は terminal-reopen として新 run を切る)。managed は静的 identity ゆえ跨いで有効。attach は
+      // 直後に reap で identity が破棄されるため best-effort (次 hook は fresh gen0・親未観測 = lineage 無し)。
+      if (input.hook_event_name === "SessionEnd") {
+        identity?.markRunTerminal();
+        // SessionEnd は session.ended を ingest した**後**に reap を促す (event 永続化 → presence release
+        // の順序を保つ・ADR 019eb365)。registry が GitWatcher を止め hello 再送で connected を落とす。
+        this.onSessionEnd?.(input.session_id);
+      }
+      this.respond(res, 200, {});
+    } catch (error) {
+      // Once a syntactically valid approval hook is identified, every internal failure must be
+      // blocking. Returning `{}` here means "no opinion" and lets the agent's normal/YOLO flow
+      // continue — exactly the fail-open condition this boundary exists to prevent.
+      if (isApprovalHook) {
+        this.respondApprovalFailure(input, res);
+        return;
+      }
+      throw error;
     }
+  }
 
-    this.onHook?.(input.hook_event_name);
-
-    // 承認ゲート: PermissionRequest / PreToolUse は承認ブリッジへ。
-    if (input.hook_event_name === "PermissionRequest" || input.hook_event_name === "PreToolUse") {
-      await this.handleApprovalGate(input, res, lineage);
+  /** Valid approval hook + internal exception → provider-specific explicit deny (no raw error). */
+  private respondApprovalFailure(input: HookCommonInput, res: ServerResponse): void {
+    const reason = "ActraDeck approval gate failed closed";
+    if (input.hook_event_name === "PermissionRequest") {
+      this.respondCaptured(res, 200, {
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: "deny" },
+        },
+      });
       return;
     }
-
-    // 通常 hook: 正規化 → sink。応答は空 (非ブロッキング)。
-    this.ingest(input, lineage);
-    // ADR 0014 D2#2: SessionEnd を ingest した後に run を terminal 化する (以後、同一 provider id の
-    // 再来は terminal-reopen として新 run を切る)。managed は静的 identity ゆえ跨いで有効。attach は
-    // 直後に reap で identity が破棄されるため best-effort (次 hook は fresh gen0・親未観測 = lineage 無し)。
-    if (input.hook_event_name === "SessionEnd") {
-      identity?.markRunTerminal();
-      // SessionEnd は session.ended を ingest した**後**に reap を促す (event 永続化 → presence release
-      // の順序を保つ・ADR 019eb365)。registry が GitWatcher を止め hello 再送で connected を落とす。
-      this.onSessionEnd?.(input.session_id);
-    }
-    this.respond(res, 200, {});
+    this.respondCaptured(res, 200, {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason,
+      },
+    });
   }
 
   private ingest(input: HookCommonInput, ctx: NormalizeContext = {}): void {
