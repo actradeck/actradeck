@@ -1,6 +1,6 @@
 {
   "name": "@actradeck/event-model",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "T1 canonical: ActraDeck 正規化イベント型・状態 enum・zod schema・INV 契約（Phase 1 で実装）",

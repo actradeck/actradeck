@@ -1,0 +1,74 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1002 222) rotate(146) scale(640 510)">
+      <stop stop-color="#006CDD" stop-opacity="0.32"/>
+      <stop offset="0.58" stop-color="#003B8F" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#00102F" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panel" x1="690" y1="98" x2="1180" y2="552" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A2452"/>
+      <stop offset="1" stop-color="#031634"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="88" y1="0" x2="620" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00B6FA"/>
+      <stop offset="0.55" stop-color="#006CDD"/>
+      <stop offset="1" stop-color="#006CDD" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="650" y="70" width="568" height="520" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000817" flood-opacity="0.55"/>
+    </filter>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#83CFFF" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" rx="24" fill="#00102F"/>
+  <rect width="1280" height="640" rx="24" fill="url(#grid)"/>
+  <rect width="1280" height="640" rx="24" fill="url(#glow)"/>
+
+  <image href="../../apps/webui/public/brand/icon.svg" x="88" y="66" width="72" height="72"/>
+  <text x="180" y="115" fill="#FFFFFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="34" font-weight="750" letter-spacing="0.5">ActraDeck</text>
+  <text x="180" y="145" fill="#82CFFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="650" letter-spacing="2.2">LOCAL-FIRST AGENT SAFETY</text>
+
+  <rect x="88" y="190" width="510" height="4" rx="2" fill="url(#rule)"/>
+
+  <text x="88" y="248" fill="#FFFFFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="43" font-weight="760" letter-spacing="-1.1">Put risky agent actions</text>
+  <text x="88" y="300" fill="#FFFFFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="43" font-weight="760" letter-spacing="-1.1">back in front</text>
+  <text x="88" y="352" fill="#FFFFFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="43" font-weight="760" letter-spacing="-1.1">of a human.</text>
+
+  <text x="90" y="394" fill="#AFC5E5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17" font-weight="450">Claude Code + Codex · approval gates · replayable audit trails</text>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="1.1">
+    <rect x="88" y="430" width="158" height="42" rx="21" fill="#08295B" stroke="#006CDD" stroke-opacity="0.75"/>
+    <text x="112" y="456" fill="#D9EDFF">APPROVAL GATES</text>
+    <rect x="258" y="430" width="180" height="42" rx="21" fill="#08295B" stroke="#006CDD" stroke-opacity="0.75"/>
+    <text x="282" y="456" fill="#D9EDFF">SECRET REDACTION</text>
+    <rect x="450" y="430" width="162" height="42" rx="21" fill="#08295B" stroke="#006CDD" stroke-opacity="0.75"/>
+    <text x="474" y="456" fill="#D9EDFF">SESSION REPLAY</text>
+  </g>
+
+  <text x="90" y="528" fill="#78CFFF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="650">npx actradeck demo</text>
+  <text x="90" y="570" fill="#8EA8CA" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">Observe across agents. Govern where supported.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="682" y="92" width="506" height="466" rx="24" fill="url(#panel)" stroke="#1E5798" stroke-width="1.5"/>
+    <rect x="682" y="92" width="506" height="58" rx="24" fill="#0D2D5E"/>
+    <path d="M682 126C682 107.222 697.222 92 716 92H1154C1172.78 92 1188 107.222 1188 126V150H682V126Z" fill="#0D2D5E"/>
+    <circle cx="716" cy="121" r="6" fill="#FF6B6B"/>
+    <circle cx="739" cy="121" r="6" fill="#FFD166"/>
+    <circle cx="762" cy="121" r="6" fill="#54D18B"/>
+    <text x="804" y="127" fill="#82A6D3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">actradeck demo</text>
+
+    <text x="724" y="194" fill="#78CFFF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">$ claude</text>
+    <text x="724" y="240" fill="#8EA8CA" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">Agent wants to run:</text>
+    <rect x="714" y="258" width="442" height="62" rx="12" fill="#00102F" stroke="#234D80"/>
+    <text x="736" y="296" fill="#F0F6FF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">rm -rf ./important-directory</text>
+
+    <rect x="714" y="350" width="442" height="150" rx="14" fill="#10254A" stroke="#00B6FA" stroke-width="1.5"/>
+    <circle cx="749" cy="388" r="15" fill="#00B6FA" fill-opacity="0.18" stroke="#00B6FA"/>
+    <path d="M742 388L747 393L757 382" stroke="#00B6FA" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="779" y="394" fill="#FFFFFF" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="21" font-weight="750">HELD FOR APPROVAL</text>
+    <text x="738" y="435" fill="#AFC5E5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">Risk: recursive destructive delete</text>
+    <text x="738" y="466" fill="#78CFFF" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">Decision: waiting for human</text>
+  </g>
+</svg>

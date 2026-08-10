@@ -1,8 +1,8 @@
 {
   "name": "actradeck",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "license": "Apache-2.0",
-  "description": "ActraDeck bootstrap CLI — verify-and-fetch a signed release, diagnose your machine, and hand off to quickstart. A thin, dependency-free wrapper; the full product ships as a signed GitHub Release + GHCR image.",
+  "description": "ActraDeck CLI — preview, install, and verify a local approval and audit cockpit for Claude Code and Codex.",
   "type": "module",
   "repository": {
     "type": "git",
@@ -27,6 +27,11 @@
   "keywords": [
     "actradeck",
     "coding-agent",
+    "claude-code",
+    "codex",
+    "agent-security",
+    "approval-gate",
+    "audit-trail",
     "observability",
     "cli",
     "bootstrap"

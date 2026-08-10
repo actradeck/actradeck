@@ -120,17 +120,29 @@ export function tokenize(segment: string): string[] {
 }
 
 /**
- * トークン先頭をコマンド名 (basename, 小文字化) に正規化する。
+ * トークン先頭をコマンド名 (shell escape 除去, basename, 小文字化) に正規化する。
  *
  * QA-3: `tokens[0] !== "rm"` のような **大小文字を区別する素の比較**は uppercase 変種
  * (`RM -RF /tmp`) を取りこぼし、承認ゲートを素通りさせていた。コマンド名比較は常に本関数で
- * 小文字化した basename に対して行う (`/usr/bin/RM` → `rm`)。引数・パスは大小文字を保つため
- * ここでは tokens[0] のみを対象にする。
+ * 小文字化した basename に対して行う (`/usr/bin/RM` → `rm`)。さらに POSIX shell が実行前に
+ * 除去する backslash escape を 1 文字ずつ畳む (`r\m` / `\/bin\/r\m` → `rm`)。これを行わないと
+ * shell では `rm` として実行される綴りが分類器だけ別名になり、承認ゲートを素通りする。
+ * 引数・パスは大小文字を保つため、ここでは tokens[0] のみを対象にする。
  */
 export function commandName(tokens: string[]): string {
   const first = tokens[0];
   if (typeof first !== "string" || first.length === 0) return "";
-  const base = first.includes("/") ? (first.split("/").pop() ?? first) : first;
+  let shellName = "";
+  for (let i = 0; i < first.length; i++) {
+    const ch = first[i];
+    if (ch === "\\" && i + 1 < first.length) {
+      shellName += first[i + 1];
+      i++;
+      continue;
+    }
+    shellName += ch;
+  }
+  const base = shellName.includes("/") ? (shellName.split("/").pop() ?? shellName) : shellName;
   return base.toLowerCase();
 }
 
@@ -177,6 +189,10 @@ const RUNNER_WRAPPERS = new Set([
   "exec",
   "time",
   "builtin",
+  // Multi-call binaries: the first positional argument selects and executes an applet. Without
+  // stripping this layer, `busybox rm -rf /` and `toybox rm -rf /` looked like benign commands.
+  "busybox",
+  "toybox",
 ]);
 
 /** ラッパ剥がしの最大反復 (二重・多重ラッパでも有界に止める。ReDoS/無限ループ防止)。 */
@@ -280,7 +296,7 @@ function isRecursiveForcedRm(tokens: string[]): boolean {
   return recursive && force;
 }
 
-/** git push が強制か。 */
+/** git push が強制か。git の global option が subcommand 前にあっても token 全体から拾う。 */
 function isForcedGitPush(tokens: string[]): boolean {
   if (commandName(tokens) !== "git" || !tokens.includes("push")) return false;
   return tokens.some(
@@ -290,6 +306,31 @@ function isForcedGitPush(tokens: string[]): boolean {
       t === "--force-with-lease" ||
       (/^-[a-z]*$/i.test(t) && t.startsWith("-") && !t.startsWith("--") && t.includes("f")),
   );
+}
+
+/** git reset --hard / clean --force を global option (`-C`, `-c`, `--no-pager`) 非依存で拾う。 */
+function isDestructiveGitWorktreeRewrite(tokens: string[]): boolean {
+  if (commandName(tokens) !== "git") return false;
+  const resetIdx = tokens.findIndex((t, i) => i > 0 && t.toLowerCase() === "reset");
+  if (resetIdx >= 0 && tokens.slice(resetIdx + 1).some((t) => t.toLowerCase() === "--hard")) {
+    return true;
+  }
+  const cleanIdx = tokens.findIndex((t, i) => i > 0 && t.toLowerCase() === "clean");
+  if (cleanIdx < 0) return false;
+  return tokens.slice(cleanIdx + 1).some((t) => {
+    const lower = t.toLowerCase();
+    return (
+      lower === "--force" ||
+      lower === "-f" ||
+      (/^-[a-z]+$/i.test(t) && !t.startsWith("--") && lower.includes("f"))
+    );
+  });
+}
+
+/** `git -c alias.x=!<shell> x` 型の shell alias は任意コード実行なので fail-safe で止める。 */
+function definesShellGitAlias(tokens: string[]): boolean {
+  if (commandName(tokens) !== "git") return false;
+  return tokens.slice(1).some((t) => /^alias\.[^=\s]+=!/i.test(t));
 }
 
 /** chmod が world-writable / 再帰か。 */
@@ -664,6 +705,12 @@ function unanalyzableSegmentRisk(
   const first = rawTokens[startIdx];
   if (first === undefined) return undefined; // 代入のみ (`FOO=bar`) → コマンド無し。委ねる。
   if (isCleanExecutableToken(first)) return undefined; // 通常コマンド名 → 既存判定に委ねる。
+  // POSIX shell の backslash escape を畳めば通常 basename になる形 (`r\m`, `\/bin\/rm`) は
+  // commandName と各構造述語で危険名を解析できる。ただし非 canonical な実行形自体は従来どおり
+  // medium 床を保つ (`\curl` 等の persistable=false を弱めない)。named category は後続述語に委ね、
+  // high-risk-other を重複付与しない。
+  const normalizedName = commandName(rawTokens.slice(startIdx));
+  if (isCleanExecutableToken(normalizedName)) return "medium";
 
   // grouping/quote メタ文字を剥がして内側を露出させ、再分類で high を拾う。
   if (depth < MAX_INLINE_DEPTH) {
@@ -676,7 +723,9 @@ function unanalyzableSegmentRisk(
   }
   // process-sub の split 断片かつ起動がベニーン (実行しない) なら medium 床上げを抑止 (low 維持)。
   if (suppressMediumFloor) return undefined;
-  // 先頭メタ文字を持つ = 構造判定不能 → fail-safe medium (over-gate 許容)。
+  // 先頭メタ文字を持つ = 構造判定不能。YOLO/default policy でも分類不能な実行形を
+  // silent defer しないよう high-risk-other backstop を付け、risk は従来どおり medium に保つ。
+  if (categories !== undefined && categories.size === 0) categories.add("high-risk-other");
   return "medium";
 }
 
@@ -1020,6 +1069,8 @@ const PERSIST_DENY_PROGRAMS: ReadonlySet<string> = new Set([
   "nohup",
   "chroot",
   "unshare",
+  "busybox",
+  "toybox",
   // shell 起動 (inline -c / スクリプト実行)。
   "sh",
   "bash",
@@ -1224,15 +1275,22 @@ function classifyCommandRiskInternal(
     const { tokens, capExhausted } = stripRunnerWrappers(deassigned);
     if (tokens.length === 0) continue;
     // 多重ラッパで実コマンドを剥がし上限の奥に隠した疑い → 分類不能として gated (medium) に倒す。
-    if (capExhausted) bump("medium");
+    if (capExhausted) {
+      bump("medium");
+      categories?.add("high-risk-other");
+    }
     // 各破壊述語を個別評価し category を付与する (短絡せず・どの述語が当たったか category へ反映)。
     let segHigh = false;
     if (isRecursiveForcedRm(tokens)) {
       categories?.add("recursive-rm");
       segHigh = true;
     }
-    if (isForcedGitPush(tokens)) {
+    if (isForcedGitPush(tokens) || isDestructiveGitWorktreeRewrite(tokens)) {
       categories?.add("history-rewrite");
+      segHigh = true;
+    }
+    if (definesShellGitAlias(tokens)) {
+      categories?.add("inline-code");
       segHigh = true;
     }
     if (isDangerousChmod(tokens)) {

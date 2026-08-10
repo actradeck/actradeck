@@ -4,13 +4,15 @@ import { cmdUp } from "./commands/up.js";
 import { cmdVersion } from "./commands/version.js";
 import { cmdInstall, type InstallOpts } from "./commands/install.js";
 import { cmdConformance, type ConformanceOpts } from "./commands/conformance.js";
+import { cmdDemo } from "./commands/demo.js";
 
-const USAGE = `actradeck — bootstrap CLI for ActraDeck (local-first audit cockpit for coding agents)
+const USAGE = `actradeck — put risky coding-agent actions back in front of a human
 
 Usage:
   actradeck <command> [options]
 
 Commands:
+  demo        Show a 5-second safety preview. No install, files, subprocesses, or network.
   doctor      Diagnose this machine (platform / Node / pnpm / git / Docker). Offline-safe.
   install     Fetch + VERIFY a signed release (checksum + provenance), then hand off to quickstart.
               --version vX.Y.Z   install a specific release tag (default: latest stable)
@@ -86,6 +88,8 @@ export async function run(deps: Deps, argv: string[]): Promise<number> {
         return 0;
       case "doctor":
         return await cmdDoctor(deps);
+      case "demo":
+        return await cmdDemo(deps);
       case "up":
         return await cmdUp(deps);
       case "version":

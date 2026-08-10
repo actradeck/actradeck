@@ -3,15 +3,16 @@
 # scripts/version.sh — lockstep version stamper for the ActraDeck monorepo.
 # =============================================================================
 # Sets ONE version across the root package and every workspace (db / packages/* /
-# apps/*), rolls the CHANGELOG's [Unreleased] section into a dated release section,
-# and (optionally) creates a LOCAL annotated tag `vX.Y.Z`. It NEVER pushes anything
-# — publishing is a separate, explicit step (git push / GitHub Release).
+# apps/*), and rolls the CHANGELOG's [Unreleased] section into a dated release section.
+# Tagging is a separate `--tag-only` invocation after the stamped files are committed,
+# so the annotated tag cannot accidentally point at the pre-bump tree. It NEVER pushes.
 #
 # Usage:
-#   scripts/version.sh <X.Y.Z> [--no-tag] [--dry-run]
+#   scripts/version.sh <X.Y.Z> [--tag-only] [--dry-run]
 #
 #   <X.Y.Z>      target semantic version (e.g. 0.1.0). Required.
-#   --no-tag     stamp files + CHANGELOG but do NOT create the git tag.
+#   --tag-only   create the local annotated tag from an already committed, clean tree.
+#   --no-tag     deprecated compatibility no-op (stamping no longer creates a tag).
 #   --dry-run    print the plan and change NOTHING (no files, no tag).
 #
 # Why lockstep (ADR 0013 / decision 019f2bc1): ActraDeck ships as ONE unit (4 tiers
@@ -40,11 +41,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- args --------------------------------------------------------------------
 VERSION=""
-NO_TAG=0
+TAG_ONLY=0
+LEGACY_NO_TAG=0
 DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
-    --no-tag)  NO_TAG=1 ;;
+    --tag-only) TAG_ONLY=1 ;;
+    --no-tag) LEGACY_NO_TAG=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)        die "Unknown option: $arg" ;;
@@ -52,7 +55,8 @@ for arg in "$@"; do
   esac
 done
 
-[ -n "$VERSION" ] || die "Version argument required. Usage: scripts/version.sh <X.Y.Z> [--no-tag] [--dry-run]"
+[ -n "$VERSION" ] || die "Version argument required. Usage: scripts/version.sh <X.Y.Z> [--tag-only] [--dry-run]"
+[ "$TAG_ONLY" = 0 ] || [ "$LEGACY_NO_TAG" = 0 ] || die "--tag-only and --no-tag cannot be combined."
 
 # --- semver validate (X.Y.Z core; optional -prerelease / +build per SemVer) ---
 SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
@@ -72,14 +76,17 @@ CURRENT="$(jq -r '.version // "0.0.0"' "$ROOT/package.json")"
 say "Current root version: $CURRENT  ->  target: $VERSION  (tag: $TAG, packages: ${#PKGS[@]})"
 
 # Idempotency: re-stamping the SAME version is a hard error (a second run would roll
-# the CHANGELOG a second time). Bumping to a NEW version is always allowed.
-if [ "$CURRENT" = "$VERSION" ]; then
+# the CHANGELOG a second time). `--tag-only` intentionally requires that same version.
+if [ "$TAG_ONLY" = 0 ] && [ "$CURRENT" = "$VERSION" ]; then
   die "Root is already at $VERSION — refusing to re-stamp (would double-roll CHANGELOG). Nothing to do."
 fi
+if [ "$TAG_ONLY" = 1 ] && [ "$CURRENT" != "$VERSION" ]; then
+  die "--tag-only requires the committed tree to already be stamped $VERSION (current: $CURRENT)."
+fi
 
-# Tag must not already exist (would be a no-op / confusing). Only checked when tagging.
-if [ "$NO_TAG" = 0 ] && git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
-  die "Tag $TAG already exists. Delete it first or pass --no-tag."
+# Reusing a released/local tag is always ambiguous. Refuse in both stamp and tag-only modes.
+if git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+  die "Tag $TAG already exists. Refusing to re-stamp or re-point it."
 fi
 
 CHANGELOG="$ROOT/CHANGELOG.md"
@@ -88,11 +95,38 @@ grep -q '^## \[Unreleased\]' "$CHANGELOG" || die "CHANGELOG.md has no '## [Unrel
 
 DATE="$(date -u +%Y-%m-%d)"
 
+if [ "$DRY_RUN" = 1 ] && [ "$TAG_ONLY" = 1 ]; then
+  say "DRY RUN — no tag created. Would verify the tree is clean, committed, and stamped $VERSION, then create local annotated tag $TAG."
+  exit 0
+fi
+
 if [ "$DRY_RUN" = 1 ]; then
   say "DRY RUN — no files changed, no tag created. Would:"
   for pj in "${PKGS[@]}"; do say "  set version -> $VERSION in ${pj#"$ROOT"/}"; done
   say "  roll CHANGELOG '[Unreleased]' -> '## [$VERSION] - $DATE'"
-  [ "$NO_TAG" = 0 ] && say "  create local annotated tag $TAG (no push)" || say "  (skip tag: --no-tag)"
+  say "  stop before tagging; after commit, run: scripts/version.sh $VERSION --tag-only"
+  exit 0
+fi
+
+# --- tag-only: validate the committed tree, then tag HEAD --------------------
+if [ "$TAG_ONLY" = 1 ]; then
+  [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ] ||
+    die "--tag-only requires a clean tree. Commit the stamped release files first."
+  for pj in "${PKGS[@]}"; do
+    got="$(jq -r '.version' "$pj")"
+    [ "$got" = "$VERSION" ] || die "Version mismatch before tagging: ${pj#"$ROOT"/}=$got (wanted $VERSION)."
+  done
+  committed="$(git -C "$ROOT" show HEAD:package.json | jq -r '.version')"
+  [ "$committed" = "$VERSION" ] ||
+    die "HEAD package.json is $committed, not $VERSION. Commit the version bump before tagging."
+  committed_changelog="$(git -C "$ROOT" show HEAD:CHANGELOG.md)"
+  grep -q "^## \[$VERSION\] - " <<<"$committed_changelog" ||
+    die "HEAD CHANGELOG.md has no released [$VERSION] section. Commit the rolled changelog first."
+  git -C "$ROOT" tag -a "$TAG" -m "ActraDeck $TAG"
+  tagged="$(git -C "$ROOT" show "$TAG:package.json" | jq -r '.version')"
+  [ "$tagged" = "$VERSION" ] || die "Created tag tree reports $tagged, not $VERSION."
+  ok "Created local annotated tag $TAG at committed version $tagged (NOT pushed)."
+  say "Publish deliberately when ready: git push origin $TAG"
   exit 0
 fi
 
@@ -139,13 +173,5 @@ awk -v ver="$VERSION" -v date="$DATE" -v tag="$TAG" -v url="$repo_url" '
 mv "$tmp" "$CHANGELOG"
 ok "Rolled CHANGELOG: '[Unreleased]' -> '[$VERSION] - $DATE'."
 
-# --- 3. local annotated tag (never pushed) -----------------------------------
-if [ "$NO_TAG" = 0 ]; then
-  git -C "$ROOT" tag -a "$TAG" -m "ActraDeck $TAG"
-  ok "Created local annotated tag $TAG (NOT pushed)."
-  say "Publish it deliberately when ready:  git push origin $TAG   (fires the Release workflow once; the pre-push gate scans the tag first)"
-else
-  say "Skipped tag creation (--no-tag). Files + CHANGELOG stamped to $VERSION."
-fi
-
-ok "Done. Review 'git diff', commit, then tag/publish as a separate step."
+ok "Stamped files only; no tag created. Review and commit this release bump."
+say "After the commit is clean, create the local tag with: scripts/version.sh $VERSION --tag-only"

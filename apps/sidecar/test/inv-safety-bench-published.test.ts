@@ -57,40 +57,41 @@ const PUBLISHED = {
     kindFamilies: 29,
   },
   classifier: {
-    micro: { support: 27, precisionPct: "87.1", recallPct: "100.0" },
+    micro: { support: 35, precisionPct: "89.7", recallPct: "100.0" },
     // support / precision% / recall% per the "Results — risk classifier" table.
     byCategory: [
-      { category: "recursive-rm", support: 6, precisionPct: "100.0", recallPct: "100.0" },
+      { category: "recursive-rm", support: 9, precisionPct: "100.0", recallPct: "100.0" },
       { category: "disk-destroy", support: 4, precisionPct: "80.0", recallPct: "100.0" },
-      { category: "history-rewrite", support: 4, precisionPct: "100.0", recallPct: "100.0" },
+      { category: "history-rewrite", support: 7, precisionPct: "100.0", recallPct: "100.0" },
       { category: "db-drop", support: 3, precisionPct: "75.0", recallPct: "100.0" },
       { category: "fork-bomb", support: 1, precisionPct: "100.0", recallPct: "100.0" },
       { category: "perm-change", support: 3, precisionPct: "100.0", recallPct: "100.0" },
-      { category: "inline-code", support: 4, precisionPct: "100.0", recallPct: "100.0" },
+      { category: "inline-code", support: 5, precisionPct: "100.0", recallPct: "100.0" },
       { category: "migrate-prod", support: 2, precisionPct: "50.0", recallPct: "100.0" },
+      { category: "high-risk-other", support: 1, precisionPct: "100.0", recallPct: "100.0" },
     ],
     gate: [
       {
         policyName: "default-gated",
-        precisionPct: "90.0",
+        precisionPct: "93.5",
         recallPct: "100.0",
-        tp: 18,
+        tp: 29,
         fp: 2,
         fn: 0,
-        tn: 23,
+        tn: 22,
       },
       {
         policyName: "strict-all",
-        precisionPct: "86.7",
+        precisionPct: "89.5",
         recallPct: "100.0",
-        tp: 26,
+        tp: 34,
         fp: 4,
         fn: 0,
-        tn: 13,
+        tn: 15,
       },
     ],
-    riskExactPct: "86.0",
-    dangerRecallPct: "96.2",
+    riskExactPct: "88.7",
+    dangerRecallPct: "97.1",
   },
 } as const;
 
@@ -170,7 +171,7 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
       );
       expect(doc, `category row ${row.category}`).toMatch(re);
     }
-    // gate rows: "| default-gated (out-of-box)          | 90.0%     | 100.0% | 18 / 2 / 0 / 23   |"
+    // gate rows: "| default-gated (out-of-box)          | 93.5%     | 100.0% | 29 / 2 / 0 / 22   |"
     for (const g of c.gate) {
       const re = new RegExp(
         `${g.precisionPct}%\\s*\\|\\s*${g.recallPct}%\\s*\\|\\s*${g.tp} / ${g.fp} / ${g.fn} / ${g.tn}`,

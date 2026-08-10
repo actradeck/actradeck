@@ -9,7 +9,11 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import type { PolicyCategory, RiskLevel } from "@actradeck/event-model";
+import {
+  DEFAULT_GATED_CATEGORIES,
+  type PolicyCategory,
+  type RiskLevel,
+} from "@actradeck/event-model";
 
 import { ApprovalBridge, encodeOperationSignature } from "../src/approval-bridge.js";
 import { classifyCommandRisk } from "../src/normalize.js";
@@ -954,6 +958,30 @@ describe("INV-APPROVAL-BYPASS-POLICY-GATE: bypass + policy で catastrophic を�
     const r = await bridge.requestApproval(bypassInput("Bash", { command: "rm -rf /tmp/x" }), emit);
     expect(emit, "承認カードを出す").toHaveBeenCalledTimes(1);
     expect(r.behavior, "無応答は安全側 deny (native flow へ defer しない)").toBe("deny");
+  });
+
+  it("default policy は adversarial executable/wrapper/Git/inline-code 形をすべて deny に落とす", async () => {
+    const adversarialCommands = [
+      "r\\m -rf /tmp/escaped",
+      "busybox rm -rf /tmp/applet",
+      "toybox rm -rf /tmp/applet",
+      "git -C /repo reset --hard HEAD~3",
+      "git -c core.pager=cat reset --hard HEAD~3",
+      "git -c alias.wipe='!rm -rf /tmp/alias-target' wipe",
+      "python3 -c \"import shutil; shutil.rmtree('/tmp/tree')\"",
+      "${RM:-rm} -rf /tmp/expanded",
+    ];
+
+    for (const command of adversarialCommands) {
+      const bridge = policyBridge([...DEFAULT_GATED_CATEGORIES], 1000);
+      const emit = vi.fn();
+      const pending = bridge.requestApproval(bypassInput("Bash", { command }), emit);
+      await Promise.resolve();
+      expect(emit, command).toHaveBeenCalledTimes(1);
+      expect(bridge.pendingCount, command).toBe(1);
+      bridge.drain();
+      expect((await pending).behavior, command).toBe("deny");
+    }
   });
 
   it("enabled-category を UI 承認すると allow", async () => {

@@ -11,8 +11,23 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-10
+
+### Added
+
+- **`actradeck demo` — a zero-side-effect five-second product preview.** The dependency-free
+  npm bootstrapper now explains detect → hold → deny → redact → record before asking a visitor
+  to install anything. It performs no network, filesystem, subprocess, or install action and
+  labels the output as a synthetic simulation before pointing to the cockpit's real 30-second
+  pipeline demo.
+
 ### Changed
 
+- **README repositioned around the first user outcome.** The opening now leads with reducing
+  blind coding-agent approvals, shows the held-action experience immediately, moves the live
+  safety demo and shortest install paths ahead of architecture/assurance detail, and keeps mode
+  support plus best-effort security limits explicit. npm metadata now uses the same outcome-led
+  description and adds Claude Code, Codex, approval, audit, and agent-security discovery terms.
 - **Breaking: audit manifest canonical form bumped to v3** (`actradeck-audit-manifest/v3`).
   The signed manifest summary now carries `approval_synthetic_retired` (relay-lost synthetic
   retires, itemized separately from operator decisions), which changes the canonical
@@ -34,6 +49,29 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   `actradeck-audit-manifest` marker per bundled session (each proves that single session
   only). To verify the packet as a whole, extract and verify the packet marker — verifying
   only a session marker proves that session, not the bundle.
+
+### Fixed
+
+- **WebSocket browser boundary now enforces same-origin upgrades.** The WebUI rejects missing,
+  duplicate, malformed, cross-origin, cross-site, and same-site cross-origin browser handshakes
+  before `handleUpgrade`, and ships framing, MIME-sniffing, referrer, and base/object CSP headers.
+- **YOLO policy classifier bypasses closed.** Shell-escaped executable names, BusyBox/Toybox
+  applets, Git global options, Git shell aliases, and dynamic executable expansion can no longer
+  bypass the default approval policy. Arbitrary inline code is now default-gated; the reproducible
+  safety corpus includes these adversarial forms (53 vectors, 100% default-gate recall).
+- **Approval-hook exceptions now fail closed.** Once a valid Claude Code `PermissionRequest` or
+  `PreToolUse` hook is identified, identity, policy, event-sink, or bridge failures return the
+  provider-specific explicit deny response instead of the no-op `{}` response that could continue
+  execution.
+- **Release tags can no longer bind the pre-version tree.** `scripts/version.sh` now separates
+  stamping from a clean-tree `--tag-only` phase after commit, and the release invariant inspects
+  the tag's own `package.json` instead of only checking that a same-named tag exists.
+- **High-severity `nanoid` development dependency advisory patched.** The transitive
+  Vitest/Vite/PostCSS path is pinned to the patched 3.3.17+ line; `pnpm audit --audit-level high`
+  now reports no known vulnerabilities.
+- **ReDoS timing invariant deflaked without loosening its threshold.** The sub-millisecond
+  auth-header case now batches identical operations per timing sample so scheduler granularity
+  cannot manufacture a super-linear ratio; the O(n²)-detecting 3.5 threshold is unchanged.
 
 ## [0.6.0] - 2026-08-05
 
@@ -108,7 +146,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   detector could not signal a gap in itself. The panel now books time-since-last-success
   client-side (clock-skew independent), shows a stale banner and dims the rows once data
   is older than three poll intervals, renders an explicit "unreachable" row when the API
-  never answered, and bounds every pull with a fetch timeout so even a *hanging* backend
+  never answered, and bounds every pull with a fetch timeout so even a _hanging_ backend
   cannot freeze the signal. Fresh-path rendering is byte-identical to before.
 - **Deflaked `INV-OPENCODE-ADAPTER-ERROR-MINIMIZED` (public CI false red).** The leak
   scan substring-matched dropped envelope values against runtime-generated fields, so a
@@ -328,7 +366,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/actradeck/actradeck/releases/tag/v0.7.0
 [0.6.0]: https://github.com/actradeck/actradeck/releases/tag/v0.6.0
 [0.5.2]: https://github.com/actradeck/actradeck/releases/tag/v0.5.2
 [0.5.1]: https://github.com/actradeck/actradeck/releases/tag/v0.5.1

@@ -3,7 +3,8 @@ name: Release
 # Signed, provenance-attested GitHub Release (ADR 0013 / decision 019f2bc1, Phase 1).
 #
 # Fires ONCE when an annotated tag `vX.Y.Z` is pushed directly to this canonical
-# repository (scripts/version.sh stamps the tag locally; the maintainer publishes it
+# repository (`scripts/version.sh X.Y.Z` stamps files; after commit,
+# `scripts/version.sh X.Y.Z --tag-only` tags that committed tree; the maintainer publishes it
 # with `git push origin vX.Y.Z`). The maintainer-side pre-push gate scans the tag
 # object (message, tagger identity) and the peeled commit range before the push
 # leaves the machine; release-tag deletion/re-pointing is denied there by default.
@@ -63,14 +64,14 @@ jobs:
           cache: pnpm
 
       # INV-RELEASE-TAG-MATCHES-VERSION: the pushed tag MUST equal `v<root package.json
-      # version>`. A lockstep bump (scripts/version.sh) stamps every package + the tag
-      # together; this guards against tagging without stamping (or vice versa).
+      # version>`. The two-phase version script stamps every package, then only tags the
+      # committed clean tree; this guards against tagging without stamping (or vice versa).
       - name: Assert tag matches package.json version
         run: |
           root_ver="$(jq -r '.version' package.json)"
           expected="v${root_ver}"
           if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
-            echo "::error::tag '${GITHUB_REF_NAME}' != package.json version '${expected}' — run scripts/version.sh ${root_ver} to stamp+tag in lockstep" >&2
+            echo "::error::tag '${GITHUB_REF_NAME}' != package.json version '${expected}' — stamp+commit with scripts/version.sh ${root_ver}, then tag with scripts/version.sh ${root_ver} --tag-only" >&2
             exit 1
           fi
           echo "tag ${GITHUB_REF_NAME} matches root version ${root_ver}"
@@ -261,7 +262,7 @@ jobs:
           root_ver="$(jq -r '.version' package.json)"
           expected="v${root_ver}"
           if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
-            echo "::error::tag '${GITHUB_REF_NAME}' != package.json version '${expected}' — run scripts/version.sh ${root_ver} to stamp+tag in lockstep before publishing an image" >&2
+            echo "::error::tag '${GITHUB_REF_NAME}' != package.json version '${expected}' — stamp+commit with scripts/version.sh ${root_ver}, then tag with scripts/version.sh ${root_ver} --tag-only before publishing an image" >&2
             exit 1
           fi
           echo "tag ${GITHUB_REF_NAME} matches root version ${root_ver}"
@@ -481,7 +482,7 @@ jobs:
           cli_ver="$(jq -r '.version' packages/cli/package.json)"
           expected="v${root_ver}"
           if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
-            echo "::error::tag '${GITHUB_REF_NAME}' != root version '${expected}' — run scripts/version.sh ${root_ver} to stamp+tag in lockstep" >&2
+            echo "::error::tag '${GITHUB_REF_NAME}' != root version '${expected}' — stamp+commit with scripts/version.sh ${root_ver}, then tag with scripts/version.sh ${root_ver} --tag-only" >&2
             exit 1
           fi
           if [ "${cli_ver}" != "${root_ver}" ]; then

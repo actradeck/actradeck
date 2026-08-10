@@ -58,16 +58,19 @@ Constraints that shape the design:
 
 ### D2 — Versioning
 
-**Lockstep single version:** the root package and every workspace share one version,
-stamped by `scripts/version.sh <X.Y.Z>`, which also rolls the `CHANGELOG.md`
-`[Unreleased]` section and creates a **local** annotated tag (never pushed by the
-script). First release: `v0.1.0`.
+**Lockstep single version:** the root package and every workspace share one version.
+`scripts/version.sh <X.Y.Z>` stamps them and rolls the `CHANGELOG.md` `[Unreleased]`
+section. After those changes are reviewed and committed,
+`scripts/version.sh <X.Y.Z> --tag-only` requires a clean tree and creates a **local**
+annotated tag that points at the committed versioned tree (never pushed by the script).
+Separating stamp from tag prevents the tag from binding the pre-bump HEAD. First
+release: `v0.1.0`.
 
 ### D3 — Signing technique, and separation from the product's own signature
 
-| Layer | Key / identity | Signs | Verified with |
-| --- | --- | --- | --- |
-| **Release** (this ADR) | Ephemeral OIDC certificate (Sigstore, per-run) | CI build artifacts (tarball, SBOM) | `gh attestation verify` (transparency log) |
+| Layer                               | Key / identity                                          | Signs                               | Verified with                                                   |
+| ----------------------------------- | ------------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------- |
+| **Release** (this ADR)              | Ephemeral OIDC certificate (Sigstore, per-run)          | CI build artifacts (tarball, SBOM)  | `gh attestation verify` (transparency log)                      |
 | **Audit export** (ADR 0007 lineage) | Long-lived **operator** Ed25519 key, fingerprint-pinned | Runtime session data at export time | recipient re-computes the manifest root + checks the pinned key |
 
 These are **different threat models on purpose.** The long-lived operator audit key is
@@ -144,7 +147,7 @@ reference, so an upstream tag hijack cannot silently change what runs:
   injected un-pinning across all of those syntaxes/surfaces, so **a silently loosened pin
   cannot pass CI regardless of YAML syntax.**
 
-  **Honest coverage boundary.** What the gate *enforces* (task 019f3460 **landed** — the
+  **Honest coverage boundary.** What the gate _enforces_ (task 019f3460 **landed** — the
   previously-open gaps below are now closed): every remote `uses:` across all workflow YAML
   (any style — block / flow / flow-sequence / line-continuation) is a full 40-hex commit
   SHA; every `docker://image` ref (in `uses:` or a composite `runs.image`) carries a full
@@ -271,8 +274,8 @@ ADR matches the implementation:
 
 ## USER-GATED boundary (honest scope)
 
-**Buildable/verifiable now (no publishing):** version stamping + local tag; mirror
-generation → tarball; SBOM generation + leak scan; workflow permission/lint checks; the
+**Buildable/verifiable now (no publishing):** version stamping, commit, then clean-tree local
+tagging; mirror generation → tarball; SBOM generation + leak scan; workflow permission/lint checks; the
 installer's fail-closed digest path exercised against a locally tampered tarball.
 
 **Requires the maintainer, at publish time:** pushing a real tag, creating the GitHub
