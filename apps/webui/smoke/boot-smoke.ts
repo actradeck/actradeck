@@ -249,8 +249,12 @@ async function main(): Promise<void> {
   // (d) ブラウザ風 (認証ヘッダ無し) で /realtime/ws に接続 → BFF が Bearer 中継 →
   //     backend から snapshot.list を受信
   const snapshot = await new Promise<{ type: string }>((resolveP, rejectP) => {
-    // 認証ヘッダを **付けない** (ブラウザ native WS を模す)。BFF が server-side で Bearer を足す。
-    const ws = new WebSocket(`ws://${web.host}:${web.port}/realtime/ws`);
+    // Authorization は **付けない**。Node の ws はブラウザと違って Origin を自動送信しないため、
+    // cockpit の実 same-origin URL を明示して native browser handshake を再現する。
+    // BFF はこの Origin を検証した後、server-side で Bearer を upstream にだけ付与する。
+    const ws = new WebSocket(`ws://${web.host}:${web.port}/realtime/ws`, {
+      origin: `http://${web.host}:${web.port}`,
+    });
     const to = setTimeout(() => {
       ws.close();
       rejectP(new Error("timed out waiting for snapshot.list frame from BFF relay"));
