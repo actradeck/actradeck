@@ -79,12 +79,122 @@ interface ToolInput {
  */
 export const MAX_COMMAND_LEN = 4096;
 
-/** コマンドを ; | && || で区切った各セグメントへ分解 (パイプ/連結内の個別 cmd を見る)。 */
-export function splitSegments(command: string): string[] {
+/**
+ * quote 非対応の旧分割 (2026-08-14 以前の唯一の実装)。
+ * 未終端クォートで構造解析できないコマンドの fail-safe フォールバック専用に温存する
+ * (over-gate 方向 = 安全側)。新規の呼び出し元を作らないこと。
+ */
+function splitSegmentsQuoteUnaware(command: string): string[] {
   return command
     .split(/[;\n]|\|\||&&|\||(?<!\d)>{1,2}|<{1,2}/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/**
+ * コマンドを ; | && || (と redirect) で区切った各セグメントへ分解 (パイプ/連結内の個別 cmd を見る)。
+ *
+ * 承認ゲート偽陽性の実害修正 (2026-08-14): 旧実装はシングル/ダブルクォート内の `|` `;` でも
+ * 分割していたため、`rg -n 'a|b.*[Cc]' path` の引用済み正規表現が `|` で裂け、regex メタ文字
+ * (`*` `[`) で始まる断片が segment 先頭に来て「構造解析不能 → fail-safe medium 床上げ」が発動、
+ * 無害な検索コマンドが軒並み承認カード化 → 操作者不在の 30 秒で全 deny = エージェント実質
+ * ブロックの実インシデントを起こした。シェル文法どおり quote 内の演算子はデータであり
+ * 分割点ではない。
+ *
+ * 安全性の設計 (INV-APPROVAL: false-negative を許さない):
+ *  - シングルクォート内は shell が一切展開しない (真に inert)。ダブルクォート内の `$(...)` /
+ *    backtick は実行されるが、分割を抑止しても **文字列としては segment に残る**ため、既存の
+ *    hasCommandSubstitution / インライン再分類 (SEC-1) がそのまま検出する (検出点は不変)。
+ *  - `echo "rm -rf /" | sh` のような「quote 内は inert・実行はパイプ先」の形は、パイプ先の
+ *    stdin シェル (operand 無し) を既存の fail-safe が gated にする (こちらも不変)。
+ *  - backslash escape を処理する: `\"` はクォートを開かない (処理しないと `echo \"a|rm -rf /\"`
+ *    の実パイプを quote 内と誤認して **rm を素通しする false-negative** になる)。
+ *  - 未終端クォート (解析不能) は旧 quote 非対応分割へフォールバック (over-gate 方向・fail-safe)。
+ *  - 純粋な 1 パス文字走査 (正規表現ループ無し・O(n)) で ReDoS 経路を増やさない。
+ *
+ * ⚠️ 承認ゲート境界の走査範囲 (scope) 変更に当たる — 変更時は finding-registry の full 監査既定。
+ * INV-APPROVAL-QUOTED-OPERATORS (apps/sidecar/test/inv-approval.test.ts) が両方向を回帰固定する。
+ */
+export function splitSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+  const push = (): void => {
+    const trimmed = current.trim();
+    if (trimmed.length > 0) segments.push(trimmed);
+    current = "";
+  };
+  let i = 0;
+  while (i < command.length) {
+    const ch = command[i] as string;
+    if (quote === "'") {
+      current += ch;
+      if (ch === "'") quote = undefined;
+      i += 1;
+      continue;
+    }
+    if (quote === '"') {
+      // ダブルクォート内の backslash は次の 1 文字を字義どおりにする (\" で閉じない)。
+      if (ch === "\\" && i + 1 < command.length) {
+        current += ch + (command[i + 1] as string);
+        i += 2;
+        continue;
+      }
+      current += ch;
+      if (ch === '"') quote = undefined;
+      i += 1;
+      continue;
+    }
+    // quote 外: backslash は次の 1 文字を字義どおりにする (\" \| \; は開閉/分割に使わない)。
+    if (ch === "\\" && i + 1 < command.length) {
+      current += ch + (command[i + 1] as string);
+      i += 2;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === ";" || ch === "\n") {
+      push();
+      i += 1;
+      continue;
+    }
+    if (ch === "|") {
+      push();
+      i += command[i + 1] === "|" ? 2 : 1;
+      continue;
+    }
+    if (ch === "&" && command[i + 1] === "&") {
+      push();
+      i += 2;
+      continue;
+    }
+    if (ch === "<") {
+      push();
+      i += command[i + 1] === "<" ? 2 : 1;
+      continue;
+    }
+    if (ch === ">") {
+      // fd redirect (`2>`) は旧挙動どおり分割点にしない ((?<!\d) の移植)。
+      const previous = command[i - 1];
+      if (previous !== undefined && previous >= "0" && previous <= "9") {
+        current += ch;
+        i += 1;
+        continue;
+      }
+      push();
+      i += command[i + 1] === ">" ? 2 : 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+  if (quote !== undefined) return splitSegmentsQuoteUnaware(command);
+  push();
+  return segments;
 }
 
 /**

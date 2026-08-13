@@ -1396,3 +1396,63 @@ describe("INV-APPROVAL-BYPASS-SECRET-EGRESS-COMPOSITE: 片側だけでは発火�
     expect(emit).not.toHaveBeenCalled();
   });
 });
+
+// ============================================================================
+// INV-APPROVAL-QUOTED-OPERATORS (2026-08-14 実インシデント回帰固定)
+// ============================================================================
+// splitSegments が quote 非対応で引用済み正規表現の `|` を分割点にし、regex メタ文字で始まる
+// 断片が「構造解析不能 → medium 床上げ」を誤発動 → 無害な rg/grep 検索が軒並み承認カード化 →
+// 操作者不在の 30 秒 timeout で全 deny (エージェント実質ブロック) の回帰を両方向で固定する:
+//  (a) quote 内演算子はデータ (false-positive 側): 検索コマンドが low のまま。
+//  (b) 危険な実行経路は据え置き (false-negative 側): パイプ先 stdin シェル / コマンド置換 /
+//      backslash-escape 済みクォート越しの実パイプ / 未終端クォートのフォールバック。
+describe("INV-APPROVAL-QUOTED-OPERATORS: quoted operators are data, execution paths stay gated", () => {
+  it("(a) the incident command classifies low (quoted regex alternation with metacharacters)", () => {
+    // 2026-08-14 に実際に deny 連発を起こしたコマンド形 (別プロジェクトの調査セッション・
+    // trigger=destructive)。パスのみ中立化・構造は実物どおり。
+    const incident =
+      'cd /workspace/project; echo "=== deprecated features usage ==="; ' +
+      "rg -n 'roots/list|sampling/createMessage|createMessage|logging/setLevel|setRequestHandler.*[Ll]ogging|elicitation' " +
+      "--glob '!**/node_modules/**' --glob '!**/dist/**' packages/mcp/src scripts apps/mcp-server 2>/dev/null | head -10; " +
+      "echo done";
+    expect(classifyCommandRisk(incident)).toBe("low");
+  });
+
+  it("(a) quoted pipes/semicolons/redirects do not split segments", () => {
+    expect(classifyCommandRisk("rg -n 'a|b.*[Cc]' src")).toBe("low");
+    expect(classifyCommandRisk('grep -E "foo|bar[0-9]*" file.txt')).toBe("low");
+    expect(classifyCommandRisk("echo 'a && b; c > d'")).toBe("low");
+    // 実シェルでは echo の引数文字列であって rm は実行されない (single quote は無展開)。
+    expect(classifyCommandRisk("echo 'a; rm -rf /'")).toBe("low");
+    expect(classifyCommandRisk('echo "a; rm -rf /"')).toBe("low");
+  });
+
+  it("(b) piping an inert string into a stdin shell stays gated (fail-safe unchanged)", () => {
+    // quote 内は inert でも、パイプ先の operand 無しシェルは stdin コードを実行する。
+    expect(classifyCommandRisk('echo "rm -rf /" | sh')).not.toBe("low");
+    expect(classifyCommandRisk("echo 'rm -rf /' | bash")).not.toBe("low");
+  });
+
+  it("(b) command substitution inside double quotes still executes and stays gated", () => {
+    expect(classifyCommandRisk('echo "$(rm -rf /tmp/x)"')).not.toBe("low");
+    expect(classifyCommandRisk('echo "`rm -rf /tmp/x`"')).not.toBe("low");
+  });
+
+  it('(b) backslash-escaped quotes do not open a quote context (a real pipe behind \\" splits)', () => {
+    // `echo \"a\" | rm -rf /tmp/x` — \" は字義のクォート文字で、| は実パイプ。
+    // これを quote 内と誤認すると rm が素通りする (false-negative)。
+    expect(classifyCommandRisk('echo \\"a\\" | rm -rf /tmp/x')).toBe("high");
+  });
+
+  it("(b) an unterminated quote falls back to the quote-unaware split (over-gate direction)", () => {
+    // 解析不能 → 旧分割へフォールバック。旧分割は `;` で裂いて rm を検出する (fail-safe 維持)。
+    expect(classifyCommandRisk('echo "abc; rm -rf /tmp/x')).toBe("high");
+  });
+
+  it("(b) plain dangerous commands are unaffected", () => {
+    expect(classifyCommandRisk("rm -rf /tmp/x")).toBe("high");
+    expect(classifyCommandRisk("git push --force origin main")).toBe("high");
+    expect(classifyCommandRisk("echo ok && rm -rf /tmp/x")).toBe("high");
+    expect(classifyCommandRisk("true | rm -rf /tmp/x")).toBe("high");
+  });
+});
