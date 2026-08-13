@@ -139,6 +139,7 @@ export type TelemetryFetch = (
     readonly headers: Readonly<Record<string, string>>;
     readonly body: string;
     readonly signal: AbortSignal;
+    readonly redirect: "error";
   },
 ) => Promise<Response>;
 
@@ -544,12 +545,23 @@ export class AnonymousTelemetry {
     }
     const endpoint = preview.status.endpoint;
     if (!endpoint) throw new TelemetryError("not_enabled", "anonymous telemetry endpoint missing");
-    const response = await this.fetchImpl(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify(preview.batch),
-      signal: AbortSignal.timeout(5_000),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(preview.batch),
+        signal: AbortSignal.timeout(5_000),
+        // SEC-R2-1 (2026-08-13 監査 R2): redirect を follow しない。normalizeTelemetryEndpoint の
+        // 検証 (HTTPS-only / loopback 限定 / credential 拒否) は初回ホップにしか効かないため、
+        // follow を許すとゲート通過済み endpoint が 3xx で任意宛先 (内部サービス・cleartext HTTP)
+        // へ batch を横流しできる。"error" で 3xx は送達失敗 (send_failed) に倒す。
+        redirect: "error",
+      });
+    } catch (error) {
+      if (error instanceof TelemetryError) throw error;
+      throw new TelemetryError("send_failed", "telemetry collector is unreachable");
+    }
     if (!response.ok) {
       // メッセージへ upstream HTTP status を含めない (SEC-4/SEC-1: 応答 body は closed code のみに
       // 写像されるが、message も status oracle にしない — ログにも生 status を残さない方針)。

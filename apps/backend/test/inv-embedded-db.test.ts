@@ -119,13 +119,15 @@ describe("INV-EMBEDDED-DB: 埋込 PGlite boot + DB 往復", () => {
       });
       expect(response.statusCode).toBe(200);
     };
-    // QA-11 (2026-08-13 監査): since=2d で UTC 日跨ぎ straddle を構造的に閉じ、絶対値でなく
-    // before/after の delta を assert する (同一 DB 上の他テストの ingest と分離・
-    // aggregate-test-single-run-false-confidence の再発防止)。
+    // QA-11 + QA-R2-4 (2026-08-13 監査): since は **固定の過去日** にする。`2d` は from が可動で、
+    // before/after 取得の間に UTC 日が変わると前日分が窓から落ち delta が負に振れうる。固定日なら
+    // before-window ⊆ after-window が常に成立し、絶対値でなく delta の assert が厳密になる
+    // (同一 DB 上の他テストの ingest と分離・aggregate-test-single-run-false-confidence の再発防止)。
+    const sinceDay = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
     const fetchTotals = async (): Promise<Record<string, number>> => {
       const response = await app.inject({
         method: "GET",
-        url: "/realtime/usage?since=2d",
+        url: `/realtime/usage?since=${sinceDay}`,
         headers: { authorization: "Bearer t-rt" },
       });
       expect(response.statusCode).toBe(200);
@@ -204,7 +206,7 @@ describe("INV-EMBEDDED-DB: 埋込 PGlite boot + DB 往復", () => {
     // 生 payload/id が出ない (NO-RAW) — days を含む全応答で確認。
     const response = await app.inject({
       method: "GET",
-      url: "/realtime/usage?since=2d",
+      url: `/realtime/usage?since=${sinceDay}`,
       headers: { authorization: "Bearer t-rt" },
     });
     expect(JSON.stringify(response.json())).not.toMatch(

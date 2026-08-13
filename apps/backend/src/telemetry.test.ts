@@ -61,6 +61,12 @@ async function fixture(source = usage()) {
 }
 
 describe("anonymous telemetry", () => {
+  it("QA-R2-3: the test-process kill-switch injection is live (setup-env pins ACTRADECK_TELEMETRY_DISABLED)", () => {
+    // setup-env.ts が全テストプロセスへ構造注入する。この pin が落ちたら、kill-switch を
+    // 設定しない新テストが startFromEnv() 経由で実 consent state・実 collector に触れうる。
+    expect(process.env.ACTRADECK_TELEMETRY_DISABLED).toBe("1");
+  });
+
   it("is default-off and performs no network request", async () => {
     const { telemetry, fetchImpl } = await fixture();
     expect(await telemetry.status()).toMatchObject({
@@ -251,6 +257,61 @@ describe("anonymous telemetry", () => {
     expect(telemetryErrorCode(new TelemetryError("send_failed", "x"), "state_write_failed")).toBe(
       "send_failed",
     );
+  });
+
+  it("SEC-R2-1: flush does not follow redirects — a 3xx from the approved endpoint fails closed", async () => {
+    // normalizeTelemetryEndpoint は初回ホップしか検証しない。redirect を follow すると、ゲート通過済み
+    // endpoint が 307 で「直接指定なら invalid_endpoint で拒否される宛先」へ batch を横流しできる
+    // (R2 監査で 127.0.0.2 への leak を実証)。実 fetch + 実 loopback サーバで非追従を固定する。
+    const { createServer } = await import("node:http");
+    let downstreamHits = 0;
+    const downstream = createServer((_request, response) => {
+      downstreamHits += 1;
+      response.writeHead(202, { "content-type": "application/json" }).end("{}");
+    });
+    const redirector = createServer((_request, response) => {
+      const { port } = downstream.address() as { port: number };
+      response.writeHead(307, { location: `http://127.0.0.1:${port}/exfil` }).end();
+    });
+    await new Promise<void>((r) => downstream.listen(0, "127.0.0.1", r));
+    await new Promise<void>((r) => redirector.listen(0, "127.0.0.1", r));
+    try {
+      const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
+      FIXTURE_DIRS.push(directory);
+      const { port } = redirector.address() as { port: number };
+      const telemetry = new AnonymousTelemetry({
+        usage: usage(),
+        statePath: join(directory, "state.json"),
+        defaultEndpoint: `http://127.0.0.1:${port}/v1/events`,
+        now: () => new Date(NOW),
+        // fetchImpl 非注入 = 実 fetch。redirect: "error" の実挙動そのものを検証する。
+      });
+      await telemetry.enable();
+      await expect(telemetry.flush()).rejects.toMatchObject({ code: "send_failed" });
+      expect(downstreamHits).toBe(0);
+    } finally {
+      await new Promise<void>((r) => redirector.close(() => r()));
+      await new Promise<void>((r) => downstream.close(() => r()));
+    }
+  });
+
+  it("SEC-R2-1: the flush fetch init pins redirect:'error' (DI contract)", async () => {
+    const { telemetry, fetchImpl } = await fixture(
+      usage([
+        {
+          day: "2026-08-11",
+          cockpit_demo_started: 1,
+          cockpit_demo_completed: 0,
+          real_sessions: 0,
+          protected_sessions: 0,
+          approval_requests: 0,
+          operator_decisions: 0,
+        },
+      ]),
+    );
+    await telemetry.enable();
+    await telemetry.flush();
+    expect(fetchImpl.mock.calls.at(-1)?.[1]).toMatchObject({ redirect: "error" });
   });
 
   it("flush failure surfaces a closed code without upstream status echo (SEC-1/SEC-4)", async () => {

@@ -61,6 +61,12 @@ export default defineConfig({
         branches: 75,
         functions: 85,
         lines: 88,
+        // QA-R2-1 (2026-08-13 監査 R2): include に足すだけでは global に吸収され、テスト削除で
+        //   48.97%→6.12% に落ちても gate が緑のままだった (mutation probe g SURVIVED)。per-file
+        //   floor で erosion を実際に止める。実測 (use-telemetry-hook.test.tsx + telemetry-ui.test.ts):
+        //   97.95/90.9/100/100 → floor は worst-observed の 3-5pt 下 (funcs は 小-N 感度で 10pt 余裕・
+        //   per-file-coverage-floor-below-worst-not-best)。
+        "src/ui/use-telemetry.ts": { statements: 93, branches: 85, functions: 90, lines: 95 },
       },
     },
   },

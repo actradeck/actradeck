@@ -26,6 +26,7 @@ import {
 
 import { type BuildEventInput, buildEvent } from "./event-factory.js";
 import { checkFields } from "./check-classifier.js";
+import { isBypassPermissionMode } from "./permission-mode.js";
 import { redactString } from "@actradeck/redaction";
 
 /** Claude Code hook の共通入力 (HTTP body = command stdin と同形)。 */
@@ -1608,8 +1609,9 @@ export function normalizeHook(
       // protected を過大計上しない。保証宣言は run 起点だけに載せる。
       ...(event_type === "session.started"
         ? {
-            governance_mode:
-              input.permission_mode === "bypassPermissions" ? "unavailable" : "enforcement",
+            governance_mode: isBypassPermissionMode(input.permission_mode)
+              ? "unavailable"
+              : "enforcement",
           }
         : {}),
       event_type,

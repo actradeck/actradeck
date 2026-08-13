@@ -23,3 +23,8 @@ try {
   // .env が無い環境 (CI 等) は env 注入経路に委ねる。実 PG テストは未到達なら skip。
 }
 applyTestDatabaseGuard(process.env);
+
+// QA-R2-3 (2026-08-13 監査 R2): telemetry kill-switch を全テストプロセスへ構造注入する
+// (backend/sidecar の setup-env と同一方針)。integration テストが起動する backend が
+// 実 consent state・実 collector へ触れる経路を規約でなく setup で閉じる。
+process.env.ACTRADECK_TELEMETRY_DISABLED = "1";

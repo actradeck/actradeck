@@ -38,6 +38,7 @@ import {
   isPersistDeniedCommand,
 } from "./normalize.js";
 import type { HookCommonInput } from "./normalize.js";
+import { isBypassPermissionMode } from "./permission-mode.js";
 import { countRedactionMarkersByKind, redactString } from "@actradeck/redaction";
 
 /**
@@ -718,7 +719,7 @@ export class ApprovalBridge {
     //   CC の PreToolUse フック deny は bypassPermissions でも honor される (検証済) ため、ここでのゲートは
     //   alert でなく **本物の予防** (timeout→deny で無人 YOLO は安全側に縮退)。
     let bypassPolicyGate: GateDecision | undefined;
-    if (input.permission_mode === "bypassPermissions") {
+    if (isBypassPermissionMode(input.permission_mode)) {
       // ADR 019f0eca: 操作ごとに cwd→repoScope を解決し effective = repos[scope] ?? default を引く。
       //   repos が空なら git を叩かず default のみ (最適化・従来挙動と同等)。解決不能 (非 git/cwd 無し)
       //   は scope undefined → effectiveLivePolicy が default へフォールバック (fail-safe・厳格側)。

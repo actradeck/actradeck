@@ -239,8 +239,9 @@ run_verify_job() {
   pnpm run type-check
 
   step "verify: Orchestrator script smoke"
-  # QA-5 (2026-08-13 audit): mirror the two root node --test gates that ci.yml runs inside this
-  # step's body (the name-based drift tripwire cannot see body-only additions — keep in sync).
+  # QA-5 (2026-08-13 audit): mirror the root node --test gates that ci.yml runs inside this
+  # step's body (the name-based drift tripwire cannot see body-only additions; the 1b parity
+  # check in test-ci-preflight.sh asserts every `pnpm run test:*` gate in ci.yml appears here).
   pnpm run test:public-metrics
   pnpm run test:telemetry-cli
   pnpm run test:usage-cli

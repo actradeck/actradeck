@@ -1,4 +1,9 @@
 import { applyD1Migrations, env } from "cloudflare:test";
+import {
+  TELEMETRY_EVENT_NAMES,
+  TELEMETRY_MAX_COUNT,
+  TelemetryPlatform,
+} from "@actradeck/telemetry-contract";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTelemetryWorker, type Env } from "./index.js";
@@ -212,6 +217,64 @@ describe("Cloudflare telemetry collector", () => {
     expect(JSON.stringify(report)).not.toMatch(
       /installation_hash|installation_id|prompt|command|repo/,
     );
+  });
+
+  it("TDA-R2-3: every contract event name round-trips through the real D1 CHECK constraint", async () => {
+    // TS closed enum と migrations/0001_init.sql の CHECK は手コピーの二重記述。parity gate が
+    // 無いと、enum に 11 個目を足したとき全テスト緑のまま本番で CHECK violation → 503 →
+    // sender は send_failed を swallow = 恒久 silent 送信不能になる (R2 監査 TDA-R2-3)。
+    // 実 migration 済み D1 へ全値を 1 件ずつ POST し、受理 + 実 persist を固定する。
+    for (const eventName of TELEMETRY_EVENT_NAMES) {
+      const response = await dispatch(
+        eventRequest({
+          ...validBatch,
+          events: [{ ...validBatch.events[0], event_name: eventName }],
+        }),
+      );
+      expect(response.status, eventName).toBe(202);
+    }
+    const persisted = await env.DB.prepare(
+      "SELECT COUNT(DISTINCT event_name) AS n FROM telemetry_daily",
+    ).first<{ n: number }>();
+    expect(persisted?.n).toBe(TELEMETRY_EVENT_NAMES.length);
+  });
+
+  it("TDA-R2-3: every contract platform round-trips through the real D1 CHECK constraint", async () => {
+    // PK は (installation_hash, event_name, occurred_on) で platform を含まない — 同一日だと
+    // 同一行へ upsert され distinct が 1 に潰れるため、platform ごとに受理窓内の別日を使う。
+    for (const [index, platform] of TelemetryPlatform.options.entries()) {
+      const response = await dispatch(
+        eventRequest({
+          ...validBatch,
+          events: [{ ...validBatch.events[0], platform, occurred_on: `2026-08-0${index + 1}` }],
+        }),
+      );
+      expect(response.status, platform).toBe(202);
+    }
+    const persisted = await env.DB.prepare(
+      "SELECT COUNT(DISTINCT platform) AS n FROM telemetry_daily",
+    ).first<{ n: number }>();
+    expect(persisted?.n).toBe(TelemetryPlatform.options.length);
+  });
+
+  it("TDA-R2-3: the count ceiling is shared — contract max persists, max+1 rejects at the contract", async () => {
+    const atCeiling = await dispatch(
+      eventRequest({
+        ...validBatch,
+        events: [{ ...validBatch.events[0], count: TELEMETRY_MAX_COUNT }],
+      }),
+    );
+    expect(atCeiling.status).toBe(202);
+    expect(await env.DB.prepare("SELECT count FROM telemetry_daily").first<number>("count")).toBe(
+      TELEMETRY_MAX_COUNT,
+    );
+    const overCeiling = await dispatch(
+      eventRequest({
+        ...validBatch,
+        events: [{ ...validBatch.events[0], count: TELEMETRY_MAX_COUNT + 1 }],
+      }),
+    );
+    expect(overCeiling.status).toBe(400);
   });
 
   it("returns generic service errors instead of leaking missing secrets", async () => {

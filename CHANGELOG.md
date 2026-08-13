@@ -38,6 +38,14 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   pending approvals — approval cards never appeared in the Inbox or Live Wall and every request
   timed out to deny. The sidecar now reopens a new run on any first hook after a terminal reap,
   preserving lineage (`resumed_from`).
+- **Telemetry flush no longer follows redirects.** The endpoint gate (HTTPS-only, loopback-HTTP
+  only for development, no credentials) validated only the first hop; a 3xx from the configured
+  collector could forward the batch to a destination the gate would reject directly. The send
+  now uses `redirect: "error"` and a redirect fails closed as `send_failed`.
+- **`migrate:down` works again on databases that applied the interim `usage_daily` view.** The
+  view migration briefly existed on this branch and was deleted after the aggregation moved to
+  range-bounded queries; it is restored as an idempotent cleanup (`DROP VIEW IF EXISTS`), so
+  mid-branch databases regain a working migration chain and shed the stale view on re-`up`.
 
 ## [0.7.0] - 2026-08-10
 

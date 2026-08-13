@@ -101,8 +101,8 @@ Install dependencies and validate the Worker locally:
 
 ```bash
 pnpm install
-pnpm --filter @actradeck/telemetry-collector test
-pnpm --filter @actradeck/telemetry-collector build
+pnpm --filter @actradeck/telemetry-collector test:worker
+pnpm --filter @actradeck/telemetry-collector build:worker
 ```
 
 Authenticate Wrangler, create the D1 database, and copy the example configuration:

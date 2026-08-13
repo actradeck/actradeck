@@ -922,14 +922,87 @@ fi
 # constant in src/ silently reports a stale version forever after the next release (the
 # telemetry app_version did exactly this). Runtime code must derive from its package.json.
 # Scan is scoped to assignment-shaped occurrences to avoid matching test fixtures/semver ranges.
-VERSION_LITERALS="$(grep -rnE '(_VERSION|Version)[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+' \
-  "$ROOT"/apps/*/src "$ROOT"/packages/*/src --include='*.ts' 2>/dev/null \
-  | grep -v -e '\.test\.ts' -e '\.spec\.ts' \
-  | grep -vE 'SCHEMA_VERSION|PROTOCOL_VERSION|MANIFEST_VERSION|PACKET_VERSION' || true)"
+# TDA-R2-1 (audit R2): the original regex missed the exact shape it protects — a *typed*
+# declaration (`NAME: string = "x.y.z"`) — plus object-property form (`Version: "x.y.z"`),
+# template-literal quotes, and .tsx files. The regex below allows an optional type annotation
+# between the identifier and `=`, accepts `:` (property) as the assignment shape, and any of
+# the three quote styles. Known limits (documented, not silent): identifiers must end in
+# Version/_VERSION/_version, and non-scalar type annotations (e.g. `string[]`) are not covered.
+version_literal_scan() {
+  # $@ = roots to scan
+  grep -rnE \
+    '(_VERSION|_version|Version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>|[:space:]]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+' \
+    "$@" --include='*.ts' --include='*.tsx' 2>/dev/null \
+    | grep -v -e '\.test\.ts' -e '\.spec\.ts' -e '\.test\.tsx' -e '\.spec\.tsx' \
+    | grep -vE '(SCHEMA|PROTOCOL|MANIFEST|PACKET)_VERSION' || true
+}
+VERSION_LITERALS="$(version_literal_scan "$ROOT"/apps/*/src "$ROOT"/packages/*/src)"
 if [ -z "$VERSION_LITERALS" ]; then
   ok "INV-VERSION-SINGLE-SOURCE: no hardcoded app-version literal in runtime sources"
 else
   ng "INV-VERSION-SINGLE-SOURCE: hardcoded version literal(s) in runtime sources: $VERSION_LITERALS"
+fi
+# RED probes (falsifiable, TDA-R2-1): inject the exact re-hardcoding shapes into a throwaway
+# tree and assert the same scanner (single source: version_literal_scan) reports each of them.
+VLP="$WORK/vliteral/src"; mkdir -p "$VLP"
+printf 'export const ACTRADECK_APP_VERSION: string = "9.9.9";\n' > "$VLP/typed.ts"
+printf 'const AppVersion = "9.9.9";\n' > "$VLP/untyped.ts"
+printf 'const meta = { appVersion: "9.9.9" };\n' > "$VLP/property.tsx"
+for probe in typed.ts untyped.ts property.tsx; do
+  if version_literal_scan "$WORK/vliteral" | grep -q "$probe"; then
+    ok "INV-VERSION-SINGLE-SOURCE: scanner catches injected literal ($probe)"
+  else
+    ng "INV-VERSION-SINGLE-SOURCE: DEAD GATE — injected literal escaped the scanner ($probe)"
+  fi
+done
+printf 'export const CLEAN_VERSION: string = readManifest().version;\n' > "$VLP/clean.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'clean\.ts'; then
+  ng "INV-VERSION-SINGLE-SOURCE: scanner false-positives on manifest-derived version (clean.ts)"
+else
+  ok "INV-VERSION-SINGLE-SOURCE: scanner ignores manifest-derived version (no false positive)"
+fi
+
+# ============================================================================
+# INV-DOCS-SCRIPT-PARITY (TDA-R2-2, 2026-08-13 audit R2)
+# ============================================================================
+# Operator-facing docs quote `pnpm --filter <pkg> [run] <script>` commands. A package script
+# rename (this branch renamed the collector's test/build to test:worker/build:worker) silently
+# hard-fails the documented first-deployment steps. Extract every such command from the given
+# docs and assert the script exists in the named package's manifest. `exec ...` is not a script.
+docs_script_parity() {
+  # $1 = repo root whose package manifests are authoritative; $2.. = doc files to scan
+  local root="$1"; shift
+  local drift="" cmd pkg script pkgjson
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    pkg="$(printf '%s' "$cmd" | awk '{print $3}')"
+    script="$(printf '%s' "$cmd" | awk '{ if ($4=="run") print $5; else print $4 }')"
+    [ "$script" = "exec" ] && continue
+    [ -z "$script" ] && continue
+    pkgjson="$(grep -rl "\"name\": \"$pkg\"" "$root"/apps/*/package.json "$root"/packages/*/package.json 2>/dev/null | head -1)"
+    if [ -z "$pkgjson" ]; then
+      drift="$drift [$cmd -> package not found]"
+    elif ! jq -e --arg s "$script" '.scripts[$s]' "$pkgjson" >/dev/null 2>&1; then
+      drift="$drift [$cmd -> script '$script' missing in $(basename "$(dirname "$pkgjson")")]"
+    fi
+  done <<EOF
+$(grep -rhoE 'pnpm --filter @actradeck/[a-z0-9-]+ (run )?[a-zA-Z][A-Za-z0-9:._-]*' "$@" 2>/dev/null | sort -u || true)
+EOF
+  printf '%s' "$drift"
+}
+DOCS_DRIFT="$(docs_script_parity "$ROOT" "$ROOT"/docs/*.md "$ROOT"/README.md)"
+if [ -z "$DOCS_DRIFT" ]; then
+  ok "INV-DOCS-SCRIPT-PARITY: every documented pnpm --filter command maps to a real package script"
+else
+  ng "INV-DOCS-SCRIPT-PARITY: documented commands reference missing scripts:$DOCS_DRIFT"
+fi
+# RED probe (falsifiable): a doc quoting a script that does not exist must be reported.
+DSP="$WORK/docs-parity"; mkdir -p "$DSP"
+printf '```bash\npnpm --filter @actradeck/telemetry-collector test\n```\n' > "$DSP/stale.md"
+if [ -n "$(docs_script_parity "$ROOT" "$DSP/stale.md")" ]; then
+  ok "INV-DOCS-SCRIPT-PARITY: gate FAILS on a doc referencing a renamed-away script (falsifiable)"
+else
+  ng "INV-DOCS-SCRIPT-PARITY: DEAD GATE — stale documented command passed"
 fi
 
 # ============================================================================

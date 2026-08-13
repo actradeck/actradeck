@@ -62,7 +62,10 @@ export function parseUsageRange(raw: string | undefined, now = new Date()): Usag
     return { from: utcDay(new Date(now.getTime() - (days - 1) * DAY_MS)), to };
   }
   if (!isUtcDay(value) || value > to) return undefined;
-  return { from: value, to };
+  // TDA-R2-6 (audit R2): the date form gets the same lookback bound as the duration form —
+  // an unbounded `since=1970-01-01` would re-create the full-history scan that TDA-2 removed.
+  const floor = utcDay(new Date(now.getTime() - (MAX_LOOKBACK_DAYS - 1) * DAY_MS));
+  return { from: value >= floor ? value : floor, to };
 }
 
 function dayString(value: unknown): string {
@@ -106,6 +109,13 @@ export class UsageStore {
   async report(range: UsageRange): Promise<UsageReport> {
     const fromTs = `${range.from}T00:00:00.000Z`;
     const toExclusiveTs = nextDayUtc(range.to);
+    // Positional bind legend (TDA-R2-7: the SQL consumes $5..$9 out of declaration order, and a
+    // silently shifted bind produces a wrong-but-plausible aggregate, not an error):
+    //   $1 = fromTs (inclusive)          $2 = toExclusiveTs (exclusive)
+    //   $3 = demoLikePattern()           $4 = ENFORCEMENT (governance_mode)
+    //   $5 = SESSION_ENDED               $6 = PERMISSION_REQUESTED
+    //   $7 = PERMISSION_RESOLVED         $8 = HEARTBEAT
+    //   $9 = OPERATOR_ORIGIN (payload->>'resolution_origin')
     // real_sessions counts distinct non-demo sessions with at least one non-heartbeat event on
     // the day. Deriving it from `events` (not `sessions.started_at`) keeps sessions that were
     // discovered mid-flight (attach with no observed session.started → started_at IS NULL)

@@ -24,6 +24,16 @@ describe("parseUsageRange", () => {
     "rejects invalid or unbounded value %s",
     (value) => expect(parseUsageRange(value, now)).toBeUndefined(),
   );
+
+  it("TDA-R2-6: clamps an ancient explicit date to the same lookback floor as the duration form", () => {
+    // `since=1970-01-01` が全履歴走査 (TDA-2 が除去した head-of-line block) を復活させない。
+    // clamp は応答の from に echo される (silent でない)。
+    const floor = parseUsageRange("3650d", now)?.from;
+    expect(floor).toBeDefined();
+    expect(parseUsageRange("1970-01-01", now)).toEqual({ from: floor, to: "2026-08-10" });
+    // floor 以降の日付は clamp されない。
+    expect(parseUsageRange("2026-08-01", now)?.from).toBe("2026-08-01");
+  });
 });
 
 describe("UsageStore", () => {
