@@ -926,15 +926,28 @@ fi
 # declaration (`NAME: string = "x.y.z"`) — plus object-property form (`Version: "x.y.z"`),
 # template-literal quotes, and .tsx files. The regex below allows an optional type annotation
 # between the identifier and `=`, accepts `:` (property) as the assignment shape, and any of
-# the three quote styles. Known limits (documented, not silent): identifiers must end in
-# Version/_VERSION/_version, and non-scalar type annotations (e.g. `string[]`) are not covered.
+# the three quote styles.
+# TDA-R3-1 (audit R3): the schema-name exclusion is applied per MATCH, not per line — the old
+# `grep -v SCHEMA_VERSION` dropped the whole line, so a real app-version literal co-located
+# with a SCHEMA_VERSION assignment escaped. Excluded-name assignments are stripped from the
+# candidate line first, and the line is reported only if a match remains.
+# Known limits (documented, not silent; each verified by the probes below): identifiers must
+# end in Version/_VERSION/_version (`const APP_VER = "…"` is out of scope), and non-scalar
+# type annotations (e.g. `string[]`) are not covered.
+VERSION_LITERAL_RE='(_VERSION|_version|Version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>|[:space:]]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+'
 version_literal_scan() {
   # $@ = roots to scan
-  grep -rnE \
-    '(_VERSION|_version|Version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>|[:space:]]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+' \
+  local line stripped
+  grep -rnE "$VERSION_LITERAL_RE" \
     "$@" --include='*.ts' --include='*.tsx' 2>/dev/null \
     | grep -v -e '\.test\.ts' -e '\.spec\.ts' -e '\.test\.tsx' -e '\.spec\.tsx' \
-    | grep -vE '(SCHEMA|PROTOCOL|MANIFEST|PACKET)_VERSION' || true
+    | while IFS= read -r line; do
+        stripped="$(printf '%s' "$line" \
+          | sed -E 's/(SCHEMA|PROTOCOL|MANIFEST|PACKET)_(VERSION|version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>| ]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+//g')"
+        if printf '%s\n' "$stripped" | grep -qE "$VERSION_LITERAL_RE"; then
+          printf '%s\n' "$line"
+        fi
+      done || true
 }
 VERSION_LITERALS="$(version_literal_scan "$ROOT"/apps/*/src "$ROOT"/packages/*/src)"
 if [ -z "$VERSION_LITERALS" ]; then
@@ -961,6 +974,21 @@ if version_literal_scan "$WORK/vliteral" | grep -q 'clean\.ts'; then
 else
   ok "INV-VERSION-SINGLE-SOURCE: scanner ignores manifest-derived version (no false positive)"
 fi
+# TDA-R3-1: the exclusion is match-level — a real literal on the SAME LINE as an excluded
+# schema-name assignment must still be reported, while a lone excluded assignment must not.
+printf 'export const SCHEMA_VERSION = "1.0.0"; export const APP_VERSION: string = "9.9.9";\n' > "$VLP/sameline.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'sameline\.ts'; then
+  ok "INV-VERSION-SINGLE-SOURCE: match-level exclusion catches a literal co-located with SCHEMA_VERSION"
+else
+  ng "INV-VERSION-SINGLE-SOURCE: DEAD GATE — SCHEMA_VERSION on the same line masked a real literal"
+fi
+rm -f "$VLP/sameline.ts"
+printf 'export const SCHEMA_VERSION = "1.0.0";\n' > "$VLP/schemaonly.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'schemaonly\.ts'; then
+  ng "INV-VERSION-SINGLE-SOURCE: exclusion regression — a lone SCHEMA_VERSION assignment is flagged"
+else
+  ok "INV-VERSION-SINGLE-SOURCE: excluded schema-name assignments stay unflagged (no false positive)"
+fi
 
 # ============================================================================
 # INV-DOCS-SCRIPT-PARITY (TDA-R2-2, 2026-08-13 audit R2)
@@ -969,17 +997,27 @@ fi
 # rename (this branch renamed the collector's test/build to test:worker/build:worker) silently
 # hard-fails the documented first-deployment steps. Extract every such command from the given
 # docs and assert the script exists in the named package's manifest. `exec ...` is not a script.
+# TDA-R3-2 (audit R3): pnpm resolves BUILTIN command names before package scripts, so a doc
+# quoting e.g. `pnpm --filter x deploy` (no `run`) invokes pnpm's own deploy, not the script.
+# Any documented bare invocation whose token collides with a pnpm builtin is drift.
+PNPM_BUILTINS=" add audit bin config deploy dlx doctor env exec import init install licenses link list outdated pack patch prune publish rebuild remove root run setup store update why "
 docs_script_parity() {
   # $1 = repo root whose package manifests are authoritative; $2.. = doc files to scan
   local root="$1"; shift
-  local drift="" cmd pkg script pkgjson
+  local drift="" cmd pkg script bare pkgjson
   while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
     pkg="$(printf '%s' "$cmd" | awk '{print $3}')"
     script="$(printf '%s' "$cmd" | awk '{ if ($4=="run") print $5; else print $4 }')"
+    bare="$(printf '%s' "$cmd" | awk '{ if ($4=="run") print "no"; else print "yes" }')"
     [ "$script" = "exec" ] && continue
     [ -z "$script" ] && continue
-    pkgjson="$(grep -rl "\"name\": \"$pkg\"" "$root"/apps/*/package.json "$root"/packages/*/package.json 2>/dev/null | head -1)"
+    if [ "$bare" = "yes" ] && printf '%s' "$PNPM_BUILTINS" | grep -qF " $script "; then
+      drift="$drift [$cmd -> '$script' collides with a pnpm builtin; docs must use 'run $script']"
+      continue
+    fi
+    # TDA-R3-2: db/ is a workspace package outside apps/*/packages/* — include it in the lookup.
+    pkgjson="$(grep -rl "\"name\": \"$pkg\"" "$root"/apps/*/package.json "$root"/packages/*/package.json "$root"/db/package.json 2>/dev/null | head -1)"
     if [ -z "$pkgjson" ]; then
       drift="$drift [$cmd -> package not found]"
     elif ! jq -e --arg s "$script" '.scripts[$s]' "$pkgjson" >/dev/null 2>&1; then
@@ -990,7 +1028,8 @@ $(grep -rhoE 'pnpm --filter @actradeck/[a-z0-9-]+ (run )?[a-zA-Z][A-Za-z0-9:._-]
 EOF
   printf '%s' "$drift"
 }
-DOCS_DRIFT="$(docs_script_parity "$ROOT" "$ROOT"/docs/*.md "$ROOT"/README.md)"
+# TDA-R3-2: recurse docs/ (subdirectory docs were previously invisible to the gate).
+DOCS_DRIFT="$(docs_script_parity "$ROOT" $(find "$ROOT/docs" -name '*.md' -type f) "$ROOT"/README.md)"
 if [ -z "$DOCS_DRIFT" ]; then
   ok "INV-DOCS-SCRIPT-PARITY: every documented pnpm --filter command maps to a real package script"
 else
@@ -1003,6 +1042,23 @@ if [ -n "$(docs_script_parity "$ROOT" "$DSP/stale.md")" ]; then
   ok "INV-DOCS-SCRIPT-PARITY: gate FAILS on a doc referencing a renamed-away script (falsifiable)"
 else
   ng "INV-DOCS-SCRIPT-PARITY: DEAD GATE — stale documented command passed"
+fi
+# TDA-R3-2 probe: a stale command hidden in a docs SUBDIRECTORY must be found by the recursive
+# scan (exercised through the same find expression the live gate uses).
+mkdir -p "$DSP/docs/sub"
+printf '```bash\npnpm --filter @actradeck/telemetry-collector test\n```\n' > "$DSP/docs/sub/deep.md"
+if [ -n "$(docs_script_parity "$ROOT" $(find "$DSP/docs" -name '*.md' -type f))" ]; then
+  ok "INV-DOCS-SCRIPT-PARITY: recursive scan catches a stale command in a docs subdirectory"
+else
+  ng "INV-DOCS-SCRIPT-PARITY: DEAD GATE — docs subdirectory escaped the scan"
+fi
+# TDA-R3-2 probe: a bare builtin-colliding invocation must be reported even though the script
+# exists (`pnpm --filter x deploy` runs pnpm's builtin deploy, not the package script).
+printf '```bash\npnpm --filter @actradeck/telemetry-collector deploy\n```\n' > "$DSP/builtin.md"
+if docs_script_parity "$ROOT" "$DSP/builtin.md" | grep -q "collides with a pnpm builtin"; then
+  ok "INV-DOCS-SCRIPT-PARITY: gate FAILS on a bare invocation shadowed by a pnpm builtin"
+else
+  ng "INV-DOCS-SCRIPT-PARITY: DEAD GATE — builtin-shadowed bare invocation passed"
 fi
 
 # ============================================================================

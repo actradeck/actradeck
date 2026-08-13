@@ -151,6 +151,12 @@ export interface AnonymousTelemetryOptions {
   readonly fetchImpl?: TelemetryFetch;
   readonly now?: () => Date;
   readonly sendIntervalMs?: number;
+  /**
+   * kill-switch 判定に使う環境 (既定 process.env・SEC-R3-2)。テストは `env: {}` を明示して
+   * 「有効化された telemetry」の挙動を検証する (テストプロセスは setup-env が
+   * ACTRADECK_TELEMETRY_DISABLED=1 を注入するため、既定のままでは常に無効側に倒れる)。
+   */
+  readonly env?: Readonly<Record<string, string | undefined>>;
 }
 
 function isIsoInstant(value: unknown): value is string {
@@ -225,6 +231,19 @@ export function normalizeTelemetryEndpoint(raw: string): string {
     );
   }
   return endpoint.toString();
+}
+
+/**
+ * 値ベース kill-switch の単一判定 (QA-2 / SEC-R3-2)。composition root (index.ts) はこれで
+ * サブシステム全体を非生成にし、AnonymousTelemetry 自身も同判定で flush/start/enable を
+ * 無効化する (defense-in-depth: statePath を省略した将来のテスト/スクリプトが実 consent state
+ * を書いたり実 collector へ送る事故を、単一 egress 点でも構造的に止める)。
+ */
+export function telemetryDisabledByEnv(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const value = env.ACTRADECK_TELEMETRY_DISABLED;
+  return value === "1" || value === "true";
 }
 
 export function defaultTelemetryStatePath(
@@ -408,10 +427,15 @@ export class AnonymousTelemetry {
   private readonly fetchImpl: TelemetryFetch;
   private readonly now: () => Date;
   private readonly sendIntervalMs: number;
+  private readonly disabledByEnv: boolean;
   private timer: NodeJS.Timeout | undefined;
 
   constructor(private readonly options: AnonymousTelemetryOptions) {
     this.now = options.now ?? (() => new Date());
+    // SEC-R3-2: kill-switch は composition root だけでなくインスタンス自身も尊重する
+    // (defense-in-depth)。statePath 省略 + 既定 endpoint (本番 collector) で直接 construct した
+    // コードが operator の実 consent state を書き換えたり実送信する事故を、ここで止める。
+    this.disabledByEnv = telemetryDisabledByEnv(options.env ?? process.env);
     this.state = new TelemetryStateStore(
       options.statePath ?? defaultTelemetryStatePath(),
       this.now,
@@ -512,6 +536,12 @@ export class AnonymousTelemetry {
   }
 
   async enable(endpoint?: string): Promise<TelemetryStatus> {
+    if (this.disabledByEnv) {
+      throw new TelemetryError(
+        "not_configured",
+        "telemetry is disabled by ACTRADECK_TELEMETRY_DISABLED",
+      );
+    }
     const selected = endpoint ?? this.defaultEndpoint;
     if (!selected) {
       throw new TelemetryError(
@@ -536,6 +566,7 @@ export class AnonymousTelemetry {
   }
 
   async flush(): Promise<TelemetryFlushResult> {
+    if (this.disabledByEnv) return { sent: false, event_count: 0, reason: "disabled" };
     const preview = await this.preview();
     if (preview.status.mode !== "anonymous" || preview.batch === null) {
       return { sent: false, event_count: 0, reason: "disabled" };
@@ -572,6 +603,7 @@ export class AnonymousTelemetry {
   }
 
   async start(): Promise<void> {
+    if (this.disabledByEnv) return; // kill-switch: presence 記録も timer も生成しない。
     await this.state.recordCockpitStarted();
     void this.flush().catch(() => {});
     this.timer = setInterval(() => void this.flush().catch(() => {}), this.sendIntervalMs);

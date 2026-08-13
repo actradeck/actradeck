@@ -45,7 +45,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 - **`migrate:down` works again on databases that applied the interim `usage_daily` view.** The
   view migration briefly existed on this branch and was deleted after the aggregation moved to
   range-bounded queries; it is restored as an idempotent cleanup (`DROP VIEW IF EXISTS`), so
-  mid-branch databases regain a working migration chain and shed the stale view on re-`up`.
+  mid-branch databases regain a working migration chain, and running `migrate:down` there also
+  removes the stale view (fresh databases are unaffected).
+- **Approval cards can no longer be hidden by a terminated session projection.** Pending
+  approvals now follow the request's own lifecycle: reaching a terminal state still clears that
+  run's open approvals, but a request arriving *after* the terminal state — a live daemon
+  holding a real round-trip — stays visible and actionable instead of silently timing out to
+  deny.
 
 ## [0.7.0] - 2026-08-10
 

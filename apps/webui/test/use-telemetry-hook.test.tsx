@@ -223,6 +223,26 @@ describe("useTelemetry runtime (QA-R2-1)", () => {
     expect(result.preview).toBeNull();
   });
 
+  it("QA-R3-2: a malformed (out-of-contract) mutation response folds to the error flag", async () => {
+    // HTTP 200 だが status projection を通らない body — `if (!parsed) throw` guard の pin。
+    // guard を外すと status=null を黙って採用し error=false のまま (silent 誤状態)。
+    const fetchMock = vi.fn((_path: string, init?: RequestInit) =>
+      Promise.resolve(
+        init?.method === "POST"
+          ? jsonResponse({ schema_version: 2, mode: "broken" })
+          : jsonResponse(OFF_STATUS),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await render(true);
+    expect(result.error).toBe(false);
+    await act(async () => {
+      await result.disable();
+    });
+    expect(result.error).toBe(true);
+    expect(result.status).toMatchObject({ mode: "off" }); // last-known は破壊しない。
+  });
+
   it("disable and resetId post to their mutation routes; a failed mutation sets error", async () => {
     const posted: string[] = [];
     const fetchMock = vi.fn((path: string, init?: RequestInit) => {

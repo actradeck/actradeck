@@ -9,6 +9,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# SEC-R3-4 (2026-08-14 監査): telemetry kill-switch をワークフロー全体のシェルレベルで固定する。
+# vitest 内は setup-env が注入するが、vitest を経ない将来のゲート (スクリプト/CLI/スモーク) が
+# 実 consent state・実 collector に触れる経路もここで一様に閉じる (指標の自作汚染防止)。
+env:
+  ACTRADECK_TELEMETRY_DISABLED: "1"
+
 # SEC-1 (監査): least-privilege GITHUB_TOKEN。verify/e2e/migrations は repo を read するだけ
 #   (checkout/install/build/test/migrate を CI-local Postgres に対して実行・write/upload なし)。
 #   read に固定し、compromised な依存 lifecycle script が write スコープ token を得る経路を断つ。

@@ -17,7 +17,11 @@ import { createPool } from "./db.js";
 import { reapStaleDemoSessionState } from "./ingest-store.js";
 import { buildIngestionServer } from "./ingestion-server.js";
 import { SAFETY_DEMO_SESSION_PREFIX as DEMO_SESSION_PREFIX } from "./safety-demo-script.js";
-import { ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT, AnonymousTelemetry } from "./telemetry.js";
+import {
+  ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT,
+  AnonymousTelemetry,
+  telemetryDisabledByEnv,
+} from "./telemetry.js";
 import { UsageStore } from "./usage-store.js";
 
 export const BACKEND_NAME = "@actradeck/backend" as const;
@@ -172,9 +176,7 @@ export async function startFromEnv(): Promise<{
   // QA-2 (2026-08-13 監査): 値ベース kill-switch。テストゲート/CI/スクリプトは
   // ACTRADECK_TELEMETRY_DISABLED=1 で telemetry サブシステム全体 (state file 読取り含む) を
   // 構造的に無効化できる (operator の実 consent state を掴まない・fetch 経路も生成されない)。
-  const telemetryDisabled =
-    process.env.ACTRADECK_TELEMETRY_DISABLED === "1" ||
-    process.env.ACTRADECK_TELEMETRY_DISABLED === "true";
+  const telemetryDisabled = telemetryDisabledByEnv(process.env);
   const telemetry = telemetryDisabled
     ? undefined
     : new AnonymousTelemetry({

@@ -490,7 +490,16 @@ export function applyEvent(prev: SessionProjection, ev: NormalizedEvent): Reduce
 
   const finalize = (resultState: State | undefined): SessionProjection => {
     const terminal = resultState !== undefined && isTerminalState(resultState);
-    const effectivePending = terminal ? [] : pending;
+    // 承認可視性は session state でなく **要求自身のライフサイクル** (requested→resolved) に従う
+    // (2026-08-13 承認不可視インシデント・main-loop H 所見):
+    // - terminal **到達時** (currentTerminal=false → terminal): その run の既存 pending は moot として
+    //   クリアする (従来どおり・解消不能カードを残さない)。
+    // - terminal **後** に到着した tool.permission.requested は、生きた daemon が round-trip を保持する
+    //   actionable な要求 (daemon 再起動で run lineage の synthetic 再開が失敗した場合等に発生)。
+    //   これを抑制すると操作者にカードが見えないまま全て timeout→deny に落ちる (全プロジェクトの
+    //   エージェントが実質ブロックされた実害)。滞留はしない — 全 requested は daemon の解決
+    //   (操作者 / timeout / child_exit) で必ず resolved が届き fold が除去する。
+    const effectivePending = terminal && !currentTerminal ? [] : pending;
     // ADR 0014 直交軸 (2/3・3/3): continuation / terminal_evidence は terminal でのみ意味を持つ。
     //   出所は event-model の正準写像 (TERMINAL_CONTINUATION / TERMINAL_EVIDENCE_DEFAULT) で、
     //   **resultState のみに依存** (イベント非依存) ゆえ ignore-after-terminal 経路で再計算しても

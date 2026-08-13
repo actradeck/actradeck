@@ -171,10 +171,14 @@ describe("INV-AUTOGUARD-PROJECTION: trigger/secret_kinds carry + closed-enum dro
 });
 
 /**
- * QA-1 (ADR 019e99ad): terminal 確定で pending は moot。terminal 後に到達した requested を
- * 滞留させず、終了時に未解決承認を残さない (UI に解消不能な承認カードを出さない)。
+ * QA-1 (ADR 019e99ad・2026-08-13 インシデントで改訂): terminal **確定時** に既存 pending は moot
+ * としてクリアする (解消不能カードを残さない)。ただし terminal **後** に到着した requested は
+ * 生きた daemon が round-trip を保持する actionable な要求であり **可視化する** — 旧契約 (抑制)
+ * は daemon 再起動後の resume fold で承認カードを全プロジェクトで不可視化し、全承認が
+ * timeout→deny に落ちる実害を生んだ。滞留防止は抑制でなく解決ライフサイクル (全 requested は
+ * operator/timeout/child_exit のいずれかで必ず resolved) が担保する。
  */
-describe("QA-1: terminal state clears pending_approvals (no stuck approval card)", () => {
+describe("QA-1: terminal-transition clears pending; post-terminal requests stay visible", () => {
   function ended(atMs: number) {
     return makeEvent({
       session_id: SID,
@@ -194,12 +198,21 @@ describe("QA-1: terminal state clears pending_approvals (no stuck approval card)
     expect(proj.needs_attention).toBe(false);
   });
 
-  it("a requested arriving AFTER terminal does not accumulate (state ignored, pending empty)", () => {
+  it("INV-APPROVAL-POST-TERMINAL-VISIBLE: a requested arriving AFTER terminal is visible and actionable", () => {
     let proj = applyEvent(initialProjection(SID), ended(1000)).projection;
-    // terminal 後の requested: state 変更は無視され、pending も滞留しない。
+    // terminal 後の requested: state は不変 (INV-TERMINAL-IMMUTABLE) だが、pending は要求の
+    // ライフサイクルに従い**可視** — 抑制すると live daemon の承認カードが出ず全て timeout→deny
+    // になる (2026-08-13 実障害)。
     proj = applyEvent(proj, requested("s1:apr-late", {}, 2000)).projection;
     expect(proj.state).toBe("completed");
+    expect(proj.pending_approvals).toHaveLength(1);
+    expect(proj.pending_approvals[0]?.request_id).toBe("s1:apr-late");
+    expect(proj.needs_attention).toBe(true);
+    // 解決 (timeout deny 含む) が届けば fold が除去する — 滞留しない (stuck card 防止は解決
+    // ライフサイクルが担保)。
+    proj = applyEvent(proj, resolved("s1:apr-late", 3000)).projection;
     expect(proj.pending_approvals).toHaveLength(0);
+    expect(proj.state).toBe("completed");
     expect(proj.needs_attention).toBe(false);
   });
 });

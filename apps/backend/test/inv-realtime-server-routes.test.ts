@@ -361,6 +361,7 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
       const { join } = await import("node:path");
       const dir = await mkdtemp(join(tmpdir(), "actradeck-telemetry-routes-"));
       const telemetry = new AnonymousTelemetry({
+        env: {}, // SEC-R3-2: kill-switch を明示解除して有効時挙動を検証
         usage: {
           report: async (range) => ({
             schema_version: 1,

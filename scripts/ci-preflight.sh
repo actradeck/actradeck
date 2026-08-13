@@ -37,6 +37,9 @@ CI_YML=".github/workflows/ci.yml"
 
 export CI=true
 export ACTRADECK_SKIP_REAL_BIN_E2E=1
+# SEC-R3-4: telemetry kill-switch をシェルレベルで一様固定 (ci.yml のワークフロー env と対)。
+# vitest 内は setup-env が注入するが、vitest を経ないゲートも実 consent/collector に触れさせない。
+export ACTRADECK_TELEMETRY_DISABLED=1
 
 # ---------------------------------------------------------------------------
 # Drift tripwire: mirrored jobs' step names must match this list exactly.

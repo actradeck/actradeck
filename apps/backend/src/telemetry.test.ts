@@ -51,6 +51,7 @@ async function fixture(source = usage()) {
   const statePath = join(directory, "telemetry.json");
   const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
   const telemetry = new AnonymousTelemetry({
+    env: {}, // SEC-R3-2: kill-switch を明示解除 (setup-env が全テストプロセスへ注入するため)
     usage: source,
     statePath,
     defaultEndpoint: "https://telemetry.example.test/v1/events",
@@ -65,6 +66,34 @@ describe("anonymous telemetry", () => {
     // setup-env.ts が全テストプロセスへ構造注入する。この pin が落ちたら、kill-switch を
     // 設定しない新テストが startFromEnv() 経由で実 consent state・実 collector に触れうる。
     expect(process.env.ACTRADECK_TELEMETRY_DISABLED).toBe("1");
+  });
+
+  it("SEC-R3-2: the env kill-switch disables the instance itself (defense in depth)", async () => {
+    // composition root (index.ts) の非生成に加え、直接 construct された instance も kill-switch を
+    // 尊重する: statePath 省略 + 本番 endpoint の将来テストが実 consent state を書いたり実送信
+    // する事故を単一 egress 点で止める。enable は closed code で拒否・state file は生成されない。
+    const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
+    FIXTURE_DIRS.push(directory);
+    const statePath = join(directory, "state.json");
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
+    const telemetry = new AnonymousTelemetry({
+      env: { ACTRADECK_TELEMETRY_DISABLED: "1" },
+      usage: usage(),
+      statePath,
+      defaultEndpoint: "https://telemetry.example.test/v1/events",
+      now: () => new Date(NOW),
+      fetchImpl,
+    });
+    await expect(telemetry.enable()).rejects.toMatchObject({ code: "not_configured" });
+    await expect(telemetry.flush()).resolves.toEqual({
+      sent: false,
+      event_count: 0,
+      reason: "disabled",
+    });
+    await telemetry.start();
+    telemetry.dispose();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await expect(readFile(statePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("is default-off and performs no network request", async () => {
@@ -91,6 +120,7 @@ describe("anonymous telemetry", () => {
     const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
     FIXTURE_DIRS.push(directory);
     const telemetry = new AnonymousTelemetry({
+      env: {}, // SEC-R3-2: kill-switch を明示解除 (setup-env が全テストプロセスへ注入するため)
       usage: usage(),
       statePath: join(directory, "state.json"),
       now: () => new Date(NOW),
@@ -191,6 +221,7 @@ describe("anonymous telemetry", () => {
     const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
     FIXTURE_DIRS.push(directory);
     const telemetry = new AnonymousTelemetry({
+      env: {}, // SEC-R3-2: kill-switch を明示解除 (setup-env が全テストプロセスへ注入するため)
       usage: usage(),
       statePath: join(directory, "state.json"),
       defaultEndpoint: "http://collector.internal/v1/events", // 非 loopback HTTP = invalid
@@ -280,6 +311,7 @@ describe("anonymous telemetry", () => {
       FIXTURE_DIRS.push(directory);
       const { port } = redirector.address() as { port: number };
       const telemetry = new AnonymousTelemetry({
+        env: {}, // SEC-R3-2: kill-switch を明示解除 (setup-env が全テストプロセスへ注入するため)
         usage: usage(),
         statePath: join(directory, "state.json"),
         defaultEndpoint: `http://127.0.0.1:${port}/v1/events`,

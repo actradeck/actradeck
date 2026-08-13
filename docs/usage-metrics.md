@@ -37,6 +37,11 @@ The aggregation runs range-bounded against the base tables and reports UTC day b
 
 - `cockpit_demo_started` and `cockpit_demo_completed`;
 - `real_sessions` — distinct non-demo sessions with at least one non-heartbeat event on the day.
+  Note (QA-R3-3): the `totals` block sums these per-day distincts, so over a multi-day window it
+  counts **session-days**, not unique sessions — a session active on two days contributes 2 to
+  `totals.real_sessions` but 1 to `protected_sessions` (derived per session). The direction is
+  safe (the protected ratio can only be under-reported) and the anonymous telemetry batch
+  consumes only the per-day rows, never this fold.
   Deriving this from events (not from observed session starts) keeps sessions that ActraDeck
   attached to mid-flight visible as activity;
 - `protected_sessions` (real sessions explicitly declaring `governance_mode=enforcement`);
