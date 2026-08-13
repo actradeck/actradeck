@@ -38,11 +38,7 @@ export interface HookReceiverOptions {
    * SessionIdentity を解決する。設定時は静的 `identity` より優先し、これを learn 対象にする。
    * registry が初出 session の entry 生成 / GitWatcher 起動を担う (副作用は resolver 側)。
    */
-  readonly resolveIdentity?: (
-    sessionId: string,
-    cwd?: string,
-    isSessionStart?: boolean,
-  ) => SessionIdentity;
+  readonly resolveIdentity?: (sessionId: string, cwd?: string) => SessionIdentity;
   /**
    * 観測モード (ADR 019ea476 D8)。Attach 構成では "attach" を渡し、全 emit に
    * capture_mode="attach" を付与する (UI の attach バッジ用)。省略時は付与しない (managed 既定)。
@@ -127,7 +123,7 @@ export class HookReceiver {
   private readonly approvalBridge: ApprovalBridge;
   private readonly identity: SessionIdentity | undefined;
   private readonly resolveIdentity:
-    | ((sessionId: string, cwd?: string, isSessionStart?: boolean) => SessionIdentity)
+    | ((sessionId: string, cwd?: string) => SessionIdentity)
     | undefined;
   private readonly captureMode: "managed" | "attach" | undefined;
   private readonly host: string;
@@ -255,15 +251,12 @@ export class HookReceiver {
       // 監視イベントは境界を駆動しない (D3・分裂防止)。
       // 注釈は run 語彙エイリアス RunIdentity (= SessionIdentity): ここでの用途は run 境界判定
       // (onHookSession) であり、エイリアスの意図した使用点 (3b-1 sweep TDA-1 で実体化)。
-      // decision 019fd2ac ①: SessionStart フラグを registry へ伝え、reap 跨ぎ resume の初出でのみ
-      // terminal tombstone を consume させる (straggler hook で phantom run を作らない)。
+      // decision 019fd2ac ① 改訂 (2026-08-13): terminal tombstone は registry 側で**任意 hook** の
+      // 初出に consume される (SessionStart 限定は resume 時に SessionStart を発火しないクライアントで
+      // 承認を永久不可視化した — attach-session-registry の tombstone docstring 参照)。
       const identity: RunIdentity | undefined =
         this.resolveIdentity !== undefined
-          ? this.resolveIdentity(
-              input.session_id,
-              input.cwd,
-              input.hook_event_name === "SessionStart",
-            )
+          ? this.resolveIdentity(input.session_id, input.cwd)
           : this.identity;
       let lineage: NormalizeContext = {};
       if (identity !== undefined) {
