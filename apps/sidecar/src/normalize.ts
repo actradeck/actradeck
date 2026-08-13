@@ -94,13 +94,18 @@ export const MAX_COMMAND_LEN = 4096;
  * redirect の一部 (`2>&1` `>&2` `<&-` `&>file`) は 1 トークンとして残す (SEC-CQ3-1・R3 監査 H)。
  *
  * ⚠️ 分割器へ演算子を足す変更は **risk に対して単調ではない** (SEC-CQ3-2 ≡ TDA-CQ3-1 ≡ QA-CQ3-1
- * で訂正): 本関数は union backstop の legacy 側 (high-only ゆえ FP 中立) であると同時に
- * **primary の fallback** でもあり、fallback 役では粒度がそのまま primary の判定になる。
- * 細かく割れば (a) command 名とフラグが分断されて high→low へ**下がりうる** (SEC-CQ3-1 が実例)、
- * (b) 断片先頭がメタ文字になり「解析不能→medium 床上げ」が発火して新規承認カードが増える
- * (benign corpus 実測 2.5%)、(c) 逆に割らなければ検出が復活する。単調性は仮定せず、
- * INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND / INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR の
- * 両方向 pin と INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE の全数比較で機械的に担保する。
+ * で訂正・TDA-CQ4-3 で計数追加): 本関数は union backstop の legacy 側 (high-only ゆえ FP 中立)
+ * であると同時に **primary の fallback** でもあり、fallback 役では粒度がそのまま primary の
+ * 判定になる。base→R3 HEAD の 22,620 入力 differential (監査レーン実測) の遷移内訳:
+ *   **medium→low 1,894** (最大の de-gating セル) / high→low 126 / high→medium 79 /
+ *   low→medium 371 / low→high 811 / medium→high 1,089。
+ * つまり細かく割ると (a) command 名とフラグが分断されて high/medium→low へ**下がり**、
+ * (b) 断片先頭がメタ文字になり「解析不能→medium 床上げ」で新規承認カードも増える。
+ * 単調性は仮定せず、INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND (演算子×位置の全組合せ) /
+ * INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR / FP 予算 pin で両方向を機械的に担保する。
+ * なお **等価 metatest は本クラスを検出できない** (TDA-CQ4-5): 両実装が同じ誤答で一致する形
+ * (`\>&` 等) では 9,330 件緑のまま fail-open が成立する。一致は drift の tripwire であって
+ * 正しさの証拠ではない — 正しさ側は上記マトリクスが担う。
  */
 export function splitSegmentsQuoteUnaware(command: string): string[] {
   return command
@@ -159,10 +164,20 @@ type SegmentSplitter = (command: string) => string[];
  * 過大方向ゆえ ADR 0015 の under-credit 原則と逆で、追跡 task で扱う。
  * backstop の適用範囲を変える修正は boundary-gate 走査範囲変更 = full 監査既定。
  *
+ * **redirect は区切りでも語でもない (SEC-CQ4-1/2/3 ≡ TDA-CQ4-1/2/6・R4 監査 H)**: 演算子
+ * (`>` `>>` `>|` `<` `<>` `>&` `<&` `&>` `&>>` `<<<` `<<[-]`) と対象語・fd 指定を segment から
+ * **除去**し、プログラム名と残りの引数を同一 segment に保つ。旧実装は redirect 位置で分割して
+ * いたため `rm >out.log -rf /` が ["rm", "out.log -rf /"] となり、実 bash が削除するのに low =
+ * 承認カード無しだった (`2>` だけは digit 規則で偶然 whole に残っていた)。文字単位の隣接判定
+ * (`previous === ">"` 等) は演算子の途中で 1 文字だけ見るため `&>>` の 2 つ目の `>`・escape 済み
+ * `\>` の直後の `&` と、**位置が 1 つずれるたびに穴が開いた** (3 ラウンド連続)。演算子を
+ * トークンとして一括認識することで、この off-by-one クラスを構造的に閉じる。
+ *
  * ⚠️ 承認ゲート境界の走査範囲 (scope) 変更に当たる — 変更時は finding-registry の full 監査既定。
  * INV-APPROVAL-QUOTED-OPERATORS / INV-APPROVAL-NONQUOTE-CONTEXT-SEPARATORS /
- * INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR / INV-APPROVAL-SPLIT-LAYER-CONTRACT
- * (apps/sidecar/test/inv-approval.test.ts) が両方向を回帰固定する。
+ * INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR / INV-APPROVAL-SPLIT-LAYER-CONTRACT /
+ * INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND (演算子 × 位置の 132 組合せマトリクス + escape 形)
+ * が両方向を回帰固定する。
  */
 interface PendingHeredoc {
   readonly delimiter: string;
@@ -171,6 +186,28 @@ interface PendingHeredoc {
 }
 
 const SEPARATOR_OR_SPACE_RE = /[\s;|&<>]/;
+/** redirect の直前に付く fd 指定 (`2>` の `2` / `{v}>` の `{v}`) — 語ではないので segment から外す。 */
+const FD_PREFIX_TAIL_RE = /(?:\{[A-Za-z_][A-Za-z0-9_]*\}|\d+)$/;
+
+/**
+ * `i` が heredoc 以外の redirect 演算子の先頭ならその長さを返す (0 = 演算子でない)。
+ *
+ * SEC-CQ4-1/2/3 (R4 監査 H×3): 文字単位の隣接判定 (`previous === ">"` 等) は
+ * 「演算子の途中で 1 文字だけ見る」ため、`&>>` の 2 つ目の `>`・escape された `\>` の直後の `&`
+ * のように**位置が 1 つずれた形**で毎回穴が開いた (3 ラウンド連続)。演算子を**トークンとして
+ * 一括認識**することで、この off-by-one クラスを構造的に消す。
+ */
+function redirectOperatorLength(command: string, i: number): number {
+  const c = command[i];
+  const next = command[i + 1];
+  if (c === "&") return next === ">" ? (command[i + 2] === ">" ? 3 : 2) : 0; // &>> / &>
+  if (c === ">") return next === ">" || next === "&" || next === "|" ? 2 : 1; // >> >& >| >
+  if (c === "<") {
+    if (next === "<") return 0; // heredoc / herestring は専用分岐が扱う。
+    return next === "&" || next === ">" ? 2 : 1; // <& <> <
+  }
+  return 0;
+}
 
 export function splitSegments(command: string): string[] {
   const segments: string[] = [];
@@ -181,6 +218,24 @@ export function splitSegments(command: string): string[] {
     const trimmed = current.trim();
     if (trimmed.length > 0) segments.push(trimmed);
     current = "";
+  };
+  /** redirect の対象語 (`> out.log` の `out.log`) の終端 index を返す。quote 済みも 1 語。 */
+  const targetEnd = (from: number): number => {
+    let j = from;
+    while (command[j] === " " || command[j] === "\t") j += 1;
+    const q = command[j];
+    if (q === '"' || q === "'") {
+      j += 1;
+      while (j < command.length && command[j] !== q) j += 1;
+      return j < command.length ? j + 1 : j;
+    }
+    while (j < command.length && !SEPARATOR_OR_SPACE_RE.test(command[j] as string)) j += 1;
+    return j;
+  };
+  /** fd 指定 + 演算子 + 対象語を segment から取り除く (redirect は語を供給しない)。 */
+  const elideRedirect = (operatorEnd: number): number => {
+    current = current.replace(FD_PREFIX_TAIL_RE, "");
+    return targetEnd(operatorEnd);
   };
   let i = 0;
   while (i < command.length) {
@@ -257,7 +312,10 @@ export function splitSegments(command: string): string[] {
           }
           if (!matched) return splitSegmentsQuoteUnaware(command); // 未終端 heredoc → fail-safe。
         }
-        current += bodyKeep;
+        // コマンド語 (redirect 演算子・delimiter を除去済み) を先に確定し、本文は別 segment に
+        // 残す (unquoted delimiter のみ・$()/backtick の検出点を保つ)。
+        push();
+        current = bodyKeep;
         push();
         continue;
       }
@@ -271,14 +329,11 @@ export function splitSegments(command: string): string[] {
       continue;
     }
     if (ch === "&") {
-      // `&&` (連結) も単一 `&` (background 終端・SEC-CQ-2) も区切り。ただし **redirect の一部**
-      // (`2>&1` `1>&2` `<&-` の fd-dup / `&>file` `&>>file` の統合 redirect) の `&` は演算子では
-      // なくトークン内部の字句であり、分割すると command 名とフラグが裂ける (SEC-CQ3-1・R3 監査 H:
-      // `rm 2>&1 -rf /` が ["rm 2>", "1 -rf /"] になり実 bash が削除するのに low = 承認カード無し)。
-      const previous = command[i - 1];
-      if (previous === ">" || previous === "<" || command[i + 1] === ">") {
-        current += ch;
-        i += 1;
+      // `&>file` / `&>>file` は統合 redirect (演算子)。それ以外の `&` は `&&` (連結) も
+      // 単一 `&` (background 終端・SEC-CQ-2) も区切り。
+      const redirect = redirectOperatorLength(command, i);
+      if (redirect > 0) {
+        i = elideRedirect(i + redirect);
         continue;
       }
       push();
@@ -286,20 +341,16 @@ export function splitSegments(command: string): string[] {
       continue;
     }
     if (ch === "<") {
-      // SEC-CQ3-1: `<&` は fd-dup redirect の字句 (演算子ではない) — 分割しない。
-      if (command[i + 1] === "&") {
-        current += ch;
-        i += 1;
-        continue;
-      }
       if (command[i + 1] === "<" && command[i + 2] === "<") {
-        push(); // herestring `<<< word`: word はデータだが旧挙動どおり後続を通常走査する。
-        i += 3;
+        // herestring `<<<word`: 演算子も word も command の語ではない — まとめて除去する。
+        i = elideRedirect(i + 3);
         continue;
       }
       if (command[i + 1] === "<") {
         // heredoc operator。delimiter word を読み取り、本文消費を次の `\n` に予約する。
-        push();
+        // 演算子と delimiter は語を供給しないため segment からは除去する (残る引数は同一
+        // segment に留まる — `rm <<EOF -rf /` の `-rf` が rm から切れない・SEC-CQ4-3)。
+        current = current.replace(FD_PREFIX_TAIL_RE, "");
         i += 2;
         let stripTabs = false;
         if (command[i] === "-") {
@@ -338,29 +389,11 @@ export function splitSegments(command: string): string[] {
         pendingHeredocs.push({ delimiter, quoted: delimiterQuoted, stripTabs });
         continue;
       }
-      push();
-      i += 1;
+      i = elideRedirect(i + redirectOperatorLength(command, i));
       continue;
     }
     if (ch === ">") {
-      // fd redirect (`2>`) は旧挙動どおり分割点にしない ((?<!\d) の移植)。
-      // SEC-CQ3-1: `>&` (fd-dup) と `&>` (統合 redirect) も同様 — redirect トークンの内部で
-      // 裂くと command 名とフラグが分断され、実行される破壊的コマンドが low になる。
-      const previous = command[i - 1];
-      if (previous === "&" || command[i + 1] === "&") {
-        current += ch;
-        i += 1;
-        continue;
-      }
-      if (previous !== undefined && previous >= "0" && previous <= "9") {
-        current += ch;
-        i += 1;
-        continue;
-      }
-      push();
-      // `>>` は 1 演算子。ただし直後が `&` (`>>&`・bash では構文エラー) のときは legacy の
-      // regex backtracking と同じく単一 `>` として扱い、残る `>&` を fd-dup 字句に残す。
-      i += command[i + 1] === ">" && command[i + 2] !== "&" ? 2 : 1;
+      i = elideRedirect(i + redirectOperatorLength(command, i));
       continue;
     }
     current += ch;

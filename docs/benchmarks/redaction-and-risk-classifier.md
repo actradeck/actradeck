@@ -46,8 +46,8 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   the strict leak gate over the rest of the tree stays hole-free.
 
 Corpus size: **38 redaction positives** across **29 kind families**, **28 hard negatives**, and
-**53 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
-Git shell-alias, and dynamic-executable adversarial forms).
+**59 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
+Git shell-alias, dynamic-executable, and redirect-placement adversarial forms).
 
 ## Results — redaction
 
@@ -153,16 +153,16 @@ the tool input (not from the command string alone) and are **out of scope** for 
 
 | Category          | Support | Precision | Recall     |
 | ----------------- | ------- | --------- | ---------- |
-| recursive-rm      | 9       | 100.0%    | 100.0%     |
+| recursive-rm      | 12      | 100.0%    | 100.0%     |
 | disk-destroy      | 4       | 80.0%     | 100.0%     |
-| history-rewrite   | 7       | 100.0%    | 100.0%     |
+| history-rewrite   | 8       | 100.0%    | 100.0%     |
 | db-drop           | 3       | 75.0%     | 100.0%     |
 | fork-bomb         | 1       | 100.0%    | 100.0%     |
-| perm-change       | 3       | 100.0%    | 100.0%     |
+| perm-change       | 4       | 100.0%    | 100.0%     |
 | inline-code       | 5       | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
 | high-risk-other   | 1       | 100.0%    | 100.0%     |
-| **micro-average** | 35      | **89.7%** | **100.0%** |
+| **micro-average** | 40      | **90.9%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
 Precision is below 100% only where a keyword literal fires on a benign near-miss (below). This is
@@ -173,11 +173,11 @@ than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "g
 
 | Policy                              | Precision | Recall | TP / FP / FN / TN |
 | ----------------------------------- | --------- | ------ | ----------------- |
-| default-gated (out-of-box)          | 93.5%     | 100.0% | 29 / 2 / 0 / 22   |
-| strict-all (every category enabled) | 89.5%     | 100.0% | 34 / 4 / 0 / 15   |
+| default-gated (out-of-box)          | 94.3%     | 100.0% | 33 / 2 / 0 / 24   |
+| strict-all (every category enabled) | 90.7%     | 100.0% | 39 / 4 / 0 / 16   |
 
-- Risk-level exact-match accuracy: **88.7%**.
-- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **97.1%**.
+- Risk-level exact-match accuracy: **89.8%**.
+- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **97.4%**.
 
 Under the out-of-box `DEFAULT_GATED_CATEGORIES`, `inline-code` is **on by default** alongside the
 catastrophic categories: interpreter-mediated operations are held even when the classifier cannot

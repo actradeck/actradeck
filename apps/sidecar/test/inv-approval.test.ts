@@ -1651,16 +1651,88 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     }
   });
 
-  it("both splitters keep the redirect token whole (split-output level, discriminating)", () => {
-    for (const cmd of ["rm 2>&1 -rf /tmp/x", "rm >&2 -rf /tmp/x", "rm 0<&0 -rf /tmp/x"]) {
-      expect(splitSegments(cmd), cmd).toEqual([cmd]);
-      expect(splitSegmentsQuoteUnaware(cmd), cmd).toEqual([cmd]);
+  it("the primary splitter elides the redirect and its target, keeping the command words together", () => {
+    // SEC-CQ4-1/2/3 (R4 監査 H×3) の構造修正: redirect は「区切り」でも「語」でもない。
+    // 演算子 + 対象語を除去し、プログラム名と残りの引数を同一 segment に保つ。
+    const cases: ReadonlyArray<readonly [string, readonly string[]]> = [
+      ["rm 2>&1 -rf /tmp/x", ["rm  -rf /tmp/x"]],
+      ["rm >out.log -rf /tmp/x", ["rm  -rf /tmp/x"]],
+      ["rm > out.log -rf /tmp/x", ["rm  -rf /tmp/x"]],
+      ["rm &>>out.log -rf /tmp/x", ["rm  -rf /tmp/x"]],
+      [">out.log rm -rf /tmp/x", ["rm -rf /tmp/x"]],
+      ["rm <<<word -rf /tmp/x", ["rm  -rf /tmp/x"]],
+      ["rm 0<&0 -rf /tmp/x", ["rm  -rf /tmp/x"]],
+      ["true \\>& rm -rf /tmp/x", ["true \\>", "rm -rf /tmp/x"]],
+      ["cat f > out; echo done", ["cat f", "echo done"]],
+    ];
+    for (const [cmd, expected] of cases) {
+      expect(splitSegments(cmd), cmd).toEqual(expected);
     }
-    // `&>` (統合 redirect) も分割点にしない。
-    expect(splitSegments("rm &>/dev/null -rf /tmp/x")).toEqual(["rm &>/dev/null -rf /tmp/x"]);
-    expect(splitSegmentsQuoteUnaware("rm &>/dev/null -rf /tmp/x")).toEqual([
-      "rm &>/dev/null -rf /tmp/x",
-    ]);
+  });
+
+  it("R4 matrix: no redirect form placed between a program and its flags can de-gate it", () => {
+    // SEC-CQ4-1/2/3 ≡ TDA-CQ4-1/2/6: 3 ラウンド連続で「隣接規則を足す → 隣の形で穴が開く」
+    // (2>&1 → &>> → \>&) を繰り返したため、個別ベクタでなく **演算子 × 位置の全組合せ**を
+    // 機械生成して固定する。ground truth は監査レーンが実 bash で確認した性質:
+    // 「redirect は語を供給しないので、どこに挟まっても rm/chmod/git は同じ引数で実行される」。
+    const REDIRECTS = [
+      ">out.log",
+      "> out.log",
+      ">>out.log",
+      ">|out.log",
+      "<in.txt",
+      "<>rw.txt",
+      "<<<word",
+      "&>out.log",
+      "&>>out.log",
+      "2>out.log",
+      "2>>out.log",
+      "2>&1",
+      "1>&2",
+      "3>&1",
+      "2>&-",
+      "0<&0",
+      "<&-",
+      ">&2",
+      "{v}>out.log",
+      "{v}>&1",
+      '>"my out.log"',
+      ">'my out.log'",
+    ] as const;
+    const TEMPLATES: ReadonlyArray<readonly [(r: string) => string, string]> = [
+      [(r) => `rm ${r} -rf /tmp/x`, "recursive-rm"],
+      [(r) => `${r} rm -rf /tmp/x`, "recursive-rm"],
+      [(r) => `rm -rf /tmp/x ${r}`, "recursive-rm"],
+      [(r) => `chmod ${r} -R 777 /tmp/x`, "perm-change"],
+      [(r) => `git ${r} reset --hard HEAD~5`, "history-rewrite"],
+      [(r) => `cat f | rm ${r} -rf /tmp/x`, "recursive-rm"],
+    ];
+    const failures: string[] = [];
+    for (const redirect of REDIRECTS) {
+      for (const [template, category] of TEMPLATES) {
+        const cmd = template(redirect);
+        const { risk, categories } = classifyCommandWithCategories(cmd);
+        if (risk !== "high" || !categories.has(category as never)) {
+          failures.push(`${cmd} -> ${risk} ${JSON.stringify([...categories])}`);
+        }
+      }
+    }
+    expect(failures, `${failures.length} de-gated redirect placements`).toEqual([]);
+    expect(REDIRECTS.length * TEMPLATES.length).toBe(132); // vacuity guard: 実際に全組合せを回した。
+  });
+
+  it("R4: escaped redirect characters are data, so a following & still separates (TDA-CQ4-1)", () => {
+    // `\>` は literal `>` で redirect 演算子ではない → 直後の `&` は background 演算子。
+    // 9d1cc6d の生文字隣接判定はこれを redirect と誤認し、実行される rm を飲み込んでいた。
+    for (const cmd of [
+      "echo a \\>& rm -rf /tmp/x",
+      "echo a \\<& rm -rf /tmp/x",
+      "cat f 2\\>& rm -rf /tmp/x",
+      "echo a \\>& chmod -R 777 /tmp/x",
+      "echo a \\>& git push --force origin main",
+    ]) {
+      expect(classifyCommandRisk(cmd), cmd).toBe("high");
+    }
   });
 
   it("a real background & is still a separator (the CQ-R2 fix is not regressed)", () => {
@@ -1733,9 +1805,11 @@ describe("INV-APPROVAL-SPLIT-LAYER-CONTRACT: layer (a) is pinned at split-output
     ]) {
       expect(classifyCommandRisk(cmd), cmd).toBe("low");
     }
-    // 既知・受容する FP (断片先頭がメタ文字になる形)。増減はレビュー対象。
+    // 既知・受容する FP (fallback で断片先頭がメタ文字になる形)。TDA-CQ4-4: `not.toBe("high")`
+    // は low でも medium でも緑になり FP の出現/消滅を検出できなかったため、**厳密値**で pin する
+    // (= これが「予算」。増減はどちらの向きでもレビュー対象になる)。
     for (const cmd of ["printf $'don\\'t & retry\\n'", "echo 'cmd & *.log"]) {
-      expect(classifyCommandRisk(cmd), cmd).not.toBe("high");
+      expect(classifyCommandRisk(cmd), cmd).toBe("medium");
     }
   });
 
@@ -1793,7 +1867,7 @@ describe("INV-APPROVAL-CATEGORY-UNION-MERGE: legacy categories merge even when p
 // コメント (#) / 改行 heredoc を含まない入力では両者は**完全一致**しなければならない —
 // 片側だけ演算子を足す drift をこの全数比較が RED にする。単一 & は CQ-R2 (SEC-CQ2-1) で
 // 共有集合へ昇格した (fallback/backstop が & を見ないと二層同時 fail-open になるため)。
-const SHARED_SPLIT_ALPHABET = ["a", " ", ";", "|", "&", "<", ">", "2"] as const;
+const SHARED_SPLIT_ALPHABET = ["a", " ", ";", "|", "&", "2"] as const;
 describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
   it("exhaustive equivalence on the shared-operator domain (alphabet without # newline quotes)", () => {
     let checked = 0;
@@ -1807,25 +1881,41 @@ describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
       }
     };
     walk("", 5);
-    expect(checked).toBeGreaterThan(19_000); // vacuity guard: 全数走査が実際に回っている。
+    // vacuity guard: 全数走査が実際に回っている (6 文字 × 深さ 5 = 9,330 通り)。
+    // QA-CQ3-5: 件数だけでなく深さと alphabet 長も固定し、「guard を緩めて depth を下げる」
+    // 件数保存変異が唯一の防御を無音で外せないようにする。
+    expect(SHARED_SPLIT_ALPHABET.length).toBe(6);
+    expect(checked).toBe(9_330);
   });
 
   it("QA-CQ2-5: the alphabet composition is pinned (element swaps are RED, not just count changes)", () => {
-    // 件数だけの vacuity guard は「`<` を benign 文字へ差し替える」件数保存変異を素通した
-    // (CQ-R2 T2 SURVIVED)。構成そのものを二重リテラルで pin し、変異には両所同時変更 =
-    // レビュー + full 監査 (走査範囲契約) を強制する。
-    expect([...SHARED_SPLIT_ALPHABET].sort()).toEqual(
-      [" ", "&", "2", ";", "<", ">", "a", "|"].sort(),
-    );
-    // 意味の teeth: alphabet 中の各分割演算子は両実装で実際に分割を起こす (benign 文字への
-    // 差し替えはこの semantic assert が引っ掛ける)。
-    for (const op of [";", "|", "&", "<", ">"]) {
+    // 件数だけの vacuity guard は要素差し替えの件数保存変異を素通した (CQ-R2 T2 SURVIVED)。
+    // 構成そのものを二重リテラルで pin し、変異には両所同時変更 = レビュー + full 監査
+    // (走査範囲契約) を強制する。`<` `>` は R4 で共有集合から外した (下記 divergence 参照)。
+    expect([...SHARED_SPLIT_ALPHABET].sort()).toEqual([" ", "&", "2", ";", "a", "|"].sort());
+    // 意味の teeth: alphabet 中の各区切り演算子は両実装で実際に分割を起こす。
+    for (const op of [";", "|", "&"]) {
       expect(splitSegments(`a ${op} b`).length, `splitSegments splits on ${op}`).toBeGreaterThan(1);
       expect(
         splitSegmentsQuoteUnaware(`a ${op} b`).length,
         `legacy splits on ${op}`,
       ).toBeGreaterThan(1);
     }
+  });
+
+  it("R4: redirect handling diverges by design (primary elides, legacy over-splits)", () => {
+    // SEC-CQ4-1/2/3 の構造修正で、primary は shell 文法どおり redirect 演算子と対象語を
+    // **除去**し、legacy(regex) は従来どおり redirect 位置で**過剰分割**する。legacy の役割は
+    // (1) 解析不能入力の fail-safe fallback (2) high-only の union backstop であり、過剰分割は
+    // どちらでも安全側。したがって両者は redirect を含む入力で一致しない — 等価契約は
+    // 上記 alphabet(redirect 記号を含まない)に限定される。この divergence 自体を pin する。
+    expect(splitSegments("rm >out.log -rf /tmp/x")).toEqual(["rm  -rf /tmp/x"]);
+    expect(splitSegmentsQuoteUnaware("rm >out.log -rf /tmp/x")).toEqual([
+      "rm",
+      "out.log -rf /tmp/x",
+    ]);
+    // 危険側の帰結: primary が正しく high、legacy 単独では low (= union は引き上げない)。
+    expect(classifyCommandRisk("rm >out.log -rf /tmp/x")).toBe("high");
   });
 
   it("the known intentional divergences exist (positive controls)", () => {

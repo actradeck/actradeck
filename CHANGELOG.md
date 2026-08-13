@@ -52,28 +52,33 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   run's open approvals, but a request arriving _after_ the terminal state — a live daemon
   holding a real round-trip — stays visible and actionable instead of silently timing out to
   deny.
-- **Harmless search commands no longer flood the approval inbox.** The command risk classifier
-  split segments on `|` and `;` even inside quotes, so a quoted regex alternation
-  (`rg -n 'a|b.*[Cc]' src`) was torn apart and floored to "needs approval" — with nobody
-  watching the cockpit, every such card timed out to deny and effectively blocked agents. The
-  splitter is now shell-syntax-aware (quotes, backslash escapes, `#` comments, heredoc bodies),
-  and a single `&` (background terminator) is a separator in **both** the primary splitter and
-  the legacy fallback/backstop splitter, so unparseable inputs (unterminated quotes or
-  heredocs) keep the `&` separation too — while an `&` that belongs to a redirect (`2>&1`,
-  `>&2`, `<&-`, `&>file`) is kept inside its token, because splitting there tore a program name
-  away from its flags and let `rm 2>&1 -rf /` classify as harmless. Dangerous paths stay gated:
-  command substitution, stdin shells and real pipes classify as before, and as a structural
-  backstop any command the previous classifier rated high still rates high. Honest costs of
-  that backstop, and the honest limit of the guarantee: adding operators to a splitter is **not
-  monotone** — the legacy splitter is also the fallback for unparseable input, so finer
-  splitting there can lower a verdict as well as raise one (the redirect case above was exactly
-  that), which is why both directions are pinned by regression tests rather than assumed. A
-  dangerous-
-  looking string inside quotes (`echo 'a; rm -rf /'`) or inside a quoted heredoc body (writing
-  a runbook that documents `rm -rf`) still classifies high even though the shell would not
-  execute it — the false-negative guarantee is bought with those known false positives — and
-  the classifier is no longer strictly regex-loop-free (the character scan is; the legacy
-  splitter remains a bounded regex split).
+- **Harmless search commands no longer flood the approval inbox, and redirects can no longer
+  hide a destructive command.** The command risk classifier split segments on `|` and `;` even
+  inside quotes, so a quoted regex alternation (`rg -n 'a|b.*[Cc]' src`) was torn apart and
+  floored to "needs approval" — with nobody watching the cockpit, every such card timed out to
+  deny and effectively blocked agents. The splitter is now shell-syntax-aware (quotes,
+  backslash escapes, `#` comments, heredoc bodies) and a single `&` (background terminator)
+  separates in both the primary splitter and the legacy fallback/backstop splitter.
+  Redirections are now lexed as whole tokens and removed from the segment together with their
+  target word, instead of being treated as separators: splitting there tore a program name away
+  from its flags, so `rm >out.log -rf /path` — which bash really does execute — classified as
+  harmless with no approval card in any mode. That affected every redirect form placed between
+  a program and its arguments (`>`, `>>`, `>|`, `<`, `<>`, `>&`, `<&`, `&>`, `&>>`, `<<<`,
+  heredocs, with or without an fd prefix); a generated matrix of operator forms by position now
+  pins all of them. Dangerous paths stay gated: command substitution, stdin shells and real
+  pipes classify as before, and as a structural backstop any command the previous classifier
+  rated high still rates high.
+  Honest limits of that guarantee. Changing a splitter is **not monotone** with respect to
+  risk: the legacy splitter is also the fallback for unparseable input, so a finer split there
+  can lower a verdict as well as raise one — which is how the redirect hole was introduced in
+  the first place — and both directions are now pinned by tests rather than assumed. The
+  equivalence check between the two splitters cannot catch this class either, because both can
+  agree on the same wrong answer; correctness is carried by the operator matrix, not by that
+  agreement. A dangerous-looking string inside quotes (`echo 'a; rm -rf /'`) or inside a quoted
+  heredoc body (writing a runbook that documents `rm -rf`) still classifies high even though
+  the shell would not execute it — the false-negative guarantee is bought with those known
+  false positives. One known gap remains and is tracked: a quoted assignment whose value
+  contains a space (`FOO='a b' rm -rf /path`) still hides the program from the classifier.
 
 ## [0.7.0] - 2026-08-10
 

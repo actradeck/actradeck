@@ -348,4 +348,40 @@ export const COMMANDS: readonly CommandVector[] = [
     expectCategories: [],
     note: "file-to-file copy with dd (no block device) — human intent benign",
   },
+  {
+    command: "rm >out.log -rf /tmp/build-cache",
+    expectRisk: "high",
+    expectCategories: ["recursive-rm"],
+    note: "redirect placed between the program and its flags — bash still runs the rm (audit TDA-CQ4-6)",
+  },
+  {
+    command: "rm &>>run.log -rf /tmp/build-cache",
+    expectRisk: "high",
+    expectCategories: ["recursive-rm"],
+    note: "merged append redirect between program and flags — same execution, must stay gated",
+  },
+  {
+    command: "chmod 2>&1 -R 777 /srv/app",
+    expectRisk: "high",
+    expectCategories: ["perm-change"],
+    note: "fd duplication between program and flags — world-writable chmod still executes",
+  },
+  {
+    command: "git >/dev/null reset --hard HEAD~5",
+    expectRisk: "high",
+    expectCategories: ["history-rewrite"],
+    note: "redirect before the git subcommand — history rewrite still executes",
+  },
+  {
+    command: "echo a \\>& rm -rf /tmp/build-cache",
+    expectRisk: "high",
+    expectCategories: ["recursive-rm"],
+    note: "escaped '>' is literal data, so the following & backgrounds and the rm runs",
+  },
+  {
+    command: "tar -czf backup.tar.gz ./src >build.log 2>&1",
+    expectRisk: "low",
+    expectCategories: [],
+    note: "ordinary redirects on a benign command — must not become a false positive",
+  },
 ];
