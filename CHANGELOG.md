@@ -57,9 +57,16 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   (`rg -n 'a|b.*[Cc]' src`) was torn apart and floored to "needs approval" — with nobody
   watching the cockpit, every such card timed out to deny and effectively blocked agents. The
   splitter is now shell-syntax-aware (quotes, backslash escapes, `#` comments, heredoc bodies),
-  and a single `&` (background terminator) is now a separator. Dangerous paths stay gated:
-  command substitution, stdin shells and real pipes classify as before, and as a structural
-  backstop any command the previous classifier rated high still rates high.
+  and a single `&` (background terminator) is a separator in **both** the primary splitter and
+  the legacy fallback/backstop splitter, so unparseable inputs (unterminated quotes or
+  heredocs) keep the `&` separation too. Dangerous paths stay gated: command substitution,
+  stdin shells and real pipes classify as before, and as a structural backstop any command the
+  previous classifier rated high still rates high. Honest costs of that backstop: a dangerous-
+  looking string inside quotes (`echo 'a; rm -rf /'`) or inside a quoted heredoc body (writing
+  a runbook that documents `rm -rf`) still classifies high even though the shell would not
+  execute it — the false-negative guarantee is bought with those known false positives — and
+  the classifier is no longer strictly regex-loop-free (the character scan is; the legacy
+  splitter remains a bounded regex split).
 
 ## [0.7.0] - 2026-08-10
 

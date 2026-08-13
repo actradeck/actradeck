@@ -80,16 +80,22 @@ interface ToolInput {
 export const MAX_COMMAND_LEN = 4096;
 
 /**
- * quote 非対応の旧分割 (2026-08-14 以前の唯一の実装)。2 つの役割で温存する:
+ * quote 非対応の旧分割 (2026-08-14 以前の唯一の実装 + SEC-CQ2-1 の単一 `&`)。2 つの役割で温存する:
  *  1. 未終端クォート/未終端 heredoc で構造解析できないコマンドの fail-safe フォールバック。
  *  2. SEC-CQ-1 の**非対称 union backstop** の legacy 側 split (classifyCommandRisk が
  *     この分割でも一度分類し、legacy が high のときのみ high へ引き上げる)。
  * quote-aware 側の解析ミス (phantom quote / heredoc 誤認) がどう転んでも、旧分類器が high と
  * 呼んだ入力は high に留まる。新規の呼び出し元を作らないこと。
+ *
+ * 単一 `&` を区切りに含める (SEC-CQ2-1 ≡ QA-CQ2-1・CQ-R2 監査 H): fallback と union backstop は
+ * どちらも本分割を使うため、ここが `&` を見ないと ANSI-C quoting の位相ずれ・未終端 heredoc 等で
+ * **二層が同時に** `cmd & rm -rf /` の rm を見失い、実 bash が実行するのに low (承認カード無し)
+ * になる fail-open が実測された。分割の追加は fail-safe/引き上げ専用の役割上 risk を下げる方向に
+ * 働かない (増える FP は quote 内 `&` の断片化 = 受容済みクラス)。
  */
 export function splitSegmentsQuoteUnaware(command: string): string[] {
   return command
-    .split(/[;\n]|\|\||&&|\||(?<!\d)>{1,2}|<{1,2}/)
+    .split(/[;\n]|\|\||&&|\||&|(?<!\d)>{1,2}|<{1,2}/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
@@ -134,8 +140,15 @@ type SegmentSplitter = (command: string) => string[];
  *    tokenize の QUOTE_CHARS (単語連結処理) とは目的が異なる非対称で、揃えてはならない。
  *  - 純粋な 1 パス文字走査 (正規表現ループ無し・O(n)) で ReDoS 経路を増やさない。
  *
+ * Consumer (TDA-CQ2-4): 承認分類 (classifyCommandRisk / classifyCommandWithCategories /
+ * isNetworkEgressCommand) に加えて **check-classifier (classifyCheck) も本分割を消費する**。
+ * check 認定側には union backstop が**適用されない** (quote-aware 分割のみ) — check は
+ * 「検証を実行した」ことの credit であり、取りこぼしは under-credit (安全方向) に倒れるため。
+ * backstop の適用範囲を変える修正は boundary-gate 走査範囲変更 = full 監査既定。
+ *
  * ⚠️ 承認ゲート境界の走査範囲 (scope) 変更に当たる — 変更時は finding-registry の full 監査既定。
- * INV-APPROVAL-QUOTED-OPERATORS / INV-APPROVAL-NONQUOTE-CONTEXT-SEPARATORS
+ * INV-APPROVAL-QUOTED-OPERATORS / INV-APPROVAL-NONQUOTE-CONTEXT-SEPARATORS /
+ * INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR / INV-APPROVAL-SPLIT-LAYER-CONTRACT
  * (apps/sidecar/test/inv-approval.test.ts) が両方向を回帰固定する。
  */
 interface PendingHeredoc {
@@ -936,8 +949,8 @@ function unanalyzableSegmentRisk(
   rawSegment: string,
   depth: number,
   suppressMediumFloor: boolean,
-  categories?: Set<PolicyCategory>,
-  split: SegmentSplitter = splitSegments,
+  categories: Set<PolicyCategory> | undefined,
+  split: SegmentSplitter,
 ): "high" | "medium" | undefined {
   const startIdx = skipLeadingAssignments(rawTokens);
   const first = rawTokens[startIdx];
@@ -980,8 +993,8 @@ function inlineCodeRisk(
   tokens: string[],
   rawSegment: string,
   depth: number,
-  categories?: Set<PolicyCategory>,
-  split: SegmentSplitter = splitSegments,
+  categories: Set<PolicyCategory> | undefined,
+  split: SegmentSplitter,
 ): "high" | "medium" | undefined {
   const name = commandName(tokens);
 
@@ -1057,8 +1070,8 @@ function inlineCodeRisk(
 function reclassifySubstitution(
   rawSegment: string,
   depth: number,
-  categories?: Set<PolicyCategory>,
-  split: SegmentSplitter = splitSegments,
+  categories: Set<PolicyCategory> | undefined,
+  split: SegmentSplitter,
 ): "high" | "medium" | undefined {
   const inners: string[] = [];
   // $(...) 抽出 (ネストは無視し、最初の ) で閉じる素朴版)。
@@ -1098,8 +1111,8 @@ function reclassifySubstitution(
 function reclassifyProcessSubstitution(
   command: string,
   depth: number,
-  categories?: Set<PolicyCategory>,
-  split: SegmentSplitter = splitSegments,
+  categories: Set<PolicyCategory> | undefined,
+  split: SegmentSplitter,
 ): "high" | "medium" | undefined {
   const inners: string[] = [];
   let i = 0;
@@ -1143,10 +1156,7 @@ function isProcessSubstitutionExecutor(name: string): boolean {
  * 起動コマンド (先頭セグメントの runner ラッパ剥がし後) が実行/source 系で、かつ
  * 文字列に `<(`/`>(` を含むとき true。プロセス置換の中身は再パースしづらいためゲート対象。
  */
-function launchesShellWithProcessSubstitution(
-  command: string,
-  split: SegmentSplitter = splitSegments,
-): boolean {
+function launchesShellWithProcessSubstitution(command: string, split: SegmentSplitter): boolean {
   if (!hasProcessSubstitution(command)) return false;
   const firstSeg = split(command)[0];
   if (firstSeg === undefined) return false;
@@ -1205,7 +1215,7 @@ function matchesHighRiskLiteral(command: string): boolean {
  *   旧 medium だが low を維持し、旧 high (`echo it's; rm -rf /; echo don't` 系) は high に戻る。
  */
 export function classifyCommandRisk(command: string): RiskLevel {
-  const primary = classifyCommandRiskInternal(command, 0);
+  const primary = classifyCommandRiskInternal(command, 0, undefined, splitSegments);
   if (primary === "high") return "high";
   const legacy = classifyCommandRiskInternal(command, 0, undefined, splitSegmentsQuoteUnaware);
   return legacy === "high" ? "high" : primary;
@@ -1227,11 +1237,15 @@ export function classifyCommandWithCategories(command: string): {
   categories: Set<PolicyCategory>;
 } {
   const categories = new Set<PolicyCategory>();
-  let risk = classifyCommandRiskInternal(command, 0, categories);
+  let risk = classifyCommandRiskInternal(command, 0, categories, splitSegments);
   // SEC-CQ-1 非対称 union (classifyCommandRisk と同一規則): 旧分割が high のときのみ引き上げ、
   // その際は旧走査の named categories (recursive-rm 等) も合流させる (bypass/YOLO の
   // DEFAULT_GATED 照合と監査証跡を legacy 検出に追随させる)。
-  if (risk !== "high") {
+  // SEC-CQ2-2 (CQ-R2 監査 M): legacy 評価を「primary が high でないとき」に限らず**無条件**に行う。
+  // primary が全文 LITERAL rule で先に high になったケースでも legacy 専用の named category
+  // (例: `git reset --hard ; (true)#…\nrm -rf /tmp/x` の recursive-rm) を落とさない —
+  // 落とすと出荷 preset (demo) の bypass gate 照合が base 実装より弱くなる。
+  {
     const legacyCategories = new Set<PolicyCategory>();
     const legacy = classifyCommandRiskInternal(
       command,
@@ -1499,10 +1513,13 @@ export function isPersistDeniedCommand(command: string): boolean {
 function classifyCommandRiskInternal(
   command: string,
   depth: number,
-  categories?: Set<PolicyCategory>,
+  categories: Set<PolicyCategory> | undefined,
   // SEC-CQ-1 union backstop 用: legacy 評価パスは splitSegmentsQuoteUnaware を全再帰レベルへ
-  // 一様に伝播させる (= 8cbde70 時点の分類器と同一の走査)。既定は quote-aware。
-  split: SegmentSplitter = splitSegments,
+  // 一様に伝播させる (= 8cbde70 時点の分類器と同一の走査)。
+  // TDA-CQ2-1 (CQ-R2 監査 M): default 引数を持たない**必須**パラメータ。default があると
+  // 再帰/委譲の 1 箇所で split の引き回しを落としても型・テスト両緑のまま素通りし、
+  // union の legacy 側が quote-aware 分割へ静かに退化する (mutation 10 種中 9 SURVIVED の実測)。
+  split: SegmentSplitter,
 ): RiskLevel {
   if (typeof command !== "string" || command.length === 0) return "high"; // fail-safe
   if (command.length > 16 * 1024) return "high"; // 解析不能に巨大 → fail-safe high

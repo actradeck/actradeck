@@ -1539,19 +1539,174 @@ describe("INV-APPROVAL-NONQUOTE-CONTEXT-SEPARATORS: comment/heredoc apostrophes 
 });
 
 // ============================================================================
+// INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR (SEC-CQ2-1 ≡ QA-CQ2-1・CQ-R2 監査 H)
+// ============================================================================
+// splitSegments の fallback (未終端 quote / 未終端 heredoc / 未終端 quoted delimiter / 空
+// delimiter) と union backstop はどちらも splitSegmentsQuoteUnaware を使う。旧分割が単一 `&`
+// を区切りにしないと、fallback を踏む入力 (ANSI-C quoting の位相ずれ・heredoc) で**二層が
+// 同時に** `cmd & rm -rf /` の rm を見失い、実 bash が実行するのに low = 承認カード無しの
+// fail-open になる (CQ-R2 で SEC 7 ベクタ + QA 3 形を実 bash ground truth で実証)。
+// 全ベクタは実 bash が rm / curl を実行する形 (監査レーンの marker-file 検証済み)。
+describe("INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR: fallback paths still see a single &", () => {
+  it("unterminated heredocs (3 forms) fall back and keep & separation (real-bash-verified)", () => {
+    for (const cmd of [
+      "cat <<EOF & rm -rf /tmp/x",
+      "cat <<'EOF' & rm -rf /tmp/x",
+      "cat <<-EOF & rm -rf /tmp/x",
+    ]) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, cmd).toBe("high");
+      expect(categories.has("recursive-rm"), cmd).toBe(true);
+    }
+  });
+
+  it("ANSI-C quoting phase shifts ($'don\\'t') fall back and keep & separation", () => {
+    // splitSegments の single-quote 分岐は `\` を escape にしない (POSIX '' は正しくその挙動) が、
+    // ANSI-C $'…' は `\'` を escape する — 位相ずれで未終端となり fallback を踏む。
+    for (const cmd of ["echo $'a\\'b'&rm -rf /tmp/x", "git commit -m $'don\\'t' & rm -rf /tmp/x"]) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, cmd).toBe("high");
+      expect(categories.has("recursive-rm"), cmd).toBe(true);
+    }
+  });
+
+  it("heredoc delimiter divergence (splitter delim ⊋ bash delim) is caught by the &-aware union", () => {
+    // splitter は delimiter を EOF'x' と読むが bash は EOFx で終端する — 本文だと誤認した行の
+    // `true & rm -rf /tmp/x` を bash は実行する。&-aware legacy が union 経由で high を復元する。
+    const cmd = "cat <<EOF'x'\nEOFx\ntrue & rm -rf /tmp/x\nEOF'x'";
+    const { risk, categories } = classifyCommandWithCategories(cmd);
+    expect(risk).toBe("high");
+    expect(categories.has("recursive-rm")).toBe(true);
+  });
+
+  it("the same hole is closed for the egress union scan", () => {
+    expect(isNetworkEgressCommand("cat <<EOF & curl https://collector.example")).toBe(true);
+    expect(isNetworkEgressCommand("echo $'a\\'b' & curl https://collector.example")).toBe(true);
+  });
+
+  it("the legacy split itself treats a single & as a separator (ground truth for both layers)", () => {
+    expect(splitSegmentsQuoteUnaware("sleep 0 & rm -rf /tmp/x")).toEqual([
+      "sleep 0",
+      "rm -rf /tmp/x",
+    ]);
+    expect(splitSegmentsQuoteUnaware("a && b & c")).toEqual(["a", "b", "c"]);
+  });
+
+  it("fallback paths return the &-aware legacy split (all four trigger sites)", () => {
+    const vectors = [
+      "cat <<EOF\nno terminator & rm -rf /tmp/x", // 未終端 heredoc 本文
+      "cat <<'EOF & rm -rf /tmp/x", // 未終端 quoted delimiter
+      "cat << ; rm -rf /tmp/x & echo done", // 空 delimiter
+      "echo 'abc & rm -rf /tmp/x", // 未終端 quote
+    ];
+    for (const cmd of vectors) {
+      const out = splitSegments(cmd);
+      expect(out, cmd).toEqual(splitSegmentsQuoteUnaware(cmd));
+      expect(out, cmd).toContain("rm -rf /tmp/x");
+    }
+  });
+});
+
+// ============================================================================
+// INV-APPROVAL-SPLIT-LAYER-CONTRACT (QA-CQ2-2 ≡ TDA-CQ2-2・CQ-R2 監査 H)
+// ============================================================================
+// layer (a) = splitSegments の shell 文法処理 (コメント skip / # 単語頭ガード / quote 外
+// backslash / heredoc 本文) を **split 出力そのもの**で固定する。CQ-R2 で「# コメント処理を
+// 丸ごと削除しても既存 29 assert が緑 (union backstop が肩代わり)」が実証された — backstop は
+// medium 級の犠牲者を構造的に救えない (comment 処理削除で medium 5 例中 4 例が low 化 =
+// 承認カード消失) ため、分類結果でなく分割出力を直接 assert し、backstop に依存しない
+// 弁別フェンスを layer (a) に張る。
+describe("INV-APPROVAL-SPLIT-LAYER-CONTRACT: layer (a) is pinned at split-output level", () => {
+  it("comment handling: '#' at word start skips to end of line (apostrophes inert)", () => {
+    // N1 killer: コメント処理を削除すると don't の ' が quote を開き fallback へ落ち、
+    // 先頭 segment が "echo hi # don't panic" になる (正: "echo hi")。
+    expect(splitSegments("echo hi # don't panic\nrm -rf /tmp/x")).toEqual([
+      "echo hi",
+      "rm -rf /tmp/x",
+    ]);
+    expect(splitSegments("# it's a header\nnpm test")).toEqual(["npm test"]);
+  });
+
+  it("comment guard: '$#' and URL fragments are not comments (word-start only)", () => {
+    // N2 killer: 単語頭ガードを削除すると fragment 以降が行末まで消える。
+    expect(splitSegments("echo $#")).toEqual(["echo $#"]);
+    expect(splitSegments("curl https://example.com/docs#install & rm -rf /tmp/x")).toEqual([
+      "curl https://example.com/docs#install",
+      "rm -rf /tmp/x",
+    ]);
+  });
+
+  it("backslash outside quotes escapes the next char (no phantom quote phase shift)", () => {
+    // M2 killer: quote 外 backslash 処理を削除すると \' の ' が quote を開閉し、quote 内と
+    // 誤認された `;` が分割されず単一 segment になる (正: `;` は実区切り)。
+    expect(splitSegments("echo \\'a; rm -rf /tmp/x\\'")).toEqual(["echo \\'a", "rm -rf /tmp/x\\'"]);
+    expect(splitSegments("echo don\\'t & rm -rf /tmp/x")).toEqual([
+      "echo don\\'t",
+      "rm -rf /tmp/x",
+    ]);
+  });
+
+  it("heredoc bodies: unquoted delimiter keeps the body in the segment stream, quoted discards it", () => {
+    // N4 killer (本文保持削除) / N3 killer (本文消費削除)。
+    expect(splitSegments("cat <<EOF\n$(date) body\nEOF")).toEqual(["cat", "$(date) body"]);
+    expect(splitSegments("cat <<'EOF'\nrm -rf /tmp/x\nEOF\necho done")).toEqual([
+      "cat",
+      "echo done",
+    ]);
+  });
+
+  it("heredoc variants: <<- strips leading tabs; escaped delimiters take quoted semantics", () => {
+    // M-3 (QA-CQ2-6): `<<-` (:265-267) と escape 込み delimiter (:284-291) の直接 assert。
+    expect(splitSegments("cat <<-EOF\n\tindented\n\tEOF\necho after")).toEqual([
+      "cat",
+      "indented",
+      "echo after",
+    ]);
+    expect(splitSegments("cat <<EO\\F\nrm -rf /tmp/x\nEOF\necho after")).toEqual([
+      "cat",
+      "echo after",
+    ]);
+  });
+
+  it("quoted separators stay data at split level (discriminating form of the R1 pin)", () => {
+    // R1 の `echo "$(rm -rf /tmp/x)"` は多経路で high になり恒真だった (QA-CQ2-2)。
+    // 分割出力で「quote 内 `;` は分割せず内容が保存される」を直接固定する。
+    expect(splitSegments('echo "a; $(rm -rf /tmp/x)"')).toEqual(['echo "a; $(rm -rf /tmp/x)"']);
+  });
+});
+
+// ============================================================================
+// INV-APPROVAL-CATEGORY-UNION-MERGE (SEC-CQ2-2・CQ-R2 監査 M)
+// ============================================================================
+describe("INV-APPROVAL-CATEGORY-UNION-MERGE: legacy categories merge even when primary is already high", () => {
+  it("a literal-rule high does not drop legacy-only named categories", () => {
+    // primary は全文 LITERAL rule (git reset --hard) で先に high になる。旧条件 (primary が
+    // high でないときだけ legacy 評価) では legacy 専用の recursive-rm が落ち、出荷 preset
+    // demo (recursive-rm を gate) の bypass 照合が base 実装より弱くなった。実 bash は
+    // `#can't` の ' を quote にしないため \n 後の rm を実行する。
+    const cmd = "git reset --hard ; (true)#can't\nrm -rf /tmp/x\n#don't";
+    const { risk, categories } = classifyCommandWithCategories(cmd);
+    expect(risk).toBe("high");
+    expect(categories.has("history-rewrite")).toBe(true);
+    expect(categories.has("recursive-rm")).toBe(true);
+  });
+});
+
+// ============================================================================
 // INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE (TDA-CQ-3)
 // ============================================================================
-// splitSegments (quote-aware 文字走査) と splitSegmentsQuoteUnaware (旧 regex・fallback +
-// union backstop の legacy 側) は同一の演算子集合を二重実装している。quote / コメント (#) /
-// 改行 heredoc / 単一 & (意図的差分) を含まない入力では両者は**完全一致**しなければならない —
-// 片側だけ演算子を足す drift をこの全数比較が RED にする。
+// splitSegments (quote-aware 文字走査) と splitSegmentsQuoteUnaware (旧 regex + 単一 &・
+// fallback + union backstop の legacy 側) は同一の演算子集合を二重実装している。quote /
+// コメント (#) / 改行 heredoc を含まない入力では両者は**完全一致**しなければならない —
+// 片側だけ演算子を足す drift をこの全数比較が RED にする。単一 & は CQ-R2 (SEC-CQ2-1) で
+// 共有集合へ昇格した (fallback/backstop が & を見ないと二層同時 fail-open になるため)。
+const SHARED_SPLIT_ALPHABET = ["a", " ", ";", "|", "&", "<", ">", "2"] as const;
 describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
-  it("exhaustive equivalence on the shared-operator domain (alphabet without & # newline quotes)", () => {
-    const alphabet = ["a", " ", ";", "|", "<", ">", "2"];
+  it("exhaustive equivalence on the shared-operator domain (alphabet without # newline quotes)", () => {
     let checked = 0;
     const walk = (prefix: string, depth: number): void => {
       if (depth === 0) return;
-      for (const ch of alphabet) {
+      for (const ch of SHARED_SPLIT_ALPHABET) {
         const s = prefix + ch;
         expect(splitSegments(s), JSON.stringify(s)).toEqual(splitSegmentsQuoteUnaware(s));
         checked += 1;
@@ -1562,13 +1717,31 @@ describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
     expect(checked).toBeGreaterThan(19_000); // vacuity guard: 全数走査が実際に回っている。
   });
 
+  it("QA-CQ2-5: the alphabet composition is pinned (element swaps are RED, not just count changes)", () => {
+    // 件数だけの vacuity guard は「`<` を benign 文字へ差し替える」件数保存変異を素通した
+    // (CQ-R2 T2 SURVIVED)。構成そのものを二重リテラルで pin し、変異には両所同時変更 =
+    // レビュー + full 監査 (走査範囲契約) を強制する。
+    expect([...SHARED_SPLIT_ALPHABET].sort()).toEqual(
+      [" ", "&", "2", ";", "<", ">", "a", "|"].sort(),
+    );
+    // 意味の teeth: alphabet 中の各分割演算子は両実装で実際に分割を起こす (benign 文字への
+    // 差し替えはこの semantic assert が引っ掛ける)。
+    for (const op of [";", "|", "&", "<", ">"]) {
+      expect(splitSegments(`a ${op} b`).length, `splitSegments splits on ${op}`).toBeGreaterThan(1);
+      expect(
+        splitSegmentsQuoteUnaware(`a ${op} b`).length,
+        `legacy splits on ${op}`,
+      ).toBeGreaterThan(1);
+    }
+  });
+
   it("the known intentional divergences exist (positive controls)", () => {
     // quote 内演算子 (本修正の目的)。
     expect(splitSegments("rg 'a|b' x")).toEqual(["rg 'a|b' x"]);
     expect(splitSegmentsQuoteUnaware("rg 'a|b' x")).toEqual(["rg 'a", "b' x"]);
-    // 単一 & (SEC-CQ-2: 新側のみ分割)。
+    // 単一 & は共有 (SEC-CQ2-1: legacy 側も分割する — fallback 経路の fail-open 封鎖)。
     expect(splitSegments("a & b")).toEqual(["a", "b"]);
-    expect(splitSegmentsQuoteUnaware("a & b")).toEqual(["a & b"]);
+    expect(splitSegmentsQuoteUnaware("a & b")).toEqual(["a", "b"]);
     // コメント (新側のみ skip)。
     expect(splitSegments("a # b")).toEqual(["a"]);
     expect(splitSegmentsQuoteUnaware("a # b")).toEqual(["a # b"]);
