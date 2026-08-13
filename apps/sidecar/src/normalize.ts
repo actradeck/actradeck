@@ -80,16 +80,22 @@ interface ToolInput {
 export const MAX_COMMAND_LEN = 4096;
 
 /**
- * quote 非対応の旧分割 (2026-08-14 以前の唯一の実装)。
- * 未終端クォートで構造解析できないコマンドの fail-safe フォールバック専用に温存する
- * (over-gate 方向 = 安全側)。新規の呼び出し元を作らないこと。
+ * quote 非対応の旧分割 (2026-08-14 以前の唯一の実装)。2 つの役割で温存する:
+ *  1. 未終端クォート/未終端 heredoc で構造解析できないコマンドの fail-safe フォールバック。
+ *  2. SEC-CQ-1 の**非対称 union backstop** の legacy 側 split (classifyCommandRisk が
+ *     この分割でも一度分類し、legacy が high のときのみ high へ引き上げる)。
+ * quote-aware 側の解析ミス (phantom quote / heredoc 誤認) がどう転んでも、旧分類器が high と
+ * 呼んだ入力は high に留まる。新規の呼び出し元を作らないこと。
  */
-function splitSegmentsQuoteUnaware(command: string): string[] {
+export function splitSegmentsQuoteUnaware(command: string): string[] {
   return command
     .split(/[;\n]|\|\||&&|\||(?<!\d)>{1,2}|<{1,2}/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
+
+/** 分類器内部で segment 分割を差し替えるための型 (SEC-CQ-1 union backstop 用・下記参照)。 */
+type SegmentSplitter = (command: string) => string[];
 
 /**
  * コマンドを ; | && || (と redirect) で区切った各セグメントへ分解 (パイプ/連結内の個別 cmd を見る)。
@@ -104,21 +110,47 @@ function splitSegmentsQuoteUnaware(command: string): string[] {
  * 安全性の設計 (INV-APPROVAL: false-negative を許さない):
  *  - シングルクォート内は shell が一切展開しない (真に inert)。ダブルクォート内の `$(...)` /
  *    backtick は実行されるが、分割を抑止しても **文字列としては segment に残る**ため、既存の
- *    hasCommandSubstitution / インライン再分類 (SEC-1) がそのまま検出する (検出点は不変)。
+ *    hasCommandSubstitution / インライン再分類 (SEC-1) が同じ検出点で検出する (入力の
+ *    segment 区切りは変わるため「検出点の入力範囲」は変わる — TDA-CQ-2 の残余は下記 union
+ *    backstop が覆う)。
  *  - `echo "rm -rf /" | sh` のような「quote 内は inert・実行はパイプ先」の形は、パイプ先の
  *    stdin シェル (operand 無し) を既存の fail-safe が gated にする (こちらも不変)。
  *  - backslash escape を処理する: `\"` はクォートを開かない (処理しないと `echo \"a|rm -rf /\"`
  *    の実パイプを quote 内と誤認して **rm を素通しする false-negative** になる)。
- *  - 未終端クォート (解析不能) は旧 quote 非対応分割へフォールバック (over-gate 方向・fail-safe)。
+ *  - **非クォート文脈を shell 文法どおり扱う (SEC-CQ-1・2026-08-14 R1 監査 H)**: `#` コメントは
+ *    行末まで読み飛ばし、heredoc (`<<[-]DELIM`) は本文を消費する (quoted delimiter は真のデータ
+ *    ゆえ破棄・unquoted delimiter は `$()`/backtick が活性なため本文を segment 文字列に残して
+ *    置換検出を保つ)。これを欠くとコメント/heredoc 本文中のアポストロフィ (don't / it's) が
+ *    quote 開閉に数えられ、**偶数で釣り合うと後続の実区切りを phantom quote が飲み込み、実行
+ *    される `rm -rf` が low (承認カード無し) になる**回帰が実測された。
+ *  - 単一 `&` (background 終端) も shell 文法どおり区切りにする (SEC-CQ-2・pre-existing:
+ *    旧分割は `&&` のみで `sleep 0 & rm -rf /` の rm を素通した)。
+ *  - 未終端クォート・未終端/解析不能 heredoc は旧 quote 非対応分割へフォールバック
+ *    (over-gate 方向・fail-safe)。
+ *  - さらに解析ミスの構造 backstop として、classifyCommandRisk が**非対称 union** を取る
+ *    (下記 classifyCommandRisk docstring 参照)。
+ *  - backtick は意図的に quote 扱いしない (TDA-CQ-7): 内容が実行されるため「データ」ではなく、
+ *    区切り文字を含む backtick は素通しせず既存の hasCommandSubstitution 検出に委ねる。
+ *    tokenize の QUOTE_CHARS (単語連結処理) とは目的が異なる非対称で、揃えてはならない。
  *  - 純粋な 1 パス文字走査 (正規表現ループ無し・O(n)) で ReDoS 経路を増やさない。
  *
  * ⚠️ 承認ゲート境界の走査範囲 (scope) 変更に当たる — 変更時は finding-registry の full 監査既定。
- * INV-APPROVAL-QUOTED-OPERATORS (apps/sidecar/test/inv-approval.test.ts) が両方向を回帰固定する。
+ * INV-APPROVAL-QUOTED-OPERATORS / INV-APPROVAL-NONQUOTE-CONTEXT-SEPARATORS
+ * (apps/sidecar/test/inv-approval.test.ts) が両方向を回帰固定する。
  */
+interface PendingHeredoc {
+  readonly delimiter: string;
+  readonly quoted: boolean;
+  readonly stripTabs: boolean;
+}
+
+const SEPARATOR_OR_SPACE_RE = /[\s;|&<>]/;
+
 export function splitSegments(command: string): string[] {
   const segments: string[] = [];
   let current = "";
   let quote: '"' | "'" | undefined;
+  const pendingHeredocs: PendingHeredoc[] = [];
   const push = (): void => {
     const trimmed = current.trim();
     if (trimmed.length > 0) segments.push(trimmed);
@@ -151,13 +183,58 @@ export function splitSegments(command: string): string[] {
       i += 2;
       continue;
     }
+    // `#` コメント (単語頭のみ = 先頭 or 空白/区切り直後)。行末まで shell は読まない (SEC-CQ-1)。
+    // `$#` / URL fragment (`http://x#y`) は前が非空白ゆえ字義どおり残る。
+    if (ch === "#") {
+      const previous = command[i - 1];
+      if (previous === undefined || SEPARATOR_OR_SPACE_RE.test(previous)) {
+        const nl = command.indexOf("\n", i);
+        i = nl === -1 ? command.length : nl; // `\n` 自体は通常の区切りとして処理させる。
+        continue;
+      }
+      current += ch;
+      i += 1;
+      continue;
+    }
     if (ch === "'" || ch === '"') {
       quote = ch;
       current += ch;
       i += 1;
       continue;
     }
-    if (ch === ";" || ch === "\n") {
+    if (ch === ";") {
+      push();
+      i += 1;
+      continue;
+    }
+    if (ch === "\n") {
+      if (pendingHeredocs.length > 0) {
+        // heredoc 本文の消費 (FIFO・POSIX)。quoted delimiter は真のデータゆえ破棄、
+        // unquoted は $()/backtick が活性なため本文を segment に残して置換検出を保つ。
+        i += 1;
+        let bodyKeep = "";
+        while (pendingHeredocs.length > 0) {
+          const heredoc = pendingHeredocs.shift() as PendingHeredoc;
+          let matched = false;
+          while (i <= command.length) {
+            const nl = command.indexOf("\n", i);
+            const end = nl === -1 ? command.length : nl;
+            const line = command.slice(i, end);
+            const compare = heredoc.stripTabs ? line.replace(/^\t+/, "") : line;
+            i = nl === -1 ? command.length : nl + 1;
+            if (compare === heredoc.delimiter) {
+              matched = true;
+              break;
+            }
+            if (!heredoc.quoted) bodyKeep += `\n${line}`;
+            if (nl === -1) break; // 入力末尾に到達 (delimiter 不一致のまま)。
+          }
+          if (!matched) return splitSegmentsQuoteUnaware(command); // 未終端 heredoc → fail-safe。
+        }
+        current += bodyKeep;
+        push();
+        continue;
+      }
       push();
       i += 1;
       continue;
@@ -167,14 +244,62 @@ export function splitSegments(command: string): string[] {
       i += command[i + 1] === "|" ? 2 : 1;
       continue;
     }
-    if (ch === "&" && command[i + 1] === "&") {
+    if (ch === "&") {
+      // `&&` (連結) も単一 `&` (background 終端・SEC-CQ-2) も区切り。`2>&1` の `&1` は
+      // 分割後に無害な数値 fragment になるだけで判定を汚さない。
       push();
-      i += 2;
+      i += command[i + 1] === "&" ? 2 : 1;
       continue;
     }
     if (ch === "<") {
+      if (command[i + 1] === "<" && command[i + 2] === "<") {
+        push(); // herestring `<<< word`: word はデータだが旧挙動どおり後続を通常走査する。
+        i += 3;
+        continue;
+      }
+      if (command[i + 1] === "<") {
+        // heredoc operator。delimiter word を読み取り、本文消費を次の `\n` に予約する。
+        push();
+        i += 2;
+        let stripTabs = false;
+        if (command[i] === "-") {
+          stripTabs = true;
+          i += 1;
+        }
+        while (i < command.length && (command[i] === " " || command[i] === "\t")) i += 1;
+        let delimiter = "";
+        let delimiterQuoted = false;
+        const q = command[i];
+        if (q === "'" || q === '"') {
+          delimiterQuoted = true;
+          i += 1;
+          while (i < command.length && command[i] !== q) {
+            delimiter += command[i] as string;
+            i += 1;
+          }
+          if (i >= command.length) return splitSegmentsQuoteUnaware(command); // 未終端。
+          i += 1;
+        } else {
+          while (i < command.length && !SEPARATOR_OR_SPACE_RE.test(command[i] as string)) {
+            if (command[i] === "\\") {
+              delimiterQuoted = true; // escape 込み delimiter は quoted 意味論 (展開不活性)。
+              i += 1;
+              if (i < command.length) {
+                delimiter += command[i] as string;
+                i += 1;
+              }
+              continue;
+            }
+            delimiter += command[i] as string;
+            i += 1;
+          }
+        }
+        if (delimiter.length === 0) return splitSegmentsQuoteUnaware(command); // 解析不能。
+        pendingHeredocs.push({ delimiter, quoted: delimiterQuoted, stripTabs });
+        continue;
+      }
       push();
-      i += command[i + 1] === "<" ? 2 : 1;
+      i += 1;
       continue;
     }
     if (ch === ">") {
@@ -192,7 +317,8 @@ export function splitSegments(command: string): string[] {
     current += ch;
     i += 1;
   }
-  if (quote !== undefined) return splitSegmentsQuoteUnaware(command);
+  // 未終端クォート / 未消費 heredoc = 構造解析不能 → 旧分割へフォールバック (over-gate 方向)。
+  if (quote !== undefined || pendingHeredocs.length > 0) return splitSegmentsQuoteUnaware(command);
   push();
   return segments;
 }
@@ -811,6 +937,7 @@ function unanalyzableSegmentRisk(
   depth: number,
   suppressMediumFloor: boolean,
   categories?: Set<PolicyCategory>,
+  split: SegmentSplitter = splitSegments,
 ): "high" | "medium" | undefined {
   const startIdx = skipLeadingAssignments(rawTokens);
   const first = rawTokens[startIdx];
@@ -828,7 +955,7 @@ function unanalyzableSegmentRisk(
     const unwrapped = rawSegment.replace(LEADING_GROUPING_RE, "").replace(TRAILING_GROUPING_RE, "");
     // 剥がしで実際に変化したときのみ再分類 (無限ループ防止)。
     if (unwrapped.length > 0 && unwrapped !== rawSegment) {
-      const inner = classifyCommandRiskInternal(unwrapped, depth + 1, categories);
+      const inner = classifyCommandRiskInternal(unwrapped, depth + 1, categories, split);
       if (inner === "high") return "high";
     }
   }
@@ -854,6 +981,7 @@ function inlineCodeRisk(
   rawSegment: string,
   depth: number,
   categories?: Set<PolicyCategory>,
+  split: SegmentSplitter = splitSegments,
 ): "high" | "medium" | undefined {
   const name = commandName(tokens);
 
@@ -872,7 +1000,12 @@ function inlineCodeRisk(
       const inner = tokens.slice(flagIdx + 1);
       if (inner.length > 0 && depth < MAX_INLINE_DEPTH) {
         // 内側を再帰再分類: high を拾えれば high、そうでなければ fail-safe で medium に床上げ。
-        const innerRisk = classifyCommandRiskInternal(inner.join(" "), depth + 1, categories);
+        const innerRisk = classifyCommandRiskInternal(
+          inner.join(" "),
+          depth + 1,
+          categories,
+          split,
+        );
         return innerRisk === "high" ? "high" : "medium";
       }
       // 内側が抽出できない (クォート/エスケープで再パース不能) → fail-safe medium。
@@ -907,7 +1040,7 @@ function inlineCodeRisk(
   if (hasCommandSubstitution(rawSegment)) {
     categories?.add("inline-code");
     if (depth < MAX_INLINE_DEPTH) {
-      const innerRisk = reclassifySubstitution(rawSegment, depth + 1, categories);
+      const innerRisk = reclassifySubstitution(rawSegment, depth + 1, categories, split);
       if (innerRisk === "high") return "high";
     }
     return "medium"; // 置換あり = 中身が再分類で確定しなくてもゲート対象。
@@ -925,6 +1058,7 @@ function reclassifySubstitution(
   rawSegment: string,
   depth: number,
   categories?: Set<PolicyCategory>,
+  split: SegmentSplitter = splitSegments,
 ): "high" | "medium" | undefined {
   const inners: string[] = [];
   // $(...) 抽出 (ネストは無視し、最初の ) で閉じる素朴版)。
@@ -949,7 +1083,7 @@ function reclassifySubstitution(
   // (戻り値は従来「high が1つでもあれば high」と同値)。
   let risk: "high" | "medium" | undefined;
   for (const inner of inners) {
-    const r = classifyCommandRiskInternal(inner, depth + 1, categories);
+    const r = classifyCommandRiskInternal(inner, depth + 1, categories, split);
     if (r === "high") risk = "high";
     else if (r === "medium" && risk !== "high") risk = "medium";
   }
@@ -965,6 +1099,7 @@ function reclassifyProcessSubstitution(
   command: string,
   depth: number,
   categories?: Set<PolicyCategory>,
+  split: SegmentSplitter = splitSegments,
 ): "high" | "medium" | undefined {
   const inners: string[] = [];
   let i = 0;
@@ -982,7 +1117,7 @@ function reclassifyProcessSubstitution(
   // ADR 019f0c3e: high で early-return せず全 inner を走査して category を漏れなく集約する。
   let risk: "high" | "medium" | undefined;
   for (const inner of inners) {
-    const r = classifyCommandRiskInternal(inner, depth + 1, categories);
+    const r = classifyCommandRiskInternal(inner, depth + 1, categories, split);
     if (r === "high") risk = "high";
     else if (r === "medium" && risk !== "high") risk = "medium";
   }
@@ -1008,9 +1143,12 @@ function isProcessSubstitutionExecutor(name: string): boolean {
  * 起動コマンド (先頭セグメントの runner ラッパ剥がし後) が実行/source 系で、かつ
  * 文字列に `<(`/`>(` を含むとき true。プロセス置換の中身は再パースしづらいためゲート対象。
  */
-function launchesShellWithProcessSubstitution(command: string): boolean {
+function launchesShellWithProcessSubstitution(
+  command: string,
+  split: SegmentSplitter = splitSegments,
+): boolean {
   if (!hasProcessSubstitution(command)) return false;
-  const firstSeg = splitSegments(command)[0];
+  const firstSeg = split(command)[0];
   if (firstSeg === undefined) return false;
   const { tokens } = stripRunnerWrappers(tokenize(firstSeg));
   const name = commandName(tokens);
@@ -1055,8 +1193,22 @@ function matchesHighRiskLiteral(command: string): boolean {
   return LITERAL_RULES.some((rule) => rule.high && rule.re.test(command));
 }
 
+/**
+ * コマンド risk の公開判定 (承認ゲートの唯一の根拠)。
+ *
+ * SEC-CQ-1 (2026-08-14 R1 監査 H) の**非対称 union backstop**: quote-aware 分割 (primary) を
+ * 基本としつつ、旧 quote 非対応分割でも一度分類し、**旧側が high のときのみ high へ引き上げる**。
+ * - quote-aware 側の解析ミス (phantom quote parity / heredoc 誤認等) がどう転んでも、旧分類器が
+ *   high と呼んだ入力は high に留まる = 旧実装比で false-negative を構造的に導入しない。
+ * - 旧側の **medium は引き上げない** (非対称): 引用内演算子の分割断片が生む medium 床上げは
+ *   まさに偽陽性インシデントの原因で、それを復活させないため。`rg -n 'a|b.*[Cc]' src` は
+ *   旧 medium だが low を維持し、旧 high (`echo it's; rm -rf /; echo don't` 系) は high に戻る。
+ */
 export function classifyCommandRisk(command: string): RiskLevel {
-  return classifyCommandRiskInternal(command, 0);
+  const primary = classifyCommandRiskInternal(command, 0);
+  if (primary === "high") return "high";
+  const legacy = classifyCommandRiskInternal(command, 0, undefined, splitSegmentsQuoteUnaware);
+  return legacy === "high" ? "high" : primary;
 }
 
 /**
@@ -1075,7 +1227,23 @@ export function classifyCommandWithCategories(command: string): {
   categories: Set<PolicyCategory>;
 } {
   const categories = new Set<PolicyCategory>();
-  const risk = classifyCommandRiskInternal(command, 0, categories);
+  let risk = classifyCommandRiskInternal(command, 0, categories);
+  // SEC-CQ-1 非対称 union (classifyCommandRisk と同一規則): 旧分割が high のときのみ引き上げ、
+  // その際は旧走査の named categories (recursive-rm 等) も合流させる (bypass/YOLO の
+  // DEFAULT_GATED 照合と監査証跡を legacy 検出に追随させる)。
+  if (risk !== "high") {
+    const legacyCategories = new Set<PolicyCategory>();
+    const legacy = classifyCommandRiskInternal(
+      command,
+      0,
+      legacyCategories,
+      splitSegmentsQuoteUnaware,
+    );
+    if (legacy === "high") {
+      risk = "high";
+      for (const category of legacyCategories) categories.add(category);
+    }
+  }
   // backstop: high と判定されたのに named category が付かなかった残余を取りこぼさない (silent hole 防止)。
   if (risk === "high" && categories.size === 0) categories.add("high-risk-other");
   return { risk, categories };
@@ -1114,13 +1282,19 @@ export const NETWORK_EXEC_PROGRAMS: readonly string[] = [
 const NETWORK_EGRESS_PROGRAMS: ReadonlySet<string> = new Set(NETWORK_EXEC_PROGRAMS);
 export function isNetworkEgressCommand(command: string): boolean {
   if (typeof command !== "string" || command.length === 0) return false;
-  for (const seg of splitSegments(command)) {
-    const raw = tokenize(seg);
-    const { tokens } = stripRunnerWrappers(raw.slice(skipLeadingAssignments(raw)));
-    if (tokens.length === 0) continue;
-    if (NETWORK_EGRESS_PROGRAMS.has(normalizeCommandName(commandName(tokens)))) return true;
-  }
-  return false;
+  // SEC-CQ-1: quote-aware と旧分割の**両方**を走査する (union・over-detect 方向が安全側)。
+  // phantom quote parity で新分割が egress program を segment 先頭から失っても、旧分割側が拾い、
+  // secret-egress composite (egress ∧ inline secret) の片側が silent に消えない。
+  const scan = (segments: string[]): boolean => {
+    for (const seg of segments) {
+      const raw = tokenize(seg);
+      const { tokens } = stripRunnerWrappers(raw.slice(skipLeadingAssignments(raw)));
+      if (tokens.length === 0) continue;
+      if (NETWORK_EGRESS_PROGRAMS.has(normalizeCommandName(commandName(tokens)))) return true;
+    }
+    return false;
+  };
+  return scan(splitSegments(command)) || scan(splitSegmentsQuoteUnaware(command));
 }
 
 /**
@@ -1326,6 +1500,9 @@ function classifyCommandRiskInternal(
   command: string,
   depth: number,
   categories?: Set<PolicyCategory>,
+  // SEC-CQ-1 union backstop 用: legacy 評価パスは splitSegmentsQuoteUnaware を全再帰レベルへ
+  // 一様に伝播させる (= 8cbde70 時点の分類器と同一の走査)。既定は quote-aware。
+  split: SegmentSplitter = splitSegments,
 ): RiskLevel {
   if (typeof command !== "string" || command.length === 0) return "high"; // fail-safe
   if (command.length > 16 * 1024) return "high"; // 解析不能に巨大 → fail-safe high
@@ -1352,11 +1529,11 @@ function classifyCommandRiskInternal(
   // SEC-1 #4: シェル/インタプリタ + プロセス置換 `<(...)`/`>(...)`。splitSegments が `<`/`>` で
   //   分割するため起動シェルが裸セグメント化して (B) でも拾えるが、ここで明示的に中身を再分類し
   //   破壊的なら high を拾う。再分類不能でも medium に床上げ (fail-safe)。
-  const procSubExecutor = launchesShellWithProcessSubstitution(command);
+  const procSubExecutor = launchesShellWithProcessSubstitution(command, split);
   if (procSubExecutor) {
     categories?.add("inline-code"); // プロセス置換を実行/source するシェル起動 = 動的コード実行。
     if (depth < MAX_INLINE_DEPTH)
-      bump(reclassifyProcessSubstitution(command, depth + 1, categories));
+      bump(reclassifyProcessSubstitution(command, depth + 1, categories, split));
     bump("medium");
   }
   // process-sub があるが起動がベニーン (diff/cat 等 = 中身を実行しない) なら、`<(`/`>( ` の split で
@@ -1364,7 +1541,7 @@ function classifyCommandRiskInternal(
   //   内側が high のときは依然 high を拾う (`diff <(rm -rf /tmp)`)。
   const suppressGroupingMedium = hasProcessSubstitution(command) && !procSubExecutor;
 
-  for (const seg of splitSegments(command)) {
+  for (const seg of split(command)) {
     const rawTokens = tokenize(seg);
     if (rawTokens.length === 0) {
       // トークンが無くても置換 `$(...)`/backtick だけのセグメントは SEC-1 でゲートする。
@@ -1377,7 +1554,7 @@ function classifyCommandRiskInternal(
     // 再監査#4 round2 (D): 先頭がシェルメタ文字 ( { $ < > 等でクリーンな実行可能名に正規化できない
     //   セグメントは構造判定不能 → grouping を剥がして内側を再分類 (high を拾う)、不能なら medium 床上げ。
     //   `(rm -rf /)` / `{ rm -rf /; }` / `(sh)` / `$X -rf /` を一括捕捉。
-    bump(unanalyzableSegmentRisk(rawTokens, seg, depth, suppressGroupingMedium, categories));
+    bump(unanalyzableSegmentRisk(rawTokens, seg, depth, suppressGroupingMedium, categories, split));
     // SEC-1 (round D 再監査): bare な先頭 env 代入 (`FOO=bar rm -rf /`) は RUNNER_WRAPPERS に無く
     //   commandName が `FOO=bar` を返すため、全構造述語が実コマンドを取りこぼし承認ゲートを素通り
     //   させていた。構造判定の前に先頭代入を skip し、ラッパ剥がしと同列に正規化する (skip 後に剥がす)。
@@ -1432,7 +1609,7 @@ function classifyCommandRiskInternal(
       bump("medium");
     }
     // SEC-1: シェル/インタプリタのインラインコード + コマンド置換 (stripRunnerWrappers 後の実コマンドに対して)。
-    bump(inlineCodeRisk(tokens, seg, depth, categories));
+    bump(inlineCodeRisk(tokens, seg, depth, categories, split));
   }
 
   if (risk !== "low") return risk;

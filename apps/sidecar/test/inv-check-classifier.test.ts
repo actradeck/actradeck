@@ -246,3 +246,24 @@ describe("meta-test (受入 11): 正準トークナイザチェーンを消費�
     expect(classifyCheck("TZ=utc vitest run")?.check_kind).toBe("test");
   });
 });
+
+// TDA-CQ-1 (2026-08-14): check-classifier は分類器と同じ splitSegments を消費するため、
+// quote-aware 化 (fix/classifier-quoted-operators) の走査範囲変更がここにも波及する。
+// 両方向を pin する: 引用内演算子は crediting を壊さず、引用内の偽 check 語は credit しない。
+describe("quoted operators in check commands (splitSegments coupling)", () => {
+  it("quoted args with pipes do not break check crediting", () => {
+    expect(classifyCheck("vitest run -t 'a|b'")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("pnpm test # rerun after fix")).toEqual({
+      check_kind: "test",
+      check_match: "script",
+    });
+  });
+
+  it("a check word inside a quoted string is data, not a credited check (false-credit removal)", () => {
+    // 旧分割は "foo | pytest" の引用内 | で裂けて pytest を segment として誤 credit した。
+    expect(classifyCheck('echo "foo | pytest"')).toBeUndefined();
+  });
+});

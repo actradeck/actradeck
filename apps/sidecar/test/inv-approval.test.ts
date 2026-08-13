@@ -16,7 +16,13 @@ import {
 } from "@actradeck/event-model";
 
 import { ApprovalBridge, encodeOperationSignature } from "../src/approval-bridge.js";
-import { classifyCommandRisk } from "../src/normalize.js";
+import {
+  classifyCommandRisk,
+  classifyCommandWithCategories,
+  isNetworkEgressCommand,
+  splitSegments,
+  splitSegmentsQuoteUnaware,
+} from "../src/normalize.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
 
@@ -1422,20 +1428,29 @@ describe("INV-APPROVAL-QUOTED-OPERATORS: quoted operators are data, execution pa
     expect(classifyCommandRisk("rg -n 'a|b.*[Cc]' src")).toBe("low");
     expect(classifyCommandRisk('grep -E "foo|bar[0-9]*" file.txt')).toBe("low");
     expect(classifyCommandRisk("echo 'a && b; c > d'")).toBe("low");
-    // 実シェルでは echo の引数文字列であって rm は実行されない (single quote は無展開)。
-    expect(classifyCommandRisk("echo 'a; rm -rf /'")).toBe("low");
-    expect(classifyCommandRisk('echo "a; rm -rf /"')).toBe("low");
+    // SEC-CQ-1 の非対称 union による意図的 FP コスト: 実シェルでは echo の引数文字列で rm は
+    // 実行されないが、**旧分割が high と呼ぶ形は high に留める** (quote-aware 解析のいかなる
+    // ミスも旧実装比 false-negative にしない構造保証の対価)。危険風の文字列を quote 内に
+    // 含まない通常形 (`git commit -m 'remove rm -rf usage'` 等) は low のまま。
+    expect(classifyCommandRisk("echo 'a; rm -rf /'")).toBe("high");
+    expect(classifyCommandRisk('echo "a; rm -rf /"')).toBe("high");
+    expect(classifyCommandRisk("git commit -m 'mention rm -rf in docs'")).toBe("low");
   });
 
   it("(b) piping an inert string into a stdin shell stays gated (fail-safe unchanged)", () => {
     // quote 内は inert でも、パイプ先の operand 無しシェルは stdin コードを実行する。
-    expect(classifyCommandRisk('echo "rm -rf /" | sh')).not.toBe("low");
-    expect(classifyCommandRisk("echo 'rm -rf /' | bash")).not.toBe("low");
+    // QA-CQ-5: baseline を厳密値で pin する (`.not.toBe("low")` は多段降格を素通すため)。
+    // quote 内に区切りが無いこの形は legacy 側でも echo 先頭のままで、stdin シェルの
+    // fail-safe medium 床上げが唯一のゲート根拠 = medium が正確な baseline。
+    expect(classifyCommandRisk('echo "rm -rf /" | sh')).toBe("medium");
+    expect(classifyCommandRisk("echo 'rm -rf /' | bash")).toBe("medium");
+    expect(classifyCommandRisk('echo "hello" | sh')).toBe("medium");
   });
 
   it("(b) command substitution inside double quotes still executes and stays gated", () => {
-    expect(classifyCommandRisk('echo "$(rm -rf /tmp/x)"')).not.toBe("low");
-    expect(classifyCommandRisk('echo "`rm -rf /tmp/x`"')).not.toBe("low");
+    // QA-CQ-5: baseline high を厳密に pin (high→medium の降格も RED にする)。
+    expect(classifyCommandRisk('echo "$(rm -rf /tmp/x)"')).toBe("high");
+    expect(classifyCommandRisk('echo "`rm -rf /tmp/x`"')).toBe("high");
   });
 
   it('(b) backslash-escaped quotes do not open a quote context (a real pipe behind \\" splits)', () => {
@@ -1454,5 +1469,108 @@ describe("INV-APPROVAL-QUOTED-OPERATORS: quoted operators are data, execution pa
     expect(classifyCommandRisk("git push --force origin main")).toBe("high");
     expect(classifyCommandRisk("echo ok && rm -rf /tmp/x")).toBe("high");
     expect(classifyCommandRisk("true | rm -rf /tmp/x")).toBe("high");
+  });
+});
+
+// ============================================================================
+// INV-APPROVAL-NONQUOTE-CONTEXT-SEPARATORS (SEC-CQ-1/CQ-2・2026-08-14 R1 監査 H)
+// ============================================================================
+// quote-aware 分割の R1 版は `#` コメント / heredoc 本文中のアポストロフィ (don't / it's) を
+// quote 開閉に数え、**偶数で釣り合うと未終端フォールバックが不発**になり、後続の実区切り
+// (\n ; |) を phantom quote が飲み込んで実行される rm -rf が low (承認カード無し) になった。
+// SEC レーンの反証ベクタ 4 種 + 単一 & (SEC-CQ-2) + 検証済み置換 (TDA-CQ-2) を両方向で固定する。
+// 防御は二層: (a) shell 文法どおりの非クォート文脈処理 (コメント skip / heredoc 消費)、
+// (b) classifyCommandRisk の非対称 union (旧分割が high なら high へ引き上げ)。
+describe("INV-APPROVAL-NONQUOTE-CONTEXT-SEPARATORS: comment/heredoc apostrophes cannot swallow real separators", () => {
+  it("SEC-CQ-1: balanced phantom quotes in comments do not hide a following rm -rf (4 falsifiers)", () => {
+    expect(classifyCommandRisk("echo a # '\nrm -rf /tmp/x\n# '")).toBe("high");
+    expect(
+      classifyCommandRisk("npm test # make sure it's green\nrm -rf /tmp/x\n# don't keep artifacts"),
+    ).toBe("high");
+    expect(
+      classifyCommandRisk("awk '{print $1}' f.txt # it's fine\nrm -rf /tmp/x\n# don't worry"),
+    ).toBe("high");
+    expect(
+      classifyCommandRisk("cat <<EOF > note.txt\nit's a note\nEOF\nrm -rf /tmp/x\n# that's all"),
+    ).toBe("high");
+  });
+
+  it("SEC-CQ-2: a single & (background terminator) is a separator", () => {
+    expect(classifyCommandRisk("sleep 0 & rm -rf /tmp/x")).toBe("high");
+  });
+
+  it("TDA-CQ-2: an executing substitution with an inner separator stays high with its named category", () => {
+    // 実 bash で rm が実行される形。R1 版は $() 抽出が最初の ) で止まり medium へ降格していた。
+    // 非対称 union が旧分割の high + recursive-rm を復元する。
+    const { risk, categories } = classifyCommandWithCategories(
+      'echo "$( (true) ; rm -rf /tmp/x )"',
+    );
+    expect(risk).toBe("high");
+    expect(categories.has("recursive-rm")).toBe(true);
+  });
+
+  it("the incident shapes stay low (the asymmetric union does not resurrect the false positives)", () => {
+    // 旧分割はこれらを medium にしていた (high ではない) ため、union は引き上げない。
+    expect(
+      classifyCommandRisk(
+        "rg -n 'roots/list|sampling/createMessage|setRequestHandler.*[Ll]ogging' --glob '!**/dist/**' src 2>/dev/null | head -10",
+      ),
+    ).toBe("low");
+    expect(classifyCommandRisk('git commit -m "msg" # done')).toBe("low");
+    // heredoc 本文 (quoted delimiter = 真のデータ) は segment 化しない — エージェント最頻形の
+    // markdown/heredoc 書き込みが medium 床上げされない (TDA-CQ-4 の同類偽陽性も解消)。
+    expect(classifyCommandRisk("cat > notes.md <<'EOF'\n* item one\n* item two\nEOF")).toBe("low");
+  });
+
+  it("unquoted heredoc bodies keep substitution detection ($() in the body still gates)", () => {
+    // unquoted delimiter は $()/backtick が活性 → 本文は segment 文字列に残り既存検出が発火する。
+    expect(classifyCommandRisk("cat <<EOF\n$(rm -rf /tmp/x)\nEOF")).toBe("high");
+    expect(classifyCommandRisk("cat <<EOF\nplain text only\nEOF")).toBe("low");
+  });
+
+  it("network-egress detection survives phantom-parity inputs (union scan)", () => {
+    expect(isNetworkEgressCommand("echo it's a # note\ncurl http://collector.example it's")).toBe(
+      true,
+    );
+    // QA-CQ-4: 引用内の egress 語はデータ (実行されない)。union の legacy 側も先頭 token が
+    // echo のままなので偽 egress 判定は復活しない。
+    expect(isNetworkEgressCommand("echo 'see: curl https://collector.example'")).toBe(false);
+  });
+});
+
+// ============================================================================
+// INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE (TDA-CQ-3)
+// ============================================================================
+// splitSegments (quote-aware 文字走査) と splitSegmentsQuoteUnaware (旧 regex・fallback +
+// union backstop の legacy 側) は同一の演算子集合を二重実装している。quote / コメント (#) /
+// 改行 heredoc / 単一 & (意図的差分) を含まない入力では両者は**完全一致**しなければならない —
+// 片側だけ演算子を足す drift をこの全数比較が RED にする。
+describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
+  it("exhaustive equivalence on the shared-operator domain (alphabet without & # newline quotes)", () => {
+    const alphabet = ["a", " ", ";", "|", "<", ">", "2"];
+    let checked = 0;
+    const walk = (prefix: string, depth: number): void => {
+      if (depth === 0) return;
+      for (const ch of alphabet) {
+        const s = prefix + ch;
+        expect(splitSegments(s), JSON.stringify(s)).toEqual(splitSegmentsQuoteUnaware(s));
+        checked += 1;
+        walk(s, depth - 1);
+      }
+    };
+    walk("", 5);
+    expect(checked).toBeGreaterThan(19_000); // vacuity guard: 全数走査が実際に回っている。
+  });
+
+  it("the known intentional divergences exist (positive controls)", () => {
+    // quote 内演算子 (本修正の目的)。
+    expect(splitSegments("rg 'a|b' x")).toEqual(["rg 'a|b' x"]);
+    expect(splitSegmentsQuoteUnaware("rg 'a|b' x")).toEqual(["rg 'a", "b' x"]);
+    // 単一 & (SEC-CQ-2: 新側のみ分割)。
+    expect(splitSegments("a & b")).toEqual(["a", "b"]);
+    expect(splitSegmentsQuoteUnaware("a & b")).toEqual(["a & b"]);
+    // コメント (新側のみ skip)。
+    expect(splitSegments("a # b")).toEqual(["a"]);
+    expect(splitSegmentsQuoteUnaware("a # b")).toEqual(["a # b"]);
   });
 });

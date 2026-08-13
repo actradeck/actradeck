@@ -49,9 +49,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   removes the stale view (fresh databases are unaffected).
 - **Approval cards can no longer be hidden by a terminated session projection.** Pending
   approvals now follow the request's own lifecycle: reaching a terminal state still clears that
-  run's open approvals, but a request arriving *after* the terminal state — a live daemon
+  run's open approvals, but a request arriving _after_ the terminal state — a live daemon
   holding a real round-trip — stays visible and actionable instead of silently timing out to
   deny.
+- **Harmless search commands no longer flood the approval inbox.** The command risk classifier
+  split segments on `|` and `;` even inside quotes, so a quoted regex alternation
+  (`rg -n 'a|b.*[Cc]' src`) was torn apart and floored to "needs approval" — with nobody
+  watching the cockpit, every such card timed out to deny and effectively blocked agents. The
+  splitter is now shell-syntax-aware (quotes, backslash escapes, `#` comments, heredoc bodies),
+  and a single `&` (background terminator) is now a separator. Dangerous paths stay gated:
+  command substitution, stdin shells and real pipes classify as before, and as a structural
+  backstop any command the previous classifier rated high still rates high.
 
 ## [0.7.0] - 2026-08-10
 
