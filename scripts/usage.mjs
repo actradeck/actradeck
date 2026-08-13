@@ -36,6 +36,9 @@ function printHuman(report) {
     "Counts are local aggregates, not users. Demo sessions are excluded from real/protected sessions.",
     "Protected counts only sessions whose start was observed with governance evidence;",
     "sessions from before the governance-mode upgrade (or discovered mid-flight) stay unclassified.",
+    "The classification is start-time: a session switched to bypassPermissions mid-run keeps its",
+    "protected count (over-count direction), and managed Codex declares enforcement as a constant.",
+    "See docs/usage-metrics.md (Honest boundaries) for both directions.",
   ];
   process.stdout.write(`${lines.join("\n")}\n`);
 }

@@ -23,10 +23,13 @@ import {
  * 第二の独立ゲートは形がどうあれ `permission_mode` をどこかで読む必要があり、**純増**なら
  * トークン出現が増えた時点で RED になる。R5 監査 (QA-R5-1) の訂正: 出現数はコメント内の
  * 言及も数えるため、**件数保存の comment↔code swap** (コメント言及を消して同数のコード読取り
- * を足す) は allowlist を素通りする — 形式非依存は純増方向に限る。swap を実際に塞ぐのは
- * (a) approval-bridge.ts の出現丁度 1 (コメント予算ゼロ) + 下記 (3) の条件行 pin、
- * (b) normalize.test.ts の挙動テスト (bypassPermissions session を enforcement と宣言しない
- * over-claim pin)。固定する排他性:
+ * を足す) は allowlist を素通りする — 形式非依存は純増方向に限る。swap 形の第二ゲートを
+ * 実際に討ち取るのは inv-approval.test.ts の gate 側 mode 列挙テスト (bypass 集合の挙動 pin)
+ * だが、その列挙は現行 CC の closed set に閉じており**未列挙の将来 mode は非カバー**
+ * (R5T QA-R5T-1: token を綴らない helper 経由 + 未列挙 mode の probe が bridge 出現 pin・
+ * 挙動テスト込みの全 suite 緑のまま通ることを実証)。未列挙 mode coupling の構造閉塞
+ * (comment-strip 集計 + コメント件数の別 pin) は走査正規化変更 = full 監査対象ゆえ
+ * follow-up task 019ffc38-b973 で消化する。固定する排他性:
  *  (1) 引用リテラル (どの quote 形でも・SEC-R3-3) は permission-mode.ts のみ。
  *  (2) `permission_mode` トークンの出現は下記 allowlist の file×件数に完全一致する
  *      (コメント内の言及も数える = 保守的。正当なリファクタ時はこの map を実測で更新し、
@@ -52,7 +55,7 @@ const PERMISSION_MODE_OCCURRENCES: Readonly<Record<string, number>> = {
   "approval-bridge.ts": 1, // ゲート条件の isBypassPermissionMode(input.permission_mode) のみ。
   "event-factory.ts": 5, // 型 field 宣言 + 投影 (値比較なし)。
   "normalize.ts": 9, // hook 入力型 + 投影 + governanceModeFor 消費 (値比較なし)。
-  [SINGLE_SOURCE_FILE]: 3, // 単一出所自身 (predicate + 導出 + docstring)。
+  [SINGLE_SOURCE_FILE]: 3, // docstring コメント×3 (コード出現 0 — 関数は引数名 mode を使う。= swap 予算 3)。
 };
 
 async function sourceFiles(): Promise<string[]> {

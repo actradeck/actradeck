@@ -20,18 +20,18 @@ export function isBypassPermissionMode(mode: string | undefined): boolean {
  * 宣言 (normalize) とゲート (approval-bridge) は **同一の bypass 集合** をこの単一出所から
  * 消費する — ただし評価時点は同一ではない (R5 SEC-R5-1≡TDA-R5-2 で訂正): 宣言は run 起点
  * (session.started) の 1 回・ゲートは操作ごと。run 途中で bypassPermissions へ切り替わった
- * session はゲートでは正しく操作単位で defer になる一方、start 時の enforcement 宣言は
- * 残る (指標側の over-report 方向として docs/usage-metrics.md に開示・demote は v0.8
- * follow-up task 019ffc38-92ac)。
- * ゲート側だけに bypass 扱いモードを足す変更は inv-governance-bypass-coupling の
- * **permission_mode トークン出現 allowlist** (file→件数の完全一致 pin・R4 SEC-R4-1 で
- * 比較形 regex から置換) と bridge 条件形 pin が RED にする。排他性の実担保 (R5 QA-R5-1 で
- * 訂正): 出現数 pin はコメント内出現も数えるため「件数保存の comment↔code swap」には
- * 可換であり、単体では第二ゲートを塞がない。実際に塞ぐのは (a) bridge の出現丁度 1
- * (コメント予算ゼロ) + 条件行 pin、(b) normalize 側の挙動テスト (bypassPermissions を
- * enforcement と宣言しない over-claim pin)。既知の限界: 動的プロパティ構成と件数保存 swap は
- * allowlist 単体では検知しない (comment-strip 集計化は full 監査対象の follow-up task
- * 019ffc38-b973)。
+ * session は、ゲートでは操作単位で正しく bypass 経路へ分岐する (既定は DEFAULT_GATED
+ * カテゴリ該当で Web UI 承認カード経路・非該当のみ defer — R5T TDA-R5T-4 で訂正) 一方、
+ * start 時の enforcement 宣言は残る (指標側の over-report 方向として docs/usage-metrics.md
+ * に開示・demote は v0.8 follow-up task 019ffc38-92ac)。
+ * ゲート側だけに bypass 扱いモードを足す変更を実際に討ち取るのは inv-approval.test.ts の
+ * gate 側 mode 列挙テスト (bypass 集合の挙動 pin) であり、その列挙は現行 CC の closed set
+ * に閉じている — **未列挙の将来 mode を使う第二ゲートはどのテストにも当たらない** (R5T
+ * QA-R5T-1 で probe 実証・構造閉塞は follow-up task 019ffc38-b973)。
+ * inv-governance-bypass-coupling の permission_mode 出現 allowlist は**純増方向のみ**の
+ * tripwire で、コメント予算を使う件数保存 comment↔code swap には可換 (同 test docstring
+ * 参照)。既知の限界: 動的プロパティ構成・件数保存 swap・未列挙 mode は本モジュール周辺の
+ * ガード群単体では検知しない。
  */
 export function governanceModeFor(mode: string | undefined): "unavailable" | "enforcement" {
   return isBypassPermissionMode(mode) ? "unavailable" : "enforcement";

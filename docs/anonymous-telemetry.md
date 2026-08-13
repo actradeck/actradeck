@@ -39,18 +39,18 @@ The local usage report is separate and remains available with telemetry off:
 
 The sender can represent only these UTC-day counters:
 
-| Event                      | Definition                                                                  |
-| -------------------------- | --------------------------------------------------------------------------- |
-| `install_verified`         | Anonymous telemetry was explicitly enabled for this random installation ID. Anchored to the enable day; clamped into the reported 30-day window when older. |
-| `cockpit_started`          | A UTC day on which the opted-in cockpit backend was running (daily presence, recorded at most once per day — process restarts do not inflate it). |
-| `cockpit_demo_started`     | Built-in Cockpit safety-demo start.                                         |
-| `cockpit_demo_completed`   | Built-in Cockpit safety-demo completion.                                    |
-| `first_agent_observed`     | First real agent activity represented in the reported history.              |
-| `first_governed_session`   | First enforcement-mode session represented in the reported history.         |
-| `governed_session_started` | Real session declaring `governance_mode=enforcement`.                       |
-| `approval_requested`       | Approval request count.                                                     |
-| `approval_decided`         | Operator-originated allow/deny decision count.                              |
-| `active_day`               | UTC day with at least one real observed session (including sessions ActraDeck attached to mid-flight). |
+| Event                      | Definition                                                                                                                                                                                     |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `install_verified`         | Anonymous telemetry was explicitly enabled for this random installation ID. Anchored to the enable day; clamped into the reported 30-day window when older.                                    |
+| `cockpit_started`          | A UTC day on which the opted-in cockpit backend was running (daily presence, recorded at most once per day — process restarts do not inflate it).                                              |
+| `cockpit_demo_started`     | Built-in Cockpit safety-demo start.                                                                                                                                                            |
+| `cockpit_demo_completed`   | Built-in Cockpit safety-demo completion.                                                                                                                                                       |
+| `first_agent_observed`     | First real agent activity represented in the reported history.                                                                                                                                 |
+| `first_governed_session`   | First session that _declared_ `governance_mode=enforcement` at session start (a start-time declaration, not a per-operation measurement — see [Usage metrics](./usage-metrics.md)).            |
+| `governed_session_started` | Real session declaring `governance_mode=enforcement` at session start. The declaration can be broader than its evidence; see the honest-boundary cases in [Usage metrics](./usage-metrics.md). |
+| `approval_requested`       | Approval request count.                                                                                                                                                                        |
+| `approval_decided`         | Operator-originated allow/deny decision count.                                                                                                                                                 |
+| `active_day`               | UTC day with at least one real observed session (including sessions ActraDeck attached to mid-flight).                                                                                         |
 
 Each row also contains the ActraDeck semantic version and coarse platform
 (`linux`/`darwin`/`win32`/`other`). Batches contain a random UUID, absolute daily counts, and no
@@ -192,8 +192,12 @@ Use the signals as a funnel, not as a single vanity metric:
 1. npm/GitHub snapshots indicate discovery.
 2. `install_verified` and `cockpit_demo_completed` indicate successful evaluation.
 3. `first_agent_observed` indicates the user crossed into a real workflow.
-4. `first_governed_session` and `governed_session_started` indicate the approval gate was actually
-   in the execution path—not merely observe-only.
+4. `first_governed_session` and `governed_session_started` count sessions that **declared**
+   `governance_mode=enforcement` at session start. That is a declaration, not a per-operation
+   measurement of the execution path: two enumerated cases are broader than their evidence (the
+   managed-Codex constant declaration, and a mid-session switch to `bypassPermissions` that
+   keeps the start-time declaration). See "Honest boundaries" in
+   [Usage metrics](./usage-metrics.md) before quoting these counters.
 5. D7/D30 `active_day` retention indicates repeated real use.
 
 Stars and downloads alone cannot validate PMF. Conversely, a small number of retained governed
