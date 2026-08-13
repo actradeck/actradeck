@@ -12,6 +12,7 @@ import {
   defaultTelemetryStatePath,
   normalizeTelemetryEndpoint,
   telemetryErrorCode,
+  type TelemetryFetch,
   type TelemetryUsageSource,
 } from "./telemetry.js";
 import type { UsageReport, UsageRange } from "./usage-store.js";
@@ -26,22 +27,24 @@ afterAll(async () => {
 
 function usage(days: UsageReport["days"] = []): TelemetryUsageSource {
   return {
-    report: vi.fn(async (range: UsageRange) => ({
-      schema_version: 1,
-      timezone: "UTC",
-      semantics: "local_aggregate_not_users",
-      from: range.from,
-      to: range.to,
-      totals: {
-        cockpit_demo_started: 0,
-        cockpit_demo_completed: 0,
-        real_sessions: 0,
-        protected_sessions: 0,
-        approval_requests: 0,
-        operator_decisions: 0,
-      },
-      days,
-    })),
+    report: vi.fn(
+      async (range: UsageRange): Promise<UsageReport> => ({
+        schema_version: 1,
+        timezone: "UTC",
+        semantics: "local_aggregate_not_users",
+        from: range.from,
+        to: range.to,
+        totals: {
+          cockpit_demo_started: 0,
+          cockpit_demo_completed: 0,
+          real_sessions: 0,
+          protected_sessions: 0,
+          approval_requests: 0,
+          operator_decisions: 0,
+        },
+        days,
+      }),
+    ),
   };
 }
 
@@ -49,7 +52,7 @@ async function fixture(source = usage()) {
   const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
   FIXTURE_DIRS.push(directory);
   const statePath = join(directory, "telemetry.json");
-  const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
+  const fetchImpl = vi.fn<TelemetryFetch>(async () => new Response("{}", { status: 202 }));
   const telemetry = new AnonymousTelemetry({
     env: {}, // SEC-R3-2: kill-switch を明示解除 (setup-env が全テストプロセスへ注入するため)
     usage: source,
@@ -75,7 +78,7 @@ describe("anonymous telemetry", () => {
     const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
     FIXTURE_DIRS.push(directory);
     const statePath = join(directory, "state.json");
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
+    const fetchImpl = vi.fn<TelemetryFetch>(async () => new Response("{}", { status: 202 }));
     const telemetry = new AnonymousTelemetry({
       env: { ACTRADECK_TELEMETRY_DISABLED: "1" },
       usage: usage(),
@@ -114,7 +117,7 @@ describe("anonymous telemetry", () => {
       cockpit_started: {},
     });
     await writeFile(statePath, enabledState, "utf8");
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
+    const fetchImpl = vi.fn<TelemetryFetch>(async () => new Response("{}", { status: 202 }));
     const telemetry = new AnonymousTelemetry({
       env: { ACTRADECK_TELEMETRY_DISABLED: "1" },
       usage: usage(),
@@ -123,11 +126,21 @@ describe("anonymous telemetry", () => {
       now: () => new Date(NOW),
       fetchImpl,
     });
-    await expect(telemetry.disable()).rejects.toMatchObject({ code: "not_configured" });
-    await expect(telemetry.resetId()).rejects.toMatchObject({ code: "not_configured" });
+    const disableOutcome = await telemetry.disable().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const resetOutcome = await telemetry.resetId().then(
+      () => null,
+      (error: unknown) => error,
+    );
     // consent state はバイト単位で不変 (installation UUID の回転も opt-out clobber も無い)。
+    // QA-R5-4: バイト検査を reject 形状の assert より先に置く — 先行 assert の失敗でこの
+    // 主張本体が未到達になる条件付き性を除去する。
     expect(await readFile(statePath, "utf8")).toBe(enabledState);
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(disableOutcome).toMatchObject({ code: "not_configured" });
+    expect(resetOutcome).toMatchObject({ code: "not_configured" });
   });
 
   it("SEC-R4-2: with a REAL opted-in consent state, flush()/start() still perform zero egress under the kill-switch", async () => {
@@ -146,7 +159,7 @@ describe("anonymous telemetry", () => {
       cockpit_started: {},
     });
     await writeFile(statePath, enabledState, "utf8");
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
+    const fetchImpl = vi.fn<TelemetryFetch>(async () => new Response("{}", { status: 202 }));
     const telemetry = new AnonymousTelemetry({
       env: { ACTRADECK_TELEMETRY_DISABLED: "1" },
       usage: usage(),

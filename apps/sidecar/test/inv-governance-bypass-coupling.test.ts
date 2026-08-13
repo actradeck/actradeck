@@ -20,8 +20,13 @@ import {
  * (SEC-R4-1 ≡ QA-R4-1 ≡ TDA-R4-9) で、R3 の比較形 regex (`permission_mode ===`) が
  * **形式依存** — 中間 const alias / `Set.has()` / switch / 分割代入など 8 形が素通り — と
  * 実証されたため、本版は**トークン出現 allowlist** (file → 出現数の完全一致 pin) へ置換した。
- * 第二の独立ゲートは形がどうあれ `permission_mode` をどこかで読む必要があり、トークン出現が
- * 増えた時点で RED になる (形式非依存)。固定する排他性:
+ * 第二の独立ゲートは形がどうあれ `permission_mode` をどこかで読む必要があり、**純増**なら
+ * トークン出現が増えた時点で RED になる。R5 監査 (QA-R5-1) の訂正: 出現数はコメント内の
+ * 言及も数えるため、**件数保存の comment↔code swap** (コメント言及を消して同数のコード読取り
+ * を足す) は allowlist を素通りする — 形式非依存は純増方向に限る。swap を実際に塞ぐのは
+ * (a) approval-bridge.ts の出現丁度 1 (コメント予算ゼロ) + 下記 (3) の条件行 pin、
+ * (b) normalize.test.ts の挙動テスト (bypassPermissions session を enforcement と宣言しない
+ * over-claim pin)。固定する排他性:
  *  (1) 引用リテラル (どの quote 形でも・SEC-R3-3) は permission-mode.ts のみ。
  *  (2) `permission_mode` トークンの出現は下記 allowlist の file×件数に完全一致する
  *      (コメント内の言及も数える = 保守的。正当なリファクタ時はこの map を実測で更新し、
@@ -29,8 +34,10 @@ import {
  *  (3) bridge のゲート条件は boolean 演算子を伴わない `isBypassPermissionMode(...)` 単独形で、
  *      bridge 内の permission_mode 出現は丁度 1 (= その predicate 呼び出しのみ)。
  *  (4) 宣言側は governanceModeFor() を消費する (独自の三項分岐を持たない)。
- * 既知の限界 (正直開示): トークン走査ゆえ `input["permission" + "_mode"]` のような動的
+ * 既知の限界 (正直開示): ①トークン走査ゆえ `input["permission" + "_mode"]` のような動的
  * プロパティ構成は検知しない (敵対的難読化は single-operator 境界の脅威モデル外・レビュー対象)。
+ * ②上記の件数保存 comment↔code swap (QA-R5-1・comment-strip 集計化 + コメント件数の別 pin は
+ * 走査正規化の変更 = full 監査対象ゆえ follow-up task 019ffc38-b973 で消化)。
  *
  * ⚠️ 走査範囲 (scope) 契約: この metatest の走査正規化 (src 再帰・.ts/.tsx・quote 形・
  * 出現 allowlist) を変える修正は finding-registry の full 再監査既定に該当する。

@@ -261,7 +261,9 @@ class TelemetryStateStore {
   constructor(
     readonly path: string,
     private readonly now: () => Date,
-    private readonly disabled = false,
+    // SEC-R5-3: 既定値を持たない必須引数。既定 false だと将来の第 2 構築点 (CLI/診断) が
+    // 引数を省いた時点で kill-switch の外に無防備な store が生まれる — 型で構築点に選択を強制する。
+    private readonly disabled: boolean,
   ) {}
 
   private async readDirect(): Promise<PersistedTelemetryState> {
