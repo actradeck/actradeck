@@ -2,6 +2,8 @@
 /** Local control plane for explicit anonymous telemetry consent. */
 import { pathToFileURL } from "node:url";
 
+import { backendOrigin } from "./lib/backend-origin.mjs";
+
 const ACTIONS = new Set(["status", "preview", "enable", "disable", "reset-id", "flush"]);
 
 export function parseArgs(argv) {
@@ -24,13 +26,8 @@ export function parseArgs(argv) {
   return { action, endpoint, json };
 }
 
-export function backendOrigin(env = process.env) {
-  const rawHost = env.ACTRADECK_BACKEND_HOST || "127.0.0.1";
-  const host = rawHost === "0.0.0.0" || rawHost === "::" ? "127.0.0.1" : rawHost;
-  const urlHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  const port = env.ACTRADECK_BACKEND_PORT || "55410";
-  return `http://${urlHost}:${port}`;
-}
+// 単一出所 (scripts/lib/backend-origin.mjs) から re-export (既存 import/テスト互換)。
+export { backendOrigin };
 
 function humanStatus(status) {
   const lines = [

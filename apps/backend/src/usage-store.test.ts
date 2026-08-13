@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Pool } from "pg";
 
+import { SAFETY_DEMO_SESSION_PREFIX } from "./safety-demo-script.js";
 import { parseUsageRange, UsageStore } from "./usage-store.js";
 
 describe("parseUsageRange", () => {
@@ -52,10 +53,25 @@ describe("UsageStore", () => {
     const store = new UsageStore({ query } as unknown as Pool);
     const report = await store.report({ from: "2026-08-09", to: "2026-08-10" });
 
+    // QA-3/TDA-8 (2026-08-13 監査): 分類値は SQL リテラルでなく正準 import のバインドで渡す。
+    // 範囲は UTC 日境界の半開区間 [from 00:00Z, to+1day 00:00Z) — インデックス可能な生 timestamptz。
     expect(query).toHaveBeenCalledWith(expect.stringContaining("day::text AS day"), [
-      "2026-08-09",
-      "2026-08-10",
+      "2026-08-09T00:00:00.000Z",
+      "2026-08-11T00:00:00.000Z",
+      `${SAFETY_DEMO_SESSION_PREFIX}%`,
+      "enforcement",
+      "session.ended",
+      "tool.permission.requested",
+      "tool.permission.resolved",
+      "heartbeat",
+      "operator",
     ]);
+    const sql = (query.mock.calls[0] as [string, unknown[]])[0];
+    // 全走査防止 (TDA-2): 両 CTE が範囲述語で bound されている。
+    expect(sql).toMatch(/started_at >= \$1::timestamptz AND started_at < \$2::timestamptz/);
+    expect(sql).toMatch(/timestamp >= \$1::timestamptz AND timestamp < \$2::timestamptz/);
+    // 分類リテラルの直書きが無い (sentinel/prefix 契約の走査対象を作らない)。
+    expect(sql).not.toMatch(/demo-safety|resolution_origin'\s*=\s*'/);
     expect(report.totals).toEqual({
       cockpit_demo_started: 2,
       cockpit_demo_completed: 1,

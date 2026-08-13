@@ -41,8 +41,8 @@ The sender can represent only these UTC-day counters:
 
 | Event                      | Definition                                                                  |
 | -------------------------- | --------------------------------------------------------------------------- |
-| `install_verified`         | Anonymous telemetry was explicitly enabled for this random installation ID. |
-| `cockpit_started`          | Cockpit backend start after opt-in.                                         |
+| `install_verified`         | Anonymous telemetry was explicitly enabled for this random installation ID. Anchored to the enable day; clamped into the reported 30-day window when older. |
+| `cockpit_started`          | A UTC day on which the opted-in cockpit backend was running (daily presence, recorded at most once per day — process restarts do not inflate it). |
 | `cockpit_demo_started`     | Built-in Cockpit safety-demo start.                                         |
 | `cockpit_demo_completed`   | Built-in Cockpit safety-demo completion.                                    |
 | `first_agent_observed`     | First real agent activity represented in the reported history.              |
@@ -50,7 +50,7 @@ The sender can represent only these UTC-day counters:
 | `governed_session_started` | Real session declaring `governance_mode=enforcement`.                       |
 | `approval_requested`       | Approval request count.                                                     |
 | `approval_decided`         | Operator-originated allow/deny decision count.                              |
-| `active_day`               | UTC day with at least one real observed session.                            |
+| `active_day`               | UTC day with at least one real observed session (including sessions ActraDeck attached to mid-flight). |
 
 Each row also contains the ActraDeck semantic version and coarse platform
 (`linux`/`darwin`/`win32`/`other`). Batches contain a random UUID, absolute daily counts, and no
@@ -66,7 +66,7 @@ still processes network metadata as the infrastructure provider.
 ## Data flow and ownership
 
 ```text
-local usage_daily view
+local usage aggregation (range-bounded, UTC day buckets)
         |
         | explicit opt-in; HTTPS; 6-hour retry of absolute daily counters
         v
@@ -173,8 +173,9 @@ curl -fsS \
 The report contains funnel installation counts, total and daily governed sessions/approvals, and
 exact-day D1/D7/D30 active-installation retention. Public OSS clients cannot carry a secret that
 proves they are genuine, so these numbers are directional product evidence—not billing,
-compliance, or fraud-resistant analytics. Rate limits and the closed schema bound abuse but do not
-eliminate deliberate metric poisoning.
+compliance, or fraud-resistant analytics. Rate limits, the closed schema, and the accepted
+`occurred_on` window (past 90 days to next-day UTC; out-of-window days are rejected) bound abuse
+but do not eliminate deliberate metric poisoning.
 
 ### Why GA is not the primary collector
 

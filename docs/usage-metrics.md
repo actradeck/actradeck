@@ -11,15 +11,17 @@ anonymous telemetry. The product remains local-first: central telemetry is off b
 
 - npm downloads for the previous UTC day;
 - npm's rolling seven-day per-version breakdown;
-- GitHub's rolling views and clone counters;
 - cumulative GitHub release-asset download counters.
 
+Repository traffic (views/clones) is deliberately **not** snapshotted: GitHub scopes that data to
+push-access holders, and anything this public repository's workflow writes is public. Read
+traffic in GitHub Insights directly.
+
 These counters are distribution signals, not installations or users. The daily snapshots retain
-history that the upstream APIs only expose for short windows. Run the collector manually with a
-repository-scoped GitHub token:
+history that the upstream APIs only expose for short windows. Run the collector manually:
 
 ```bash
-GITHUB_TOKEN=... node scripts/collect-public-metrics.mjs --dry-run
+node scripts/collect-public-metrics.mjs --dry-run
 ```
 
 ## Local aggregate usage
@@ -31,13 +33,21 @@ With the cockpit running, inspect the local database through the authenticated l
 ./scripts/actradeck usage --since 2026-08-01 --json
 ```
 
-The `usage_daily` database view reports UTC day buckets only:
+The aggregation runs range-bounded against the base tables and reports UTC day buckets only:
 
 - `cockpit_demo_started` and `cockpit_demo_completed`;
-- `real_sessions` (demo sessions excluded);
+- `real_sessions` — distinct non-demo sessions with at least one non-heartbeat event on the day.
+  Deriving this from events (not from observed session starts) keeps sessions that ActraDeck
+  attached to mid-flight visible as activity;
 - `protected_sessions` (real sessions explicitly declaring `governance_mode=enforcement`);
 - `approval_requests`;
 - `operator_decisions` (`resolution_origin=operator`).
+
+Honest boundaries of `protected_sessions`: the guarantee is only recorded when a session **start**
+was observed carrying governance evidence. Sessions stored before the governance-mode upgrade,
+and sessions whose start ActraDeck never observed (mid-flight attach), stay unclassified (NULL)
+and are never inferred as protected — so the protected ratio under-reports rather than
+over-claims.
 
 The endpoint and CLI never return prompts, commands, paths, repository names, session/event IDs,
 or sub-day timestamps. These metrics stay on the machine unless the operator explicitly exports

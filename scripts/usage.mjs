@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 /** Read aggregate local usage from the authenticated loopback backend. */
+import { pathToFileURL } from "node:url";
 
-function parseArgs(argv) {
+import { backendOrigin } from "./lib/backend-origin.mjs";
+
+export function parseArgs(argv) {
   let since = "30d";
   let json = false;
   for (let i = 0; i < argv.length; i += 1) {
@@ -31,6 +34,8 @@ function printHuman(report) {
     `Cockpit demos completed:  ${t.cockpit_demo_completed}/${t.cockpit_demo_started}`,
     "",
     "Counts are local aggregates, not users. Demo sessions are excluded from real/protected sessions.",
+    "Protected counts only sessions whose start was observed with governance evidence;",
+    "sessions from before the governance-mode upgrade (or discovered mid-flight) stay unclassified.",
   ];
   process.stdout.write(`${lines.join("\n")}\n`);
 }
@@ -39,11 +44,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const token = process.env.REALTIME_TOKEN;
   if (!token) throw new Error("REALTIME_TOKEN is missing; configure .env first");
-  const rawHost = process.env.ACTRADECK_BACKEND_HOST || "127.0.0.1";
-  const host = rawHost === "0.0.0.0" || rawHost === "::" ? "127.0.0.1" : rawHost;
-  const urlHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  const port = process.env.ACTRADECK_BACKEND_PORT || "55410";
-  const url = new URL(`http://${urlHost}:${port}/realtime/usage`);
+  const url = new URL(`${backendOrigin()}/realtime/usage`);
   url.searchParams.set("since", args.since);
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
@@ -58,9 +59,12 @@ async function main() {
   else printHuman(body);
 }
 
-main().catch((error) => {
-  process.stderr.write(
-    `actradeck usage: ${error instanceof Error ? error.message : String(error)}\n`,
-  );
-  process.exitCode = 1;
-});
+// entrypoint guard (telemetry.mjs と同型): import (テスト) では実行しない。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(
+      `actradeck usage: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  });
+}

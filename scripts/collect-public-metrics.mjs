@@ -3,8 +3,15 @@
  * Collect distribution-only metrics from the official npm and GitHub APIs.
  *
  * This script never receives product telemetry. It snapshots public package/repository
- * counters so short-retention APIs (notably GitHub's 14-day traffic window and npm's
- * 7-day per-version window) remain useful over time.
+ * counters so short-retention APIs (notably npm's 7-day per-version window) remain useful
+ * over time.
+ *
+ * SEC-7 (2026-08-13 audit, operator decision): repository *traffic* (views/clones) is
+ * deliberately NOT collected. Traffic data is scoped by GitHub to push-access holders, and
+ * everything this workflow can write in a public repository (commits, logs, artifacts) is
+ * public — so snapshotting it here would irreversibly publish admin-only data. The operator
+ * reads traffic in GitHub Insights directly; preserving its history would require a private
+ * sink (out of scope).
  */
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -94,18 +101,14 @@ async function collectNpm(packageName, date) {
 }
 
 async function collectGitHub(repository, token) {
-  if (!token) throw new Error("GITHUB_TOKEN is required for repository traffic metrics");
   const base = `https://api.github.com/repos/${repository}`;
   const headers = {
-    Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
+    // Releases are public data; the token only lifts the unauthenticated rate limit.
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
-  const [views, clones, releases] = await Promise.all([
-    fetchJson(`${base}/traffic/views?per=day`, headers),
-    fetchJson(`${base}/traffic/clones?per=day`, headers),
-    fetchJson(`${base}/releases?per_page=100`, headers),
-  ]);
+  const releases = await fetchJson(`${base}/releases?per_page=100`, headers);
   const assets = Array.isArray(releases)
     ? releases.flatMap((release) =>
         Array.isArray(release.assets)
@@ -120,7 +123,6 @@ async function collectGitHub(repository, token) {
     : [];
   return {
     repository,
-    traffic: { views, clones },
     release_assets: assets,
     release_asset_downloads_total: assets.reduce((sum, asset) => sum + asset.download_count, 0),
   };

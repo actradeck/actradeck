@@ -47,4 +47,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore(metrics): snapshot public distribution signals [skip ci]"
+          # TDA-18 (2026-08-13 audit): a human push since checkout must not red the daily run.
+          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
           git push

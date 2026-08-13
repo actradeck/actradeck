@@ -11,6 +11,34 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Added
+
+- **Anonymous telemetry, off by default.** An explicitly opted-in, closed-schema daily counter
+  batch (random installation UUID, event enum, UTC day, version, coarse platform, count — no
+  prompts, commands, paths, repository names, or session/event identifiers can be represented).
+  Controlled from **Settings → Privacy** or `actradeck telemetry`; the exact outgoing batch is
+  previewable before enabling. The independently deployed Cloudflare Worker collector stores an
+  HMAC of the installation UUID and rejects out-of-window days. See
+  `docs/anonymous-telemetry.md`.
+- **`actradeck usage` — local-only aggregate usage report.** UTC-day buckets for demo runs, real
+  and governance-protected sessions, and approval activity, computed range-bounded on the local
+  store. Nothing leaves the machine.
+- **`governance_mode` on `session.started`** (closed enum `enforcement` / `observe_only` /
+  `unavailable`) recording whether the approval gate is in the execution path; never inferred
+  when missing.
+- **Daily public distribution snapshot workflow** (npm downloads and release-asset counters —
+  deliberately no repository traffic, which GitHub scopes to push-access holders).
+- `ACTRADECK_TELEMETRY_ENDPOINT` / `ACTRADECK_TELEMETRY_STATE` / `ACTRADECK_TELEMETRY_DISABLED`
+  operator settings (see `docs/configuration.md`).
+
+### Fixed
+
+- **Approvals from resumed sessions are actionable again.** Sessions that resumed without a
+  SessionStart hook folded into their previous terminated run, whose projection suppresses
+  pending approvals — approval cards never appeared in the Inbox or Live Wall and every request
+  timed out to deny. The sidecar now reopens a new run on any first hook after a terminal reap,
+  preserving lineage (`resumed_from`).
+
 ## [0.7.0] - 2026-08-10
 
 ### Added

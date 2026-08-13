@@ -1,19 +1,28 @@
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import {
+  ACTRADECK_APP_VERSION,
   ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT,
   AnonymousTelemetry,
+  TelemetryError,
   defaultTelemetryStatePath,
   normalizeTelemetryEndpoint,
+  telemetryErrorCode,
   type TelemetryUsageSource,
 } from "./telemetry.js";
 import type { UsageReport, UsageRange } from "./usage-store.js";
 
 const NOW = new Date("2026-08-11T12:00:00.000Z");
+
+// QA-11 (2026-08-13 監査): fixture の mkdtemp を残留させない (テスト実行ごとの tmp ごみ堆積防止)。
+const FIXTURE_DIRS: string[] = [];
+afterAll(async () => {
+  await Promise.all(FIXTURE_DIRS.map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 function usage(days: UsageReport["days"] = []): TelemetryUsageSource {
   return {
@@ -38,6 +47,7 @@ function usage(days: UsageReport["days"] = []): TelemetryUsageSource {
 
 async function fixture(source = usage()) {
   const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
+  FIXTURE_DIRS.push(directory);
   const statePath = join(directory, "telemetry.json");
   const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
   const telemetry = new AnonymousTelemetry({
@@ -73,6 +83,7 @@ describe("anonymous telemetry", () => {
       "http://127.0.0.1:8789/v1/events",
     );
     const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
+    FIXTURE_DIRS.push(directory);
     const telemetry = new AnonymousTelemetry({
       usage: usage(),
       statePath: join(directory, "state.json"),
@@ -132,5 +143,139 @@ describe("anonymous telemetry", () => {
     expect(defaultTelemetryStatePath({ ACTRADECK_TELEMETRY_STATE: "/tmp/custom.json" })).toBe(
       "/tmp/custom.json",
     );
+  });
+
+  it("stamps app_version from the backend package manifest, never a source literal (TDA-1)", async () => {
+    // version.sh は package.json のみ stamp する。ソース直書きはリリース毎に旧版を名乗る
+    // silent 汚染源なので、実行時導出が manifest と一致することを pin する。
+    const manifest = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    expect(ACTRADECK_APP_VERSION).toBe(manifest.version);
+    expect(ACTRADECK_APP_VERSION).toMatch(/^\d+\.\d+\.\d+/);
+    const { telemetry } = await fixture();
+    await telemetry.enable();
+    const preview = await telemetry.preview();
+    for (const event of preview.batch?.events ?? []) {
+      expect(event.app_version).toBe(manifest.version);
+    }
+  });
+
+  it("INV-TELEMETRY-BOOT-FAILSAFE: unreadable/corrupt state degrades to off with zero egress (SEC-2)", async () => {
+    for (const corrupt of [
+      "{ not json",
+      "",
+      JSON.stringify({ schema_version: 2, mode: "anonymous" }),
+      JSON.stringify({ schema_version: 1, mode: "anonymous", installation_id: "not-a-uuid" }),
+    ]) {
+      const { telemetry, statePath, fetchImpl } = await fixture();
+      await writeFile(statePath, corrupt, "utf8");
+      await expect(telemetry.status()).resolves.toMatchObject({ mode: "off" });
+      await expect(telemetry.flush()).resolves.toMatchObject({ sent: false, reason: "disabled" });
+      // start() (boot 経路) も throw せず、egress ゼロのまま。
+      await telemetry.start();
+      telemetry.dispose();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      // 壊れたファイルは上書きされない (調査可能性を残す)。
+      expect(await readFile(statePath, "utf8")).toBe(corrupt);
+    }
+  });
+
+  it("INV-TELEMETRY-BOOT-FAILSAFE: an invalid offered endpoint degrades to none instead of throwing (SEC-2)", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
+    FIXTURE_DIRS.push(directory);
+    const telemetry = new AnonymousTelemetry({
+      usage: usage(),
+      statePath: join(directory, "state.json"),
+      defaultEndpoint: "http://collector.internal/v1/events", // 非 loopback HTTP = invalid
+      now: () => new Date(NOW),
+    });
+    const status = await telemetry.status();
+    expect(status.mode).toBe("off");
+    expect(status.offered_endpoint).toBeUndefined();
+    // 提示 endpoint 無し ⇒ enable は明示 endpoint を要求する (closed code)。
+    await expect(telemetry.enable()).rejects.toMatchObject({ code: "not_configured" });
+  });
+
+  it("records cockpit_started as at-most-once-per-UTC-day presence, not a process-start counter (QA-2)", async () => {
+    const { telemetry, statePath, fetchImpl } = await fixture();
+    await telemetry.enable(); // records the day
+    await telemetry.start(); // same day: must stay 1
+    telemetry.dispose();
+    await telemetry.start();
+    telemetry.dispose();
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      cockpit_started: Record<string, number>;
+    };
+    expect(state.cockpit_started).toEqual({ "2026-08-11": 1 });
+    const preview = await telemetry.preview();
+    const started = preview.batch?.events.filter((e) => e.event_name === "cockpit_started");
+    expect(started).toEqual([expect.objectContaining({ occurred_on: "2026-08-11", count: 1 })]);
+    expect(fetchImpl).toHaveBeenCalled(); // start() は flush を試みる (enable 済みなので送信可)。
+  });
+
+  it("clamps install_verified into the reported source_range (TDA-17)", async () => {
+    const { telemetry, statePath } = await fixture();
+    await telemetry.enable();
+    // enabled_at をレポート窓 (30 日) より古い日へ書き換える。
+    const state = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    await writeFile(
+      statePath,
+      JSON.stringify({ ...state, enabled_at: "2026-05-01T00:00:00.000Z" }),
+      "utf8",
+    );
+    const preview = await telemetry.preview();
+    expect(preview.source_range).not.toBeNull();
+    const install = preview.batch?.events.find((e) => e.event_name === "install_verified");
+    expect(install?.occurred_on).toBe(preview.source_range?.from);
+    for (const event of preview.batch?.events ?? []) {
+      expect(event.occurred_on >= preview.source_range!.from).toBe(true);
+      expect(event.occurred_on <= preview.source_range!.to).toBe(true);
+    }
+  });
+
+  it("maps telemetry failures to the closed error vocabulary only (SEC-4)", async () => {
+    try {
+      normalizeTelemetryEndpoint("https://user:pw@example.test/events");
+      expect.unreachable("normalize must reject credentials");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TelemetryError);
+      expect((error as TelemetryError).code).toBe("invalid_endpoint");
+    }
+    const { telemetry } = await fixture();
+    await expect(telemetry.resetId()).rejects.toMatchObject({ code: "not_enabled" });
+    // 未知エラーは fallback へ畳む (raw message を外へ出す経路を作らない)。
+    expect(
+      telemetryErrorCode(new Error("EACCES: /home/user/.actradeck"), "state_write_failed"),
+    ).toBe("state_write_failed");
+    expect(telemetryErrorCode(new TelemetryError("send_failed", "x"), "state_write_failed")).toBe(
+      "send_failed",
+    );
+  });
+
+  it("flush failure surfaces a closed code without upstream status echo (SEC-1/SEC-4)", async () => {
+    const { telemetry, fetchImpl } = await fixture(
+      usage([
+        {
+          day: "2026-08-11",
+          cockpit_demo_started: 1,
+          cockpit_demo_completed: 0,
+          real_sessions: 0,
+          protected_sessions: 0,
+          approval_requests: 0,
+          operator_decisions: 0,
+        },
+      ]),
+    );
+    await telemetry.enable();
+    fetchImpl.mockResolvedValueOnce(new Response("nope", { status: 503 }));
+    try {
+      await telemetry.flush();
+      expect.unreachable("flush must reject on upstream failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TelemetryError);
+      expect((error as TelemetryError).code).toBe("send_failed");
+      expect((error as TelemetryError).message).not.toContain("503");
+    }
   });
 });

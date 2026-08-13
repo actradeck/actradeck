@@ -917,6 +917,21 @@ else
   ok "INV-VERSION-SINGLE-SOURCE: gate FAILS when one package.json diverges (falsifiable)"
 fi
 
+# TDA-1 (2026-08-13 audit): no hardcoded product-version literal in TypeScript sources.
+# version.sh stamps package.json files only; a semver literal assigned to an APP_VERSION-style
+# constant in src/ silently reports a stale version forever after the next release (the
+# telemetry app_version did exactly this). Runtime code must derive from its package.json.
+# Scan is scoped to assignment-shaped occurrences to avoid matching test fixtures/semver ranges.
+VERSION_LITERALS="$(grep -rnE '(_VERSION|Version)[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+' \
+  "$ROOT"/apps/*/src "$ROOT"/packages/*/src --include='*.ts' 2>/dev/null \
+  | grep -v -e '\.test\.ts' -e '\.spec\.ts' \
+  | grep -vE 'SCHEMA_VERSION|PROTOCOL_VERSION|MANIFEST_VERSION|PACKET_VERSION' || true)"
+if [ -z "$VERSION_LITERALS" ]; then
+  ok "INV-VERSION-SINGLE-SOURCE: no hardcoded app-version literal in runtime sources"
+else
+  ng "INV-VERSION-SINGLE-SOURCE: hardcoded version literal(s) in runtime sources: $VERSION_LITERALS"
+fi
+
 # ============================================================================
 # INV-RELEASE-TAG-MATCHES-VERSION  (run version.sh in an isolated throwaway repo)
 # ============================================================================

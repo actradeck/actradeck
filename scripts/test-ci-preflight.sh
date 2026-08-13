@@ -59,6 +59,30 @@ else
   bad "tripwire missed an injected new job (rc=$rc): $out"
 fi
 
+echo "[test-ci-preflight] 1b. orchestrator-step body parity (QA-5, 2026-08-13 audit)"
+
+# The name-based tripwire cannot see body-only edits. Pin the known body-drift class: every
+# `pnpm run test:*` gate that ci.yml runs inside the orchestrator step must also appear in
+# ci-preflight.sh, so a root-script gate added to CI cannot silently vanish from local preflight.
+CI_GATES="$(grep -oE 'pnpm run test:[a-z-]+' .github/workflows/ci.yml | sort -u)"
+if [ -z "$CI_GATES" ]; then
+  bad "expected at least one 'pnpm run test:*' gate in ci.yml (extraction went vacuous)"
+else
+  MISSING=""
+  while IFS= read -r gate; do
+    if ! grep -qF "$gate" scripts/ci-preflight.sh; then
+      MISSING="$MISSING $gate"
+    fi
+  done <<EOF_GATES
+$CI_GATES
+EOF_GATES
+  if [ -z "$MISSING" ]; then
+    ok "every ci.yml 'pnpm run test:*' gate is mirrored in ci-preflight.sh"
+  else
+    bad "ci.yml gates missing from ci-preflight.sh:$MISSING"
+  fi
+fi
+
 echo "[test-ci-preflight] 2. assert-inv-ran.mjs fixtures"
 
 fixture() { printf '%s' "$1" > "$TMPDIR_TCP/report.json"; }
@@ -147,14 +171,17 @@ if [ ! -f packages/event-model/dist/test-db-guard.js ]; then
   pnpm --filter @actradeck/event-model run build >/dev/null
 fi
 
-out="$(bash scripts/ci-preflight.sh --db-guard "postgresql://actradeck@127.0.0.1:55432/actradeck" 2>&1)"; rc=$?
+# Hermetic (QA-PF-1, 2026-08-13): the guard honors ACTRADECK_TEST_DATABASE_URL over the argument
+# by design, so an ambient test-DB env var would mask the injected production-port fixture and
+# flip this metatest to a false FAIL. Strip it for both probes.
+out="$(env -u ACTRADECK_TEST_DATABASE_URL bash scripts/ci-preflight.sh --db-guard "postgresql://actradeck@127.0.0.1:55432/actradeck" 2>&1)"; rc=$?
 if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi "refusing"; then
   ok "db guard RED on a production-port (:55432) DSN"
 else
   bad "db guard passed a production-port DSN (rc=$rc): $out"
 fi
 
-out="$(bash scripts/ci-preflight.sh --db-guard "postgresql://actradeck@127.0.0.1:5456/actradeck" 2>&1)"; rc=$?
+out="$(env -u ACTRADECK_TEST_DATABASE_URL bash scripts/ci-preflight.sh --db-guard "postgresql://actradeck@127.0.0.1:5456/actradeck" 2>&1)"; rc=$?
 if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "not a production-port"; then
   ok "db guard GREEN on a disposable-port (:5456) DSN"
 else

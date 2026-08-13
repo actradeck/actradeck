@@ -92,6 +92,32 @@ describe("Cloudflare telemetry collector", () => {
     expect(stored?.count).toBe(3);
   });
 
+  it("rejects out-of-window occurred_on days and persists nothing (SEC-3)", async () => {
+    // 未来日 pre-seed と太古日は retention/cohort 汚染 + unbounded 成長の主要 vector。
+    for (const day of ["9999-12-31", "1970-01-01", "2026-05-01", "2026-08-15"]) {
+      const response = await dispatch(
+        eventRequest({
+          ...validBatch,
+          events: [{ ...validBatch.events[0], occurred_on: day }],
+        }),
+      );
+      expect(response.status, day).toBe(400);
+      expect(await response.json()).toEqual({ error: "occurred_on outside accepted window" });
+    }
+    const rows = await env.DB.prepare("SELECT COUNT(*) AS n FROM telemetry_daily").first();
+    expect(rows?.n).toBe(0);
+    // 窓内 (当日・翌日・90 日前ちょうど) は受理される。
+    for (const day of ["2026-08-13", "2026-08-14", "2026-05-15"]) {
+      const response = await dispatch(
+        eventRequest({
+          ...validBatch,
+          events: [{ ...validBatch.events[0], occurred_on: day }],
+        }),
+      );
+      expect(response.status, day).toBe(202);
+    }
+  });
+
   it("rejects unknown fields and arbitrary event names", async () => {
     const response = await dispatch(
       eventRequest({

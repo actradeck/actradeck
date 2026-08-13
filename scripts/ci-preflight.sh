@@ -60,6 +60,8 @@ verify:Assert backend real-DB INV actually RAN (not skipped)
 verify:Test (backend coverage gate)
 verify:Test (redaction coverage gate)
 verify:Test (event-model coverage gate)
+verify:Test (telemetry-contract coverage gate)
+verify:Test (telemetry collector, workerd)
 verify:Build backend (provide dist for sidecar e2e import)
 verify:Test (sidecar coverage gate)
 verify:Assert egress e2e actually RAN (not skipped)
@@ -237,6 +239,11 @@ run_verify_job() {
   pnpm run type-check
 
   step "verify: Orchestrator script smoke"
+  # QA-5 (2026-08-13 audit): mirror the two root node --test gates that ci.yml runs inside this
+  # step's body (the name-based drift tripwire cannot see body-only additions — keep in sync).
+  pnpm run test:public-metrics
+  pnpm run test:telemetry-cli
+  pnpm run test:usage-cli
   bash scripts/test-actradeck.sh
   bash scripts/test-ad-attach.sh
   bash scripts/test-install.sh
@@ -298,6 +305,13 @@ run_verify_job() {
 
   step "verify: Test (event-model coverage gate)"
   pnpm --filter @actradeck/event-model run test:coverage
+
+  step "verify: Test (telemetry-contract coverage gate)"
+  pnpm --filter @actradeck/telemetry-contract run test:coverage
+
+  step "verify: Test (telemetry collector, workerd)"
+  pnpm --filter @actradeck/telemetry-collector run build:worker
+  pnpm --filter @actradeck/telemetry-collector run test:worker
 
   step "verify: Build backend (dist for sidecar e2e)"
   pnpm --filter @actradeck/backend run build

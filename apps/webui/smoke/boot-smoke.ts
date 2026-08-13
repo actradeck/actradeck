@@ -199,6 +199,10 @@ async function main(): Promise<void> {
     REALTIME_TOKEN,
     ACTRADECK_BACKEND_PORT: String(backendPort),
     ACTRADECK_BACKEND_HOST: "127.0.0.1",
+    // QA-2 (2026-08-13 監査): smoke の backend が operator の実 ~/.actradeck/telemetry.json を
+    // 掴んで実 collector へ送信・cockpit_started を偽計上しないよう、telemetry を値ベースで
+    // 完全無効化する (テストゲートは egress ゼロ + consent state 非接触が不変条件)。
+    ACTRADECK_TELEMETRY_DISABLED: "1",
   });
   // index.ts の "[backend] ingestion server ready on http://host:port"
   const be = await waitForPort(

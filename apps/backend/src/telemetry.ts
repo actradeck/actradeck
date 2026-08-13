@@ -7,27 +7,40 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { dirname, resolve } from "node:path";
 
 import {
+  TELEMETRY_MAX_COUNT,
   TELEMETRY_SCHEMA_VERSION,
   TelemetryBatch,
+  TelemetryInstallationId,
+  isUtcDay,
   telemetryPlatform,
+  utcDay,
   type TelemetryDailyEvent,
   type TelemetryEventName,
 } from "@actradeck/telemetry-contract";
 
 import type { UsageReport, UsageRange } from "./usage-store.js";
 
-export const ACTRADECK_APP_VERSION = "0.7.0" as const;
+/**
+ * リリース時に stamp される backend package.json を実行時に読む (単一出所)。ソースへの
+ * semver リテラル直書きは scripts/version.sh の stamp 対象外で、リリースのたびに全テレメトリが
+ * 旧バージョンを名乗り続ける silent 汚染源だった (audit finding TDA-1・2026-08-13)。
+ * `INV-VERSION-SINGLE-SOURCE` (scripts/test-release-prep.sh) がソース直書きの再発を落とす。
+ */
+const backendPackageJson = createRequire(import.meta.url)("../package.json") as {
+  readonly version: string;
+};
+export const ACTRADECK_APP_VERSION: string = backendPackageJson.version;
 export const ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT =
   "https://actradeck-telemetry.actradeck-telemetry-collector.workers.dev/v1/events" as const;
 export const TELEMETRY_SEND_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 export const TELEMETRY_LOOKBACK_DAYS = 30;
 
 const DAY_MS = 86_400_000;
-const MAX_LOCAL_COUNTER = 1_000_000_000;
 const STATUS_COLLECTS = [
   "installation verification",
   "cockpit starts and demo completion",
@@ -83,6 +96,38 @@ export interface TelemetryFlushResult {
   readonly reason?: "disabled" | "empty";
 }
 
+/**
+ * Closed error vocabulary for the telemetry HTTP surface (SEC-4, 2026-08-13 audit): route error
+ * bodies carry one of these literals only — never a raw `Error.message`, which leaked absolute
+ * local paths (ENOENT/EACCES) and the upstream HTTP status of an operator-chosen endpoint.
+ */
+export const TELEMETRY_ERROR_CODES = [
+  "invalid_endpoint",
+  "not_configured",
+  "not_enabled",
+  "state_write_failed",
+  "send_failed",
+] as const;
+export type TelemetryErrorCode = (typeof TELEMETRY_ERROR_CODES)[number];
+
+export class TelemetryError extends Error {
+  constructor(
+    readonly code: TelemetryErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "TelemetryError";
+  }
+}
+
+/** Map an unknown error to the closed vocabulary (unknown shapes fold to `fallback`). */
+export function telemetryErrorCode(
+  error: unknown,
+  fallback: TelemetryErrorCode,
+): TelemetryErrorCode {
+  return error instanceof TelemetryError ? error.code : fallback;
+}
+
 export interface TelemetryUsageSource {
   report(range: UsageRange): Promise<UsageReport>;
 }
@@ -107,16 +152,6 @@ export interface AnonymousTelemetryOptions {
   readonly sendIntervalMs?: number;
 }
 
-function utcDay(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function isUtcDay(value: unknown): value is string {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  return !Number.isNaN(parsed.getTime()) && utcDay(parsed) === value;
-}
-
 function isIsoInstant(value: unknown): value is string {
   return typeof value === "string" && !Number.isNaN(new Date(value).getTime());
 }
@@ -129,7 +164,7 @@ function isCounterMap(value: unknown): value is Readonly<Record<string, number>>
       typeof count === "number" &&
       Number.isSafeInteger(count) &&
       count >= 0 &&
-      count <= MAX_LOCAL_COUNTER,
+      count <= TELEMETRY_MAX_COUNT,
   );
 }
 
@@ -142,10 +177,7 @@ function parseState(value: unknown): PersistedTelemetryState {
   if (record.mode === "off") return { schema_version: 1, mode: "off" };
   if (
     record.mode !== "anonymous" ||
-    typeof record.installation_id !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      record.installation_id,
-    ) ||
+    !TelemetryInstallationId.safeParse(record.installation_id).success ||
     typeof record.endpoint !== "string" ||
     !isIsoInstant(record.enabled_at) ||
     (record.last_success_at !== undefined && !isIsoInstant(record.last_success_at)) ||
@@ -156,7 +188,7 @@ function parseState(value: unknown): PersistedTelemetryState {
   return {
     schema_version: 1,
     mode: "anonymous",
-    installation_id: record.installation_id,
+    installation_id: record.installation_id as string,
     endpoint: normalizeTelemetryEndpoint(record.endpoint),
     enabled_at: record.enabled_at,
     ...(record.last_success_at !== undefined
@@ -172,7 +204,7 @@ export function normalizeTelemetryEndpoint(raw: string): string {
   try {
     endpoint = new URL(raw);
   } catch {
-    throw new Error("telemetry endpoint must be an absolute URL");
+    throw new TelemetryError("invalid_endpoint", "telemetry endpoint must be an absolute URL");
   }
   const loopback =
     endpoint.hostname === "localhost" ||
@@ -180,10 +212,14 @@ export function normalizeTelemetryEndpoint(raw: string): string {
     endpoint.hostname === "[::1]" ||
     endpoint.hostname === "::1";
   if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) {
-    throw new Error("telemetry endpoint must use HTTPS (loopback HTTP is allowed for development)");
+    throw new TelemetryError(
+      "invalid_endpoint",
+      "telemetry endpoint must use HTTPS (loopback HTTP is allowed for development)",
+    );
   }
   if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
-    throw new Error(
+    throw new TelemetryError(
+      "invalid_endpoint",
       "telemetry endpoint must not contain credentials, query parameters, or fragments",
     );
   }
@@ -208,13 +244,14 @@ class TelemetryStateStore {
   ) {}
 
   private async readDirect(): Promise<PersistedTelemetryState> {
+    // SEC-2 (2026-08-13 監査): 読めない/壊れた state は例外を伝播させず「off」へ倒す (fail-safe)。
+    // unreadable state ⇒ telemetry 停止 = egress ゼロが安全方向で、optional な分析ファイルの破損が
+    // cockpit (承認カードを描く Web UI) の boot を落とすことを構造的に防ぐ。壊れたファイルは
+    // 上書きしない (次の明示 enable まで温存 — 調査可能性を残す)。
     try {
       return parseState(JSON.parse(await readFile(this.path, "utf8")) as unknown);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return { schema_version: 1, mode: "off" };
-      }
-      throw error;
+    } catch {
+      return { schema_version: 1, mode: "off" };
     }
   }
 
@@ -280,7 +317,9 @@ class TelemetryStateStore {
   async resetId(): Promise<AnonymousTelemetryState> {
     return this.exclusive(async () => {
       const current = await this.readDirect();
-      if (current.mode !== "anonymous") throw new Error("anonymous telemetry is disabled");
+      if (current.mode !== "anonymous") {
+        throw new TelemetryError("not_enabled", "anonymous telemetry is disabled");
+      }
       const reset: AnonymousTelemetryState = {
         schema_version: 1,
         mode: "anonymous",
@@ -304,7 +343,11 @@ class TelemetryStateStore {
       const counters = Object.fromEntries(
         Object.entries(current.cockpit_started).filter(([day]) => day >= cutoff),
       );
-      counters[today] = Math.min(MAX_LOCAL_COUNTER, (counters[today] ?? 0) + 1);
+      // QA-2 (2026-08-13 監査): 意味論は「その UTC 日に opt-in 済み backend が稼働した」の
+      // 日次プレゼンス (最大 1/日)。プロセス起動回数を数えると再起動・スクリプト・CI が
+      // 「利用」として指標を自作汚染する (単なる ++ は 1 日に何度でも増えた)。
+      if (counters[today] === 1) return; // 書込み省略 (既に記録済み・state churn 回避)。
+      counters[today] = 1;
       await this.writeDirect({ ...current, cockpit_started: counters });
     });
   }
@@ -372,9 +415,18 @@ export class AnonymousTelemetry {
       options.statePath ?? defaultTelemetryStatePath(),
       this.now,
     );
-    this.defaultEndpoint = options.defaultEndpoint
-      ? normalizeTelemetryEndpoint(options.defaultEndpoint)
-      : undefined;
+    // SEC-2 (2026-08-13 監査): 提示用 endpoint (env 由来) の不正値で construct を落とさない。
+    // 不正なら「提示 endpoint 無し」へ縮退する (enable 時に明示 endpoint が必要になるだけで、
+    // env の typo が backend boot を落とさない)。
+    let offered: string | undefined;
+    try {
+      offered = options.defaultEndpoint
+        ? normalizeTelemetryEndpoint(options.defaultEndpoint)
+        : undefined;
+    } catch {
+      offered = undefined;
+    }
+    this.defaultEndpoint = offered;
     this.appVersion = options.appVersion ?? ACTRADECK_APP_VERSION;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.sendIntervalMs = options.sendIntervalMs ?? TELEMETRY_SEND_INTERVAL_MS;
@@ -397,7 +449,16 @@ export class AnonymousTelemetry {
     const report = await this.options.usage.report(range);
     const events: TelemetryDailyEvent[] = [];
 
-    pushEvent(events, this.appVersion, "install_verified", utcDay(enabledAt), 1);
+    // install_verified は enable 日にアンカーするが、レポート窓より古い enable は range.from へ
+    // clamp する (TDA-17: source_range 外の event を batch に混ぜて preview を内部矛盾させない)。
+    const installDay = utcDay(enabledAt);
+    pushEvent(
+      events,
+      this.appVersion,
+      "install_verified",
+      installDay >= range.from ? installDay : range.from,
+      1,
+    );
     for (const [day, count] of Object.entries(state.cockpit_started)) {
       if (day >= range.from && day <= range.to) {
         pushEvent(events, this.appVersion, "cockpit_started", day, count);
@@ -452,7 +513,8 @@ export class AnonymousTelemetry {
   async enable(endpoint?: string): Promise<TelemetryStatus> {
     const selected = endpoint ?? this.defaultEndpoint;
     if (!selected) {
-      throw new Error(
+      throw new TelemetryError(
+        "not_configured",
         "telemetry collector is not configured; set ACTRADECK_TELEMETRY_ENDPOINT or pass endpoint",
       );
     }
@@ -481,14 +543,18 @@ export class AnonymousTelemetry {
       return { sent: false, event_count: 0, reason: "empty" };
     }
     const endpoint = preview.status.endpoint;
-    if (!endpoint) throw new Error("anonymous telemetry endpoint missing");
+    if (!endpoint) throw new TelemetryError("not_enabled", "anonymous telemetry endpoint missing");
     const response = await this.fetchImpl(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(preview.batch),
       signal: AbortSignal.timeout(5_000),
     });
-    if (!response.ok) throw new Error(`telemetry collector returned HTTP ${response.status}`);
+    if (!response.ok) {
+      // メッセージへ upstream HTTP status を含めない (SEC-4/SEC-1: 応答 body は closed code のみに
+      // 写像されるが、message も status oracle にしない — ログにも生 status を残さない方針)。
+      throw new TelemetryError("send_failed", "telemetry collector rejected the batch");
+    }
     await this.state.recordSuccess(this.now());
     return { sent: true, event_count: preview.batch.events.length };
   }

@@ -72,7 +72,11 @@ import type { AuditStore } from "./audit-store.js";
 import { isPathWithinProjectScope, parseProjectScope } from "./project-scope.js";
 import type { RealtimeStore } from "./realtime-store.js";
 import type { SafetyDemoLauncher } from "./safety-demo.js";
-import type { AnonymousTelemetry } from "./telemetry.js";
+import {
+  telemetryErrorCode,
+  type AnonymousTelemetry,
+  type TelemetryErrorCode,
+} from "./telemetry.js";
 import { parseUsageRange, type UsageStore } from "./usage-store.js";
 import type {
   CodexSpawnRelayResult,
@@ -538,50 +542,55 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
   // Explicit opt-in telemetry controls. All endpoints are behind the same REALTIME_TOKEN gate.
   // The BFF additionally enforces same-origin + POST-only for state changes. Preview returns the
   // exact closed-schema batch that would be sent; no product session/event identifiers exist in it.
-  if (opts.telemetry !== undefined) {
+  // SEC-4 (2026-08-13 監査): error body は telemetry.ts の closed enum `TelemetryErrorCode` のみ
+  // (raw Error.message は絶対パス / upstream HTTP status を echo していた)。生エラーはログ専用。
+  const telemetry = opts.telemetry;
+  if (telemetry !== undefined) {
     app.get("/realtime/telemetry", async (_req, reply) => {
-      return reply.send(await opts.telemetry!.status());
+      return reply.send(await telemetry.status());
     });
 
     app.get("/realtime/telemetry/preview", async (_req, reply) => {
-      return reply.send(await opts.telemetry!.preview());
+      return reply.send(await telemetry.preview());
     });
 
     app.post<{ Body: { endpoint?: unknown } }>("/realtime/telemetry/enable", async (req, reply) => {
       const endpoint = req.body?.endpoint;
       if (endpoint !== undefined && typeof endpoint !== "string") {
-        return reply.code(400).send({ error: "endpoint must be a string" });
+        return reply.code(400).send({ error: "invalid_endpoint" satisfies TelemetryErrorCode });
       }
       try {
-        return reply.send(await opts.telemetry!.enable(endpoint));
+        return reply.send(await telemetry.enable(endpoint));
       } catch (error) {
-        return reply.code(400).send({
-          error: error instanceof Error ? error.message : "telemetry enable failed",
-        });
-      }
-    });
-
-    app.post("/realtime/telemetry/disable", async (_req, reply) => {
-      return reply.send(await opts.telemetry!.disable());
-    });
-
-    app.post("/realtime/telemetry/reset-id", async (_req, reply) => {
-      try {
-        return reply.send(await opts.telemetry!.resetId());
-      } catch (error) {
-        return reply.code(400).send({
-          error: error instanceof Error ? error.message : "telemetry id reset failed",
-        });
+        req.log.error({ err: error }, "telemetry enable failed");
+        return reply.code(400).send({ error: telemetryErrorCode(error, "state_write_failed") });
       }
     });
 
-    app.post("/realtime/telemetry/flush", async (_req, reply) => {
+    app.post("/realtime/telemetry/disable", async (req, reply) => {
       try {
-        return reply.send(await opts.telemetry!.flush());
+        return reply.send(await telemetry.disable());
       } catch (error) {
-        return reply.code(502).send({
-          error: error instanceof Error ? error.message : "telemetry send failed",
-        });
+        req.log.error({ err: error }, "telemetry disable failed");
+        return reply.code(500).send({ error: telemetryErrorCode(error, "state_write_failed") });
+      }
+    });
+
+    app.post("/realtime/telemetry/reset-id", async (req, reply) => {
+      try {
+        return reply.send(await telemetry.resetId());
+      } catch (error) {
+        req.log.error({ err: error }, "telemetry id reset failed");
+        return reply.code(400).send({ error: telemetryErrorCode(error, "state_write_failed") });
+      }
+    });
+
+    app.post("/realtime/telemetry/flush", async (req, reply) => {
+      try {
+        return reply.send(await telemetry.flush());
+      } catch (error) {
+        req.log.error({ err: error }, "telemetry flush failed");
+        return reply.code(502).send({ error: telemetryErrorCode(error, "send_failed") });
       }
     });
   }

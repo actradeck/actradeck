@@ -15,6 +15,8 @@ import {
   normalizeHook,
 } from "../src/normalize.js";
 import type { HookCommonInput } from "../src/normalize.js";
+import { MANAGED_HOOK_EVENTS } from "../src/settings-injection.js";
+import { ATTACH_HOOK_EVENTS } from "../src/settings-merge.js";
 
 function hook(extra: Record<string, unknown>): HookCommonInput {
   return { session_id: "s1", cwd: "/repo", hook_event_name: "x", ...extra } as HookCommonInput;
@@ -185,6 +187,16 @@ describe("normalizeHook: governance guarantee", () => {
   it("carries governance_mode on session.started only", () => {
     const [ev] = normalizeHook(hook({ hook_event_name: "UserPromptSubmit", prompt: "hello" }));
     expect(ev?.governance_mode).toBeUndefined();
+  });
+
+  it("SEC-5 coupling: the injected hook set actually wires the gate that 'enforcement' asserts", () => {
+    // 「hook 経路 = enforcement」の主張は PreToolUse / PermissionRequest が実際に注入される
+    // ことに依存する。注入集合から片方でも外れたら (= gate が in-path でなくなったら) この
+    // pin が赤くなり、Protected 表示 / governed_session_started が偽装 green のまま残らない。
+    // attach 既定モードは MANAGED_HOOK_EVENTS と同一集合 (settings-merge.ts ATTACH_HOOK_EVENTS)。
+    expect(MANAGED_HOOK_EVENTS).toContain("PreToolUse");
+    expect(MANAGED_HOOK_EVENTS).toContain("PermissionRequest");
+    expect(ATTACH_HOOK_EVENTS).toEqual(MANAGED_HOOK_EVENTS);
   });
 });
 

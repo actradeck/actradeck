@@ -10,11 +10,22 @@
 import {
   TELEMETRY_EVENT_NAMES,
   TelemetryBatch,
+  isUtcDay,
+  nonNegativeCount,
+  utcDay,
   type TelemetryBatch as TelemetryBatchValue,
 } from "@actradeck/telemetry-contract";
 
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_REPORT_DAYS = 365;
+/**
+ * SEC-3 (2026-08-13 監査): 受理する occurred_on の窓。sender の lookback は 30 日 + enable 日
+ * clamp なので、正当な batch は過去 90 日を要求しない。窓外 (太古/未来日) を 400 で拒否し、
+ * pre-seed した未来行・任意過去行での retention/cohort 汚染と unbounded D1 成長の主要 vector を
+ * 閉じる (無認証 ingest 自体の poisoning-in-principle は docs の開示どおり残余)。
+ */
+const ACCEPT_PAST_DAYS = 90;
+const ACCEPT_FUTURE_DAYS = 1;
 // D1 permits 100 bound parameters per statement. Each row has six parameters.
 const ROWS_PER_UPSERT = 16;
 const FUNNEL_EVENTS = [
@@ -49,16 +60,6 @@ interface ParsedBody {
   readonly status?: 400 | 413;
 }
 
-function utcDay(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function validDay(value: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  return !Number.isNaN(parsed.getTime()) && utcDay(parsed) === value;
-}
-
 function daysBetween(from: string, to: string): number {
   return (
     Math.floor(
@@ -72,7 +73,7 @@ function parseReportRange(url: URL, now: Date): { from: string; to: string } | u
   const to = url.searchParams.get("to") ?? utcDay(now);
   const from =
     url.searchParams.get("from") ?? utcDay(new Date(now.getTime() - (30 - 1) * 86_400_000));
-  if (!validDay(from) || !validDay(to) || from > to) return undefined;
+  if (!isUtcDay(from) || !isUtcDay(to) || from > to) return undefined;
   const span = daysBetween(from, to);
   return span >= 1 && span <= MAX_REPORT_DAYS ? { from, to } : undefined;
 }
@@ -106,11 +107,6 @@ async function installationHash(secret: string, installationId: string): Promise
     await crypto.subtle.sign("HMAC", key, encoder.encode(installationId)),
   );
   return Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function integer(value: unknown): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 function rate(value: number, eligible: number): number | null {
@@ -221,14 +217,15 @@ async function aggregateReport(
       .bind(range.from, range.to),
     database
       .prepare(
+        // TDA-12 (2026-08-13 監査): funnel の対象イベントは FUNNEL_EVENTS を bind する
+        // (TS 配列と SQL リテラルの二重管理は追加イベントを silent 0 にする drift 源だった)。
         `SELECT event_name, COUNT(DISTINCT installation_hash) AS installations
            FROM telemetry_daily
           WHERE occurred_on BETWEEN ? AND ?
-            AND event_name IN ('install_verified', 'cockpit_started', 'cockpit_demo_completed',
-                               'first_agent_observed', 'first_governed_session')
+            AND event_name IN (${FUNNEL_EVENTS.map(() => "?").join(", ")})
           GROUP BY event_name`,
       )
-      .bind(range.from, range.to),
+      .bind(range.from, range.to, ...FUNNEL_EVENTS),
     database
       .prepare(
         `SELECT occurred_on AS day,
@@ -295,7 +292,7 @@ async function aggregateReport(
   ) as Record<string, number>;
   for (const row of resultRows(totalsResult)) {
     if (typeof row.event_name === "string" && row.event_name in totals) {
-      totals[row.event_name] = integer(row.count);
+      totals[row.event_name] = nonNegativeCount(row.count);
     }
   }
   const funnel = Object.fromEntries(FUNNEL_EVENTS.map((name) => [name, 0] as const)) as Record<
@@ -304,21 +301,21 @@ async function aggregateReport(
   >;
   for (const row of resultRows(funnelResult)) {
     if (typeof row.event_name === "string" && row.event_name in funnel) {
-      funnel[row.event_name] = integer(row.installations);
+      funnel[row.event_name] = nonNegativeCount(row.installations);
     }
   }
   const retentionRow = resultRows(retentionResult)[0] ?? {};
   const d1 = {
-    eligible: integer(retentionRow.eligible_d1),
-    retained: integer(retentionRow.retained_d1),
+    eligible: nonNegativeCount(retentionRow.eligible_d1),
+    retained: nonNegativeCount(retentionRow.retained_d1),
   };
   const d7 = {
-    eligible: integer(retentionRow.eligible_d7),
-    retained: integer(retentionRow.retained_d7),
+    eligible: nonNegativeCount(retentionRow.eligible_d7),
+    retained: nonNegativeCount(retentionRow.retained_d7),
   };
   const d30 = {
-    eligible: integer(retentionRow.eligible_d30),
-    retained: integer(retentionRow.retained_d30),
+    eligible: nonNegativeCount(retentionRow.eligible_d30),
+    retained: nonNegativeCount(retentionRow.retained_d30),
   };
 
   return {
@@ -331,13 +328,13 @@ async function aggregateReport(
     totals,
     daily: resultRows(dailyResult).map((row) => ({
       day: typeof row.day === "string" ? row.day.slice(0, 10) : "",
-      active_installations: integer(row.active_installations),
-      governed_sessions: integer(row.governed_sessions),
-      approval_requests: integer(row.approval_requests),
-      approval_decisions: integer(row.approval_decisions),
+      active_installations: nonNegativeCount(row.active_installations),
+      governed_sessions: nonNegativeCount(row.governed_sessions),
+      approval_requests: nonNegativeCount(row.approval_requests),
+      approval_decisions: nonNegativeCount(row.approval_decisions),
     })),
     retention: {
-      cohort_size: integer(retentionRow.cohort_size),
+      cohort_size: nonNegativeCount(retentionRow.cohort_size),
       day_1: { ...d1, rate: rate(d1.retained, d1.eligible) },
       day_7: { ...d7, rate: rate(d7.retained, d7.eligible) },
       day_30: { ...d30, rate: rate(d30.retained, d30.eligible) },
@@ -371,6 +368,16 @@ async function handleRequest(request: Request, env: Env, now: () => Date): Promi
     if (body.status === 400) return json({ error: "invalid JSON" }, 400);
     const parsed = TelemetryBatch.safeParse(body.value);
     if (!parsed.success) return json({ error: "invalid telemetry batch" }, 400);
+    // SEC-3 (2026-08-13 監査): 受理窓外の occurred_on (太古/未来日) は batch ごと 400。
+    const requestTime = now();
+    const oldestAccepted = utcDay(new Date(requestTime.getTime() - ACCEPT_PAST_DAYS * 86_400_000));
+    const newestAccepted = utcDay(
+      new Date(requestTime.getTime() + ACCEPT_FUTURE_DAYS * 86_400_000),
+    );
+    const outOfWindow = parsed.data.events.some(
+      (event) => event.occurred_on < oldestAccepted || event.occurred_on > newestAccepted,
+    );
+    if (outOfWindow) return json({ error: "occurred_on outside accepted window" }, 400);
     await persistBatch(env, parsed.data);
     return json({ accepted: parsed.data.events.length }, 202);
   }

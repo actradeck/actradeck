@@ -30,13 +30,28 @@ export const TELEMETRY_EVENT_NAMES = TelemetryEventName.options;
 export const TelemetryPlatform = z.enum(["linux", "darwin", "win32", "other"]);
 export type TelemetryPlatform = z.infer<typeof TelemetryPlatform>;
 
-const UtcDay = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine((value) => {
-    const date = new Date(`${value}T00:00:00.000Z`);
-    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
-  }, "invalid UTC day");
+/**
+ * Canonical UTC-day helpers. Sender (backend), collector, and any tooling must consume these
+ * instead of re-deriving `toISOString().slice(...)` / day regexes locally — the day predicate is
+ * part of the wire contract, and hand copies drift (audit finding TDA-5, 2026-08-13).
+ */
+export function utcDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+export function isUtcDay(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && utcDay(parsed) === value;
+}
+
+/** Coerce an untrusted value to a non-negative safe integer (invalid input folds to 0). */
+export function nonNegativeCount(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+const UtcDay = z.string().refine(isUtcDay, "invalid UTC day");
 
 const AppVersion = z
   .string()
@@ -54,10 +69,13 @@ export const TelemetryDailyEvent = z
   .strict();
 export type TelemetryDailyEvent = z.infer<typeof TelemetryDailyEvent>;
 
+/** Random (never machine-derived) installation identifier — the batch's only correlation key. */
+export const TelemetryInstallationId = z.uuid();
+
 export const TelemetryBatch = z
   .object({
     schema_version: z.literal(TELEMETRY_SCHEMA_VERSION),
-    installation_id: z.uuid(),
+    installation_id: TelemetryInstallationId,
     events: z.array(TelemetryDailyEvent).min(1).max(TELEMETRY_MAX_EVENTS_PER_BATCH),
   })
   .strict();
