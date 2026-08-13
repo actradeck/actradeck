@@ -1608,6 +1608,73 @@ describe("INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR: fallback paths still see a
 });
 
 // ============================================================================
+// INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND (SEC-CQ3-1・CQ-R3 監査 H)
+// ============================================================================
+// `&` が background 演算子なのは **redirect の一部でないとき** だけ。fd-dup (`2>&1` `1>&2`
+// `<&-`) と統合 redirect (`&>file`) の `&` はトークン内部の字句で、そこで裂くと command 名と
+// フラグが分断される。CQ-R2 で両分割器に `&` を入れた結果、`rm 2>&1 -rf /` が
+// ["rm 2>", "1 -rf /"] になり **実 bash は削除するのに low・カテゴリ空**(通常モードは
+// `risk !== "low"` を満たさず、bypass は DEFAULT_GATED に一致せず)= 二層同時 fail-open が
+// 実測された。base(8cbde70) / parent(97f4e4a) はどちらも high|recursive-rm でゲートしていた回帰。
+// 分類結果と split 出力の両レベルで固定する。
+describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not background separators", () => {
+  it("fd-dup between the program and its flags stays gated with its named category", () => {
+    const vectors: ReadonlyArray<readonly [string, string]> = [
+      ["rm 2>&1 -rf /tmp/x", "recursive-rm"],
+      ["rm 1>&2 -rf /tmp/x", "recursive-rm"],
+      ["rm 2>&- -rf /tmp/x", "recursive-rm"],
+      ["rm 3>&1 -rf /tmp/x", "recursive-rm"],
+      ["rm 2>&1 -rf /tmp/x | cat", "recursive-rm"],
+      ["cat file | rm 2>&1 -rf /tmp/x", "recursive-rm"],
+      ["env FOO=1 rm 2>&1 -rf /tmp/x", "recursive-rm"],
+      ["sudo rm 2>&1 -rf /tmp/x", "recursive-rm"],
+      ["chmod 2>&1 -R 777 /tmp/x", "perm-change"],
+      ["git 2>&1 reset --hard HEAD~5", "history-rewrite"],
+      ["rm >&2 -rf /tmp/x", "recursive-rm"],
+      ["rm 0<&0 -rf /tmp/x", "recursive-rm"],
+      ["rm &>/dev/null -rf /tmp/x", "recursive-rm"],
+    ];
+    for (const [cmd, category] of vectors) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, cmd).toBe("high");
+      expect([...categories], cmd).toContain(category);
+    }
+  });
+
+  it("fd-dup inside inline shell code is gated too (recursion sees the same lexing)", () => {
+    for (const cmd of [
+      "sh 2>&1 -c 'rm -rf /'",
+      "bash -c 'rm 2>&1 -rf /tmp/x'",
+      "{ rm 2>&1 -rf /tmp/x; }",
+    ]) {
+      expect(classifyCommandWithCategories(cmd).risk, cmd).toBe("high");
+    }
+  });
+
+  it("both splitters keep the redirect token whole (split-output level, discriminating)", () => {
+    for (const cmd of ["rm 2>&1 -rf /tmp/x", "rm >&2 -rf /tmp/x", "rm 0<&0 -rf /tmp/x"]) {
+      expect(splitSegments(cmd), cmd).toEqual([cmd]);
+      expect(splitSegmentsQuoteUnaware(cmd), cmd).toEqual([cmd]);
+    }
+    // `&>` (統合 redirect) も分割点にしない。
+    expect(splitSegments("rm &>/dev/null -rf /tmp/x")).toEqual(["rm &>/dev/null -rf /tmp/x"]);
+    expect(splitSegmentsQuoteUnaware("rm &>/dev/null -rf /tmp/x")).toEqual([
+      "rm &>/dev/null -rf /tmp/x",
+    ]);
+  });
+
+  it("a real background & is still a separator (the CQ-R2 fix is not regressed)", () => {
+    expect(splitSegments("sleep 0 & rm -rf /tmp/x")).toEqual(["sleep 0", "rm -rf /tmp/x"]);
+    expect(splitSegmentsQuoteUnaware("sleep 0 & rm -rf /tmp/x")).toEqual([
+      "sleep 0",
+      "rm -rf /tmp/x",
+    ]);
+    // redirect の直後に置かれた本物の background & は区切り (`cmd 2>&1 & danger`)。
+    expect(classifyCommandRisk("sleep 0 2>&1 & rm -rf /tmp/x")).toBe("high");
+  });
+});
+
+// ============================================================================
 // INV-APPROVAL-SPLIT-LAYER-CONTRACT (QA-CQ2-2 ≡ TDA-CQ2-2・CQ-R2 監査 H)
 // ============================================================================
 // layer (a) = splitSegments の shell 文法処理 (コメント skip / # 単語頭ガード / quote 外
@@ -1644,6 +1711,32 @@ describe("INV-APPROVAL-SPLIT-LAYER-CONTRACT: layer (a) is pinned at split-output
       "echo don\\'t",
       "rm -rf /tmp/x",
     ]);
+  });
+
+  it("backslash inside double quotes escapes the next char (QA-CQ3-2: M3 killer)", () => {
+    // M2 (quote 外 backslash) の隣に置く対の assert。R3 監査時点で M3 (ダブルクォート内の
+    // backslash 処理削除) は production 唯一の生存変異で、union backstop だけが救っていた —
+    // layer (a) 自身のフェンスがこの 1 本。`\"` は quote を閉じないため後続の `;` は quote 内。
+    expect(splitSegments('echo "a\\"; rm -rf /tmp/x"')).toEqual(['echo "a\\"; rm -rf /tmp/x"']);
+    expect(splitSegments('echo "a\\\\"; rm -rf /tmp/x')).toEqual(['echo "a\\\\"', "rm -rf /tmp/x"]);
+  });
+
+  it("TDA-CQ3-1: the fallback FP budget is pinned (benign unparseable shapes stay low)", () => {
+    // legacy splitter の粒度は fallback 役では primary の判定そのもの。`&` 追加で生じた
+    // 新規 medium (= 承認カード) を予算として明示 pin する。ここが RED になったら、splitter
+    // 変更が FP を無音で広げた合図 (実インシデントと同一クラス)。
+    for (const cmd of [
+      "psql -c $'select 1'",
+      "printf $'hello\\n'",
+      "echo 'unterminated",
+      "git commit -m $'wip'",
+    ]) {
+      expect(classifyCommandRisk(cmd), cmd).toBe("low");
+    }
+    // 既知・受容する FP (断片先頭がメタ文字になる形)。増減はレビュー対象。
+    for (const cmd of ["printf $'don\\'t & retry\\n'", "echo 'cmd & *.log"]) {
+      expect(classifyCommandRisk(cmd), cmd).not.toBe("high");
+    }
   });
 
   it("heredoc bodies: unquoted delimiter keeps the body in the segment stream, quoted discards it", () => {

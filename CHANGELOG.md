@@ -59,9 +59,16 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   splitter is now shell-syntax-aware (quotes, backslash escapes, `#` comments, heredoc bodies),
   and a single `&` (background terminator) is a separator in **both** the primary splitter and
   the legacy fallback/backstop splitter, so unparseable inputs (unterminated quotes or
-  heredocs) keep the `&` separation too. Dangerous paths stay gated: command substitution,
-  stdin shells and real pipes classify as before, and as a structural backstop any command the
-  previous classifier rated high still rates high. Honest costs of that backstop: a dangerous-
+  heredocs) keep the `&` separation too — while an `&` that belongs to a redirect (`2>&1`,
+  `>&2`, `<&-`, `&>file`) is kept inside its token, because splitting there tore a program name
+  away from its flags and let `rm 2>&1 -rf /` classify as harmless. Dangerous paths stay gated:
+  command substitution, stdin shells and real pipes classify as before, and as a structural
+  backstop any command the previous classifier rated high still rates high. Honest costs of
+  that backstop, and the honest limit of the guarantee: adding operators to a splitter is **not
+  monotone** — the legacy splitter is also the fallback for unparseable input, so finer
+  splitting there can lower a verdict as well as raise one (the redirect case above was exactly
+  that), which is why both directions are pinned by regression tests rather than assumed. A
+  dangerous-
   looking string inside quotes (`echo 'a; rm -rf /'`) or inside a quoted heredoc body (writing
   a runbook that documents `rm -rf`) still classifies high even though the shell would not
   execute it — the false-negative guarantee is bought with those known false positives — and

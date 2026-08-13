@@ -90,12 +90,21 @@ export const MAX_COMMAND_LEN = 4096;
  * 単一 `&` を区切りに含める (SEC-CQ2-1 ≡ QA-CQ2-1・CQ-R2 監査 H): fallback と union backstop は
  * どちらも本分割を使うため、ここが `&` を見ないと ANSI-C quoting の位相ずれ・未終端 heredoc 等で
  * **二層が同時に** `cmd & rm -rf /` の rm を見失い、実 bash が実行するのに low (承認カード無し)
- * になる fail-open が実測された。分割の追加は fail-safe/引き上げ専用の役割上 risk を下げる方向に
- * 働かない (増える FP は quote 内 `&` の断片化 = 受容済みクラス)。
+ * になる fail-open が実測された。ただし `&` は **background 演算子のときだけ** 区切りで、
+ * redirect の一部 (`2>&1` `>&2` `<&-` `&>file`) は 1 トークンとして残す (SEC-CQ3-1・R3 監査 H)。
+ *
+ * ⚠️ 分割器へ演算子を足す変更は **risk に対して単調ではない** (SEC-CQ3-2 ≡ TDA-CQ3-1 ≡ QA-CQ3-1
+ * で訂正): 本関数は union backstop の legacy 側 (high-only ゆえ FP 中立) であると同時に
+ * **primary の fallback** でもあり、fallback 役では粒度がそのまま primary の判定になる。
+ * 細かく割れば (a) command 名とフラグが分断されて high→low へ**下がりうる** (SEC-CQ3-1 が実例)、
+ * (b) 断片先頭がメタ文字になり「解析不能→medium 床上げ」が発火して新規承認カードが増える
+ * (benign corpus 実測 2.5%)、(c) 逆に割らなければ検出が復活する。単調性は仮定せず、
+ * INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND / INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR の
+ * 両方向 pin と INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE の全数比較で機械的に担保する。
  */
 export function splitSegmentsQuoteUnaware(command: string): string[] {
   return command
-    .split(/[;\n]|\|\||&&|\||&|(?<!\d)>{1,2}|<{1,2}/)
+    .split(/[;\n]|\|\||(?<![<>])&&|\||(?<![<>])&(?!>)|(?<![\d&])>{1,2}(?!&)|<<<|<{1,2}(?!&)/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
@@ -144,6 +153,10 @@ type SegmentSplitter = (command: string) => string[];
  * isNetworkEgressCommand) に加えて **check-classifier (classifyCheck) も本分割を消費する**。
  * check 認定側には union backstop が**適用されない** (quote-aware 分割のみ) — check は
  * 「検証を実行した」ことの credit であり、取りこぼしは under-credit (安全方向) に倒れるため。
+ * ただし **fallback 経路では legacy 分割が check 認定にも届く** (TDA-CQ3-2・R3 監査): 未終端
+ * heredoc/quote で splitSegments が splitSegmentsQuoteUnaware を返すため、bash が実際には
+ * 実行しないコマンドへ check_kind が付きうる (union 非適用でも粒度は legacy)。credit の
+ * 過大方向ゆえ ADR 0015 の under-credit 原則と逆で、追跡 task で扱う。
  * backstop の適用範囲を変える修正は boundary-gate 走査範囲変更 = full 監査既定。
  *
  * ⚠️ 承認ゲート境界の走査範囲 (scope) 変更に当たる — 変更時は finding-registry の full 監査既定。
@@ -258,13 +271,27 @@ export function splitSegments(command: string): string[] {
       continue;
     }
     if (ch === "&") {
-      // `&&` (連結) も単一 `&` (background 終端・SEC-CQ-2) も区切り。`2>&1` の `&1` は
-      // 分割後に無害な数値 fragment になるだけで判定を汚さない。
+      // `&&` (連結) も単一 `&` (background 終端・SEC-CQ-2) も区切り。ただし **redirect の一部**
+      // (`2>&1` `1>&2` `<&-` の fd-dup / `&>file` `&>>file` の統合 redirect) の `&` は演算子では
+      // なくトークン内部の字句であり、分割すると command 名とフラグが裂ける (SEC-CQ3-1・R3 監査 H:
+      // `rm 2>&1 -rf /` が ["rm 2>", "1 -rf /"] になり実 bash が削除するのに low = 承認カード無し)。
+      const previous = command[i - 1];
+      if (previous === ">" || previous === "<" || command[i + 1] === ">") {
+        current += ch;
+        i += 1;
+        continue;
+      }
       push();
       i += command[i + 1] === "&" ? 2 : 1;
       continue;
     }
     if (ch === "<") {
+      // SEC-CQ3-1: `<&` は fd-dup redirect の字句 (演算子ではない) — 分割しない。
+      if (command[i + 1] === "&") {
+        current += ch;
+        i += 1;
+        continue;
+      }
       if (command[i + 1] === "<" && command[i + 2] === "<") {
         push(); // herestring `<<< word`: word はデータだが旧挙動どおり後続を通常走査する。
         i += 3;
@@ -317,14 +344,23 @@ export function splitSegments(command: string): string[] {
     }
     if (ch === ">") {
       // fd redirect (`2>`) は旧挙動どおり分割点にしない ((?<!\d) の移植)。
+      // SEC-CQ3-1: `>&` (fd-dup) と `&>` (統合 redirect) も同様 — redirect トークンの内部で
+      // 裂くと command 名とフラグが分断され、実行される破壊的コマンドが low になる。
       const previous = command[i - 1];
+      if (previous === "&" || command[i + 1] === "&") {
+        current += ch;
+        i += 1;
+        continue;
+      }
       if (previous !== undefined && previous >= "0" && previous <= "9") {
         current += ch;
         i += 1;
         continue;
       }
       push();
-      i += command[i + 1] === ">" ? 2 : 1;
+      // `>>` は 1 演算子。ただし直後が `&` (`>>&`・bash では構文エラー) のときは legacy の
+      // regex backtracking と同じく単一 `>` として扱い、残る `>&` を fd-dup 字句に残す。
+      i += command[i + 1] === ">" && command[i + 2] !== "&" ? 2 : 1;
       continue;
     }
     current += ch;
