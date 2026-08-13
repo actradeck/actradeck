@@ -1615,7 +1615,9 @@ describe("INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR: fallback paths still see a
 // フラグが分断される。CQ-R2 で両分割器に `&` を入れた結果、`rm 2>&1 -rf /` が
 // ["rm 2>", "1 -rf /"] になり **実 bash は削除するのに low・カテゴリ空**(通常モードは
 // `risk !== "low"` を満たさず、bypass は DEFAULT_GATED に一致せず)= 二層同時 fail-open が
-// 実測された。base(8cbde70) / parent(97f4e4a) はどちらも high|recursive-rm でゲートしていた回帰。
+// 実測された。QA-CQ4-5 の訂正: 「base / 97f4e4a はどちらも high だった回帰」は 13 ベクタ中
+// 10 本にのみ当てはまる — `rm >&2 -rf`・`rm 0<&0 -rf` は base=medium/97f4e4a=low、
+// `rm &>/dev/null -rf` は両者 low で、この 3 本は回帰の復元でなく**新規の改善**。
 // 分類結果と split 出力の両レベルで固定する。
 describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not background separators", () => {
   it("fd-dup between the program and its flags stays gated with its named category", () => {
@@ -1863,10 +1865,21 @@ describe("INV-APPROVAL-CATEGORY-UNION-MERGE: legacy categories merge even when p
 // INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE (TDA-CQ-3)
 // ============================================================================
 // splitSegments (quote-aware 文字走査) と splitSegmentsQuoteUnaware (旧 regex + 単一 &・
-// fallback + union backstop の legacy 側) は同一の演算子集合を二重実装している。quote /
-// コメント (#) / 改行 heredoc を含まない入力では両者は**完全一致**しなければならない —
-// 片側だけ演算子を足す drift をこの全数比較が RED にする。単一 & は CQ-R2 (SEC-CQ2-1) で
-// 共有集合へ昇格した (fallback/backstop が & を見ないと二層同時 fail-open になるため)。
+// fallback + union backstop の legacy 側) は **区切り演算子** (`;` `\n` `|` `||` `&&` `&`) を
+// 二重実装している。両者が一致しなければならないのは下記 SHARED_SPLIT_ALPHABET の全数域に
+// 限る — 片側だけ区切りを足す drift をこの比較が RED にする。
+//
+// 一致域の正直な限定 (QA-CQ4-4 で訂正・以前は「quote/#/改行を含まなければ完全一致」と
+// 過大に述べていた):
+//  - **backslash**: quote-aware 側のみ escape を解釈するため構造的に乖離する
+//    (実測 37,448 入力中 8,992 件・legacy が常に同等以上に細かい = 安全方向)。下の
+//    positive control で乖離クラスとその向きを pin する。
+//  - **redirect (`<` `>` とその合成形)**: R4 の構造修正で primary は演算子と対象語を除去し、
+//    legacy は従来どおり過剰分割する (意図的 divergence・別 test で pin)。
+//  - quote / `#` コメント / 改行 heredoc: 元から primary のみが解釈する。
+// **一致は drift の tripwire であって正しさの証拠ではない** (TDA-CQ4-5): 両実装が同じ誤答で
+// 一致する形では全数緑のまま fail-open が成立しうる。正しさ側は
+// INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND の演算子×配置マトリクスが担う。
 const SHARED_SPLIT_ALPHABET = ["a", " ", ";", "|", "&", "2"] as const;
 describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
   it("exhaustive equivalence on the shared-operator domain (alphabet without # newline quotes)", () => {
@@ -1928,5 +1941,14 @@ describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
     // コメント (新側のみ skip)。
     expect(splitSegments("a # b")).toEqual(["a"]);
     expect(splitSegmentsQuoteUnaware("a # b")).toEqual(["a # b"]);
+    // QA-CQ4-4: backslash escape (quote-aware 側のみ解釈)。乖離の**向き**も固定する —
+    // legacy は常に同等以上に細かく割る (= union backstop は high 側にしか効かず安全方向)。
+    expect(splitSegments("aa\\;a")).toEqual(["aa\\;a"]);
+    expect(splitSegmentsQuoteUnaware("aa\\;a")).toEqual(["aa\\", "a"]);
+    expect(splitSegments("echo a\\| rm -rf /tmp/x")).toEqual(["echo a\\| rm -rf /tmp/x"]);
+    expect(splitSegmentsQuoteUnaware("echo a\\| rm -rf /tmp/x")).toEqual([
+      "echo a\\",
+      "rm -rf /tmp/x",
+    ]);
   });
 });
