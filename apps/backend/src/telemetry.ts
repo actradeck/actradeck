@@ -261,6 +261,7 @@ class TelemetryStateStore {
   constructor(
     readonly path: string,
     private readonly now: () => Date,
+    private readonly disabled = false,
   ) {}
 
   private async readDirect(): Promise<PersistedTelemetryState> {
@@ -276,6 +277,19 @@ class TelemetryStateStore {
   }
 
   private async writeDirect(state: PersistedTelemetryState): Promise<void> {
+    // QA-R4-2 / TDA-R4-4 / SEC-R4-2 (2026-08-14 監査 R4): kill-switch の state-write ガードは
+    // 呼び出し側の per-method 判定でなく、この単一 choke point で構造的に止める
+    // (ApprovalBridge.safePersist と同じ単一出所規律)。R3 版は enable/flush/start のみ
+    // ガードし、disable()/resetId() が実 consent state へ到達していた (resetId は
+    // installation UUID を回転させ collector 上「新規インストール」に見える = 指標自作汚染)。
+    // ここで止めれば将来の mutator 追加も自動的に覆われる。read は非ガード (status/preview は
+    // 無害な読取りで、壊れた state の fail-safe 縮退と同じ扱い)。
+    if (this.disabled) {
+      throw new TelemetryError(
+        "not_configured",
+        "telemetry is disabled by ACTRADECK_TELEMETRY_DISABLED",
+      );
+    }
     const parent = dirname(this.path);
     await mkdir(parent, { recursive: true, mode: 0o700 });
     const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
@@ -432,13 +446,18 @@ export class AnonymousTelemetry {
 
   constructor(private readonly options: AnonymousTelemetryOptions) {
     this.now = options.now ?? (() => new Date());
-    // SEC-R3-2: kill-switch は composition root だけでなくインスタンス自身も尊重する
-    // (defense-in-depth)。statePath 省略 + 既定 endpoint (本番 collector) で直接 construct した
-    // コードが operator の実 consent state を書き換えたり実送信する事故を、ここで止める。
+    // SEC-R3-2 + R4 M-1 (QA-R4-2/TDA-R4-4/SEC-R4-2): kill-switch は composition root だけでなく
+    // インスタンス自身も尊重する (defense-in-depth)。カバレッジは二層で正確に:
+    //  - state 書込みは **全 mutator** (enable/disable/resetId/recordCockpitStarted/recordSuccess
+    //    と将来の追加) を store の writeDirect 単一 choke で遮断する。
+    //  - egress (flush/start) と operator 向けエラー整形 (enable) は per-method 早期 return/throw。
+    // これで statePath 省略 + 既定 endpoint (本番 collector) で直接 construct したコードが
+    // operator の実 consent state を書き換えたり実送信する事故を構造的に止める。
     this.disabledByEnv = telemetryDisabledByEnv(options.env ?? process.env);
     this.state = new TelemetryStateStore(
       options.statePath ?? defaultTelemetryStatePath(),
       this.now,
+      this.disabledByEnv,
     );
     // SEC-2 (2026-08-13 監査): 提示用 endpoint (env 由来) の不正値で construct を落とさない。
     // 不正なら「提示 endpoint 無し」へ縮退する (enable 時に明示 endpoint が必要になるだけで、

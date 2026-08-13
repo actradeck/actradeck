@@ -20,8 +20,10 @@ export function isBypassPermissionMode(mode: string | undefined): boolean {
  * 宣言 (normalize) とゲート (approval-bridge) が **同一 predicate の同一評価** から分岐する
  * ことをこの関数が構造的に保証する — 宣言側がこの関数を、ゲート側が isBypassPermissionMode を
  * 消費し、両者の bypass 集合は定義上一致する。ゲート側だけに bypass 扱いモードを足す変更は
- * inv-governance-bypass-coupling の排他 assert (permission_mode の値比較は本モジュール外に
- * 存在しない + bridge 条件形 pin) が RED にする。
+ * inv-governance-bypass-coupling の **permission_mode トークン出現 allowlist** (file→件数の
+ * 完全一致 pin・R4 SEC-R4-1 で比較形 regex から置換 = alias/Set.has 等の形式に依存しない) と
+ * bridge 条件形 pin が RED にする。トークンを一切読まない第二ゲートは書けないため、この保証は
+ * 形式非依存 (既知の限界: 動的プロパティ構成による難読化はレビュー対象・脅威モデル外)。
  */
 export function governanceModeFor(mode: string | undefined): "unavailable" | "enforcement" {
   return isBypassPermissionMode(mode) ? "unavailable" : "enforcement";

@@ -51,7 +51,10 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   approvals now follow the request's own lifecycle: reaching a terminal state still clears that
   run's open approvals, but a request arriving *after* the terminal state — a live daemon
   holding a real round-trip — stays visible and actionable instead of silently timing out to
-  deny.
+  deny. Post-terminal cards are cleared by the request's own resolution, or — if the daemon
+  died first — by the synthetic relay-lost retire on the daemon's next reconnect; a card whose
+  daemon never returns stays in the store but is hidden by Inbox presence gating and can never
+  auto-allow.
 
 ## [0.7.0] - 2026-08-10
 

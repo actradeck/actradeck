@@ -1127,4 +1127,49 @@ describe("ADR 0014: orthogonal lifecycle axes (terminal poisoning fix)", () => {
     expect(suspended.pending_approvals).toHaveLength(0);
     expect(suspended.needs_attention).toBe(false);
   });
+
+  // QA-R4-3 (2026-08-14 監査 R4): INV-APPROVAL-POST-TERMINAL-VISIBLE の共有 reducer 側 pin。
+  //   backend の inv-approval-projection.test.ts だけに依存すると、webui Session Replay も消費する
+  //   この T1 reducer の契約が package 単体の CI で検知されない (locality)。terminal **到達時**は
+  //   クリア (上のテスト)・terminal **後**の requested は可視 (本テスト) の両方向を package 側で持つ。
+  it("terminal 後に到着した requested は可視のまま (INV-APPROVAL-POST-TERMINAL-VISIBLE)", () => {
+    const done = applyEvent(
+      initialProjection("s1"),
+      ev({
+        event_type: "session.ended",
+        state: "completed",
+      }),
+    ).projection;
+    expect(done.state).toBe("completed");
+    const late = applyEvent(
+      done,
+      ev({
+        event_type: "tool.permission.requested",
+        state: "waiting.approval",
+        timestamp: "2026-06-06T00:00:01.000Z",
+        payload: {
+          request_id: "s1:apr-late",
+          tool_name: "Bash",
+          command: "deploy",
+          risk_level: "high",
+        },
+      }),
+    );
+    // 状態遷移は ignore (terminal 不変) だが、要求カードは要求自身のライフサイクルに従い可視。
+    expect(late.ignoredAfterTerminal).toBe(true);
+    expect(late.projection.state).toBe("completed");
+    expect(late.projection.pending_approvals).toHaveLength(1);
+    expect(late.projection.needs_attention).toBe(true);
+    // 実 resolved で除去される (回収経路 (a))。
+    const resolved = applyEvent(
+      late.projection,
+      ev({
+        event_type: "tool.permission.resolved",
+        state: "completed",
+        timestamp: "2026-06-06T00:00:02.000Z",
+        payload: { request_id: "s1:apr-late", decision: "deny", resolution_origin: "timeout" },
+      }),
+    ).projection;
+    expect(resolved.pending_approvals).toHaveLength(0);
+  });
 });

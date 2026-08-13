@@ -96,6 +96,76 @@ describe("anonymous telemetry", () => {
     await expect(readFile(statePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("R4 M-1 (QA-R4-2/TDA-R4-4): the kill-switch chokes ALL state writers, including disable()/resetId()", async () => {
+    // R3 版は enable/flush/start のみガードし、disable()/resetId() が operator の実 consent state
+    // へ到達していた (resetId は installation UUID を回転させ collector 上「新規インストール」に
+    // 見える = 指標自作汚染)。ガードは TelemetryStateStore.writeDirect 単一 choke に在り、
+    // 将来の mutator 追加も自動的に覆う。
+    const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
+    FIXTURE_DIRS.push(directory);
+    const statePath = join(directory, "state.json");
+    // opt-in 済み operator を模す実 consent state (choke が無いと resetId がこれを書き換える)。
+    const enabledState = JSON.stringify({
+      schema_version: 1,
+      mode: "anonymous",
+      installation_id: "3e0e1abc-7c1d-4a6b-9a6e-2f4c8d1e5b7a",
+      endpoint: "https://telemetry.example.test/v1/events",
+      enabled_at: new Date(NOW).toISOString(),
+      cockpit_started: {},
+    });
+    await writeFile(statePath, enabledState, "utf8");
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
+    const telemetry = new AnonymousTelemetry({
+      env: { ACTRADECK_TELEMETRY_DISABLED: "1" },
+      usage: usage(),
+      statePath,
+      defaultEndpoint: "https://telemetry.example.test/v1/events",
+      now: () => new Date(NOW),
+      fetchImpl,
+    });
+    await expect(telemetry.disable()).rejects.toMatchObject({ code: "not_configured" });
+    await expect(telemetry.resetId()).rejects.toMatchObject({ code: "not_configured" });
+    // consent state はバイト単位で不変 (installation UUID の回転も opt-out clobber も無い)。
+    expect(await readFile(statePath, "utf8")).toBe(enabledState);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("SEC-R4-2: with a REAL opted-in consent state, flush()/start() still perform zero egress under the kill-switch", async () => {
+    // R3 のテストは未 enable 状態しか作らず、flush/start のガード除去に無反応だった (SEC-R4-2 で
+    // 実証: guard 除去 → 実 fetch 2 回・state 書換で 16/16 GREEN のまま)。本テストは opt-in 済み
+    // state を用意し、ガード除去が即 RED になる形で「egress ゼロ + state 不変」を falsify 可能に固定する。
+    const directory = await mkdtemp(join(tmpdir(), "actradeck-telemetry-"));
+    FIXTURE_DIRS.push(directory);
+    const statePath = join(directory, "state.json");
+    const enabledState = JSON.stringify({
+      schema_version: 1,
+      mode: "anonymous",
+      installation_id: "5b1f2e3d-8a4c-4d5e-b6f7-0a1b2c3d4e5f",
+      endpoint: "https://telemetry.example.test/v1/events",
+      enabled_at: new Date(NOW).toISOString(),
+      cockpit_started: {},
+    });
+    await writeFile(statePath, enabledState, "utf8");
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
+    const telemetry = new AnonymousTelemetry({
+      env: { ACTRADECK_TELEMETRY_DISABLED: "1" },
+      usage: usage(),
+      statePath,
+      defaultEndpoint: "https://telemetry.example.test/v1/events",
+      now: () => new Date(NOW),
+      fetchImpl,
+    });
+    await expect(telemetry.flush()).resolves.toEqual({
+      sent: false,
+      event_count: 0,
+      reason: "disabled",
+    });
+    await telemetry.start();
+    telemetry.dispose();
+    expect(fetchImpl).not.toHaveBeenCalled(); // ガード除去なら opt-in state ゆえ実 fetch が走り RED。
+    expect(await readFile(statePath, "utf8")).toBe(enabledState); // presence 記録も choke で不変。
+  });
+
   it("is default-off and performs no network request", async () => {
     const { telemetry, fetchImpl } = await fixture();
     expect(await telemetry.status()).toMatchObject({

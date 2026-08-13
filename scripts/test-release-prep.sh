@@ -931,16 +931,24 @@ fi
 # `grep -v SCHEMA_VERSION` dropped the whole line, so a real app-version literal co-located
 # with a SCHEMA_VERSION assignment escaped. Excluded-name assignments are stripped from the
 # candidate line first, and the line is reported only if a match remains.
+# TDA-R4-3 (audit R4): the alternation previously required a `_VERSION`/`_version`/`Version`
+# suffix, missing the single most idiomatic re-hardcoding shape `export const VERSION = "x.y.z"`.
+# `_?VERSION` covers bare all-caps VERSION as well.
+# TDA-R4-7 (audit R4): the test-file exclusion used to match the WHOLE grep line, so a real
+# literal whose line merely mentioned ".test.ts" in a comment was silently dropped. The filter
+# now anchors on the path field of grep's `path:line:content` output.
 # Known limits (documented, not silent; each verified by the probes below): identifiers must
-# end in Version/_VERSION/_version (`const APP_VER = "…"` is out of scope), and non-scalar
-# type annotations (e.g. `string[]`) are not covered.
-VERSION_LITERAL_RE='(_VERSION|_version|Version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>|[:space:]]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+'
+# end in VERSION/_VERSION/_version/Version (`const APP_VER = "…"` and bare lowercase
+# `version = "x.y.z"` identifiers are out of scope — the lowercase property form would
+# false-positive on data fixtures), and non-scalar type annotations (e.g. `string[]`) are
+# not covered.
+VERSION_LITERAL_RE='(_?VERSION|_version|Version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>|[:space:]]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+'
 version_literal_scan() {
   # $@ = roots to scan
   local line stripped
   grep -rnE "$VERSION_LITERAL_RE" \
     "$@" --include='*.ts' --include='*.tsx' 2>/dev/null \
-    | grep -v -e '\.test\.ts' -e '\.spec\.ts' -e '\.test\.tsx' -e '\.spec\.tsx' \
+    | grep -vE '^[^:]*\.(test|spec)\.tsx?:' \
     | while IFS= read -r line; do
         stripped="$(printf '%s' "$line" \
           | sed -E 's/(SCHEMA|PROTOCOL|MANIFEST|PACKET)_(VERSION|version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>| ]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+//g')"
@@ -989,6 +997,32 @@ if version_literal_scan "$WORK/vliteral" | grep -q 'schemaonly\.ts'; then
 else
   ok "INV-VERSION-SINGLE-SOURCE: excluded schema-name assignments stay unflagged (no false positive)"
 fi
+rm -f "$VLP/schemaonly.ts"
+# TDA-R4-3: bare all-caps VERSION — the most idiomatic re-hardcoding shape — must be caught.
+printf 'export const VERSION = "9.9.9";\n' > "$VLP/bareversion.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'bareversion\.ts'; then
+  ok "INV-VERSION-SINGLE-SOURCE: scanner catches a bare VERSION literal (bareversion.ts)"
+else
+  ng "INV-VERSION-SINGLE-SOURCE: DEAD GATE — bare VERSION literal escaped the scanner"
+fi
+rm -f "$VLP/bareversion.ts"
+# TDA-R4-7: the test-file filter anchors on the PATH field — a real literal in a non-test file
+# is reported even when its line mentions ".test.ts" in a comment, while real test files stay
+# excluded.
+printf 'const APP_VERSION = "9.9.9"; // covered by foo.test.ts\n' > "$VLP/contentfilter.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'contentfilter\.ts'; then
+  ok "INV-VERSION-SINGLE-SOURCE: path-anchored filter keeps a literal whose line mentions .test.ts"
+else
+  ng "INV-VERSION-SINGLE-SOURCE: DEAD GATE — a .test.ts mention in a comment suppressed a real literal"
+fi
+rm -f "$VLP/contentfilter.ts"
+printf 'const APP_VERSION = "9.9.9";\n' > "$VLP/excluded.test.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'excluded\.test\.ts'; then
+  ng "INV-VERSION-SINGLE-SOURCE: path filter regression — a real test file is being scanned"
+else
+  ok "INV-VERSION-SINGLE-SOURCE: real test files stay excluded by path (excluded.test.ts)"
+fi
+rm -f "$VLP/excluded.test.ts"
 
 # ============================================================================
 # INV-DOCS-SCRIPT-PARITY (TDA-R2-2, 2026-08-13 audit R2)
