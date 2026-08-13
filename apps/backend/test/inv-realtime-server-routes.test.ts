@@ -21,7 +21,7 @@
  * inv-replay-history / inv-realtime-server) が実データで担保する。ここでは store/replay-store の
  * **返り値形状のみ**を偽装し、ルート層の分岐到達を決定論的に固定する (DB 未到達でも実走する)。
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 
@@ -32,6 +32,7 @@ import type { RealtimeHub } from "../src/realtime-hub.js";
 import type { ReplayStore } from "../src/replay-store.js";
 import type { AuditStore } from "../src/audit-store.js";
 import type { RealtimeStore } from "../src/realtime-store.js";
+import type { UsageStore } from "../src/usage-store.js";
 import { registerRealtimeRoute } from "../src/realtime-server.js";
 import { installErrorScrubbing } from "../src/error-scrub.js";
 import { buildIngestionServer } from "../src/ingestion-server.js";
@@ -95,6 +96,7 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     calls?: FakeReplayCalls;
     auditStore?: AuditStore;
     replayStore?: ReplayStore;
+    usageStore?: UsageStore;
     projectScope?: readonly string[];
   }): Promise<FakeReplayCalls> {
     const calls: FakeReplayCalls = deps.calls ?? { commandOutputArgs: [] };
@@ -166,6 +168,26 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
       store,
       replayStore,
       auditStore,
+      usageStore:
+        deps.usageStore ??
+        ({
+          report: async () => ({
+            schema_version: 1,
+            timezone: "UTC",
+            semantics: "local_aggregate_not_users",
+            from: "2026-08-10",
+            to: "2026-08-10",
+            totals: {
+              cockpit_demo_started: 0,
+              cockpit_demo_completed: 0,
+              real_sessions: 0,
+              protected_sessions: 0,
+              approval_requests: 0,
+              operator_decisions: 0,
+            },
+            days: [],
+          }),
+        } as unknown as UsageStore),
       sidecarRegistry: registry,
       // 既定は空 scope (無制限) を明示注入し、env ACTRADECK_PROJECT_SCOPE の混入を排除して決定論化する。
       projectScope: deps.projectScope ?? [],
@@ -265,6 +287,53 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     });
     expect(res.statusCode).toBe(404);
     expect(res.json()).toMatchObject({ error: "session not registered" });
+  });
+
+  // --- aggregate-only local usage ------------------------------------------------------------
+  it("usage: missing token → 401", async () => {
+    await mount({});
+    const res = await app.inject({ method: "GET", url: "/realtime/usage?since=30d" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("usage: invalid since is rejected before querying", async () => {
+    const report = vi.fn();
+    await mount({ usageStore: { report } as unknown as UsageStore });
+    const res = await app.inject({
+      method: "GET",
+      url: "/realtime/usage?since=all",
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it("usage: returns aggregate-only report", async () => {
+    const report = vi.fn().mockResolvedValue({
+      schema_version: 1,
+      timezone: "UTC",
+      semantics: "local_aggregate_not_users",
+      from: "2026-08-10",
+      to: "2026-08-10",
+      totals: {
+        cockpit_demo_started: 1,
+        cockpit_demo_completed: 1,
+        real_sessions: 2,
+        protected_sessions: 1,
+        approval_requests: 1,
+        operator_decisions: 1,
+      },
+      days: [],
+    });
+    await mount({ usageStore: { report } as unknown as UsageStore });
+    const res = await app.inject({
+      method: "GET",
+      url: "/realtime/usage?since=1d",
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(report).toHaveBeenCalledOnce();
+    expect(res.body).not.toMatch(/session_id|event_id|command|prompt|cwd|repo/);
   });
 
   // --- INV-WALL-EMPTY-LANE: connected だが events 0 の session も空配列レーンで現れる -----------

@@ -1,0 +1,27 @@
+{
+  "name": "@actradeck/telemetry-collector",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "description": "Privacy-minimal Cloudflare Worker and D1 aggregate PMF API for explicit ActraDeck opt-in telemetry.",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --config wrangler.example.jsonc --outdir dist",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "dev": "wrangler dev --config wrangler.local.jsonc",
+    "deploy": "wrangler deploy --config wrangler.local.jsonc",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local --config wrangler.local.jsonc",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote --config wrangler.local.jsonc"
+  },
+  "dependencies": {
+    "@actradeck/telemetry-contract": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.21.2",
+    "@cloudflare/workers-types": "5.20260813.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8",
+    "wrangler": "4.122.0"
+  }
+}

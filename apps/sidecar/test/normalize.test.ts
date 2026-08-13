@@ -167,6 +167,27 @@ describe("normalizeHook: state mapping", () => {
   });
 });
 
+describe("normalizeHook: governance guarantee", () => {
+  it("marks ordinary Claude hook sessions as enforcement", () => {
+    const [ev] = normalizeHook(
+      hook({ hook_event_name: "SessionStart", permission_mode: "default" }),
+    );
+    expect(ev?.governance_mode).toBe("enforcement");
+  });
+
+  it("does not over-claim bypassPermissions sessions", () => {
+    const [ev] = normalizeHook(
+      hook({ hook_event_name: "SessionStart", permission_mode: "bypassPermissions" }),
+    );
+    expect(ev?.governance_mode).toBe("unavailable");
+  });
+
+  it("carries governance_mode on session.started only", () => {
+    const [ev] = normalizeHook(hook({ hook_event_name: "UserPromptSubmit", prompt: "hello" }));
+    expect(ev?.governance_mode).toBeUndefined();
+  });
+});
+
 /**
  * INV-SUBAGENT-BOUNDARY: subagent.started/completed は **agent_type 非空のときだけ** emit する。
  *

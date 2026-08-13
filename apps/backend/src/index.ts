@@ -17,6 +17,8 @@ import { createPool } from "./db.js";
 import { reapStaleDemoSessionState } from "./ingest-store.js";
 import { buildIngestionServer } from "./ingestion-server.js";
 import { SAFETY_DEMO_SESSION_PREFIX as DEMO_SESSION_PREFIX } from "./safety-demo-script.js";
+import { ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT, AnonymousTelemetry } from "./telemetry.js";
+import { UsageStore } from "./usage-store.js";
 
 export const BACKEND_NAME = "@actradeck/backend" as const;
 
@@ -106,6 +108,24 @@ export {
 } from "./sidecar-registry.js";
 export { registerRealtimeRoute, type RealtimeRouteOptions } from "./realtime-server.js";
 export {
+  UsageStore,
+  parseUsageRange,
+  type UsageRange,
+  type UsageReport,
+  type UsageDailyRow,
+  type UsageTotals,
+} from "./usage-store.js";
+export {
+  ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT,
+  AnonymousTelemetry,
+  defaultTelemetryStatePath,
+  normalizeTelemetryEndpoint,
+  type AnonymousTelemetryOptions,
+  type TelemetryFlushResult,
+  type TelemetryPreview,
+  type TelemetryStatus,
+} from "./telemetry.js";
+export {
   SafetyDemoLauncher,
   SAFETY_DEMO_SESSION_PREFIX,
   resolveDefaultDriverPath,
@@ -149,10 +169,16 @@ export async function startFromEnv(): Promise<{
     embedded = await startEmbeddedPg(defaultDataDir());
     pool = createPool({ connectionString: embedded.connectionString, max: EMBEDDED_POOL_MAX });
   }
+  const telemetry = new AnonymousTelemetry({
+    usage: new UsageStore(pool),
+    defaultEndpoint:
+      process.env.ACTRADECK_TELEMETRY_ENDPOINT ?? ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT,
+  });
   const app = await buildIngestionServer({
     pool,
     ingestToken,
     ...(realtimeToken ? { realtimeToken } : {}),
+    ...(realtimeToken ? { telemetry } : {}),
     logger: true,
   });
   // SEC-2 sweep (task 019f38b9): 使い捨てデモ session の stale projection 行を boot 時に reap。
@@ -173,6 +199,8 @@ export async function startFromEnv(): Promise<{
   const host = process.env.ACTRADECK_BACKEND_HOST ?? "127.0.0.1";
   // listen() は実際に bind したアドレス文字列を返す (port=0 のとき実 port を含む)。
   const address = await app.listen({ port, host });
+  // Default-off: this only reads local state. Network egress happens after explicit enable.
+  if (realtimeToken) await telemetry.start();
   // 実際に bind した port を server から取り出す (env の 0 ではなく解決後の値)。
   const addr = app.server.address();
   const boundPort = addr && typeof addr === "object" ? addr.port : port;
@@ -182,6 +210,7 @@ export async function startFromEnv(): Promise<{
     host,
     dbMode,
     close: async () => {
+      telemetry.dispose();
       await app.close();
       await pool.end();
       // 埋込のときは socket サーバ + PGlite も閉じる (real pg のときは embedded=undefined)。

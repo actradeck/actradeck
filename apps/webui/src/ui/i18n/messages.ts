@@ -40,6 +40,9 @@ const ja = {
   "header.theme.dark": "ダーク",
   "header.theme.hc": "ハイコントラスト",
   "header.locale": "言語",
+  "header.settings": "設定",
+  "settings.title": "設定",
+  "settings.privacy": "Privacy",
 
   // ── 概況メトリクス (CockpitBoard overview) ──────────────────────────────
   "overview.connection": "接続",
@@ -55,6 +58,34 @@ const ja = {
   "tab.wall": "Live Wall",
   "tab.audit": "監査",
   "tab.policy": "承認ポリシー",
+
+  // ── 明示 opt-in 匿名利用計測 ────────────────────────────────────────────
+  "telemetry.title": "匿名利用計測",
+  "telemetry.on": "ON（明示同意済み）",
+  "telemetry.off": "OFF",
+  "telemetry.defaultOff": "初期設定はOFFです",
+  "telemetry.lead":
+    "有効化するまで送信しません。日次の匿名カウンターだけを送信し、いつでも停止できます。",
+  "telemetry.collects.title": "送るもの",
+  "telemetry.collects.body":
+    "起動・デモ完了・観測／保護セッション・承認判断・利用日のUTC日次件数と、無作為なインストールID。",
+  "telemetry.excludes.title": "送らないもの",
+  "telemetry.excludes.body":
+    "プロンプト、コマンド、パス、リポジトリ名、セッション／イベントID、secret、監査イベント本文。IPはpayloadに含めずD1にも保存しません（Cloudflareが接続処理とrate limitで一時処理）。",
+  "telemetry.endpoint": "収集先HTTPS URL",
+  "telemetry.endpointHint":
+    "空欄ならActraDeck公式収集先を使います。セルフホスト時だけ独自URLを入力します。",
+  "telemetry.id": "匿名インストールID",
+  "telemetry.enabledAt": "有効化日時",
+  "telemetry.lastSent": "最終送信成功",
+  "telemetry.enable": "匿名計測を有効化",
+  "telemetry.disable": "停止してIDを削除",
+  "telemetry.resetId": "匿名IDを再生成",
+  "telemetry.sendNow": "今すぐ送信",
+  "telemetry.preview": "送信予定データを確認",
+  "telemetry.previewHide": "プレビューを閉じる",
+  "telemetry.previewLead": "このJSONが送信対象です（OFFのときは null）。",
+  "telemetry.error": "匿名計測の操作に失敗しました。収集先URLとサーバー状態を確認してください。",
 
   // ── 監査ビュー (強み(a) audit view) ─────────────────────────────────────
   "audit.title": "監査ビュー",
@@ -887,6 +918,9 @@ const en: Record<MessageKey, string> = {
   "header.theme.dark": "Dark",
   "header.theme.hc": "High contrast",
   "header.locale": "Language",
+  "header.settings": "Settings",
+  "settings.title": "Settings",
+  "settings.privacy": "Privacy",
 
   // ── overview ──
   "overview.connection": "Connection",
@@ -902,6 +936,34 @@ const en: Record<MessageKey, string> = {
   "tab.wall": "Live Wall",
   "tab.audit": "Audit",
   "tab.policy": "Approval policy",
+
+  // ── explicit opt-in anonymous telemetry ──
+  "telemetry.title": "Anonymous usage metrics",
+  "telemetry.on": "ON (opted in)",
+  "telemetry.off": "OFF",
+  "telemetry.defaultOff": "Off by default",
+  "telemetry.lead":
+    "Nothing is sent until you enable it. Only anonymous daily counters are sent, and you can stop at any time.",
+  "telemetry.collects.title": "Sent",
+  "telemetry.collects.body":
+    "UTC daily counts for starts, demo completion, observed/protected sessions, approval decisions and active days, plus a random installation ID.",
+  "telemetry.excludes.title": "Never sent",
+  "telemetry.excludes.body":
+    "Prompts, commands, paths, repository names, session/event IDs, secrets, or audit event bodies. IP is absent from the payload and D1; Cloudflare processes it transiently for the connection and rate limit.",
+  "telemetry.endpoint": "Collector HTTPS URL",
+  "telemetry.endpointHint":
+    "Leave blank for the official ActraDeck collector. Enter a custom URL only when self-hosting.",
+  "telemetry.id": "Anonymous installation ID",
+  "telemetry.enabledAt": "Enabled",
+  "telemetry.lastSent": "Last successful send",
+  "telemetry.enable": "Enable anonymous metrics",
+  "telemetry.disable": "Stop and delete ID",
+  "telemetry.resetId": "Regenerate anonymous ID",
+  "telemetry.sendNow": "Send now",
+  "telemetry.preview": "Preview data to be sent",
+  "telemetry.previewHide": "Close preview",
+  "telemetry.previewLead": "This JSON is the complete send payload (null while off).",
+  "telemetry.error": "The telemetry action failed. Check the collector URL and server status.",
 
   // ── audit view (strength a) ──
   "audit.title": "Audit",

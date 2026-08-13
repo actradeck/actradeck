@@ -1603,6 +1603,15 @@ export function normalizeHook(
   ): ReturnType<typeof buildEvent> =>
     buildEvent({
       ...base,
+      // 通常の Claude hook 経路は ApprovalBridge が実行前に介在する。bypassPermissions は
+      // per-repo policy の有効性を同期 normalizer だけでは確定できないため unavailable とし、
+      // protected を過大計上しない。保証宣言は run 起点だけに載せる。
+      ...(event_type === "session.started"
+        ? {
+            governance_mode:
+              input.permission_mode === "bypassPermissions" ? "unavailable" : "enforcement",
+          }
+        : {}),
       event_type,
       ...(state !== undefined ? { state } : {}),
       ...(extra.summary !== undefined ? { summary: extra.summary } : {}),

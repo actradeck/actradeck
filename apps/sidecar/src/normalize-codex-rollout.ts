@@ -383,6 +383,8 @@ function makeEvent(
   //   (session.started) にのみ載せる。1-file-1-run ゆえ session_meta が唯一の起点。backend 3a の
   //   sticky (first-wins) が起点値を確定する。over-claim 回避で forked_from_id があるときだけ resume。
   if (eventType === "session.started") {
+    // rollout tail は passive capture であり、実行を停止できない。
+    candidate.governance_mode = "observe_only";
     if (ctx.startKind !== undefined) candidate.start_kind = ctx.startKind;
     if (ctx.resumedFromSessionId !== undefined)
       candidate.resumed_from_session_id = ctx.resumedFromSessionId;

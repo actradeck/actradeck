@@ -9,7 +9,8 @@
   "references": [
     { "path": "../../packages/event-model" },
     { "path": "../../packages/projection" },
-    { "path": "../../packages/redaction" }
+    { "path": "../../packages/redaction" },
+    { "path": "../../packages/telemetry-contract" }
   ],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "src/**/*.test.ts"]

@@ -31,6 +31,13 @@
 .env
 .env.*
 !.env.example
+# 明示 opt-in telemetry のローカル状態を repo 内へ上書きした場合も追跡しない。
+telemetry.json
+*.telemetry-state.json
+# Cloudflare deploy/account state and local Worker secrets. Commit only wrangler.example.jsonc.
+wrangler.local.jsonc
+.dev.vars
+.wrangler/
 
 # Node / ビルド成果物
 node_modules/

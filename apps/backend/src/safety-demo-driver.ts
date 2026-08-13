@@ -153,6 +153,8 @@ function buildDemoEvent(input: {
     provider: "claude_code",
     source: "hooks",
     session_id: input.sessionId,
+    // デモは承認イベントフローを再現するが、実コマンドを起動・停止しない。
+    ...(input.eventType === "session.started" ? { governance_mode: "observe_only" } : {}),
     event_type: input.eventType,
     state: input.state,
     timestamp: new Date().toISOString(),

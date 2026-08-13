@@ -13,6 +13,7 @@ import {
   isPolicyResolvePath,
   isPolicySetPath,
   isPolicyUnsetPath,
+  isTelemetryMutationPath,
   normalizeReplayRequestPath,
   resolveReplayHttpConfig,
 } from "../realtime/bff.js";
@@ -146,6 +147,7 @@ export async function proxyReplayHistory(
   const isAuditVerify = isAuditVerifyPath(req.url ?? "");
   // ADR 6点強化 #2: レビュー・パケット検証も同扱い (POST-only + CSRF + 大 body)。
   const isAuditPacketVerify = isAuditPacketVerifyPath(req.url ?? "");
+  const isTelemetryMutation = isTelemetryMutationPath(req.url ?? "");
   const isMutating =
     isRevoke ||
     isPolicyMutating ||
@@ -153,7 +155,8 @@ export async function proxyReplayHistory(
     isDemoLaunch ||
     isCodexSpawn ||
     isAuditVerify ||
-    isAuditPacketVerify;
+    isAuditPacketVerify ||
+    isTelemetryMutation;
   if (method === "POST" && !isMutating) {
     res.writeHead(405, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "method not allowed" }));

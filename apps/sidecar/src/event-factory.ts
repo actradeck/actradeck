@@ -9,6 +9,7 @@ import {
   type EndKind,
   EventPayload,
   type CaptureMode,
+  type GovernanceMode,
   type EventType,
   type NormalizedEvent,
   type Provider,
@@ -57,6 +58,8 @@ export interface BuildEventInput {
    * 省略時は wire 上 undefined のまま (= 欠落 = managed 既定扱い, 後方互換)。
    */
   readonly capture_mode?: CaptureMode;
+  /** session.started のガバナンス保証水準。欠落を enforcement と推測しない。 */
+  readonly governance_mode?: GovernanceMode;
   /**
    * 権限モード (sandbox)。hook の `permission_mode` 由来 (ADR 019ea4ba 段階2)。
    * 省略時は wire 上 undefined (後方互換)。表示専用 (projection key 非使用)。
@@ -149,6 +152,7 @@ export function buildEvent(input: BuildEventInput): NormalizedEvent {
   if (input.end_kind !== undefined) candidate.end_kind = input.end_kind;
   if (input.recoverability !== undefined) candidate.recoverability = input.recoverability;
   if (input.capture_mode !== undefined) candidate.capture_mode = input.capture_mode;
+  if (input.governance_mode !== undefined) candidate.governance_mode = input.governance_mode;
   if (input.permission_mode !== undefined) candidate.permission_mode = input.permission_mode;
   if (input.state !== undefined) candidate.state = input.state;
   if (input.thread_id !== undefined) candidate.thread_id = input.thread_id;

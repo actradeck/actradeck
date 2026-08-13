@@ -11,6 +11,8 @@ Where to go depending on what you need:
 | Look up an environment variable                               | [Configuration reference](./configuration.md) — every operator-facing setting, defaults, and which tier reads it                                                  |
 | See how well redaction / the risk classifier actually detect  | [Redaction & risk-classifier benchmark](./benchmarks/redaction-and-risk-classifier.md) — reproducible precision/recall on a synthetic corpus                      |
 | Demo the product                                              | [90-second demo runbook](./demo-90s.md)                                                                                                                           |
+| Inspect local and public distribution metrics                 | [Usage metrics](./usage-metrics.md)                                                                                                                               |
+| Inspect or operate opt-in anonymous PMF telemetry             | [Anonymous telemetry](./anonymous-telemetry.md) — exact schema, user controls, collector deployment, retention report                                             |
 | Prepare a public launch                                       | [Launch kit](./launch-kit.md) — honest claims, Show HN/community copy, release notes, and launch checklist                                                        |
 | Understand why it's built this way                            | [Architecture decision records](./adr/)                                                                                                                           |
 

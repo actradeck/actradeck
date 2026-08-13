@@ -76,6 +76,7 @@ describe("INV-CODEX-ROLLOUT-NORMALIZE: rollout JSONL -> canonical EventType", ()
     expect(ev.provider).toBe("codex");
     expect(ev.source).toBe("rollout");
     expect(ev.capture_mode).toBe("codex_rollout");
+    expect(ev.governance_mode).toBe("observe_only");
     expect(ev.cwd).toBe("/repo");
   });
 

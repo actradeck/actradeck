@@ -134,6 +134,11 @@ export function normalizeReplayRequestPath(requestPath: string): string {
     //   normalize は pathname 照合ゆえ query は素通しで保持される。backend は per_session query を
     //   受理可能だが現状 client UI は未送出 (常に既定 N=50)。ワイルドカード化しない (TDA-5)。
     /^\/realtime\/wall$/.test(parsed.pathname) ||
+    // Anonymous telemetry controls. Read endpoints expose the exact aggregate-only preview;
+    // state-changing endpoints are POST-only and pass the proxy's same-origin CSRF gate.
+    /^\/realtime\/telemetry$/.test(parsed.pathname) ||
+    /^\/realtime\/telemetry\/preview$/.test(parsed.pathname) ||
+    /^\/realtime\/telemetry\/(?:enable|disable|reset-id|flush)$/.test(parsed.pathname) ||
     // 強み(a) 監査ビュー (ADR 019ed1f9): 期間集計 (query from/to/limit/format は search で保持) と
     //   per-session 詳細。session セグメントは `[^/]+` (path traversal は `/` 不在で構造的に塞ぐ)。
     /^\/realtime\/audit\/sessions$/.test(parsed.pathname) ||
@@ -300,6 +305,17 @@ export function isDemoLaunchPath(requestPath: string): boolean {
     return false;
   }
   return /^\/realtime\/demo\/safety$/.test(parsed.pathname);
+}
+
+/** Explicit telemetry state changes are POST-only; status/preview remain GET-only. */
+export function isTelemetryMutationPath(requestPath: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestPath, "http://local");
+  } catch {
+    return false;
+  }
+  return /^\/realtime\/telemetry\/(?:enable|disable|reset-id|flush)$/.test(parsed.pathname);
 }
 
 /**

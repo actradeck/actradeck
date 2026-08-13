@@ -142,6 +142,21 @@ vi.mock("../src/ui/use-session-events", async () => ({
 vi.mock("../src/ui/use-session-body", async () => ({
   useSessionBody: (await import("./_support/cockpit-hook-mocks.js")).sessionBodyHookMock,
 }));
+vi.mock("../src/ui/use-telemetry", () => ({
+  useTelemetry: () => ({
+    status: { schema_version: 1, mode: "off" },
+    preview: null,
+    loading: false,
+    error: false,
+    reload: async () => {},
+    loadPreview: async () => {},
+    clearPreview: () => {},
+    enable: async () => {},
+    disable: async () => {},
+    resetId: async () => {},
+    flush: async () => {},
+  }),
+}));
 
 let CockpitBoard: typeof import("../src/ui/CockpitBoard.js").CockpitBoard;
 let FixedLocaleProvider: typeof import("../src/ui/LocaleProvider.js").FixedLocaleProvider;
@@ -192,6 +207,18 @@ function q(id: string): HTMLElement | null {
 }
 
 describe("CockpitBoard adapter 配線 (QA-5)", () => {
+  it("匿名計測は業務タブに置かず、ヘッダーの設定導線にだけ置く", () => {
+    render();
+    const settings = q("open-settings");
+    expect(settings).not.toBeNull();
+    expect(q("open-telemetry")).toBeNull();
+    expect(q("top-tabs")?.textContent).not.toContain("匿名計測");
+    act(() => (settings as HTMLButtonElement).click());
+    expect(q("settings-dialog")?.hasAttribute("open")).toBe(true);
+    expect(q("telemetry-settings")).not.toBeNull();
+    expect(q("settings-dialog")?.textContent).toContain("Privacy");
+  });
+
   it("シグナル click → onOpenSession adapter が select(session_id) を呼び board に留まる", () => {
     render();
     const btn = q("action-rail-signal-sess-stalled0001");

@@ -95,6 +95,92 @@ describe("INV-EMBEDDED-DB: 埋込 PGlite boot + DB 往復", () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it("usage_daily: demo/real/protected/approval を aggregate-only route へ正確に投影する", async () => {
+    const suffix = Date.now().toString(36);
+    const protectedSid = `sess_usage_protected_${suffix}`;
+    const observedSid = `sess_usage_observed_${suffix}`;
+    const demoSid = `demo-safety-${suffix}`;
+    const ingest = async (event: ReturnType<typeof makeEvent>): Promise<void> => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/ingest",
+        headers: { authorization: "Bearer t-ing" },
+        payload: event,
+      });
+      expect(response.statusCode).toBe(200);
+    };
+
+    await ingest(
+      makeEvent({
+        session_id: protectedSid,
+        state: "starting",
+        event_type: "session.started",
+        governance_mode: "enforcement",
+      }),
+    );
+    await ingest(
+      makeEvent({ session_id: observedSid, state: "starting", event_type: "session.started" }),
+    );
+    await ingest(
+      makeEvent({
+        session_id: protectedSid,
+        state: "waiting.approval",
+        event_type: "tool.permission.requested",
+        payload: { kind: "tool.permission.requested", request_id: `${protectedSid}:apr-1` },
+      }),
+    );
+    await ingest(
+      makeEvent({
+        session_id: protectedSid,
+        state: "running.model_wait",
+        event_type: "tool.permission.resolved",
+        payload: {
+          kind: "tool.permission.resolved",
+          request_id: `${protectedSid}:apr-1`,
+          decision: "deny",
+          resolution_origin: "operator",
+        },
+      }),
+    );
+    await ingest(
+      makeEvent({
+        session_id: demoSid,
+        state: "starting",
+        event_type: "session.started",
+        governance_mode: "observe_only",
+      }),
+    );
+    await ingest(
+      makeEvent({ session_id: demoSid, state: "completed", event_type: "session.ended" }),
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/realtime/usage?since=1d",
+      headers: { authorization: "Bearer t-rt" },
+    });
+    expect(response.statusCode).toBe(200);
+    const report = response.json() as {
+      totals: Record<string, number>;
+      days: Array<Record<string, unknown>>;
+    };
+    expect(report.totals).toEqual({
+      cockpit_demo_started: 1,
+      cockpit_demo_completed: 1,
+      real_sessions: 2,
+      protected_sessions: 1,
+      approval_requests: 1,
+      operator_decisions: 1,
+    });
+    expect(JSON.stringify(report)).not.toMatch(/session_id|event_id|command|prompt|cwd|repo/);
+
+    const persisted = await pool.query(
+      `SELECT governance_mode FROM sessions WHERE session_id = $1`,
+      [protectedSid],
+    );
+    expect(persisted.rows[0]?.governance_mode).toBe("enforcement");
+  });
+
   it("DB write + 冪等: POST /ingest で append し、再送で duplicate (event_id UNIQUE が socket 経由で有効)", async () => {
     const sid = `sess_embed_${Date.now().toString(36)}`;
     const ev = makeEvent({ session_id: sid, state: "starting", event_type: "session.started" });

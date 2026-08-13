@@ -45,6 +45,8 @@ import { registerRealtimeRoute } from "./realtime-server.js";
 import { ReplayStore } from "./replay-store.js";
 import { AuditStore } from "./audit-store.js";
 import { SafetyDemoLauncher } from "./safety-demo.js";
+import type { AnonymousTelemetry } from "./telemetry.js";
+import { UsageStore } from "./usage-store.js";
 import {
   isAllowlistResponseFrame,
   isCodexSpawnResponseFrame,
@@ -92,6 +94,8 @@ export interface IngestionServerOptions {
    * realtimeToken 未設定なら route 自体を mount しないため未使用。
    */
   readonly demoLauncher?: SafetyDemoLauncher;
+  /** Explicitly opted-in anonymous telemetry controller. Omitted in tests and library embeds. */
+  readonly telemetry?: AnonymousTelemetry;
   /** Fastify logger を有効化。 */
   readonly logger?: boolean;
 }
@@ -179,6 +183,7 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
   const realtimeStore = new RealtimeStore(opts.pool);
   const replayStore = new ReplayStore(opts.pool);
   const auditStore = new AuditStore(opts.pool);
+  const usageStore = new UsageStore(opts.pool);
   // ADR 019f22a7 P1: セーフティデモ起動コントローラ。ingestToken を子 env へ注入する authoritative 値と
   //   して束ねる (子はこの backend の /ingest/ws へ実接続する)。driver 実在時のみ auto-enable。
   const demoLauncher =
@@ -336,8 +341,10 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
       store: realtimeStore,
       replayStore,
       auditStore,
+      usageStore,
       sidecarRegistry,
       demoLauncher,
+      ...(opts.telemetry !== undefined ? { telemetry: opts.telemetry } : {}),
     });
   }
 

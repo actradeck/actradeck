@@ -100,6 +100,28 @@ For Codex approval relay, use Managed Mode:
 ./scripts/actradeck codex "refactor the payment module"
 ```
 
+Inspect privacy-preserving local usage totals without exporting audit contents:
+
+```bash
+./scripts/actradeck usage --since 30d
+./scripts/actradeck usage --since 30d --json
+```
+
+Only UTC daily aggregates are returned. The definitions and public npm/GitHub snapshot workflow
+are documented in [Usage metrics](./docs/usage-metrics.md).
+
+Optional central product telemetry is **off by default**. Every user can inspect the complete
+outgoing daily-counter batch, opt in, stop and delete the random identifier from
+**Settings → Privacy** in the Cockpit or the CLI:
+
+```bash
+./scripts/actradeck telemetry status
+./scripts/actradeck telemetry preview
+```
+
+It cannot represent prompts, commands, paths, repository names, session/event IDs, secrets, or
+audit bodies. See the [anonymous telemetry contract and collector](./docs/anonymous-telemetry.md).
+
 Prefer to inspect scripts before running them? Use the
 [manual and verified installation paths](./docs/getting-started.md), or diagnose the
 machine first with `npx actradeck@latest doctor`.

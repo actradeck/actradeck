@@ -25,6 +25,7 @@ import type { ReplayStore } from "../src/replay-store.js";
 import { encodeReplayCursor } from "../src/replay-store.js";
 import type { AuditStore } from "../src/audit-store.js";
 import type { RealtimeStore } from "../src/realtime-store.js";
+import type { UsageStore } from "../src/usage-store.js";
 import { registerRealtimeRoute } from "../src/realtime-server.js";
 import type { DiffRelayResult, SidecarRegistry } from "../src/sidecar-registry.js";
 
@@ -139,6 +140,7 @@ describe("INV-AUDIT-REPORT route guards (fakes)", () => {
       store,
       replayStore,
       auditStore,
+      usageStore: {} as unknown as UsageStore,
       sidecarRegistry,
       projectScope: [],
     });
