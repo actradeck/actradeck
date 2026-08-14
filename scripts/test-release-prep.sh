@@ -917,6 +917,184 @@ else
   ok "INV-VERSION-SINGLE-SOURCE: gate FAILS when one package.json diverges (falsifiable)"
 fi
 
+# TDA-1 (2026-08-13 audit): no hardcoded product-version literal in TypeScript sources.
+# version.sh stamps package.json files only; a semver literal assigned to an APP_VERSION-style
+# constant in src/ silently reports a stale version forever after the next release (the
+# telemetry app_version did exactly this). Runtime code must derive from its package.json.
+# Scan is scoped to assignment-shaped occurrences to avoid matching test fixtures/semver ranges.
+# TDA-R2-1 (audit R2): the original regex missed the exact shape it protects — a *typed*
+# declaration (`NAME: string = "x.y.z"`) — plus object-property form (`Version: "x.y.z"`),
+# template-literal quotes, and .tsx files. The regex below allows an optional type annotation
+# between the identifier and `=`, accepts `:` (property) as the assignment shape, and any of
+# the three quote styles.
+# TDA-R3-1 (audit R3): the schema-name exclusion is applied per MATCH, not per line — the old
+# `grep -v SCHEMA_VERSION` dropped the whole line, so a real app-version literal co-located
+# with a SCHEMA_VERSION assignment escaped. Excluded-name assignments are stripped from the
+# candidate line first, and the line is reported only if a match remains.
+# TDA-R4-3 (audit R4): the alternation previously required a `_VERSION`/`_version`/`Version`
+# suffix, missing the single most idiomatic re-hardcoding shape `export const VERSION = "x.y.z"`.
+# `_?VERSION` covers bare all-caps VERSION as well.
+# TDA-R4-7 (audit R4): the test-file exclusion used to match the WHOLE grep line, so a real
+# literal whose line merely mentioned ".test.ts" in a comment was silently dropped. The filter
+# now anchors on the path field of grep's `path:line:content` output.
+# Known limits (documented, not silent; each verified by the probes below): identifiers must
+# end in VERSION/_VERSION/_version/Version (`const APP_VER = "…"` and bare lowercase
+# `version = "x.y.z"` identifiers are out of scope — the lowercase property form would
+# false-positive on data fixtures), and non-scalar type annotations (e.g. `string[]`) are
+# not covered.
+VERSION_LITERAL_RE='(_?VERSION|_version|Version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>|[:space:]]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+'
+version_literal_scan() {
+  # $@ = roots to scan
+  local line stripped
+  grep -rnE "$VERSION_LITERAL_RE" \
+    "$@" --include='*.ts' --include='*.tsx' 2>/dev/null \
+    | grep -vE '^[^:]*\.(test|spec)\.tsx?:' \
+    | while IFS= read -r line; do
+        stripped="$(printf '%s' "$line" \
+          | sed -E 's/(SCHEMA|PROTOCOL|MANIFEST|PACKET)_(VERSION|version)[[:space:]]*(:[[:space:]]*[A-Za-z_][A-Za-z0-9_.<>| ]*)?[=:][[:space:]]*["'\''`][0-9]+\.[0-9]+\.[0-9]+//g')"
+        if printf '%s\n' "$stripped" | grep -qE "$VERSION_LITERAL_RE"; then
+          printf '%s\n' "$line"
+        fi
+      done || true
+}
+VERSION_LITERALS="$(version_literal_scan "$ROOT"/apps/*/src "$ROOT"/packages/*/src)"
+if [ -z "$VERSION_LITERALS" ]; then
+  ok "INV-VERSION-SINGLE-SOURCE: no hardcoded app-version literal in runtime sources"
+else
+  ng "INV-VERSION-SINGLE-SOURCE: hardcoded version literal(s) in runtime sources: $VERSION_LITERALS"
+fi
+# RED probes (falsifiable, TDA-R2-1): inject the exact re-hardcoding shapes into a throwaway
+# tree and assert the same scanner (single source: version_literal_scan) reports each of them.
+VLP="$WORK/vliteral/src"; mkdir -p "$VLP"
+printf 'export const ACTRADECK_APP_VERSION: string = "9.9.9";\n' > "$VLP/typed.ts"
+printf 'const AppVersion = "9.9.9";\n' > "$VLP/untyped.ts"
+printf 'const meta = { appVersion: "9.9.9" };\n' > "$VLP/property.tsx"
+for probe in typed.ts untyped.ts property.tsx; do
+  if version_literal_scan "$WORK/vliteral" | grep -q "$probe"; then
+    ok "INV-VERSION-SINGLE-SOURCE: scanner catches injected literal ($probe)"
+  else
+    ng "INV-VERSION-SINGLE-SOURCE: DEAD GATE — injected literal escaped the scanner ($probe)"
+  fi
+done
+printf 'export const CLEAN_VERSION: string = readManifest().version;\n' > "$VLP/clean.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'clean\.ts'; then
+  ng "INV-VERSION-SINGLE-SOURCE: scanner false-positives on manifest-derived version (clean.ts)"
+else
+  ok "INV-VERSION-SINGLE-SOURCE: scanner ignores manifest-derived version (no false positive)"
+fi
+# TDA-R3-1: the exclusion is match-level — a real literal on the SAME LINE as an excluded
+# schema-name assignment must still be reported, while a lone excluded assignment must not.
+printf 'export const SCHEMA_VERSION = "1.0.0"; export const APP_VERSION: string = "9.9.9";\n' > "$VLP/sameline.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'sameline\.ts'; then
+  ok "INV-VERSION-SINGLE-SOURCE: match-level exclusion catches a literal co-located with SCHEMA_VERSION"
+else
+  ng "INV-VERSION-SINGLE-SOURCE: DEAD GATE — SCHEMA_VERSION on the same line masked a real literal"
+fi
+rm -f "$VLP/sameline.ts"
+printf 'export const SCHEMA_VERSION = "1.0.0";\n' > "$VLP/schemaonly.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'schemaonly\.ts'; then
+  ng "INV-VERSION-SINGLE-SOURCE: exclusion regression — a lone SCHEMA_VERSION assignment is flagged"
+else
+  ok "INV-VERSION-SINGLE-SOURCE: excluded schema-name assignments stay unflagged (no false positive)"
+fi
+rm -f "$VLP/schemaonly.ts"
+# TDA-R4-3: bare all-caps VERSION — the most idiomatic re-hardcoding shape — must be caught.
+printf 'export const VERSION = "9.9.9";\n' > "$VLP/bareversion.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'bareversion\.ts'; then
+  ok "INV-VERSION-SINGLE-SOURCE: scanner catches a bare VERSION literal (bareversion.ts)"
+else
+  ng "INV-VERSION-SINGLE-SOURCE: DEAD GATE — bare VERSION literal escaped the scanner"
+fi
+rm -f "$VLP/bareversion.ts"
+# TDA-R4-7: the test-file filter anchors on the PATH field — a real literal in a non-test file
+# is reported even when its line mentions ".test.ts" in a comment, while real test files stay
+# excluded.
+printf 'const APP_VERSION = "9.9.9"; // covered by foo.test.ts\n' > "$VLP/contentfilter.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'contentfilter\.ts'; then
+  ok "INV-VERSION-SINGLE-SOURCE: path-anchored filter keeps a literal whose line mentions .test.ts"
+else
+  ng "INV-VERSION-SINGLE-SOURCE: DEAD GATE — a .test.ts mention in a comment suppressed a real literal"
+fi
+rm -f "$VLP/contentfilter.ts"
+printf 'const APP_VERSION = "9.9.9";\n' > "$VLP/excluded.test.ts"
+if version_literal_scan "$WORK/vliteral" | grep -q 'excluded\.test\.ts'; then
+  ng "INV-VERSION-SINGLE-SOURCE: path filter regression — a real test file is being scanned"
+else
+  ok "INV-VERSION-SINGLE-SOURCE: real test files stay excluded by path (excluded.test.ts)"
+fi
+rm -f "$VLP/excluded.test.ts"
+
+# ============================================================================
+# INV-DOCS-SCRIPT-PARITY (TDA-R2-2, 2026-08-13 audit R2)
+# ============================================================================
+# Operator-facing docs quote `pnpm --filter <pkg> [run] <script>` commands. A package script
+# rename (this branch renamed the collector's test/build to test:worker/build:worker) silently
+# hard-fails the documented first-deployment steps. Extract every such command from the given
+# docs and assert the script exists in the named package's manifest. `exec ...` is not a script.
+# TDA-R3-2 (audit R3): pnpm resolves BUILTIN command names before package scripts, so a doc
+# quoting e.g. `pnpm --filter x deploy` (no `run`) invokes pnpm's own deploy, not the script.
+# Any documented bare invocation whose token collides with a pnpm builtin is drift.
+PNPM_BUILTINS=" add audit bin config deploy dlx doctor env exec import init install licenses link list outdated pack patch prune publish rebuild remove root run setup store update why "
+docs_script_parity() {
+  # $1 = repo root whose package manifests are authoritative; $2.. = doc files to scan
+  local root="$1"; shift
+  local drift="" cmd pkg script bare pkgjson
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    pkg="$(printf '%s' "$cmd" | awk '{print $3}')"
+    script="$(printf '%s' "$cmd" | awk '{ if ($4=="run") print $5; else print $4 }')"
+    bare="$(printf '%s' "$cmd" | awk '{ if ($4=="run") print "no"; else print "yes" }')"
+    [ "$script" = "exec" ] && continue
+    [ -z "$script" ] && continue
+    if [ "$bare" = "yes" ] && printf '%s' "$PNPM_BUILTINS" | grep -qF " $script "; then
+      drift="$drift [$cmd -> '$script' collides with a pnpm builtin; docs must use 'run $script']"
+      continue
+    fi
+    # TDA-R3-2: db/ is a workspace package outside apps/*/packages/* — include it in the lookup.
+    pkgjson="$(grep -rl "\"name\": \"$pkg\"" "$root"/apps/*/package.json "$root"/packages/*/package.json "$root"/db/package.json 2>/dev/null | head -1)"
+    if [ -z "$pkgjson" ]; then
+      drift="$drift [$cmd -> package not found]"
+    elif ! jq -e --arg s "$script" '.scripts[$s]' "$pkgjson" >/dev/null 2>&1; then
+      drift="$drift [$cmd -> script '$script' missing in $(basename "$(dirname "$pkgjson")")]"
+    fi
+  done <<EOF
+$(grep -rhoE 'pnpm --filter @actradeck/[a-z0-9-]+ (run )?[a-zA-Z][A-Za-z0-9:._-]*' "$@" 2>/dev/null | sort -u || true)
+EOF
+  printf '%s' "$drift"
+}
+# TDA-R3-2: recurse docs/ (subdirectory docs were previously invisible to the gate).
+DOCS_DRIFT="$(docs_script_parity "$ROOT" $(find "$ROOT/docs" -name '*.md' -type f) "$ROOT"/README.md)"
+if [ -z "$DOCS_DRIFT" ]; then
+  ok "INV-DOCS-SCRIPT-PARITY: every documented pnpm --filter command maps to a real package script"
+else
+  ng "INV-DOCS-SCRIPT-PARITY: documented commands reference missing scripts:$DOCS_DRIFT"
+fi
+# RED probe (falsifiable): a doc quoting a script that does not exist must be reported.
+DSP="$WORK/docs-parity"; mkdir -p "$DSP"
+printf '```bash\npnpm --filter @actradeck/telemetry-collector test\n```\n' > "$DSP/stale.md"
+if [ -n "$(docs_script_parity "$ROOT" "$DSP/stale.md")" ]; then
+  ok "INV-DOCS-SCRIPT-PARITY: gate FAILS on a doc referencing a renamed-away script (falsifiable)"
+else
+  ng "INV-DOCS-SCRIPT-PARITY: DEAD GATE — stale documented command passed"
+fi
+# TDA-R3-2 probe: a stale command hidden in a docs SUBDIRECTORY must be found by the recursive
+# scan (exercised through the same find expression the live gate uses).
+mkdir -p "$DSP/docs/sub"
+printf '```bash\npnpm --filter @actradeck/telemetry-collector test\n```\n' > "$DSP/docs/sub/deep.md"
+if [ -n "$(docs_script_parity "$ROOT" $(find "$DSP/docs" -name '*.md' -type f))" ]; then
+  ok "INV-DOCS-SCRIPT-PARITY: recursive scan catches a stale command in a docs subdirectory"
+else
+  ng "INV-DOCS-SCRIPT-PARITY: DEAD GATE — docs subdirectory escaped the scan"
+fi
+# TDA-R3-2 probe: a bare builtin-colliding invocation must be reported even though the script
+# exists (`pnpm --filter x deploy` runs pnpm's builtin deploy, not the package script).
+printf '```bash\npnpm --filter @actradeck/telemetry-collector deploy\n```\n' > "$DSP/builtin.md"
+if docs_script_parity "$ROOT" "$DSP/builtin.md" | grep -q "collides with a pnpm builtin"; then
+  ok "INV-DOCS-SCRIPT-PARITY: gate FAILS on a bare invocation shadowed by a pnpm builtin"
+else
+  ng "INV-DOCS-SCRIPT-PARITY: DEAD GATE — builtin-shadowed bare invocation passed"
+fi
+
 # ============================================================================
 # INV-RELEASE-TAG-MATCHES-VERSION  (run version.sh in an isolated throwaway repo)
 # ============================================================================

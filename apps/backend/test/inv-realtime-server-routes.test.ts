@@ -21,7 +21,7 @@
  * inv-replay-history / inv-realtime-server) が実データで担保する。ここでは store/replay-store の
  * **返り値形状のみ**を偽装し、ルート層の分岐到達を決定論的に固定する (DB 未到達でも実走する)。
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 
@@ -32,6 +32,12 @@ import type { RealtimeHub } from "../src/realtime-hub.js";
 import type { ReplayStore } from "../src/replay-store.js";
 import type { AuditStore } from "../src/audit-store.js";
 import type { RealtimeStore } from "../src/realtime-store.js";
+import type { UsageStore } from "../src/usage-store.js";
+import {
+  AnonymousTelemetry,
+  TELEMETRY_ERROR_CODES,
+  type TelemetryFetch,
+} from "../src/telemetry.js";
 import { registerRealtimeRoute } from "../src/realtime-server.js";
 import { installErrorScrubbing } from "../src/error-scrub.js";
 import { buildIngestionServer } from "../src/ingestion-server.js";
@@ -95,6 +101,8 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     calls?: FakeReplayCalls;
     auditStore?: AuditStore;
     replayStore?: ReplayStore;
+    usageStore?: UsageStore;
+    telemetry?: AnonymousTelemetry;
     projectScope?: readonly string[];
   }): Promise<FakeReplayCalls> {
     const calls: FakeReplayCalls = deps.calls ?? { commandOutputArgs: [] };
@@ -166,7 +174,28 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
       store,
       replayStore,
       auditStore,
+      usageStore:
+        deps.usageStore ??
+        ({
+          report: async () => ({
+            schema_version: 1,
+            timezone: "UTC",
+            semantics: "local_aggregate_not_users",
+            from: "2026-08-10",
+            to: "2026-08-10",
+            totals: {
+              cockpit_demo_started: 0,
+              cockpit_demo_completed: 0,
+              real_sessions: 0,
+              protected_sessions: 0,
+              approval_requests: 0,
+              operator_decisions: 0,
+            },
+            days: [],
+          }),
+        } as unknown as UsageStore),
       sidecarRegistry: registry,
+      ...(deps.telemetry !== undefined ? { telemetry: deps.telemetry } : {}),
       // 既定は空 scope (無制限) を明示注入し、env ACTRADECK_PROJECT_SCOPE の混入を排除して決定論化する。
       projectScope: deps.projectScope ?? [],
     });
@@ -265,6 +294,224 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     });
     expect(res.statusCode).toBe(404);
     expect(res.json()).toMatchObject({ error: "session not registered" });
+  });
+
+  // --- aggregate-only local usage ------------------------------------------------------------
+  it("usage: missing token → 401", async () => {
+    await mount({});
+    const res = await app.inject({ method: "GET", url: "/realtime/usage?since=30d" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("usage: invalid since is rejected before querying", async () => {
+    const report = vi.fn();
+    await mount({ usageStore: { report } as unknown as UsageStore });
+    const res = await app.inject({
+      method: "GET",
+      url: "/realtime/usage?since=all",
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it("usage: returns aggregate-only report", async () => {
+    const report = vi.fn().mockResolvedValue({
+      schema_version: 1,
+      timezone: "UTC",
+      semantics: "local_aggregate_not_users",
+      from: "2026-08-10",
+      to: "2026-08-10",
+      totals: {
+        cockpit_demo_started: 1,
+        cockpit_demo_completed: 1,
+        real_sessions: 2,
+        protected_sessions: 1,
+        approval_requests: 1,
+        operator_decisions: 1,
+      },
+      days: [],
+    });
+    await mount({ usageStore: { report } as unknown as UsageStore });
+    const res = await app.inject({
+      method: "GET",
+      url: "/realtime/usage?since=1d",
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(report).toHaveBeenCalledOnce();
+    expect(res.body).not.toMatch(/session_id|event_id|command|prompt|cwd|repo/);
+  });
+
+  // --- telemetry routes (QA-1/SEC-4・2026-08-13 監査): REAL AnonymousTelemetry (tmp state +
+  //     DI fetch) で Bearer gate・closed error vocabulary・opt-in ライフサイクルを固定する ------
+  describe("telemetry routes", () => {
+    const TELEMETRY_PATHS = [
+      { method: "GET" as const, url: "/realtime/telemetry" },
+      { method: "GET" as const, url: "/realtime/telemetry/preview" },
+      { method: "POST" as const, url: "/realtime/telemetry/enable" },
+      { method: "POST" as const, url: "/realtime/telemetry/disable" },
+      { method: "POST" as const, url: "/realtime/telemetry/reset-id" },
+      { method: "POST" as const, url: "/realtime/telemetry/flush" },
+    ];
+
+    async function telemetryFixture(fetchImpl?: TelemetryFetch) {
+      const { mkdtemp, rm } = await import("node:fs/promises");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const dir = await mkdtemp(join(tmpdir(), "actradeck-telemetry-routes-"));
+      const telemetry = new AnonymousTelemetry({
+        env: {}, // SEC-R3-2: kill-switch を明示解除して有効時挙動を検証
+        usage: {
+          report: async (range) => ({
+            schema_version: 1,
+            timezone: "UTC",
+            semantics: "local_aggregate_not_users",
+            from: range.from,
+            to: range.to,
+            totals: {
+              cockpit_demo_started: 0,
+              cockpit_demo_completed: 0,
+              real_sessions: 0,
+              protected_sessions: 0,
+              approval_requests: 0,
+              operator_decisions: 0,
+            },
+            days: [],
+          }),
+        },
+        statePath: join(dir, "telemetry.json"),
+        defaultEndpoint: "https://collector.example.test/v1/events",
+        fetchImpl: fetchImpl ?? (async () => new Response("{}", { status: 202 })),
+      });
+      return { telemetry, cleanup: () => rm(dir, { recursive: true, force: true }) };
+    }
+
+    it("all six telemetry paths sit behind the Bearer gate (401 without token)", async () => {
+      const { telemetry, cleanup } = await telemetryFixture();
+      try {
+        await mount({ telemetry });
+        for (const { method, url } of TELEMETRY_PATHS) {
+          const res = await app.inject({ method, url });
+          expect(res.statusCode, `${method} ${url}`).toBe(401);
+        }
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("routes are absent (404) when no telemetry subsystem is wired (kill-switch posture)", async () => {
+      await mount({});
+      for (const { method, url } of TELEMETRY_PATHS) {
+        const res = await app.inject({ method, url, headers: auth });
+        expect(res.statusCode, `${method} ${url}`).toBe(404);
+      }
+    });
+
+    it("enable/disable/reset-id lifecycle over HTTP with real state", async () => {
+      const { telemetry, cleanup } = await telemetryFixture();
+      try {
+        await mount({ telemetry });
+        const off = await app.inject({ method: "GET", url: "/realtime/telemetry", headers: auth });
+        expect(off.json()).toMatchObject({ mode: "off" });
+
+        const resetWhileOff = await app.inject({
+          method: "POST",
+          url: "/realtime/telemetry/reset-id",
+          headers: auth,
+        });
+        expect(resetWhileOff.statusCode).toBe(400);
+        expect(resetWhileOff.json()).toEqual({ error: "not_enabled" });
+
+        const enabled = await app.inject({
+          method: "POST",
+          url: "/realtime/telemetry/enable",
+          headers: { ...auth, "content-type": "application/json" },
+          payload: {},
+        });
+        expect(enabled.statusCode).toBe(200);
+        expect(enabled.json()).toMatchObject({ mode: "anonymous" });
+
+        const preview = await app.inject({
+          method: "GET",
+          url: "/realtime/telemetry/preview",
+          headers: auth,
+        });
+        expect(preview.statusCode).toBe(200);
+        // NO-RAW は wire batch に対して検証する (status.collects/excludes の開示「文言」には
+        // "commands" 等の語が正当に含まれるため、識別子検査の対象は送信 batch のみ)。
+        const previewBody = preview.json() as { batch: unknown };
+        expect(JSON.stringify(previewBody.batch)).not.toMatch(
+          /session_id|event_id|command|prompt|cwd|repo/,
+        );
+
+        const disabled = await app.inject({
+          method: "POST",
+          url: "/realtime/telemetry/disable",
+          headers: auth,
+        });
+        expect(disabled.statusCode).toBe(200);
+        expect(disabled.json()).toMatchObject({ mode: "off" });
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("enable rejects malformed endpoints with the closed vocabulary only (SEC-4)", async () => {
+      const { telemetry, cleanup } = await telemetryFixture();
+      try {
+        await mount({ telemetry });
+        for (const payload of [
+          { endpoint: 42 },
+          { endpoint: "not-a-url" },
+          { endpoint: "http://collector.internal/v1/events" },
+          { endpoint: "https://user:pw@collector.example.test/v1/events" },
+        ]) {
+          const res = await app.inject({
+            method: "POST",
+            url: "/realtime/telemetry/enable",
+            headers: { ...auth, "content-type": "application/json" },
+            payload,
+          });
+          expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+          const body = res.json() as { error: string };
+          expect(TELEMETRY_ERROR_CODES).toContain(body.error);
+          // raw message / 入力値 / パスの echo 無し (closed literal のみ)。
+          expect(Object.keys(body)).toEqual(["error"]);
+          expect(res.body).not.toMatch(/collector\.internal|user:pw|\//u);
+        }
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("flush maps upstream failure to 502 send_failed without status/path echo (SEC-1/SEC-4)", async () => {
+      const { telemetry, cleanup } = await telemetryFixture(async () => {
+        throw new Error("connect ECONNREFUSED /home/operator/.actradeck");
+      });
+      try {
+        await mount({ telemetry });
+        await app.inject({
+          method: "POST",
+          url: "/realtime/telemetry/enable",
+          headers: { ...auth, "content-type": "application/json" },
+          payload: {},
+        });
+        // 空 batch は empty で non-send になるため、送信を強制する日次を仕込まず flush 自体の
+        // 失敗写像だけ検証する… ではなく: usage が空でも install_verified/cockpit_started が
+        // 入るため batch は非空 = fetch 到達 → reject → 502 が正しい経路。
+        const res = await app.inject({
+          method: "POST",
+          url: "/realtime/telemetry/flush",
+          headers: auth,
+        });
+        expect(res.statusCode).toBe(502);
+        expect(res.json()).toEqual({ error: "send_failed" });
+        expect(res.body).not.toMatch(/ECONNREFUSED|\.actradeck|home/);
+      } finally {
+        await cleanup();
+      }
+    });
   });
 
   // --- INV-WALL-EMPTY-LANE: connected だが events 0 の session も空配列レーンで現れる -----------

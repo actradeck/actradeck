@@ -30,5 +30,14 @@ distrusting local users with the same privileges as the agent.
 - Lost-update and partial-write are prevented within the boundary; this is **not** a
   defense against a hostile local user at equal privilege.
 - The boundary is documented in [`SECURITY.md`](../../SECURITY.md).
-- Every `0600` atomic writer must go through `writeJson0600`; re-hand-rolling
-  temp+rename+chmod is drift and is rejected in review.
+- Every `0600` atomic writer **in the sidecar** must go through `writeJson0600`
+  (`apps/sidecar/src/fs-atomic.ts`); re-hand-rolling temp+rename+chmod there is drift
+  and is rejected in review.
+- Scope revision (2026-08-14 audit, TDA-R3-8): the backend's telemetry consent-state
+  writer (`apps/backend/src/telemetry.ts` `writeDirect`) is a recorded exception, not
+  drift. The shared helper is synchronous and lives in `apps/sidecar`, which the backend
+  does not depend on, so literal reuse is structurally impossible today. The backend
+  implementation follows the same procedure (parent `0700` → temp `0600` `wx` → rename)
+  and additionally cleans up the temp file on failure. Extracting an async
+  `writeJson0600` into a shared package so both sides converge is tracked as a
+  follow-up; until then, any **third** hand-rolled 0600 writer is still rejected.

@@ -40,6 +40,19 @@ export const Payload = z.looseObject({});
  */
 export const CaptureMode = z.enum(["managed", "attach", "codex_rollout"]);
 export type CaptureMode = z.infer<typeof CaptureMode>;
+
+/**
+ * セッション開始時に宣言するガバナンス保証水準。
+ *
+ * - enforcement: ActraDeck の承認ゲートが実行経路に介在する。
+ * - observe_only: 監査はできるが実行を停止できない。
+ * - unavailable: 入口で保証水準を確定できないため何も主張しない。
+ *
+ * closed enum + optional で、既存 producer は後方互換のまま。Protected session は
+ * `enforcement` の明示宣言だけを数え、欠落や unavailable を推測で昇格させない。
+ */
+export const GovernanceMode = z.enum(["enforcement", "observe_only", "unavailable"]);
+export type GovernanceMode = z.infer<typeof GovernanceMode>;
 export type Payload = z.infer<typeof Payload>;
 
 export const NormalizedEvent = z.object({
@@ -103,6 +116,11 @@ export const NormalizedEvent = z.object({
    * 欠落時は managed 既定扱い (wire validator は寛容; LIVE-FOUND-3 教訓)。
    */
   capture_mode: CaptureMode.optional(),
+  /**
+   * セッション開始時点のガバナンス保証水準。`session.started` にのみ載せる carriage point。
+   * optional (後方互換)・projection key 非使用。backend は sessions へ first-wins で投影する。
+   */
+  governance_mode: GovernanceMode.optional(),
   /**
    * 権限モード (sandbox)。Claude Code hooks の `permission_mode` 由来
    * (default / acceptEdits / bypassPermissions / plan 等)。ActraDeck は監督対象 agent の

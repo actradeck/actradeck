@@ -333,6 +333,9 @@ export class IngestStore {
     // COALESCE で sticky にし、一度 attach が観測されたら後続の欠落イベントで managed へ戻さない
     // (= attach daemon 経路は全 emit に capture_mode=attach を被せる前提・観測モードは session 不変)。
     const captureMode = ev.capture_mode ?? null;
+    // Protected session の唯一の根拠。session.started に明示された closed enum だけを first-wins で
+    // sessions へ投影し、欠落/capture_mode/permission_mode から enforcement を推測しない。
+    const governanceMode = isStart ? (ev.governance_mode ?? null) : null;
     // 段階2 (ADR 019ea4ba D3): permission_mode (sandbox) を sessions 行へ投影。
     //   capture_mode (観測モード = session 不変) と異なり permission_mode は session 途中で
     //   変わりうる (default→acceptEdits 等) ため、**欠落時のみ既存維持** (COALESCE で NULL 上書き回避)・
@@ -357,9 +360,9 @@ export class IngestStore {
     const endKind = nonEmpty(ev.end_kind);
     const recoverability = nonEmpty(ev.recoverability);
     await client.query(
-      `INSERT INTO sessions (session_id, provider, source, agent_id, repo, branch, cwd, started_at, capture_mode, permission_mode,
+      `INSERT INTO sessions (session_id, provider, source, agent_id, repo, branch, cwd, started_at, capture_mode, governance_mode, permission_mode,
                              provider_session_id, start_kind, resumed_from_session_id, end_kind, recoverability)
-       VALUES ($1,$2,$3,$4,$5,$6,$7, CASE WHEN $8 THEN $9::timestamptz ELSE NULL END, $10, $11, $12, $13, $14, $15, $16)
+       VALUES ($1,$2,$3,$4,$5,$6,$7, CASE WHEN $8 THEN $9::timestamptz ELSE NULL END, $10, $11, $12, $13, $14, $15, $16, $17)
        ON CONFLICT (session_id) DO UPDATE SET
          agent_id = COALESCE(EXCLUDED.agent_id, sessions.agent_id),
          repo     = COALESCE(EXCLUDED.repo, sessions.repo),
@@ -367,6 +370,7 @@ export class IngestStore {
          cwd      = COALESCE(EXCLUDED.cwd, sessions.cwd),
          started_at = COALESCE(sessions.started_at, EXCLUDED.started_at),
          capture_mode = COALESCE(EXCLUDED.capture_mode, sessions.capture_mode),
+         governance_mode = COALESCE(sessions.governance_mode, EXCLUDED.governance_mode),
          permission_mode = COALESCE(EXCLUDED.permission_mode, sessions.permission_mode),
          -- run lineage 起点情報: first-wins (一度確定したら変えない)。
          provider_session_id     = COALESCE(sessions.provider_session_id, EXCLUDED.provider_session_id),
@@ -387,6 +391,7 @@ export class IngestStore {
         isStart,
         new Date(toEpochMs(ev.timestamp)).toISOString(),
         captureMode,
+        governanceMode,
         permissionMode,
         providerSessionId,
         startKind,

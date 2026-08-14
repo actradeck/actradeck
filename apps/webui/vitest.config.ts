@@ -39,6 +39,10 @@ export default defineConfig({
         // QA-1: セーフティデモ起動フックの runtime (二度押し抑止 / NO-RAW parse 統合 / error 縮退 /
         //   TDA-2 出現 watchdog) を無検証化させないため gate に含める (safety-demo-hook.test.tsx が駆動)。
         "src/ui/use-safety-demo.ts",
+        // TDA-7 (2026-08-13 監査): プライバシー制御フックの fail-safe 分岐 (parse null / !ok /
+        //   closed-contract batch 再射影) を無検証化させないため gate に含める
+        //   (telemetry-ui.test.ts が駆動・use-audit-coverage / use-safety-demo と同カテゴリ)。
+        "src/ui/use-telemetry.ts",
         // ADR 0015 B3 (QA-B3-2): work-items の差別化不変条件を司る純ロジックを floor 保護する。
         //   work-items-fold (client fold == projection reduce の locale 写像・badge 単一出所) /
         //   parse-replay (wire→DTO の NO-RAW carriage 検証) / replay-state (DTO→NormalizedEvent 復元・
@@ -57,6 +61,12 @@ export default defineConfig({
         branches: 75,
         functions: 85,
         lines: 88,
+        // QA-R2-1 (2026-08-13 監査 R2): include に足すだけでは global に吸収され、テスト削除で
+        //   48.97%→6.12% に落ちても gate が緑のままだった (mutation probe g SURVIVED)。per-file
+        //   floor で erosion を実際に止める。実測 (use-telemetry-hook.test.tsx + telemetry-ui.test.ts):
+        //   97.95/90.9/100/100 → floor は worst-observed の 3-5pt 下 (funcs は 小-N 感度で 10pt 余裕・
+        //   per-file-coverage-floor-below-worst-not-best)。
+        "src/ui/use-telemetry.ts": { statements: 93, branches: 85, functions: 90, lines: 95 },
       },
     },
   },

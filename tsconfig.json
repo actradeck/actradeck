@@ -9,6 +9,7 @@
     { "path": "./packages/projection" },
     { "path": "./packages/redaction" },
     { "path": "./packages/design-tokens" },
+    { "path": "./packages/telemetry-contract" },
     { "path": "./apps/sidecar" },
     { "path": "./apps/backend" }
   ]

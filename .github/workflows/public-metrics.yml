@@ -1,0 +1,52 @@
+name: Public metrics snapshot
+
+on:
+  schedule:
+    # Previous UTC day is complete when this runs.
+    - cron: "17 02 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Snapshot day (YYYY-MM-DD); defaults to yesterday UTC"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: public-metrics-snapshot
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.16.0"
+      - name: Collect official public counters
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SNAPSHOT_DATE: ${{ inputs.date }}
+        run: |
+          if [ -n "$SNAPSHOT_DATE" ]; then
+            node scripts/collect-public-metrics.mjs --date "$SNAPSHOT_DATE"
+          else
+            node scripts/collect-public-metrics.mjs
+          fi
+      - name: Commit snapshot when changed
+        run: |
+          git add metrics/public
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(metrics): snapshot public distribution signals [skip ci]"
+          # TDA-18 (2026-08-13 audit): a human push since checkout must not red the daily run.
+          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
+          git push

@@ -33,6 +33,10 @@
 #   actradeck print-unit  <backend|webui>   生成 systemd unit を標準出力 (確認用・単一ソース)。
 #   actradeck print-plist <backend|webui>   生成 launchd LaunchAgent plist を標準出力 (print-unit の twin)。
 #   actradeck doctor        .env 権限 / node / linger / 4ティア unit・plist / ポート到達性を点検 (秘匿非表示)。
+#   actradeck usage [--since 30d|YYYY-MM-DD] [--json]
+#                           backend のローカル日次集計を表示。prompt/command/path/session id は含まない。
+#   actradeck telemetry status|preview|enable|disable|reset-id|flush [--json]
+#                           匿名の日次集計を明示 opt-in で管理。enable は任意で --endpoint URL。
 #
 # 注意:
 #   - node を更新 (nvm install 等) したら `actradeck up` を再実行して unit/plist を更新 (203/EXEC 回避)。
@@ -722,6 +726,26 @@ do_codex() {
   exec "${codex_argv[@]}"
 }
 
+do_usage() {
+  local node_bin
+  node_bin="$(resolve_node)"
+  if ! source_env_guarded; then
+    die "$ENV_FILE がありません。REALTIME_TOKEN を設定して actradeck up を起動してください。"
+  fi
+  # token は環境でのみ渡す。argv / 出力へ載せない。
+  "$node_bin" "$SCRIPT_DIR/usage.mjs" "$@"
+}
+
+do_telemetry() {
+  local node_bin
+  node_bin="$(resolve_node)"
+  if ! source_env_guarded; then
+    die "$ENV_FILE がありません。REALTIME_TOKEN を設定して actradeck up を起動してください。"
+  fi
+  # token は環境でのみ渡す。argv / 出力へ載せない。
+  "$node_bin" "$SCRIPT_DIR/telemetry.mjs" "$@"
+}
+
 main() {
   local cmd="${1:-status}"
   shift || true
@@ -732,6 +756,8 @@ main() {
     status) do_status ;;
     build) do_build ;;
     codex) do_codex "$@" ;;
+    usage) do_usage "$@" ;;
+    telemetry) do_telemetry "$@" ;;
     logs) do_logs "${1:-}" ;;
     doctor) do_doctor ;;
     print-unit) use_service "${1:-}"; generate_unit ;;

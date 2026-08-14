@@ -28,6 +28,8 @@ export interface MakeEventOverrides {
    * リテラルは codex_rollout 追加時に stale 化した実例あり・再宣言しない)。
    */
   capture_mode?: NormalizedEvent["capture_mode"];
+  /** session.started のガバナンス保証水準。 */
+  governance_mode?: NormalizedEvent["governance_mode"];
   /** 権限モード (sandbox)。ADR 019ea4ba D3 / 段階2。省略時は未指定。 */
   permission_mode?: string;
   /** 作業ディレクトリ (sessions.cwd の出所)。project scope テスト等で指定。省略時は未指定。 */
@@ -71,6 +73,7 @@ export function makeEvent(o: MakeEventOverrides = {}): NormalizedEvent {
   if (o.state !== undefined) input.state = o.state;
   if (o.summary !== undefined) input.summary = o.summary;
   if (o.capture_mode !== undefined) input.capture_mode = o.capture_mode;
+  if (o.governance_mode !== undefined) input.governance_mode = o.governance_mode;
   if (o.permission_mode !== undefined) input.permission_mode = o.permission_mode;
   if (o.cwd !== undefined) input.cwd = o.cwd;
   if (o.thread_id !== undefined) input.thread_id = o.thread_id;

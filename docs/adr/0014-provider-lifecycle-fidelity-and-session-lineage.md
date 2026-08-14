@@ -112,10 +112,14 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
 - Persist `provider_session_id` on `sessions` (and `events` if needed); add
   `sessions.{start_kind, resumed_from_session_id, end_kind, recoverability}`
   (`start_kind: fresh | resume | recovery | clear | unknown`).
-- Claude Attach: do NOT reuse the raw hook `session_id` as the ActraDeck `session_id`; mint a
-  new run id per SessionStart `source=startup|resume|clear`; put the raw id in
-  `provider_session_id`; `source=compact` does NOT create a new run (a compaction event within
-  the existing run).
+- Claude Attach (original plan — **superseded by the shipped implementation**; the capture-path
+  matrix below is authoritative, audit TDA-R5T-5): the plan minted a new run id per SessionStart
+  `source=startup|resume|clear`. The shipped rule instead adopts the raw hook `session_id` as
+  the canonical id and mints a distinct run only on a provider-id change or a terminal reopen —
+  driven by the **first observed hook of any type**, never SessionStart-specifically (a
+  SessionStart-driven boundary is the defect class behind the invisible-approvals incident).
+  Still true from the plan: `source=compact` does NOT create a new run (a compaction event
+  within the existing run).
 - Codex rollout (Phase 3b-2, implemented): one rollout file = one observation run
   (`session_id` = the file's `session_meta.payload.id`). `provider_session_id` = the stable
   conversation `session_meta.payload.session_id` when declared, else the file id.
@@ -143,11 +147,11 @@ This keeps normalization to a common state while **declaring, not hiding, lost c
   how much each observation path can honestly claim; UI and docs must not present a weaker
   tier as a stronger one (e.g. a declared rollout edge as an observed one):
 
-  | Capture path                                        | `provider_session_id`                                                    | `start_kind`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `resumed_from_session_id`                                                                                                                                                                                                                                                                                                 | Run boundary / end                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-  | --------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | Claude Code hooks (managed + attach; `RunIdentity`) | raw hook `session_id`, on all events                                     | **Observed, best-effort**: derived from the observed SessionStart `source` (`startup`→`fresh`, `resume`→`resume`, `clear`→`clear`); with an observed parent but no usable `source`, `resume`; else `unknown`. **Managed launch argv override** (decision 019fd2ac ②): a positively detected `--resume`/`--continue` in the launch argv authoritatively sets the generation-0 `start_kind` to `resume` (launch-owned evidence beats the advisory hook `source`; absence of the flags asserts nothing) | Observed in-process parent (including across an attach reap, via the terminal tombstone — decision 019fd2ac ①), **or** a declared edge from an explicit managed `--resume <uuid>` argv value (UUID shape-gated, self-loop-guarded; an unobserved referent renders as linked-unknown, same tier as declared rollout edges) | A provider-id change or a terminal-reopen mints a distinct run (synthetic `sess_<uuidv7>`); monitoring events never drive a boundary (D3). Attach: a SessionEnd reap records a bounded terminal tombstone (provider id → last run id) so the next observed SessionStart of the same provider id re-enters the terminal-reopen path (new synthetic run + observed `resumed_from`) instead of folding into the terminated run; non-SessionStart stragglers still fold (sanctioned 3b-1 behavior), and if a straggler re-materializes the entry before the resume SessionStart arrives — or the resume is observed before the SessionEnd reap — the tombstone stays unconsumed and the edge is simply skipped (safe best-effort degradation, no false edge) |
-  | Codex managed (app-server)                          | **Enrich-only**: `thread.sessionId` when the server reports it           | Not emitted (`NULL` — this path observes no restart lineage)                                                                                                                                                                                                                                                                                                                                                                                                                                         | Not emitted                                                                                                                                                                                                                                                                                                               | One managed run per spawn. `end_kind`/`recoverability` are set on both the process-exit terminal and the handshake/connection-failure path (uniformized by the Phase 3c precedence decision 019fd250): `recoverability` is uniformly `not_resumable`; `end_kind` follows the exit — process-exit sets `completed`/`failed` by exit code, the failure path sets `failed`. The child is stopped on connection loss, so the process-exit rationale applies                                                                                                                                                                                                                                                                                                  |
-  | Codex rollout (observe-only tail)                   | Stable `session_meta.payload.session_id` when declared, else the file id | `resume` only when a `forked_from_id` edge is declared, else `unknown` (never a claimed `fresh`)                                                                                                                                                                                                                                                                                                                                                                                                     | **As declared** by `forked_from_id`: the parent may be unobserved and the referent may be the stable conversation id                                                                                                                                                                                                      | One rollout file = one observation run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+  | Capture path                                        | `provider_session_id`                                                    | `start_kind`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `resumed_from_session_id`                                                                                                                                                                                                                                                                                                 | Run boundary / end                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  | --------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | Claude Code hooks (managed + attach; `RunIdentity`) | raw hook `session_id`, on all events                                     | **Observed, best-effort**: derived from the observed SessionStart `source` (`startup`→`fresh`, `resume`→`resume`, `clear`→`clear`); with an observed parent but no usable `source`, `resume`; else `unknown`. **Managed launch argv override** (decision 019fd2ac ②): a positively detected `--resume`/`--continue` in the launch argv authoritatively sets the generation-0 `start_kind` to `resume` (launch-owned evidence beats the advisory hook `source`; absence of the flags asserts nothing) | Observed in-process parent (including across an attach reap, via the terminal tombstone — decision 019fd2ac ①), **or** a declared edge from an explicit managed `--resume <uuid>` argv value (UUID shape-gated, self-loop-guarded; an unobserved referent renders as linked-unknown, same tier as declared rollout edges) | A provider-id change or a terminal-reopen mints a distinct run (synthetic `sess_<uuidv7>`); monitoring events never drive a boundary (D3). Attach: a SessionEnd reap records a bounded terminal tombstone (provider id → last run id) so the **first observed hook of any type** for the same provider id re-enters the terminal-reopen path (new synthetic run + observed `resumed_from`) instead of folding into the terminated run. Revision (decision 019fd2ac ①, revised 2026-08-13, audit TDA-R5-1): consumption was originally SessionStart-only with non-SessionStart stragglers folding — that behavior let resumed sessions from clients that never fire SessionStart fold permanently into the terminal projection, rendering their approval requests invisible until timeout-deny (a real production incident), so any-hook consumption is now the contract and a straggler simply becomes a small synthetic run with a recorded lineage edge rather than an invisible fold. If resume activity is observed before the SessionEnd reap, no tombstone exists yet and the ordinary pre-reap terminal-reopen path (also any-hook) applies — same semantics, no false edge |
+  | Codex managed (app-server)                          | **Enrich-only**: `thread.sessionId` when the server reports it           | Not emitted (`NULL` — this path observes no restart lineage)                                                                                                                                                                                                                                                                                                                                                                                                                                         | Not emitted                                                                                                                                                                                                                                                                                                               | One managed run per spawn. `end_kind`/`recoverability` are set on both the process-exit terminal and the handshake/connection-failure path (uniformized by the Phase 3c precedence decision 019fd250): `recoverability` is uniformly `not_resumable`; `end_kind` follows the exit — process-exit sets `completed`/`failed` by exit code, the failure path sets `failed`. The child is stopped on connection loss, so the process-exit rationale applies                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+  | Codex rollout (observe-only tail)                   | Stable `session_meta.payload.session_id` when declared, else the file id | `resume` only when a `forked_from_id` edge is declared, else `unknown` (never a claimed `fresh`)                                                                                                                                                                                                                                                                                                                                                                                                     | **As declared** by `forked_from_id`: the parent may be unobserved and the referent may be the stable conversation id                                                                                                                                                                                                      | One rollout file = one observation run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
   The consumer requirements for declared rollout edges are stated exactly once, in the Codex
   rollout bullet above; the normalizer docstring defers to that bullet instead of restating
@@ -166,7 +170,6 @@ origin=relay_lost, delivery=not_sent`).
 
   **Landed 2026-08-06 (decision `019fd705`).** Implementation notes, where they refine the
   sketch above:
-
   - Reconciliation is driven by the `active_pending_request_ids` **declaration**, not by an
     epoch comparison: an empty array is a meaningful "no pending survives" declaration, while
     a missing field means an older (or observe-only) daemon and reconciliation is skipped
@@ -175,7 +178,7 @@ origin=relay_lost, delivery=not_sent`).
     announced and recorded for diagnostics; the declaration is always current, so an epoch
     comparison adds no reconcile signal.
   - Stale entries are retired by ingesting a synthetic `tool.permission.resolved
-    { decision: cancel, resolution_origin: relay_lost, delivery_status: not_sent }` through
+{ decision: cancel, resolution_origin: relay_lost, delivery_status: not_sent }` through
     the **normal ingress path** (redaction floor + `parseEvent` + store). The fold clears the
     card (acceptance #7) and the audit trail records honestly that nobody decided and nothing
     was delivered. Declared-alive entries are left untouched and resolve exactly once over the
@@ -196,7 +199,6 @@ origin=relay_lost, delivery=not_sent`).
     observation markers instead.
 
   **Audit round 2 hardening (2026-08-06, SEC/QA/TDA full audit findings landed):**
-
   - **Redaction-stable request ids (SEC-1, H).** Approval request ids no longer embed the raw
     session id: `mintApprovalRequestId` derives `s<sha256(session_id)[0..12]>:apr-<token>`
     (R2 shipped a 128-bit base64url token; round 3 superseded it with the canonical 32-hex /
@@ -235,10 +237,9 @@ origin=relay_lost, delivery=not_sent`).
     the `onApprovalReconcile` registration goes red.
 
   **Audit round 3 hardening (2026-08-06, full SEC/QA/TDA re-audit of the R2 landing):**
-
   - **Canonical request-id minting for both tiers (TDA-R2-1/SEC-R2-4/QA-R2-5, M).** The minter
     moved to event-model (`approval-request-id.ts`): `s<sha256(sid)[0..12]>:apr-<32 lowercase
-    hex>`. The hex token charset structurally excludes every vendor-prefix redaction rule
+hex>`. The hex token charset structurally excludes every vendor-prefix redaction rule
     (they all need non-hex letters, uppercase or `_`), upgrading redaction-stability from
     probabilistic (SEC-R2-3 measured ~4.5e-9/id under base64url) to structural; the sidecar
     bridge additionally re-rolls (bounded) against the real redactor as belt-and-braces.
@@ -270,7 +271,7 @@ origin=relay_lost, delivery=not_sent`).
   - **Honest-scope corrections (TDA-R2-3/4/5, SEC-R2-6, L).** Wire-module docstring no longer
     claims field names are structurally single-sourced (caps and validation are; names are
     pinned by both tiers' tests); the 1024 cap documents its per-daemon derivation (64/session
-    × 16); `synthetic_retired` documents that it counts resolved *events* (a double-audit-row
+    × 16); `synthetic_retired` documents that it counts resolved _events_ (a double-audit-row
     request contributes to both terms, shrinking `pending` by clamp) and that
     `resolution_origin` is producer-claimed — there is no server-authoritative synthetic
     marker, which inside the INGEST_TOKEN boundary is the pre-existing trust model, not a new
@@ -278,14 +279,14 @@ origin=relay_lost, delivery=not_sent`).
   - **Coordinated rollout for the request-id change (TDA-R2-6).** The SEC-1 fix takes effect
     only when the sidecar dist is rebuilt and both daemons restarted alongside the backend.
     Until a resident attach daemon restarts it keeps minting legacy-shape ids, so the H
-    symptoms (approve no-op, live pendings retired as relay_lost for `sess_<uuidv7>`-shaped
+    symptoms (approve no-op, live pendings retired as relay*lost for `sess*<uuidv7>`-shaped
     sessions) persist for that daemon; the R2/R3 backend changes only mitigate and honestly
     account for the residue. Deploy sidecar + daemons + backend together (same requirement as
     the strict-enum vocabulary). Legacy pendings persisted before the upgrade no longer match
     any new declaration and are retired as relay_lost on the first hello — that is the
     designed recovery, not data loss.
   - **Watermark heuristic disclosure (SEC-R2-5, L).** The 2s watermark is anchored to the
-    backend's hello *receipt* time; the sidecar's snapshot time is unknown, so a transport lag
+    backend's hello _receipt_ time; the sidecar's snapshot time is unknown, so a transport lag
     above the margin could still retire a just-created live pending (degrades to the
     pre-watermark behaviour; deny-direction, loopback makes it improbable). Carrying a
     `declared_at` timestamp in the hello would close the window exactly — tracked in the
@@ -303,7 +304,6 @@ origin=relay_lost, delivery=not_sent`).
     relay-lost sessions are a tracked follow-up.
 
   **Audit round 4 hardening (2026-08-07, full SEC/QA/TDA re-audit of the R3 landing — no H):**
-
   - **Old manifests verify honestly (SEC-R3-1/TDA-R3-3, M).** The v2→v3
     `AUDIT_MANIFEST_VERSION` bump is a breaking change for every manifest exported by v0.6.0:
     before this round the verify surface collapsed them to `malformed-manifest` (HTTP 400 via
@@ -362,14 +362,13 @@ origin=relay_lost, delivery=not_sent`).
     the per-connection controlToken, not "backend-internal" execution).
 
   **Audit round 5 hardening (2026-08-07, full SEC/QA/TDA re-audit of the R4 landing — no H):**
-
   - **Decision vocabulary consolidation, audit tier (TDA-R4-3, M).** The backend audit tally
     fold (`AUDIT_DECISIONS`) and the webui tally/membership arrays now consume the canonical
     `APPROVAL_DECISIONS` (`ApprovalDecision.options`) from event-model — the R4 enum sweep
-    had stopped at the origin list while identical hand mirrors of the *decision* list
+    had stopped at the origin list while identical hand mirrors of the _decision_ list
     remained, which would have let a 5th decision silently vanish from `by_decision` and be
-    absorbed into `pending`. Honest scope (SEC-R5-1): this consolidated the *tally fold and
-    membership scans*, not every consumer — the signed manifest's canonical form still
+    absorbed into `pending`. Honest scope (SEC-R5-1): this consolidated the _tally fold and
+    membership scans_, not every consumer — the signed manifest's canonical form still
     projects the decisions as hand-written `approval_<d>` keys, and the sidecar
     approval-message gate plus two webui type mirrors kept hand copies until R6
     (`INV-APPROVAL-DECISION-VOCAB` now pins reference identity and the manifest projection;
@@ -422,7 +421,6 @@ origin=relay_lost, delivery=not_sent`).
     Previously deleting the provider wiring survived the full sidecar suite (silent-off).
 
   **Audit round 6 (2026-08-07, landing of the R5 full re-audit findings — no H):**
-
   - **Decision vocabulary consolidation completed across tiers (TDA-R5-1 + SEC-R5-1 +
     QA-R5-1, M).** The four residual hand copies are gone: the sidecar approval-message
     security gate consumes `APPROVAL_DECISIONS` (set-equivalent refactor, pinned by a
@@ -433,7 +431,7 @@ origin=relay_lost, delivery=not_sent`).
     `INV-APPROVAL-DECISION-VOCAB` pins `AUDIT_DECISIONS`/webui `DECISIONS` reference identity
     (the identical hand literal previously survived the full suite — probe P3c) and pins the
     signed manifest's `approval_<d>` projection over the whole vocabulary, so a future 5th
-    decision goes RED at the normalize stage; the *binding* follow-through (that a declared
+    decision goes RED at the normalize stage; the _binding_ follow-through (that a declared
     field actually folds into the signed root) is enforced separately by the R7
     root-sensitivity pin (`INV-AUDIT-BINDING-COMPLETENESS`, SEC-R6-1) — the projection pin
     alone did not force it.
@@ -474,7 +472,6 @@ origin=relay_lost, delivery=not_sent`).
     (TDA-R5-5, disclosed in their docstring) are tracked in the phase tech-debt sweep.
 
   **Audit round 7 (2026-08-07, landing of the R6 targeted re-audit findings — no H):**
-
   - **The fifth hand copy is gone (TDA-R6-1, M).** The R6 claim "the four residual hand
     copies are gone" was literally true for the four sites the R5 audit enumerated, but the
     attach daemon — the default observation mode — carried a byte-identical `!==` chain with
@@ -518,7 +515,6 @@ origin=relay_lost, delivery=not_sent`).
 
   **Audit round 8→9 (2026-08-07, landing of the R8 targeted re-audit findings — no H; QA
   lane APPROVE, SEC/TDA CONDITIONAL on the items below, all landed):**
-
   - **Binding completeness extended to the sibling projections (SEC-R8-1, M).** The R7
     root-sensitivity pin covered only `summary`; the same declared-but-unbound class stayed
     open for `canonicalizeEventFields` (9 positional fields — carrying `command` and
@@ -534,11 +530,11 @@ origin=relay_lost, delivery=not_sent`).
     verifier's own reason string names the real algorithm), but it falsifies the module
     doc's "any displayed value" claim and becomes an algorithm-confusion surface the day a
     second algorithm branches on it. The fix (fail-closed `algorithm` well-formedness gate
-    + a fourth envelope sweep loop; no version bump — the canonical form is unchanged) is a
-    scan-scope change and lands as a dated v0.7 task under a full audit. The key-template
-    limitation of the auto-extending loops (only unconditionally-present keys are swept;
-    optional projection fields would escape — none exist today, and the normalize object
-    literals compile-force non-optional props) is disclosed with it (SEC-R9-2).
+    - a fourth envelope sweep loop; no version bump — the canonical form is unchanged) is a
+      scan-scope change and lands as a dated v0.7 task under a full audit. The key-template
+      limitation of the auto-extending loops (only unconditionally-present keys are swept;
+      optional projection fields would escape — none exist today, and the normalize object
+      literals compile-force non-optional props) is disclosed with it (SEC-R9-2).
   - **Present→forwarded direction pinned (QA-R8-1/R8-2, L).** The gate tests only emitted
     frames omitting `reason`/`persist`, so discarding the operator's rationale or forcing
     the persistent-allowlist flag permanently off survived the full suite (fail-safe

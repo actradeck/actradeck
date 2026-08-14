@@ -62,6 +62,17 @@ Detailed in the [approval policy guide](./approval-policy.md).
 | `ACTRADECK_PERSIST_APPROVALS` | _(unset = OFF)_ | `1`/`true` enables the persistent approval allowlist. Unset also stops honoring already-recorded grants. |
 | `ACTRADECK_PERSIST_APPROVALS_TTL_MS` | `604800000` (7 days) | TTL for persisted grants; clamped to 1 minute–90 days. |
 
+## Anonymous telemetry (default off)
+
+Detailed in [Anonymous telemetry](./anonymous-telemetry.md). Sending is off until the operator
+explicitly enables it in **Settings → Privacy** or via `actradeck telemetry enable`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ACTRADECK_TELEMETRY_ENDPOINT` | _(unset = official collector offered)_ | HTTPS collector URL **offered** on enable (self-hosting path). Setting it does not enable sending. This is a network-egress control: once enabled, batches go to this destination. Loopback HTTP is accepted for development only. |
+| `ACTRADECK_TELEMETRY_STATE` | `~/.actradeck/telemetry.json` (beside `ACTRADECK_PGDATA` when set) | Where the consent state (mode, random installation ID, daily presence counters) lives. Tests and scripts must point this at a throwaway path — or better, use the kill switch below. |
+| `ACTRADECK_TELEMETRY_DISABLED` | _(unset = subsystem available)_ | `1`/`true` removes the telemetry subsystem entirely for that process: no state file reads/writes, no routes, no egress. Used by test gates and CI so they can never touch the operator's consent state or send data. |
+
 ## Display scope
 
 | Variable | Default | Notes |

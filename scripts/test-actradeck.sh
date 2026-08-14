@@ -44,6 +44,8 @@ assert_exit 1 "logs に未知サービスは exit 1" -- bash "$AC" logs bogus
 assert_exit 0 "doctor は exit 0" -- bash "$AC" doctor
 assert_contains "[doctor] node version:" "doctor は Node version を表示" -- bash "$AC" doctor
 assert_contains "[doctor] pnpm:" "doctor は pnpm version または remediation を表示" -- bash "$AC" doctor
+assert_contains "actradeck telemetry status" "help は匿名 telemetry controls を表示" -- bash "$AC" --help
+assert_exit 1 "telemetry の未知 action は exit 1" -- bash "$AC" telemetry raw-events
 
 # 3. unit 生成: ExecStart / WorkingDirectory / hardening / webui の NODE_ENV。
 assert_contains "WorkingDirectory=" "backend unit に WorkingDirectory" -- bash "$AC" print-unit backend

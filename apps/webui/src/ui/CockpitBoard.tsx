@@ -28,6 +28,7 @@ import { AuditCoveragePanel } from "./AuditCoveragePanel";
 import { SessionList } from "./SessionList";
 import { SessionReplayView } from "./SessionReplay";
 import { ThemeToggle } from "./ThemeToggle";
+import { SettingsDialog } from "./SettingsDialog";
 import { useAuditCoverage } from "./use-audit-coverage";
 import { useDaemons } from "./use-daemons";
 import { useReadiness } from "./use-readiness";
@@ -304,6 +305,7 @@ export function CockpitBoard({ wsUrl }: CockpitBoardProps) {
         <NotificationToggle notifications={notifications} />
         <LocaleToggle />
         <ThemeToggle />
+        <SettingsDialog />
       </AppHeader>
       <div className="ad-content">
         <main id="main" data-testid="cockpit" className="ad-board">

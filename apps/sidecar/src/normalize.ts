@@ -26,6 +26,7 @@ import {
 
 import { type BuildEventInput, buildEvent } from "./event-factory.js";
 import { checkFields } from "./check-classifier.js";
+import { governanceModeFor } from "./permission-mode.js";
 import { redactString } from "@actradeck/redaction";
 
 /** Claude Code hook の共通入力 (HTTP body = command stdin と同形)。 */
@@ -1603,6 +1604,12 @@ export function normalizeHook(
   ): ReturnType<typeof buildEvent> =>
     buildEvent({
       ...base,
+      // 通常の Claude hook 経路は ApprovalBridge が実行前に介在する。bypassPermissions は
+      // per-repo policy の有効性を同期 normalizer だけでは確定できないため unavailable とし、
+      // protected を過大計上しない。保証宣言は run 起点だけに載せる。
+      ...(event_type === "session.started"
+        ? { governance_mode: governanceModeFor(input.permission_mode) }
+        : {}),
       event_type,
       ...(state !== undefined ? { state } : {}),
       ...(extra.summary !== undefined ? { summary: extra.summary } : {}),

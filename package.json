@@ -18,6 +18,9 @@
     "format:fix": "prettier --write \"{packages,apps,db}/**/*.{ts,tsx,mts,mjs,json}\" \"*.{json,mjs}\"",
     "type-check": "pnpm -r --if-present run type-check",
     "test": "pnpm -r --if-present run test",
+    "test:public-metrics": "node --test scripts/collect-public-metrics.test.mjs",
+    "test:telemetry-cli": "node --test scripts/telemetry.test.mjs",
+    "test:usage-cli": "node --test scripts/usage.test.mjs",
     "build": "pnpm -r --if-present run build",
     "db:migrate": "pnpm --filter @actradeck/db run migrate:up",
     "db:migrate:down": "pnpm --filter @actradeck/db run migrate:down"

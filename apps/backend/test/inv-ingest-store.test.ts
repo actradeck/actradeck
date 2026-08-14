@@ -849,6 +849,45 @@ describe.skipIf(!reachable)("INV-IDEMPOTENCY / INV-EVENT-ORDER (real Postgres)",
     expect(detail?.capture_mode).toBeUndefined();
   });
 
+  it("governance_mode は session.started の明示値だけを first-wins で永続する", async () => {
+    const store = new IngestStore({ pool });
+    const sid = newSession("sess_governance");
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        state: "starting",
+        event_type: "session.started",
+        governance_mode: "enforcement",
+      }),
+    );
+    // 後続イベントの宣言は carriage point 外なので無視し、起点保証を上書きしない。
+    await store.ingest(
+      makeEvent({
+        session_id: sid,
+        event_type: "heartbeat",
+        governance_mode: "observe_only",
+      }),
+    );
+    const { rows } = await pool.query(
+      `SELECT governance_mode FROM sessions WHERE session_id = $1`,
+      [sid],
+    );
+    expect(rows[0].governance_mode).toBe("enforcement");
+  });
+
+  it("governance_mode 欠落を enforcement に推測しない", async () => {
+    const store = new IngestStore({ pool });
+    const sid = newSession("sess_governance_unknown");
+    await store.ingest(
+      makeEvent({ session_id: sid, state: "starting", event_type: "session.started" }),
+    );
+    const { rows } = await pool.query(
+      `SELECT governance_mode FROM sessions WHERE session_id = $1`,
+      [sid],
+    );
+    expect(rows[0].governance_mode).toBeNull();
+  });
+
   describe("INV-CURRENT-ACTION-KIND/SUBJECT (real PG round-trip) — ADR 019eeac6", () => {
     it("kind/subject が session_state へ永続し DTO へ往復する (idempotent・二重加算なし)", async () => {
       const store = new IngestStore({ pool });

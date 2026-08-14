@@ -16,6 +16,7 @@ import {
   StartKind,
   EndKind,
   Recoverability,
+  GovernanceMode,
 } from "../src/index.js";
 import { validEvent } from "./helpers.js";
 
@@ -72,6 +73,21 @@ describe("INV-EVENT-SCHEMA", () => {
 
   it("rejects a non-string provider_session_id", () => {
     expect(safeParseEvent(validEvent({ provider_session_id: 123 as never })).success).toBe(false);
+  });
+
+  it("accepts every governance_mode and rejects unknown guarantees", () => {
+    for (const mode of GovernanceMode.options) {
+      const res = safeParseEvent(validEvent({ governance_mode: mode }));
+      expect(res.success).toBe(true);
+      if (res.success) expect(res.data.governance_mode).toBe(mode);
+    }
+    expect(safeParseEvent(validEvent({ governance_mode: "mostly" as never })).success).toBe(false);
+  });
+
+  it("keeps governance_mode optional for existing producers", () => {
+    const res = safeParseEvent(validEvent());
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.governance_mode).toBeUndefined();
   });
 
   // --- ADR 0014 Phase 3a: run lineage optional fields (start_kind / resumed_from_session_id /

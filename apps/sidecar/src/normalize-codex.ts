@@ -102,6 +102,8 @@ function make(
     ...(threadId !== undefined ? { thread_id: threadId } : {}),
     ...(turnId !== undefined ? { turn_id: turnId } : {}),
     event_type,
+    // Managed Codex app-server は CodexApprovalBridge が request/response 経路に介在する。
+    ...(event_type === "session.started" ? { governance_mode: "enforcement" as const } : {}),
     ...(state !== undefined ? { state } : {}),
     ...(extra.endKind !== undefined ? { end_kind: extra.endKind } : {}),
     ...(extra.recoverability !== undefined ? { recoverability: extra.recoverability } : {}),

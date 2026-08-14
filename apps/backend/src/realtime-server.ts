@@ -72,6 +72,12 @@ import type { AuditStore } from "./audit-store.js";
 import { isPathWithinProjectScope, parseProjectScope } from "./project-scope.js";
 import type { RealtimeStore } from "./realtime-store.js";
 import type { SafetyDemoLauncher } from "./safety-demo.js";
+import {
+  telemetryErrorCode,
+  type AnonymousTelemetry,
+  type TelemetryErrorCode,
+} from "./telemetry.js";
+import { parseUsageRange, type UsageStore } from "./usage-store.js";
 import type {
   CodexSpawnRelayResult,
   PolicyRelayOp,
@@ -87,6 +93,8 @@ export interface RealtimeRouteOptions {
   readonly store: RealtimeStore;
   readonly replayStore: ReplayStore;
   readonly auditStore: AuditStore;
+  /** Aggregate-only local usage projection; never returns session/event identifiers. */
+  readonly usageStore: UsageStore;
   readonly sidecarRegistry: SidecarRegistry;
   /**
    * ADR 019f0eca 方式B: policy resolve endpoint の path 封じ込め scope。省略時は
@@ -98,6 +106,8 @@ export interface RealtimeRouteOptions {
    * `POST /realtime/demo/safety` は 404 (この配備でデモ導線を生やさない)。
    */
   readonly demoLauncher?: SafetyDemoLauncher;
+  /** Explicitly opted-in anonymous telemetry; absent for library/test builds with no egress. */
+  readonly telemetry?: AnonymousTelemetry;
 }
 
 const VALID_DECISIONS: ReadonlySet<string> = new Set(ApprovalDecision.options);
@@ -513,6 +523,77 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
     const approvals = await opts.store.approvalsSnapshot(isLive);
     return reply.send({ approvals });
   });
+
+  // ローカル利用集計。UTC 日次の件数だけを返し、session/event id・prompt・command・path は返さない。
+  // Bearer gate は /realtime 共通 onRequest が担う。`since` は 1..3650d または YYYY-MM-DD に限定。
+  app.get<{ Querystring: { since?: string } }>("/realtime/usage", async (req, reply) => {
+    const range = parseUsageRange(req.query.since);
+    if (range === undefined) {
+      return reply.code(400).send({ error: "since must be 1..3650d or YYYY-MM-DD" });
+    }
+    try {
+      return reply.send(await opts.usageStore.report(range));
+    } catch (err) {
+      req.log.error({ err }, "usage query failed");
+      return reply.code(500).send({ error: "internal error" });
+    }
+  });
+
+  // Explicit opt-in telemetry controls. All endpoints are behind the same REALTIME_TOKEN gate.
+  // The BFF additionally enforces same-origin + POST-only for state changes. Preview returns the
+  // exact closed-schema batch that would be sent; no product session/event identifiers exist in it.
+  // SEC-4 (2026-08-13 監査): error body は telemetry.ts の closed enum `TelemetryErrorCode` のみ
+  // (raw Error.message は絶対パス / upstream HTTP status を echo していた)。生エラーはログ専用。
+  const telemetry = opts.telemetry;
+  if (telemetry !== undefined) {
+    app.get("/realtime/telemetry", async (_req, reply) => {
+      return reply.send(await telemetry.status());
+    });
+
+    app.get("/realtime/telemetry/preview", async (_req, reply) => {
+      return reply.send(await telemetry.preview());
+    });
+
+    app.post<{ Body: { endpoint?: unknown } }>("/realtime/telemetry/enable", async (req, reply) => {
+      const endpoint = req.body?.endpoint;
+      if (endpoint !== undefined && typeof endpoint !== "string") {
+        return reply.code(400).send({ error: "invalid_endpoint" satisfies TelemetryErrorCode });
+      }
+      try {
+        return reply.send(await telemetry.enable(endpoint));
+      } catch (error) {
+        req.log.error({ err: error }, "telemetry enable failed");
+        return reply.code(400).send({ error: telemetryErrorCode(error, "state_write_failed") });
+      }
+    });
+
+    app.post("/realtime/telemetry/disable", async (req, reply) => {
+      try {
+        return reply.send(await telemetry.disable());
+      } catch (error) {
+        req.log.error({ err: error }, "telemetry disable failed");
+        return reply.code(500).send({ error: telemetryErrorCode(error, "state_write_failed") });
+      }
+    });
+
+    app.post("/realtime/telemetry/reset-id", async (req, reply) => {
+      try {
+        return reply.send(await telemetry.resetId());
+      } catch (error) {
+        req.log.error({ err: error }, "telemetry id reset failed");
+        return reply.code(400).send({ error: telemetryErrorCode(error, "state_write_failed") });
+      }
+    });
+
+    app.post("/realtime/telemetry/flush", async (req, reply) => {
+      try {
+        return reply.send(await telemetry.flush());
+      } catch (error) {
+        req.log.error({ err: error }, "telemetry flush failed");
+        return reply.code(502).send({ error: telemetryErrorCode(error, "send_failed") });
+      }
+    });
+  }
 
   // 段階1 (ADR 019ead7a D1): Live Wall の横断フィード集約 pull。
   //   connected(接続在席=isLive) **または** external adapter の直近 active(recency proxy)な session の

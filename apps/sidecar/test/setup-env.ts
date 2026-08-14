@@ -14,3 +14,8 @@
 import { applyTestDatabaseGuard } from "@actradeck/event-model";
 
 applyTestDatabaseGuard(process.env);
+
+// QA-R2-3 (2026-08-13 監査 R2): telemetry kill-switch を全テストプロセスへ構造注入する
+// (backend/webui の setup-env と同一方針)。sidecar は telemetry を持たないが、テストが backend を
+// 起動する将来経路も含め、テストからの実 collector 送信を setup 層で一様に閉じる。
+process.env.ACTRADECK_TELEMETRY_DISABLED = "1";

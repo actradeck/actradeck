@@ -225,6 +225,7 @@ export { BoundedLruMap } from "./bounded-lru-map.js";
 // normalized event
 export {
   CaptureMode,
+  GovernanceMode,
   NormalizedEvent,
   Metrics,
   Payload,

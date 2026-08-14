@@ -150,6 +150,12 @@ export default defineConfig({
         "src/realtime-server.ts": { statements: 94, branches: 88, functions: 90, lines: 95 },
         "src/realtime-store.ts": { statements: 87, branches: 72, functions: 95, lines: 95 },
         "src/sidecar-registry.ts": { statements: 88, branches: 72, functions: 95, lines: 95 },
+        // QA-6 (2026-08-13 監査): telemetry は egress 判断 + at-rest consent state を司る
+        //   security-adjacent モジュール。実測 (2026-08-13 local): telemetry 95.6/91.2/90.69/97、
+        //   usage-store 100/100/100/100。floor は worst-observed の 3-5pt 下
+        //   (per-file-coverage-floor-below-worst-not-best・CI regime 実測が出たら見直し可)。
+        "src/telemetry.ts": { statements: 91, branches: 86, functions: 86, lines: 92 },
+        "src/usage-store.ts": { statements: 95, branches: 92, functions: 95, lines: 95 },
         // TDA-2 (decision 019f4241 TDA-1 の抽出着地監査): relay 安全側 deny 意味論の単一出所
         //   (timeout/未知 id 黙殺/rejectAll) ゆえ erosion tripwire を張る。実測 100/100/100/100
         //   (unit + relay INV 経由) → floor は worst-observed の 5-10pt 下 (per-file-coverage-floor-

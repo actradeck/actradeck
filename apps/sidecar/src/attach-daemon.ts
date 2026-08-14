@@ -202,9 +202,9 @@ export class AttachDaemon {
       // ADR D8: 全 emit に capture_mode="attach"。
       captureMode: "attach",
       // ADR D6: per-session identity を registry から解決 (初出で entry/GitWatcher 起動)。
-      // decision 019fd2ac ①: SessionStart フラグを渡し reap 跨ぎ resume の親相関 seed を可能にする。
-      resolveIdentity: (sessionId, cwd, isSessionStart) =>
-        this.registry.observeHook(sessionId, cwd, isSessionStart).identity,
+      // decision 019fd2ac ① 改訂: reap 跨ぎ親相関 seed (tombstone consume) は registry が
+      // 任意 hook の初出で行う (SessionStart フラグ配線は撤去・承認不可視化バグの根治)。
+      resolveIdentity: (sessionId, cwd) => this.registry.observeHook(sessionId, cwd).identity,
       // ADR 019eb365: SessionEnd で当該 session を即時 reap (GitWatcher 停止 + hello 再送)。
       onSessionEnd: (sessionId) => this.registry.reap(sessionId),
       ...(opts.host !== undefined ? { host: opts.host } : {}),

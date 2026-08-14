@@ -36,6 +36,7 @@ import type { RealtimeHub } from "../src/realtime-hub.js";
 import type { RealtimeStore } from "../src/realtime-store.js";
 import type { ReplayStore } from "../src/replay-store.js";
 import type { AuditStore } from "../src/audit-store.js";
+import type { UsageStore } from "../src/usage-store.js";
 
 const REALTIME_TOKEN = "test-realtime-token-safety-demo-abcdefghij";
 
@@ -262,6 +263,7 @@ describe("INV-SAFETY-DEMO route (POST /realtime/demo/safety)", () => {
       store: {} as unknown as RealtimeStore,
       replayStore: {} as unknown as ReplayStore,
       auditStore: {} as unknown as AuditStore,
+      usageStore: {} as unknown as UsageStore,
       sidecarRegistry: new SidecarRegistry(),
       ...(demoLauncher ? { demoLauncher } : {}),
     });

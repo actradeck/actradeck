@@ -7,7 +7,15 @@
  * このテストは **実 Postgres (DATABASE_URL / Docker) を必要としない** — PGlite は自己完結ゆえ
  * postgres service 無しで走る (Phase 1c の埋込 test 移行の布石)。
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +30,7 @@ import {
   startEmbeddedPg,
   type EmbeddedDb,
 } from "../src/embedded-db.js";
+import { SAFETY_DEMO_SESSION_PREFIX } from "../src/safety-demo-script.js";
 import { makeEvent } from "./helpers.js";
 
 describe("INV-EMBEDDED-DB: 埋込 PGlite boot + DB 往復", () => {
@@ -93,6 +102,127 @@ describe("INV-EMBEDDED-DB: 埋込 PGlite boot + DB 往復", () => {
   it("認証ゲート不変: token 無し read は 401", async () => {
     const res = await app.inject({ method: "GET", url: "/realtime/approvals" });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("usage: demo/real/protected/approval/mid-flight を aggregate-only route へ正確に投影する", async () => {
+    const suffix = Date.now().toString(36);
+    const protectedSid = `sess_usage_protected_${suffix}`;
+    const observedSid = `sess_usage_observed_${suffix}`;
+    const midflightSid = `sess_usage_midflight_${suffix}`;
+    const demoSid = `${SAFETY_DEMO_SESSION_PREFIX}${suffix}`;
+    const ingest = async (event: ReturnType<typeof makeEvent>): Promise<void> => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/ingest",
+        headers: { authorization: "Bearer t-ing" },
+        payload: event,
+      });
+      expect(response.statusCode).toBe(200);
+    };
+    // QA-11 + QA-R2-4 (2026-08-13 監査): since は **固定の過去日** にする。`2d` は from が可動で、
+    // before/after 取得の間に UTC 日が変わると前日分が窓から落ち delta が負に振れうる。固定日なら
+    // before-window ⊆ after-window が常に成立し、絶対値でなく delta の assert が厳密になる
+    // (同一 DB 上の他テストの ingest と分離・aggregate-test-single-run-false-confidence の再発防止)。
+    const sinceDay = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+    const fetchTotals = async (): Promise<Record<string, number>> => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/realtime/usage?since=${sinceDay}`,
+        headers: { authorization: "Bearer t-rt" },
+      });
+      expect(response.statusCode).toBe(200);
+      return (response.json() as { totals: Record<string, number> }).totals;
+    };
+    const before = await fetchTotals();
+
+    await ingest(
+      makeEvent({
+        session_id: protectedSid,
+        state: "starting",
+        event_type: "session.started",
+        governance_mode: "enforcement",
+      }),
+    );
+    await ingest(
+      makeEvent({ session_id: observedSid, state: "starting", event_type: "session.started" }),
+    );
+    await ingest(
+      makeEvent({
+        session_id: protectedSid,
+        state: "waiting.approval",
+        event_type: "tool.permission.requested",
+        payload: { kind: "tool.permission.requested", request_id: `${protectedSid}:apr-1` },
+      }),
+    );
+    await ingest(
+      makeEvent({
+        session_id: protectedSid,
+        state: "running.model_wait",
+        event_type: "tool.permission.resolved",
+        payload: {
+          kind: "tool.permission.resolved",
+          request_id: `${protectedSid}:apr-1`,
+          decision: "deny",
+          resolution_origin: "operator",
+        },
+      }),
+    );
+    // QA-4 (2026-08-13 監査): mid-flight 観測開始 (session.started 未観測 = started_at NULL) の
+    // session は events 由来で real_sessions に数える。旧 view (sessions.started_at 由来) は
+    // この session を落とし「承認要求はあるのに active 0」の内部矛盾を出した。
+    await ingest(
+      makeEvent({
+        session_id: midflightSid,
+        state: "waiting.approval",
+        event_type: "tool.permission.requested",
+        payload: { kind: "tool.permission.requested", request_id: `${midflightSid}:apr-1` },
+      }),
+    );
+    await ingest(
+      makeEvent({
+        session_id: demoSid,
+        state: "starting",
+        event_type: "session.started",
+        governance_mode: "observe_only",
+      }),
+    );
+    await ingest(
+      makeEvent({ session_id: demoSid, state: "completed", event_type: "session.ended" }),
+    );
+
+    const after = await fetchTotals();
+    const delta = Object.fromEntries(
+      Object.entries(after).map(([key, value]) => [key, value - (before[key] ?? 0)]),
+    );
+    expect(delta).toEqual({
+      cockpit_demo_started: 1,
+      cockpit_demo_completed: 1,
+      real_sessions: 3, // protected + observed + mid-flight (started_at NULL でも活動で数える)
+      protected_sessions: 1,
+      approval_requests: 2, // protected + mid-flight
+      operator_decisions: 1,
+    });
+
+    // 生 payload/id が出ない (NO-RAW) — days を含む全応答で確認。
+    const response = await app.inject({
+      method: "GET",
+      url: `/realtime/usage?since=${sinceDay}`,
+      headers: { authorization: "Bearer t-rt" },
+    });
+    expect(JSON.stringify(response.json())).not.toMatch(
+      /session_id|event_id|command|prompt|cwd|repo/,
+    );
+
+    const persisted = await pool.query(
+      `SELECT governance_mode, started_at FROM sessions WHERE session_id = $1`,
+      [protectedSid],
+    );
+    expect(persisted.rows[0]?.governance_mode).toBe("enforcement");
+    // mid-flight session は started_at NULL のまま (推測で埋めない) が、活動としては数えた。
+    const midflight = await pool.query(`SELECT started_at FROM sessions WHERE session_id = $1`, [
+      midflightSid,
+    ]);
+    expect(midflight.rows[0]?.started_at).toBeNull();
   });
 
   it("DB write + 冪等: POST /ingest で append し、再送で duplicate (event_id UNIQUE が socket 経由で有効)", async () => {
@@ -176,20 +306,26 @@ describe("INV-EMBEDDED-DB: 硬化 (0700 締め直し / fail-loud)", () => {
 });
 
 describe("INV-EMBEDDED-DB: startFromEnv の DB モード選択", () => {
-  it("DATABASE_URL 不在 → dbMode='embedded' で起動し close できる", async () => {
+  it("DATABASE_URL 不在 → dbMode='embedded' で起動し close できる (telemetry kill-switch 下で state 非生成)", async () => {
     const prevUrl = process.env.DATABASE_URL;
     const prevPgdata = process.env.ACTRADECK_PGDATA;
     const prevPort = process.env.ACTRADECK_BACKEND_PORT;
     const prevIngest = process.env.INGEST_TOKEN;
+    const prevTelemetry = process.env.ACTRADECK_TELEMETRY_DISABLED;
     const tmp = join(mkdtempSync(join(tmpdir(), "actradeck-embed-boot-")), "pgdata");
     try {
       delete process.env.DATABASE_URL;
       process.env.ACTRADECK_PGDATA = tmp;
       process.env.ACTRADECK_BACKEND_PORT = "0"; // OS 割当 ephemeral (衝突回避)
       process.env.INGEST_TOKEN = "t-boot";
+      // QA-2 (2026-08-13 監査): テストの startFromEnv は telemetry を値ベースで無効化する。
+      // (この suite は ACTRADECK_PGDATA で state path も隔離されるが、隔離は偶然でなく明示にする。)
+      process.env.ACTRADECK_TELEMETRY_DISABLED = "1";
       const server = await startFromEnv();
       try {
         expect(server.dbMode).toBe("embedded");
+        // kill-switch 下では telemetry state file を読みも書きもしない (隔離側にも生成されない)。
+        expect(existsSync(join(tmp, "..", "telemetry.json"))).toBe(false);
       } finally {
         await server.close();
       }
@@ -202,6 +338,8 @@ describe("INV-EMBEDDED-DB: startFromEnv の DB モード選択", () => {
       else process.env.ACTRADECK_BACKEND_PORT = prevPort;
       if (prevIngest === undefined) delete process.env.INGEST_TOKEN;
       else process.env.INGEST_TOKEN = prevIngest;
+      if (prevTelemetry === undefined) delete process.env.ACTRADECK_TELEMETRY_DISABLED;
+      else process.env.ACTRADECK_TELEMETRY_DISABLED = prevTelemetry;
       rmSync(join(tmp, ".."), { recursive: true, force: true });
     }
   }, 30_000);

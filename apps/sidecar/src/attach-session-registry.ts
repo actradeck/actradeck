@@ -92,12 +92,16 @@ export class AttachSessionRegistry {
   /**
    * terminal reap 済み run の親相関 tombstone (provider id → 旧 canonical run id)。
    * SessionEnd 経由の reap (isRunTerminal) でのみ記録し、idle reap (非 terminal・self-heal 意味論)
-   * では記録しない。consume-once: SessionStart の初出で seed に使ったら削除する。
+   * では記録しない。consume-once: reap 後の**任意 hook** の初出で seed に使ったら削除する。
    *
-   * best-effort の sanctioned 縮退 (QA-3・ADR 0014 matrix に開示): straggler hook が resume の
-   * SessionStart より先に entry を再生成した場合、および SessionEnd の reap より先に resume が
-   * 観測された場合は tombstone が未消費のまま fresh fold へ落ちる (edge を張らないだけで
-   * false edge は作らない安全側)。
+   * 任意 hook 消費の理由 (2026-08-13 実障害・decision 019fd2ac ① の改訂): 消費を SessionStart
+   * 初出に限定していた旧実装は、resume 時に SessionStart を発火しない CC クライアント形態
+   * (実測: CC hook 由来 session.started が 6 日間ゼロ) で再開活動を terminal 済み run へ永久 fold
+   * させた。terminal 投影は pending_approvals を常に空へ強制する (INV-TERMINAL-IMMUTABLE) ため、
+   * 以後の承認要求はカード非表示のまま全て timeout→deny になる (単一 session で 271 件の実害)。
+   * reap **前**の再来は従来から任意 hook で terminal-reopen する (session-identity case (B)) ので、
+   * reap 跨ぎも同一意味論に揃える。straggler (SessionEnd 直後の遅延 hook) は synthetic run +
+   * resumed_from 付きの小さな真実の run になるだけで、terminal run への不可視 fold より安全。
    */
   private readonly terminalTombstones = new BoundedLruMap<string, { runId: string }>(
     TERMINAL_TOMBSTONE_MAX_ENTRIES,
@@ -157,12 +161,12 @@ export class AttachSessionRegistry {
    *
    * @param sessionId canonical = hook の session_id (即確定)。
    * @param cwd hook payload の cwd (GitWatcher の repo root 特定に使う)。初出時のみ反映。
-   * @param isSessionStart SessionStart hook か (decision 019fd2ac ①)。true の初出でのみ terminal
-   *   tombstone を consume し、reap 跨ぎ resume を terminal-reopen (synthetic run + resumed_from)
-   *   として seed する。非 SessionStart の straggler (SessionEnd 後の遅延 hook) は consume せず
-   *   従来どおり同一 id へ fold する (3b-1 sanction 済挙動を不変に保つ)。
+   *
+   * terminal tombstone は**任意 hook の初出**で consume し、reap 跨ぎ再来を terminal-reopen
+   * (synthetic run + resumed_from) として seed する (旧 SessionStart 限定は resume 時に
+   * SessionStart を発火しないクライアントで承認を永久不可視化した — フィールド docstring 参照)。
    */
-  observeHook(sessionId: string, cwd?: string, isSessionStart?: boolean): AttachSession {
+  observeHook(sessionId: string, cwd?: string): AttachSession {
     if (this.disposed) {
       // dispose 後の遅延 hook: 新規 entry を作らず ephemeral identity を返す (副作用なし)。
       const identity = new SessionIdentity({
@@ -176,9 +180,9 @@ export class AttachSessionRegistry {
       existing.lastHookAt = Date.now();
       return existing;
     }
-    // reap 跨ぎ親相関 (decision 019fd2ac ①): SessionStart の初出で terminal tombstone が有れば
+    // reap 跨ぎ親相関 (decision 019fd2ac ① 改訂): 任意 hook の初出で terminal tombstone が有れば
     // consume-once で seed し、直後の onHookSession が case (B) terminal-reopen を踏む。
-    const tombstone = isSessionStart === true ? this.terminalTombstones.get(sessionId) : undefined;
+    const tombstone = this.terminalTombstones.get(sessionId);
     if (tombstone !== undefined) this.terminalTombstones.delete(sessionId);
     // 初出: canonical を即確定する SessionIdentity を生成 (D6: hold 最小, fallback 採番無効)。
     // tombstone hit 時は explicit でなく priorTerminalRun seed (canonical=旧 runId・terminal=true)。

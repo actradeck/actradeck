@@ -490,7 +490,22 @@ export function applyEvent(prev: SessionProjection, ev: NormalizedEvent): Reduce
 
   const finalize = (resultState: State | undefined): SessionProjection => {
     const terminal = resultState !== undefined && isTerminalState(resultState);
-    const effectivePending = terminal ? [] : pending;
+    // 承認可視性は session state でなく **要求自身のライフサイクル** (requested→resolved) に従う
+    // (2026-08-13 承認不可視インシデント・main-loop H 所見):
+    // - terminal **到達時** (enteredTerminal): その run の既存 pending は moot として
+    //   クリアする (従来どおり・解消不能カードを残さない)。
+    // - terminal **後** に到着した tool.permission.requested は、生きた daemon が round-trip を保持する
+    //   actionable な要求 (daemon 再起動で run lineage の synthetic 再開が失敗した場合等に発生)。
+    //   これを抑制すると操作者にカードが見えないまま全て timeout→deny に落ちる (全プロジェクトの
+    //   エージェントが実質ブロックされた実害)。
+    // - 回収は**条件付き 2 経路** (TDA-R4-1/SEC-R4-4 で絶対形主張を訂正): (a) daemon が生きて
+    //   round-trip を保持していれば実 resolved (操作者/timeout/child_exit) が届き fold が除去する。
+    //   (b) daemon が死んだ場合は、**再接続 + hello での session 再宣言時**に approval-reconciler
+    //   の合成 cancel (relay_lost) が非 actionable 化する。恒久断 + 再宣言なしではカードが残る
+    //   (残余 accepted・decision 019ffbe3: Inbox は presence gate で非表示・relayApproval は
+    //   session 非登録を reject するため auto-allow は原理的に無い。reap は task 019ffbe4-c2cf)。
+    const enteredTerminal = terminal && !currentTerminal;
+    const effectivePending = enteredTerminal ? [] : pending;
     // ADR 0014 直交軸 (2/3・3/3): continuation / terminal_evidence は terminal でのみ意味を持つ。
     //   出所は event-model の正準写像 (TERMINAL_CONTINUATION / TERMINAL_EVIDENCE_DEFAULT) で、
     //   **resultState のみに依存** (イベント非依存) ゆえ ignore-after-terminal 経路で再計算しても

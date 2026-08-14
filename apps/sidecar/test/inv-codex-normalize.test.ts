@@ -29,9 +29,18 @@ describe("INV-CODEX-NORMALIZE: notification (b) mapping", () => {
     expect(ev.source).toBe("app_server");
     expect(ev.session_id).toBe(CTX.sessionId);
     expect(ev.provider_session_id).toBe(CTX.providerSessionId);
+    expect(ev.governance_mode).toBe("enforcement");
     // QA-2: thread/started は schema 上 params.thread.id (flat threadId 不在)。join キー
     //   thread_id を thread.id から補完すること (欠落を赤で固定)。
     expect(ev.thread_id).toBe("T1");
+  });
+
+  it("does not repeat governance_mode after session.started", () => {
+    const ev = one("turn/started", {
+      threadId: "T1",
+      turn: { id: "turn_1", status: "inProgress" },
+    });
+    expect(ev.governance_mode).toBeUndefined();
   });
 
   it("turn/started → turn.started / running.model_wait, turn_id from turn.id", () => {

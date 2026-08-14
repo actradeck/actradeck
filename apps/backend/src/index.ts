@@ -17,6 +17,12 @@ import { createPool } from "./db.js";
 import { reapStaleDemoSessionState } from "./ingest-store.js";
 import { buildIngestionServer } from "./ingestion-server.js";
 import { SAFETY_DEMO_SESSION_PREFIX as DEMO_SESSION_PREFIX } from "./safety-demo-script.js";
+import {
+  ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT,
+  AnonymousTelemetry,
+  telemetryDisabledByEnv,
+} from "./telemetry.js";
+import { UsageStore } from "./usage-store.js";
 
 export const BACKEND_NAME = "@actradeck/backend" as const;
 
@@ -106,6 +112,24 @@ export {
 } from "./sidecar-registry.js";
 export { registerRealtimeRoute, type RealtimeRouteOptions } from "./realtime-server.js";
 export {
+  UsageStore,
+  parseUsageRange,
+  type UsageRange,
+  type UsageReport,
+  type UsageDailyRow,
+  type UsageTotals,
+} from "./usage-store.js";
+export {
+  ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT,
+  AnonymousTelemetry,
+  defaultTelemetryStatePath,
+  normalizeTelemetryEndpoint,
+  type AnonymousTelemetryOptions,
+  type TelemetryFlushResult,
+  type TelemetryPreview,
+  type TelemetryStatus,
+} from "./telemetry.js";
+export {
   SafetyDemoLauncher,
   SAFETY_DEMO_SESSION_PREFIX,
   resolveDefaultDriverPath,
@@ -149,10 +173,22 @@ export async function startFromEnv(): Promise<{
     embedded = await startEmbeddedPg(defaultDataDir());
     pool = createPool({ connectionString: embedded.connectionString, max: EMBEDDED_POOL_MAX });
   }
+  // QA-2 (2026-08-13 監査): 値ベース kill-switch。テストゲート/CI/スクリプトは
+  // ACTRADECK_TELEMETRY_DISABLED=1 で telemetry サブシステム全体 (state file 読取り含む) を
+  // 構造的に無効化できる (operator の実 consent state を掴まない・fetch 経路も生成されない)。
+  const telemetryDisabled = telemetryDisabledByEnv(process.env);
+  const telemetry = telemetryDisabled
+    ? undefined
+    : new AnonymousTelemetry({
+        usage: new UsageStore(pool),
+        defaultEndpoint:
+          process.env.ACTRADECK_TELEMETRY_ENDPOINT ?? ACTRADECK_PUBLIC_TELEMETRY_ENDPOINT,
+      });
   const app = await buildIngestionServer({
     pool,
     ingestToken,
     ...(realtimeToken ? { realtimeToken } : {}),
+    ...(realtimeToken && telemetry !== undefined ? { telemetry } : {}),
     logger: true,
   });
   // SEC-2 sweep (task 019f38b9): 使い捨てデモ session の stale projection 行を boot 時に reap。
@@ -173,6 +209,20 @@ export async function startFromEnv(): Promise<{
   const host = process.env.ACTRADECK_BACKEND_HOST ?? "127.0.0.1";
   // listen() は実際に bind したアドレス文字列を返す (port=0 のとき実 port を含む)。
   const address = await app.listen({ port, host });
+  // Default-off: this only reads local state. Network egress happens after explicit enable.
+  // SEC-2 (2026-08-13 監査): optional な telemetry サブシステムの失敗 (state file 破損・
+  // endpoint typo・disk 障害) で cockpit の起動を落とさない。失敗時は telemetry 停止 =
+  // egress ゼロの安全側縮退 (承認カードを描く Web UI の可用性が優先)。
+  if (realtimeToken && telemetry !== undefined) {
+    try {
+      await telemetry.start();
+    } catch (err) {
+      const name = err instanceof Error ? err.name : "UnknownError";
+      process.stderr.write(
+        `[actradeck-backend] telemetry disabled after start failure (${name})\n`,
+      );
+    }
+  }
   // 実際に bind した port を server から取り出す (env の 0 ではなく解決後の値)。
   const addr = app.server.address();
   const boundPort = addr && typeof addr === "object" ? addr.port : port;
@@ -182,6 +232,7 @@ export async function startFromEnv(): Promise<{
     host,
     dbMode,
     close: async () => {
+      telemetry?.dispose();
       await app.close();
       await pool.end();
       // 埋込のときは socket サーバ + PGlite も閉じる (real pg のときは embedded=undefined)。
