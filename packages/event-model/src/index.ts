@@ -127,6 +127,17 @@ export {
   deriveDemoApprovalRequestId,
 } from "./approval-request-id.js";
 
+// 承認待ち時間とフック timeout の正準単一出所 (T1: sidecar bridge / sidecar settings-merge / webui 残時間表示が共有)
+//   フック timeout は承認待ちから**導出**する。逆転すると CC 契約により deny でなく素通りになる。
+export {
+  DEFAULT_APPROVAL_TIMEOUT_MS,
+  APPROVAL_HOOK_MARGIN_MS,
+  MAX_APPROVAL_TIMEOUT_MS,
+  MIN_APPROVAL_TIMEOUT_MS,
+  hookTimeoutSecondsFor,
+  clampApprovalTimeoutMs,
+} from "./approval-timeout.js";
+
 // approval reconcile hello 宣言の wire 構築 + 受信検証 (T1 single source: sidecar 送信 / backend 検証・ADR 0014 Phase 4)
 export {
   MAX_ACTIVE_PENDING_IDS,

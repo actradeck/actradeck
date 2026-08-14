@@ -26,6 +26,7 @@
  *   $VAR は allowedEnvVars 列挙時のみ CC プロセス env から解決される (非列挙は空文字)。
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, hookTimeoutSecondsFor } from "@actradeck/event-model";
 import { withFileLock, type FileLockOptions } from "./file-lock.js";
 import { writeJson0600 } from "./fs-atomic.js";
 import { HOOK_TOKEN_HEADER, MANAGED_HOOK_EVENTS } from "./settings-injection.js";
@@ -95,9 +96,22 @@ export interface MergeResult {
   readonly settings: ClaudeSettingsFile;
 }
 
-/** PreToolUse / PermissionRequest は承認待ちがあるので timeout を長めに (managed と同方針)。 */
+/** 観測のみ (承認待ちが無い) event の hook timeout (秒)。応答は即返るので短くてよい。 */
+const OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS = 10;
+
+/**
+ * PreToolUse / PermissionRequest は承認待ちがあるので timeout を長めに (managed と同方針)。
+ *
+ * ⚠️ **順序不変条件 (fail-open 防止)**: この値は承認待ち (`DEFAULT_APPROVAL_TIMEOUT_MS`) から
+ * `hookTimeoutSecondsFor()` で**導出**する。手書きリテラルに戻してはならない。CC の契約では
+ * フック timeout が先に切れた PreToolUse は**ツール呼び出しをブロックしない**
+ * (通常の permission flow へ落ちる = bypass では実行される) ため、両者が逆転すると承認ゲートが
+ * 無言で消える。`INV-APPROVAL-TIMEOUT-ORDERING` が導出と順序を回帰固定する。
+ */
 function timeoutForEvent(ev: string): number {
-  return ev === "PreToolUse" || ev === "PermissionRequest" ? 35 : 10;
+  return ev === "PreToolUse" || ev === "PermissionRequest"
+    ? hookTimeoutSecondsFor(DEFAULT_APPROVAL_TIMEOUT_MS)
+    : OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS;
 }
 
 /** ActraDeck の hook entry を生成する (token-mode に応じて headers/allowedEnvVars を切替)。 */

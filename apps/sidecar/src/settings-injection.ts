@@ -10,6 +10,8 @@
  */
 import { randomBytes } from "node:crypto";
 
+import { DEFAULT_APPROVAL_TIMEOUT_MS, hookTimeoutSecondsFor } from "@actradeck/event-model";
+
 import { writeJson0600 } from "./fs-atomic.js";
 
 /** hook receiver の per-launch 認証トークン用ヘッダ名 (SEC-3)。 */
@@ -64,6 +66,9 @@ export interface ClaudeSettings {
   readonly hooks: Record<string, Array<{ hooks: HookHttpEntry[] }>>;
 }
 
+/** 観測のみ (承認待ちが無い) event の hook timeout (秒)。応答は即返るので短くてよい。 */
+const OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS = 10;
+
 /**
  * sidecar endpoint を全 hook に配線した settings オブジェクトを生成。
  *
@@ -76,8 +81,15 @@ export function buildHookSettings(endpoint: string, token?: string): ClaudeSetti
   const hooks: Record<string, Array<{ hooks: HookHttpEntry[] }>> = {};
   const headers = token ? { [HOOK_TOKEN_HEADER]: token } : undefined;
   for (const ev of MANAGED_HOOK_EVENTS) {
-    // PreToolUse / PermissionRequest は応答待ちが必要なので timeout を少し長めに。
-    const timeout = ev === "PreToolUse" || ev === "PermissionRequest" ? 35 : 10;
+    // PreToolUse / PermissionRequest は承認待ちがあるので timeout を長めに (attach と同方針)。
+    // ⚠️ 順序不変条件: 承認待ち (`DEFAULT_APPROVAL_TIMEOUT_MS`) から `hookTimeoutSecondsFor()` で
+    //    **導出**する (手書きリテラル禁止)。フック timeout が先に切れた PreToolUse は CC 契約により
+    //    ツール呼び出しをブロックせず通常の permission flow へ落ちる = 承認ゲートが無言で消える。
+    //    INV-APPROVAL-TIMEOUT-ORDERING が導出と順序を回帰固定する。
+    const timeout =
+      ev === "PreToolUse" || ev === "PermissionRequest"
+        ? hookTimeoutSecondsFor(DEFAULT_APPROVAL_TIMEOUT_MS)
+        : OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS;
     const entry: HookHttpEntry = {
       type: "http",
       url: endpoint,

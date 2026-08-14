@@ -23,6 +23,7 @@ import type {
   ResolutionOrigin,
 } from "@actradeck/event-model";
 import {
+  DEFAULT_APPROVAL_TIMEOUT_MS,
   DEFAULT_GATED_CATEGORIES,
   isKnownRedactionKind,
   isPathWithinScope,
@@ -309,7 +310,14 @@ export interface PolicyConfigView {
 }
 
 export interface ApprovalBridgeOptions {
-  /** UI 応答待ちタイムアウト (ms)。超過で安全側へ倒す。 */
+  /**
+   * UI 応答待ちタイムアウト (ms)。超過で安全側へ倒す。既定は event-model の
+   * `DEFAULT_APPROVAL_TIMEOUT_MS` (正準単一出所)。
+   *
+   * ⚠️ この値を変える場合、agent 側フック timeout は `hookTimeoutSecondsFor()` で**導出**すること。
+   * フック timeout が先に切れると、CC 契約により承認は deny でなく**素通り**になる
+   * (INV-APPROVAL-TIMEOUT-ORDERING が順序を回帰固定する)。
+   */
   readonly timeoutMs?: number;
   /** タイムアウト時の既定動作 (security.md: ask/deny の安全側)。 */
   readonly timeoutBehavior?: "deny";
@@ -389,7 +397,7 @@ export class ApprovalBridge {
   private readonly onPersistFailure: ((count: number) => void) | undefined;
 
   constructor(opts: ApprovalBridgeOptions = {}) {
-    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
     this.persist = opts.persist;
     this.now = opts.persist?.now ?? (() => Date.now());
     this.policyEnvEnabled = opts.policyEnvEnabled ?? true;

@@ -10,6 +10,7 @@
  * pending の各要素を request_id で独立に描き、ack を request_id 突合で表示する。
  * D3: 楽観更新しない — 押下→送信中→ack(ok/error) を表示するだけ。確定済み/送信中は再送を抑止。
  */
+import { DEFAULT_APPROVAL_TIMEOUT_MS } from "@actradeck/event-model";
 import { useState } from "react";
 
 import {
@@ -32,10 +33,19 @@ import type { Locale } from "./i18n/messages";
 import { t } from "./i18n/messages";
 import type { PendingApproval } from "../realtime/contract";
 
-/** タイムアウト目安が「まもなく」強調に切り替わる閾値 (ms)。推定値ベース (誤認防止)。 */
-const APPROVAL_SOON_THRESHOLD_MS = 5_000;
+/**
+ * タイムアウト目安が「まもなく」強調に切り替わる閾値 (ms)。推定値ベース (誤認防止)。
+ *
+ * 承認待ちの既定 (`DEFAULT_APPROVAL_TIMEOUT_MS`) から**導出**する: 窓の 10% を上限 30 秒で頭打ち。
+ * 固定 5 秒だと、承認待ちを 30 秒から 300 秒へ広げたときに警告が窓の 1.7% しか残らず、
+ * 「まもなく」の意味が失われる (旧既定 30 秒では 5 秒 = 窓の 17% だった)。
+ */
+const APPROVAL_SOON_THRESHOLD_MS = Math.min(30_000, Math.round(DEFAULT_APPROVAL_TIMEOUT_MS / 10));
 
-/** 承認の推定タイムアウト目安 (秒) 表示。UI は実 timeout を知らないため安全側の推定値。 */
+/** 分表記へ切り替える下限 (ms)。これ以上は「約N分」で読ませる (「約300秒」は読みにくい)。 */
+const APPROVAL_MINUTES_FLOOR_MS = 60_000;
+
+/** 承認の推定タイムアウト目安 表示。UI は実 timeout を知らないため安全側の推定値。 */
 function approvalTimeoutHint(requestedAtIso: string, nowMs: number, locale: Locale) {
   const remainingMs = approvalTimeRemainingMs(requestedAtIso, nowMs);
   const seconds = Math.ceil(remainingMs / 1000);
@@ -44,6 +54,10 @@ function approvalTimeoutHint(requestedAtIso: string, nowMs: number, locale: Loca
   }
   if (remainingMs < APPROVAL_SOON_THRESHOLD_MS) {
     return { tone: "soon" as const, label: t(locale, "approval.timeout.soon", { seconds }) };
+  }
+  if (remainingMs >= APPROVAL_MINUTES_FLOOR_MS) {
+    const minutes = Math.ceil(remainingMs / 60_000);
+    return { tone: "ok" as const, label: t(locale, "approval.timeout.okMinutes", { minutes }) };
   }
   return { tone: "ok" as const, label: t(locale, "approval.timeout.ok", { seconds }) };
 }
