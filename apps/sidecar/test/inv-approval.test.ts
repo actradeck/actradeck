@@ -1601,8 +1601,27 @@ describe("INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR: fallback paths still see a
     ];
     for (const cmd of vectors) {
       const out = splitSegments(cmd);
-      expect(out, cmd).toEqual(splitSegmentsQuoteUnaware(cmd));
+      // SEC-CQ5-2 (R5 監査 H): 解析不能時は legacy 分割 **+ command 全体** を返す。legacy だけだと
+      // `<<` や `<`/`>` でより細かく割れて program 名が引数から切れ、fallback 経路だけ de-gate した
+      // (しかも primary と legacy が一致するため union backstop がこの場合だけ無効化される)。
+      expect(out.slice(0, -1), cmd).toEqual(splitSegmentsQuoteUnaware(cmd));
+      expect(out[out.length - 1], cmd).toBe(cmd.trim());
       expect(out, cmd).toContain("rm -rf /tmp/x");
+    }
+  });
+
+  it("SEC-CQ5-2: an unterminated heredoc cannot hide the program from its flags", () => {
+    // 実 bash は heredoc 未終端の警告を出しつつ `rm -rf` を実行する。base/R4 はここで low/[]
+    // だった (二層とも素通り)。command 全体を 1 セグメントとして必ず見せることで閉じる。
+    for (const cmd of [
+      "rm <<EOF -rf /tmp/x",
+      "rm <<1 -rf /tmp/x",
+      "rm <<-x -rf /tmp/x",
+      "chmod <<EOF -R 777 /tmp/x",
+    ]) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, cmd).toBe("high");
+      expect(categories.size, cmd).toBeGreaterThan(0);
     }
   });
 });
@@ -1643,6 +1662,57 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     }
   });
 
+  it("QA-CQ5-1: a benign process-substitution launcher still emits the inner named category", () => {
+    // R5 監査 QA-CQ5-1 (H・本ブランチ起因の回帰)。R4 の redirect 除去モデル以降、primary 分割は
+    //   `<(...)`/`>(...)` の中身を segment に残さない。union backstop は legacy が high の
+    //   ときしか合流しないため、inner が non-high だと **category が丸ごと落ちる**。
+    //   bypass/YOLO ゲートは risk 非依存の category 駆動 (`matchedPolicyCategories`) なので、
+    //   これは承認カード無しでの実行 (defer) への de-gating に直結する。
+    //   base(66b202e) 実測: `cat <(find /tmp -delete)` = low + {recursive-rm}。
+    //   修正前 HEAD 実測: low + {} ← このテストが RED になる位置。
+    //   実 bash では inner が実行されることを監査レーンが stub 呼び出しログで確認済み。
+    // risk は base(66b202e) の実測値を**厳密値**として据え置く。over-gate 方向の「修正」で
+    //   通してしまうと、本ブランチが解消したはずの承認カード FP (インシデントの原因) が再発する。
+    //   `wc -l <(chmod -R 777 /srv)` が high なのは字面 high リテラル (`chmod -R 777`) が
+    //   コマンド全体走査で当たるためで、process-sub 経路とは独立 (base も high)。
+    const cases: ReadonlyArray<readonly [string, PolicyCategory, RiskLevel]> = [
+      ["cat <(find /tmp -delete)", "recursive-rm", "low"],
+      ["diff <(find /tmp -exec rm {} +) b", "recursive-rm", "low"],
+      ["tee >(chown -R nobody /srv)", "perm-change", "low"],
+      ["wc -l <(chmod -R 777 /srv)", "perm-change", "high"],
+    ];
+    for (const [cmd, category, expectedRisk] of cases) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect([...categories], cmd).toContain(category);
+      expect(risk, `${cmd} risk must match base (no new false-positive cards)`).toBe(expectedRisk);
+    }
+    // 対照: 起動が実行/source 系なら従来どおり risk も上がり `inline-code` が付く
+    //   (benign 経路の category emission が実行系経路の床上げを弱めていないこと)。
+    const exec = classifyCommandWithCategories("source <(find /tmp -delete)");
+    expect(exec.risk).toBe("medium");
+    expect([...exec.categories].sort()).toEqual(["inline-code", "recursive-rm"]);
+    // benign 起動には `inline-code` を付けない (中身を実行しないため・over-gate 防止)。
+    expect([...classifyCommandWithCategories("cat <(find /tmp -delete)").categories]).not.toContain(
+      "inline-code",
+    );
+  });
+
+  it("QA-CQ5-2: the redirect target word stops at `&`, keeping the next command a separate segment", () => {
+    // R5 監査 QA-CQ5-2 (H)。`targetEnd` の停止文字集合から `&` を外す変異が全 suite 緑で生存した
+    //   = medium 級 de-gating に対する弁別フェンスが新 redirect lexer に無かった。
+    //   変異時の実測: split は ["cat  -rf /tmp/x"] (rm 語を対象語として飲む) となり
+    //   `cat >out.log&find /tmp -delete` が medium[recursive-rm] → low[] へ落ちた。
+    //   high 級は union backstop が肩代わりするため **分類レベルでは検知できない** →
+    //   split 出力そのものを assert する (INV-APPROVAL-SPLIT-LAYER-CONTRACT と同じ処方)。
+    expect(splitSegments("cat >out.log&rm -rf /tmp/x")).toEqual(["cat", "rm -rf /tmp/x"]);
+    expect(splitSegments("cat 2>out.log&chmod -R 777 /srv")).toEqual(["cat", "chmod -R 777 /srv"]);
+    expect(splitSegments("cat >a\\ b&rm -rf /tmp/x")).toEqual(["cat", "rm -rf /tmp/x"]);
+    // union backstop が肩代わりできない medium 級で、厳密値として固定する。
+    const { risk, categories } = classifyCommandWithCategories("cat >out.log&find /tmp -delete");
+    expect(risk).toBe("medium");
+    expect([...categories]).toContain("recursive-rm");
+  });
+
   it("fd-dup inside inline shell code is gated too (recursion sees the same lexing)", () => {
     for (const cmd of [
       "sh 2>&1 -c 'rm -rf /'",
@@ -1677,6 +1747,10 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     // (2>&1 → &>> → \>&) を繰り返したため、個別ベクタでなく **演算子 × 位置の全組合せ**を
     // 機械生成して固定する。ground truth は監査レーンが実 bash で確認した性質:
     // 「redirect は語を供給しないので、どこに挟まっても rm/chmod/git は同じ引数で実行される」。
+    // QA-CQ5-4 (R5 監査) の条件付け: この GT は **入力 redirect の対象ファイルが存在する場合**に
+    //   成立する。`rm <missing.txt -rf /tmp/x` は bash が redirect 失敗で rc=1・rm 未実行に
+    //   なるため、その形について分類器 high は過大ゲート (安全側) であり live FN ではない。
+    //   出力 redirect (`>`/`>>`/`&>`/fd-dup) には条件が付かない。
     const REDIRECTS = [
       ">out.log",
       "> out.log",
@@ -1700,6 +1774,15 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
       "{v}>&1",
       '>"my out.log"',
       ">'my out.log'",
+      // TDA-CQ5-1 (R5 監査 H): 対象語は escape / quote 断片を跨いで 1 語。素朴な「空白まで」
+      // 実装は escape された空白で語を切り、残りをコマンド名と誤認して de-gate した。
+      ">a\\ b",
+      ">a\\ b\\ c",
+      '>"a b"c',
+      '>"a\\"b"',
+      ">'a b'",
+      "2>a\\ b",
+      "&>a\\ b",
     ] as const;
     const TEMPLATES: ReadonlyArray<readonly [(r: string) => string, string]> = [
       [(r) => `rm ${r} -rf /tmp/x`, "recursive-rm"],
@@ -1710,17 +1793,61 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
       [(r) => `cat f | rm ${r} -rf /tmp/x`, "recursive-rm"],
     ];
     const failures: string[] = [];
+    let combos = 0;
     for (const redirect of REDIRECTS) {
       for (const [template, category] of TEMPLATES) {
         const cmd = template(redirect);
         const { risk, categories } = classifyCommandWithCategories(cmd);
+        combos += 1;
         if (risk !== "high" || !categories.has(category as never)) {
           failures.push(`${cmd} -> ${risk} ${JSON.stringify([...categories])}`);
         }
       }
     }
     expect(failures, `${failures.length} de-gated redirect placements`).toEqual([]);
-    expect(REDIRECTS.length * TEMPLATES.length).toBe(132); // vacuity guard: 実際に全組合せを回した。
+
+    // 非空虚性ガード (QA-CQ5-3・R5 監査 M)。旧実装は `REDIRECTS.length * TEMPLATES.length` の
+    //   **配列長の積**を固定していたが、これは反復回数を一切証言しない。QA レーンは
+    //   ループの `.slice(0, 1)` 切詰め・ガード行削除・要素の重複差し替えがいずれも全緑になり、
+    //   さらに「要素差し替え + 本番欠陥 (`>|` を 1 文字 lex)」が全緑で通ることを実証した。
+    //   `>|` はこのマトリクスが唯一の証人であり、件数を保存する 1 行編集で防御が無音で消える。
+    //   → 等価 metatest の `SHARED_SPLIT_ALPHABET` と同型に (a) 実行回数カウンタ
+    //      (b) 構成そのものの literal pin の二重固定にする。
+    expect(combos, "matrix combinations actually classified").toBe(174);
+    expect(new Set(REDIRECTS).size, "REDIRECTS must not contain duplicates").toBe(29);
+    expect(new Set(TEMPLATES.map(([t]) => t("R"))).size, "TEMPLATES must be distinct").toBe(6);
+    // 構成 pin: 要素の差し替え (件数・一意性を保つ編集) でも RED にする単一出所。
+    expect([...REDIRECTS].sort()).toEqual([
+      "&>>out.log",
+      "&>a\\ b",
+      "&>out.log",
+      "0<&0",
+      "1>&2",
+      "2>&-",
+      "2>&1",
+      "2>>out.log",
+      "2>a\\ b",
+      "2>out.log",
+      "3>&1",
+      "<&-",
+      "<<<word",
+      "<>rw.txt",
+      "<in.txt",
+      "> out.log",
+      '>"a b"c',
+      '>"a\\"b"',
+      '>"my out.log"',
+      ">&2",
+      ">'a b'",
+      ">'my out.log'",
+      ">>out.log",
+      ">a\\ b",
+      ">a\\ b\\ c",
+      ">out.log",
+      ">|out.log",
+      "{v}>&1",
+      "{v}>out.log",
+    ]);
   });
 
   it("R4: escaped redirect characters are data, so a following & still separates (TDA-CQ4-1)", () => {
@@ -1872,8 +1999,12 @@ describe("INV-APPROVAL-CATEGORY-UNION-MERGE: legacy categories merge even when p
 // 一致域の正直な限定 (QA-CQ4-4 で訂正・以前は「quote/#/改行を含まなければ完全一致」と
 // 過大に述べていた):
 //  - **backslash**: quote-aware 側のみ escape を解釈するため構造的に乖離する
-//    (実測 37,448 入力中 8,992 件・legacy が常に同等以上に細かい = 安全方向)。下の
-//    positive control で乖離クラスとその向きを pin する。
+//    (alphabet `{a, space, ;, |, &, \}` の長さ ≤6 全数 37,448 入力中 8,992 件で乖離。
+//    QA-CQ5-8 の訂正: 以前は測定 alphabet を記録しておらず再現不能だった — 別 alphabet では
+//    件数が変わる)。**向きの主張はこの域に限る**: R5 監査は redirect 記号を域に入れると
+//    62/37,448 で legacy が coarser になることを実測した (`a\>&a` → primary ["a\>","a"] /
+//    legacy ["a\>&a"])。redirect は上記のとおり意図的 divergence の域。下の positive control
+//    で乖離クラスとその向きを pin する。
 //  - **redirect (`<` `>` とその合成形)**: R4 の構造修正で primary は演算子と対象語を除去し、
 //    legacy は従来どおり過剰分割する (意図的 divergence・別 test で pin)。
 //  - quote / `#` コメント / 改行 heredoc: 元から primary のみが解釈する。
@@ -1942,7 +2073,9 @@ describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
     expect(splitSegments("a # b")).toEqual(["a"]);
     expect(splitSegmentsQuoteUnaware("a # b")).toEqual(["a # b"]);
     // QA-CQ4-4: backslash escape (quote-aware 側のみ解釈)。乖離の**向き**も固定する —
-    // legacy は常に同等以上に細かく割る (= union backstop は high 側にしか効かず安全方向)。
+    // backslash 域では legacy が同等以上に細かく割る (= union backstop は high 側にしか効かず
+    // 安全方向)。QA-CQ5-8 の限定: この向きの主張は **redirect 記号を含まない域**でのみ成立する
+    // (redirect を含めると legacy が coarser になる形が実在する — 上の domain コメント参照)。
     expect(splitSegments("aa\\;a")).toEqual(["aa\\;a"]);
     expect(splitSegmentsQuoteUnaware("aa\\;a")).toEqual(["aa\\", "a"]);
     expect(splitSegments("echo a\\| rm -rf /tmp/x")).toEqual(["echo a\\| rm -rf /tmp/x"]);

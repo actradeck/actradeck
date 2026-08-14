@@ -62,10 +62,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   Redirections are now lexed as whole tokens and removed from the segment together with their
   target word, instead of being treated as separators: splitting there tore a program name away
   from its flags, so `rm >out.log -rf /path` — which bash really does execute — classified as
-  harmless with no approval card in any mode. That affected every redirect form placed between
-  a program and its arguments (`>`, `>>`, `>|`, `<`, `<>`, `>&`, `<&`, `&>`, `&>>`, `<<<`,
-  heredocs, with or without an fd prefix); a generated matrix of operator forms by position now
-  pins all of them. Dangerous paths stay gated: command substitution, stdin shells and real
+  harmless with no approval card in any mode. That affected redirect forms placed between a
+  program and its arguments (`>`, `>>`, `>|`, `<`, `<>`, `>&`, `<&`, `&>`, `&>>`, `<<<`, with or
+  without an fd prefix, and with escaped or quoted target words); a generated matrix of operator
+  forms by position pins those. Heredoc operators and process substitution are handled by the
+  splitter but are not in that matrix, and the remaining known gaps are listed at the end of this
+  entry. Dangerous paths stay gated: command substitution, stdin shells and real
   pipes classify as before, and as a structural backstop any command the previous classifier
   rated high still rates high.
   Honest limits of that guarantee. Changing a splitter is **not monotone** with respect to
@@ -77,8 +79,18 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   agreement. A dangerous-looking string inside quotes (`echo 'a; rm -rf /'`) or inside a quoted
   heredoc body (writing a runbook that documents `rm -rf`) still classifies high even though
   the shell would not execute it — the false-negative guarantee is bought with those known
-  false positives. One known gap remains and is tracked: a quoted assignment whose value
-  contains a space (`FOO='a b' rm -rf /path`) still hides the program from the classifier.
+  false positives. Removing redirects from the segment also stopped the primary splitter from
+  leaving the body of a process substitution behind as a fragment, which silently dropped the
+  policy category for a command whose launcher only reads it (`cat <(find /tmp -delete)`). Since
+  the bypass/YOLO gate is driven by categories rather than by the risk verdict, that turned
+  previously gated forms into ungated ones. The body of a process substitution is now classified
+  for its categories even when the launcher is benign, while the verdict itself stays unchanged,
+  so no new approval cards appear. Known gaps remain and are tracked rather than claimed closed: a
+  quoted assignment whose value contains a space (`FOO='a b' rm -rf /path`) still hides the program
+  from the classifier; a redirect whose target is a process substitution carrying an fd prefix
+  (`tee 2>(rm -rf /path)`) is not classified from the primary split; and the process-substitution
+  medium-floor suppression is decided per command rather than per segment, so a benign
+  `diff <(ls) ;` prefix relaxes it for the whole line.
 
 ## [0.7.0] - 2026-08-10
 

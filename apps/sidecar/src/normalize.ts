@@ -96,7 +96,9 @@ export const MAX_COMMAND_LEN = 4096;
  * ⚠️ 分割器へ演算子を足す変更は **risk に対して単調ではない** (SEC-CQ3-2 ≡ TDA-CQ3-1 ≡ QA-CQ3-1
  * で訂正・TDA-CQ4-3 で計数追加): 本関数は union backstop の legacy 側 (high-only ゆえ FP 中立)
  * であると同時に **primary の fallback** でもあり、fallback 役では粒度がそのまま primary の
- * 判定になる。base→R3 HEAD の 22,620 入力 differential (監査レーン実測) の遷移内訳:
+ * 判定になる。**historical measurement** (base→R3 HEAD の 22,620 入力 differential・監査レーン実測。R4 の
+ * redirect 除去モデル以降の profile は異なる — R5 実測 base→HEAD は low→high 148 / medium→high 72 /
+ * medium→low 30。以下は「単調でない」ことの根拠であって現行 HEAD の分布ではない):
  *   **medium→low 1,894** (最大の de-gating セル) / high→low 126 / high→medium 79 /
  *   low→medium 371 / low→high 811 / medium→high 1,089。
  * つまり細かく割ると (a) command 名とフラグが分断されて high/medium→low へ**下がり**、
@@ -116,6 +118,58 @@ export function splitSegmentsQuoteUnaware(command: string): string[] {
 
 /** 分類器内部で segment 分割を差し替えるための型 (SEC-CQ-1 union backstop 用・下記参照)。 */
 type SegmentSplitter = (command: string) => string[];
+
+interface PendingHeredoc {
+  readonly delimiter: string;
+  readonly quoted: boolean;
+  readonly stripTabs: boolean;
+}
+
+const SEPARATOR_OR_SPACE_RE = /[\s;|&<>]/;
+/**
+ * 構造解析不能な入力の fail-safe 分割 (SEC-CQ5-2・R5 監査 H)。
+ *
+ * legacy 分割を返すだけでは **over-gate にならない**: legacy は `<<` や `<`/`>` で**より細かく**
+ * 割るため、`rm <<EOF -rf /path` (実 bash は heredoc 未終端の警告を出しつつ rm -rf を実行する) が
+ * `["rm", "EOF -rf /path"]` になり、program 名が引数から切れて low/[] = 二層とも素通りしていた。
+ * しかも fallback 時は primary と legacy が同じ分割になるため **非対称 union backstop が
+ * この場合だけ無効化**される (backstop は「quote-aware 側の解析ミス」を legacy で補う設計で、
+ * 両者が一致するときは補うものが無い)。
+ * そこで解析不能時は legacy 分割に加えて **command 全体を 1 セグメント**として渡し、分類器が
+ * 「切られていない形」も必ず見るようにする (over-gate 方向 = 解析不能入力に対する安全側)。
+ */
+function splitSegmentsUnparseable(command: string): string[] {
+  const legacy = splitSegmentsQuoteUnaware(command);
+  const whole = command.trim();
+  if (whole.length === 0) return legacy;
+  return legacy.length === 1 && legacy[0] === whole ? legacy : [...legacy, whole];
+}
+
+/** fd 指定の走査上限 (SEC-CQ5-3): 末尾からこの文字数までで打ち切り、入力長に対し線形を保つ。 */
+const FD_SCAN_LIMIT = 64;
+/** `{v}>` の変数名として妥当か (bash の名前規則)。長さは FD_SCAN_LIMIT で既に有界。 */
+const FD_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const WHITESPACE_RE = /\s/;
+
+/**
+ * `i` が heredoc 以外の redirect 演算子の先頭ならその長さを返す (0 = 演算子でない)。
+ *
+ * SEC-CQ4-1/2/3 (R4 監査 H×3): 文字単位の隣接判定 (`previous === ">"` 等) は
+ * 「演算子の途中で 1 文字だけ見る」ため、`&>>` の 2 つ目の `>`・escape された `\>` の直後の `&`
+ * のように**位置が 1 つずれた形**で毎回穴が開いた (3 ラウンド連続)。演算子を**トークンとして
+ * 一括認識**することで、この off-by-one クラスを構造的に消す。
+ */
+function redirectOperatorLength(command: string, i: number): number {
+  const c = command[i];
+  const next = command[i + 1];
+  if (c === "&") return next === ">" ? (command[i + 2] === ">" ? 3 : 2) : 0; // &>> / &>
+  if (c === ">") return next === ">" || next === "&" || next === "|" ? 2 : 1; // >> >& >| >
+  if (c === "<") {
+    if (next === "<") return 0; // heredoc / herestring は専用分岐が扱う。
+    return next === "&" || next === ">" ? 2 : 1; // <& <> <
+  }
+  return 0;
+}
 
 /**
  * コマンドを ; | && || (と redirect) で区切った各セグメントへ分解 (パイプ/連結内の個別 cmd を見る)。
@@ -152,7 +206,11 @@ type SegmentSplitter = (command: string) => string[];
  *  - backtick は意図的に quote 扱いしない (TDA-CQ-7): 内容が実行されるため「データ」ではなく、
  *    区切り文字を含む backtick は素通しせず既存の hasCommandSubstitution 検出に委ねる。
  *    tokenize の QUOTE_CHARS (単語連結処理) とは目的が異なる非対称で、揃えてはならない。
- *  - 純粋な 1 パス文字走査 (正規表現ループ無し・O(n)) で ReDoS 経路を増やさない。
+ *  - 1 パス文字走査を基本とし ReDoS 経路を増やさない。**正直な scope (QA-CQ5-9・R5 監査)**:
+ *    redirect の除去だけは「演算子 → 対象語 → fd 接頭辞」の局所再走査を伴うため厳密な単一パス
+ *    ではなく、redirect が密な入力では線形定数が上がる (監査実測: 4KB / redirect 1024 個で
+ *    splitSegments 0.955ms vs 平文 0.126ms)。fd 接頭辞の走査は FD_SCAN_LIMIT で有界化済み
+ *    (SEC-CQ5-3: 有界化前は蓄積バッファ全体への `$` アンカー正規表現で O(N²)・実測 160 秒)。
  *
  * Consumer (TDA-CQ2-4): 承認分類 (classifyCommandRisk / classifyCommandWithCategories /
  * isNetworkEgressCommand) に加えて **check-classifier (classifyCheck) も本分割を消費する**。
@@ -179,36 +237,6 @@ type SegmentSplitter = (command: string) => string[];
  * INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND (演算子 × 位置の 132 組合せマトリクス + escape 形)
  * が両方向を回帰固定する。
  */
-interface PendingHeredoc {
-  readonly delimiter: string;
-  readonly quoted: boolean;
-  readonly stripTabs: boolean;
-}
-
-const SEPARATOR_OR_SPACE_RE = /[\s;|&<>]/;
-/** redirect の直前に付く fd 指定 (`2>` の `2` / `{v}>` の `{v}`) — 語ではないので segment から外す。 */
-const FD_PREFIX_TAIL_RE = /(?:\{[A-Za-z_][A-Za-z0-9_]*\}|\d+)$/;
-
-/**
- * `i` が heredoc 以外の redirect 演算子の先頭ならその長さを返す (0 = 演算子でない)。
- *
- * SEC-CQ4-1/2/3 (R4 監査 H×3): 文字単位の隣接判定 (`previous === ">"` 等) は
- * 「演算子の途中で 1 文字だけ見る」ため、`&>>` の 2 つ目の `>`・escape された `\>` の直後の `&`
- * のように**位置が 1 つずれた形**で毎回穴が開いた (3 ラウンド連続)。演算子を**トークンとして
- * 一括認識**することで、この off-by-one クラスを構造的に消す。
- */
-function redirectOperatorLength(command: string, i: number): number {
-  const c = command[i];
-  const next = command[i + 1];
-  if (c === "&") return next === ">" ? (command[i + 2] === ">" ? 3 : 2) : 0; // &>> / &>
-  if (c === ">") return next === ">" || next === "&" || next === "|" ? 2 : 1; // >> >& >| >
-  if (c === "<") {
-    if (next === "<") return 0; // heredoc / herestring は専用分岐が扱う。
-    return next === "&" || next === ">" ? 2 : 1; // <& <> <
-  }
-  return 0;
-}
-
 export function splitSegments(command: string): string[] {
   const segments: string[] = [];
   let current = "";
@@ -219,24 +247,91 @@ export function splitSegments(command: string): string[] {
     if (trimmed.length > 0) segments.push(trimmed);
     current = "";
   };
-  /** redirect の対象語 (`> out.log` の `out.log`) の終端 index を返す。quote 済みも 1 語。 */
+  /**
+   * redirect の対象語 (`> out.log` の `out.log`) の終端 index を返す。未終端 quote は -1。
+   *
+   * **メイン走査と同じ escape/quote 規則で 1 語を読む (TDA-CQ5-1・R5 監査 H)**: 素朴な
+   * 「空白/区切りまで」実装は escape された空白を語境界と誤認し、`>a\ b rm -rf /` で対象語を
+   * `a\` までしか食わず、残った `b` がコマンド名になって実行される rm が low/[] になった
+   * (base/R4 は medium|high-risk-other でゲート = bypass でも保持していた回帰)。
+   * shell の 1 語は quote 断片と escape を跨いで連結する (`>"a b"c` / `>a\ b`) ため、
+   * 語の走査規則はメインループと**同一出所の意味論**でなければならない
+   * (security-gate-reuse-canonical-parser)。
+   */
   const targetEnd = (from: number): number => {
     let j = from;
     while (command[j] === " " || command[j] === "\t") j += 1;
-    const q = command[j];
-    if (q === '"' || q === "'") {
+    let wordQuote: '"' | "'" | undefined;
+    while (j < command.length) {
+      const c = command[j] as string;
+      if (wordQuote !== undefined) {
+        // ダブルクォート内のみ backslash が次の 1 文字を字義化する (メインループと同一)。
+        if (c === "\\" && wordQuote === '"' && j + 1 < command.length) {
+          j += 2;
+          continue;
+        }
+        j += 1;
+        if (c === wordQuote) wordQuote = undefined;
+        continue;
+      }
+      if (c === "\\" && j + 1 < command.length) {
+        j += 2; // escape された空白・区切りは語の一部。
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        wordQuote = c;
+        j += 1;
+        continue;
+      }
+      if (SEPARATOR_OR_SPACE_RE.test(c)) break;
       j += 1;
-      while (j < command.length && command[j] !== q) j += 1;
-      return j < command.length ? j + 1 : j;
     }
-    while (j < command.length && !SEPARATOR_OR_SPACE_RE.test(command[j] as string)) j += 1;
-    return j;
+    // 未終端 quote = 構造解析不能。黙って飲み込まず fail-safe の legacy 分割へ倒す (TDA-CQ5-L2)。
+    return wordQuote === undefined ? j : -1;
   };
-  /** fd 指定 + 演算子 + 対象語を segment から取り除く (redirect は語を供給しない)。 */
+  /**
+   * fd 指定 + 演算子 + 対象語を segment から取り除く (redirect は語を供給しない)。
+   * 未終端 quote のときは -1 を返し、呼び出し側が legacy fallback へ倒す。
+   */
   const elideRedirect = (operatorEnd: number): number => {
-    current = current.replace(FD_PREFIX_TAIL_RE, "");
+    stripFdPrefix();
     return targetEnd(operatorEnd);
   };
+  /**
+   * 直前の語が fd 指定 (`2>` の `2` / `{v}>` の `{v}`) なら segment から外す。
+   *
+   * **語全体が数字/`{name}` のときだけ** (SEC-CQ5-4 / TDA-CQ5-L1): bash は `file2>out` の `2` を
+   * fd と見なさない。語末の数字を無条件に削ると `base64>out` が `base` に、`pytest2>x` が
+   * `pytest` になり、check-classifier が実行されていない検証コマンドへ credit を出す
+   * (ADR 0015 が禁じる over-credit 方向)。
+   *
+   * **正規表現でなく線形の末尾走査で行う (SEC-CQ5-3・R5 監査 H)**: `/\d+$/` 系は末尾が
+   * 「数字の並び + 非数字」のバッファで開始位置ごとに後戻りし O(N²) になる。この関数は
+   * redirect 演算子ごとに呼ばれ、承認判定は **hook の同期パス**にあるため、1 個の
+   * `tool_input.command` で sidecar のイベントループ全体 (承認 relay・timeout タイマ・
+   * 他セッションの hook) を止めうる。走査は末尾から高々 `FD_SCAN_LIMIT` 文字で打ち切る。
+   */
+  function stripFdPrefix(): void {
+    const end = current.length;
+    if (end === 0) return;
+    const floor = end > FD_SCAN_LIMIT ? end - FD_SCAN_LIMIT : 0;
+    if (current[end - 1] === "}") {
+      let k = end - 2;
+      while (k >= floor && current[k] !== "{") k -= 1;
+      if (k < floor) return;
+      const name = current.slice(k + 1, end - 1);
+      if (!FD_VAR_NAME_RE.test(name)) return;
+      if (k > 0 && !WHITESPACE_RE.test(current[k - 1] as string)) return; // 語の一部。
+      current = current.slice(0, k);
+      return;
+    }
+    let k = end;
+    while (k > floor && (current[k - 1] as string) >= "0" && (current[k - 1] as string) <= "9")
+      k -= 1;
+    if (k === end) return; // 末尾が数字でない。
+    if (k > 0 && !WHITESPACE_RE.test(current[k - 1] as string)) return; // `base64` / `pytest2` は fd でない。
+    current = current.slice(0, k);
+  }
   let i = 0;
   while (i < command.length) {
     const ch = command[i] as string;
@@ -310,7 +405,7 @@ export function splitSegments(command: string): string[] {
             if (!heredoc.quoted) bodyKeep += `\n${line}`;
             if (nl === -1) break; // 入力末尾に到達 (delimiter 不一致のまま)。
           }
-          if (!matched) return splitSegmentsQuoteUnaware(command); // 未終端 heredoc → fail-safe。
+          if (!matched) return splitSegmentsUnparseable(command); // 未終端 heredoc → fail-safe。
         }
         // コマンド語 (redirect 演算子・delimiter を除去済み) を先に確定し、本文は別 segment に
         // 残す (unquoted delimiter のみ・$()/backtick の検出点を保つ)。
@@ -333,7 +428,9 @@ export function splitSegments(command: string): string[] {
       // 単一 `&` (background 終端・SEC-CQ-2) も区切り。
       const redirect = redirectOperatorLength(command, i);
       if (redirect > 0) {
-        i = elideRedirect(i + redirect);
+        const elided = elideRedirect(i + redirect);
+        if (elided < 0) return splitSegmentsUnparseable(command); // 未終端 quote → fail-safe。
+        i = elided;
         continue;
       }
       push();
@@ -343,14 +440,16 @@ export function splitSegments(command: string): string[] {
     if (ch === "<") {
       if (command[i + 1] === "<" && command[i + 2] === "<") {
         // herestring `<<<word`: 演算子も word も command の語ではない — まとめて除去する。
-        i = elideRedirect(i + 3);
+        const elided = elideRedirect(i + 3);
+        if (elided < 0) return splitSegmentsUnparseable(command); // 未終端 quote → fail-safe。
+        i = elided;
         continue;
       }
       if (command[i + 1] === "<") {
         // heredoc operator。delimiter word を読み取り、本文消費を次の `\n` に予約する。
         // 演算子と delimiter は語を供給しないため segment からは除去する (残る引数は同一
         // segment に留まる — `rm <<EOF -rf /` の `-rf` が rm から切れない・SEC-CQ4-3)。
-        current = current.replace(FD_PREFIX_TAIL_RE, "");
+        stripFdPrefix();
         i += 2;
         let stripTabs = false;
         if (command[i] === "-") {
@@ -368,7 +467,7 @@ export function splitSegments(command: string): string[] {
             delimiter += command[i] as string;
             i += 1;
           }
-          if (i >= command.length) return splitSegmentsQuoteUnaware(command); // 未終端。
+          if (i >= command.length) return splitSegmentsUnparseable(command); // 未終端。
           i += 1;
         } else {
           while (i < command.length && !SEPARATOR_OR_SPACE_RE.test(command[i] as string)) {
@@ -385,22 +484,26 @@ export function splitSegments(command: string): string[] {
             i += 1;
           }
         }
-        if (delimiter.length === 0) return splitSegmentsQuoteUnaware(command); // 解析不能。
+        if (delimiter.length === 0) return splitSegmentsUnparseable(command); // 解析不能。
         pendingHeredocs.push({ delimiter, quoted: delimiterQuoted, stripTabs });
         continue;
       }
-      i = elideRedirect(i + redirectOperatorLength(command, i));
+      const elided = elideRedirect(i + redirectOperatorLength(command, i));
+      if (elided < 0) return splitSegmentsUnparseable(command); // 未終端 quote → fail-safe。
+      i = elided;
       continue;
     }
     if (ch === ">") {
-      i = elideRedirect(i + redirectOperatorLength(command, i));
+      const elided = elideRedirect(i + redirectOperatorLength(command, i));
+      if (elided < 0) return splitSegmentsUnparseable(command); // 未終端 quote → fail-safe。
+      i = elided;
       continue;
     }
     current += ch;
     i += 1;
   }
   // 未終端クォート / 未消費 heredoc = 構造解析不能 → 旧分割へフォールバック (over-gate 方向)。
-  if (quote !== undefined || pendingHeredocs.length > 0) return splitSegmentsQuoteUnaware(command);
+  if (quote !== undefined || pendingHeredocs.length > 0) return splitSegmentsUnparseable(command);
   push();
   return segments;
 }
@@ -1612,19 +1715,37 @@ function classifyCommandRiskInternal(
     categories?.add("disk-destroy");
   }
 
-  // SEC-1 #4: シェル/インタプリタ + プロセス置換 `<(...)`/`>(...)`。splitSegments が `<`/`>` で
-  //   分割するため起動シェルが裸セグメント化して (B) でも拾えるが、ここで明示的に中身を再分類し
+  // SEC-1 #4: シェル/インタプリタ + プロセス置換 `<(...)`/`>(...)`。ここで明示的に中身を再分類し
   //   破壊的なら high を拾う。再分類不能でも medium に床上げ (fail-safe)。
+  //   TDA-CQ5-4 (R5 監査) の訂正: R4 の redirect 除去モデル以降、**primary 分割は `<(` の中身を
+  //   segment に残さない** (`diff <(rm -rf /tmp)` → ["diff  -rf /tmp) x"])。旧コメントの
+  //   「`<`/`>` で分割されるので (B) でも拾える」は成立しない。この経路と、legacy 分割を走る
+  //   high-only union backstop が検出の担い手であり、後者が**唯一の**検出源になるケースがある。
   const procSubExecutor = launchesShellWithProcessSubstitution(command, split);
   if (procSubExecutor) {
     categories?.add("inline-code"); // プロセス置換を実行/source するシェル起動 = 動的コード実行。
     if (depth < MAX_INLINE_DEPTH)
       bump(reclassifyProcessSubstitution(command, depth + 1, categories, split));
     bump("medium");
+  } else if (hasProcessSubstitution(command) && depth < MAX_INLINE_DEPTH) {
+    // QA-CQ5-1 (R5 監査 H・本ブランチ起因の回帰): 起動が benign (diff/cat/tee/wc) でも
+    //   **inner の named category だけは emit** する。戻り値 (risk) は意図的に捨てるため
+    //   通常モードの verdict は low のまま = 新規 FP ゼロ。
+    //   なぜ必要か: bypass/YOLO ゲートは risk 非依存の **category 駆動**
+    //   (`matchedPolicyCategories = classifyCommandCategories(cmd) ∩ enabled`) ゆえ、
+    //   category が空だと `behavior:"defer"` = 承認カード無しで実行される。R4 の redirect
+    //   除去モデル以降、primary 分割が `<(...)` の中身を segment に残さなくなり、
+    //   high-only union backstop も non-high な inner を救えないため、base で
+    //   `recursive-rm` / `perm-change` が付いていた形 (`cat <(find /tmp -delete)` /
+    //   `tee >(chown -R nobody /srv)`) が丸ごと de-gate されていた。
+    reclassifyProcessSubstitution(command, depth + 1, categories, split);
   }
-  // process-sub があるが起動がベニーン (diff/cat 等 = 中身を実行しない) なら、`<(`/`>( ` の split で
-  //   生じる `(ls)` 断片に対する (D) の medium 床上げを抑止して low を維持する (over-gate 防止)。
-  //   内側が high のときは依然 high を拾う (`diff <(rm -rf /tmp)`)。
+  // process-sub があるが起動がベニーン (diff/cat 等 = 中身を実行しない) なら (D) の medium 床上げを
+  //   抑止して low を維持する (over-gate 防止)。内側が high のときは依然 high を拾う
+  //   (`diff <(rm -rf /tmp)` — ただし上記のとおり検出源は legacy union 側)。
+  //   既知の限界 (TDA-CQ5-7・pre-existing): このフラグは **command 全体**で 1 回決まり全 segment に
+  //   適用されるため、`diff <(ls) ; $X -rf /tmp/x` のように無害な process-sub 前置で後続 segment の
+  //   fail-safe 床上げまで無効化できる (base/R4/R5 で同一・追跡 task)。
   const suppressGroupingMedium = hasProcessSubstitution(command) && !procSubExecutor;
 
   for (const seg of split(command)) {
