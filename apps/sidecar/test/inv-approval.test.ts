@@ -7,6 +7,9 @@
  *   ユーザー自身の permission 設定を上書きする anti-pattern (decision 019e8e4b)。
  * - shutdown 時の保留は deny で drain。
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -22,6 +25,7 @@ import {
   isNetworkEgressCommand,
   splitSegments,
   splitSegmentsQuoteUnaware,
+  stripGroupingWrappers,
 } from "../src/normalize.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
@@ -1675,6 +1679,10 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
       (inner) => `$(${inner})`,
       (inner) => `"$(${inner})"`,
       (inner) => `\`${inner}\``,
+      // TDA-CQ7-4(a): CHANGELOG は「この軸は process substitution も覆う」と書いていたのに
+      //   wrap は `$()` 系 3 種だけだった。主張を事実にする (併せて単一 predicate の
+      //   procsub 半分が load-bearing になる — TDA-CQ7-6 M1)。
+      (inner) => `<(${inner})`,
     ];
     const INNERS: ReadonlyArray<readonly [string, PolicyCategory]> = [
       ["find /tmp -delete", "recursive-rm"],
@@ -1698,10 +1706,10 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     }
     expect(failures, `${failures.length} executable redirect targets dropped`).toEqual([]);
     // 非空虚性 (QA-CQ5-3 と同型): 反復回数を実際に数え、構成そのものも固定する。
-    expect(combos, "executable-target combinations actually classified").toBe(81);
+    expect(combos, "executable-target combinations actually classified").toBe(108);
     expect(new Set(OPERATORS).size).toBe(9);
     expect([...OPERATORS].sort()).toEqual(["&>", "&>>", "1>", "2>", "<", "<>", ">", ">>", ">|"]);
-    expect(new Set(WRAPS.map((w) => w("X"))).size, "substitution wraps must be distinct").toBe(3);
+    expect(new Set(WRAPS.map((w) => w("X"))).size, "substitution wraps must be distinct").toBe(4);
     // FP 対照: 対象語が実行されない普通の redirect は従来どおり (over-gate になっていない)。
     expect(classifyCommandRisk("cp a >out.log")).toBe("low");
     expect(classifyCommandRisk("cp a >$(date)")).not.toBe("high");
@@ -1714,8 +1722,17 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     //   1 個の command で承認 relay・timeout タイマ・他セッションを止めうる。
     //
     // 判定は**比**で行う (絶対時間の閾値は並列負荷で偽 RED を出す — QA-CQ6-7 の教訓)。
-    //   入力 16 倍で線形なら ~16 倍、二次なら ~256 倍。実測は best-of-5 で 8.2〜11.6 倍だったので、
-    //   閾値は観測最悪より十分上・二次より十分下の 40 に置く。
+    //
+    // **基準は 4k に取る**: 最初 1k を基準にしたところ preflight の実負荷で 42.36 を記録し、
+    //   静穏時の実測 (8.2〜11.6) を基に置いた閾値 40 を割った。原因は t(1k)≈1.4ms という
+    //   小さすぎる分母で、負荷でノイズに埋もれると比だけが暴れる。分子分母をともに十分大きく
+    //   すると比は自然に負荷正規化される。
+    //
+    // 実測 (best-of-5・入力 4 倍):
+    //   - 現実装:   静穏 3.75〜4.41 / 人工負荷 load=17.8 下でも 3.03〜4.43 (線形なら ~4)
+    //   - 二次実装: 同条件で 15.26〜16.75 (0977a5b で実測)
+    //   閾値 9 = 観測 worst (4.43) の約 2 倍上・二次側 best (15.26) の約 1.7 倍下。
+    //   「観測 worst でなく best の下に閾値を置かない」規律 (per-file coverage floor と同じ)。
     const best = (n: number): number => {
       const cmd = "(" + ")".repeat(n) + "x";
       let ms = Infinity;
@@ -1726,12 +1743,12 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
       }
       return ms;
     };
-    const small = Math.max(best(1_000), 0.05);
+    const small = Math.max(best(4_000), 0.05);
     const large = best(16_000);
     expect(
       large / small,
-      `16x input must not cost ~256x time (quadratic): t(1k)=${small.toFixed(2)}ms t(16k)=${large.toFixed(2)}ms`,
-    ).toBeLessThan(40);
+      `4x input must not cost ~16x time (quadratic): t(4k)=${small.toFixed(2)}ms t(16k)=${large.toFixed(2)}ms`,
+    ).toBeLessThan(9);
   });
 
   it("QA-CQ6-4/5/6: the fd-prefix and target-word fail-safes are load-bearing", () => {
@@ -1757,6 +1774,135 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     //   = 走査が打ち切られている証言 (無界だと O(N^2) の再導入になる)。
     const longDigits = "9".repeat(200);
     expect(splitSegments(`${longDigits}>out.log`)).toEqual([longDigits]);
+  });
+
+  it("QA-CQ7-2: grouping-wrapper stripping is fenced by behaviour, not only by a timing ratio", () => {
+    // R7 監査 QA-CQ7-2 (H)。SEC-R6-3 で `TRAILING_GROUPING_RE` を線形走査へ置換したが、
+    //   テストは**比 (timing) のガードだけ**で挙動を一切固定していなかった。QA が末尾剥がしループを
+    //   潰す変異を全 suite 緑のまま通し、実害 (risk 降格 6 / category 喪失 15) を実測している。
+    //   例: `(git push --force)` が high[history-rewrite] → medium[high-risk-other]。
+    //   ここは (a) 旧正規表現との等価性を機械検証し (b) 代表ベクタを直接 pin する。
+    const oldStrip = (s: string): string => s.replace(/^[({\s'"]+/, "").replace(/[)}\s;'"]+$/, "");
+    const ALPHABET = ["(", "{", ")", "}", " ", ";", "'", '"', "a", "\t"] as const;
+    let checked = 0;
+    const walk = (prefix: string, depth: number): void => {
+      // 実装は module 内部なので、分類器の観測可能な出力ではなく **等価性のみ**を全数で見る。
+      expect(stripGroupingWrappers(prefix), JSON.stringify(prefix)).toBe(oldStrip(prefix));
+      checked += 1;
+      if (depth === 0) return;
+      for (const c of ALPHABET) walk(prefix + c, depth - 1);
+    };
+    walk("", 4);
+    // 非空虚性: 実際に走らせた入力数を固定する (alphabet/深さの縮小で RED)。
+    expect(checked, "equivalence inputs actually compared").toBe(11_111);
+    expect(new Set(ALPHABET).size).toBe(10);
+
+    // (b) 挙動の直接 pin — 変異が実害を出したベクタそのもの。
+    const cases: ReadonlyArray<readonly [string, RiskLevel, PolicyCategory]> = [
+      ["(git push --force)", "high", "history-rewrite"],
+      ["(find /tmp -delete)", "medium", "recursive-rm"],
+      ["((find /tmp -delete))", "medium", "recursive-rm"],
+      ["(((find /tmp -delete)))", "medium", "recursive-rm"],
+      ["(find /tmp -delete);", "medium", "recursive-rm"],
+      ["{ rm -rf /tmp/x; }", "high", "recursive-rm"],
+      ["(rm -rf /tmp/x)", "high", "recursive-rm"],
+    ];
+    let pinned = 0;
+    for (const [cmd, risk, category] of cases) {
+      const got = classifyCommandWithCategories(cmd);
+      expect(got.risk, cmd).toBe(risk);
+      expect([...got.categories], cmd).toContain(category);
+      pinned += 1;
+    }
+    expect(pinned, "grouping vectors actually classified").toBe(7);
+  });
+
+  it("QA-CQ7-3: both process-substitution depth call sites are fenced", () => {
+    // R7 監査 QA-CQ7-3 (M)。深さ計上を 1 段 1 にした修正のうち、**executor 枝**
+    //   (`sh`/`source` など中身を実行する起動) の呼び出し点を戻す変異が全 suite 緑で生存し、
+    //   38 ベクタが named category を失っていた (inline-code は残るため DEFAULT_GATED は保たれる)。
+    //   `recursive-rm` を有効化し `inline-code` を無効化した operator はゲートを失う。
+    for (const cmd of [
+      "source <(source <(find /tmp -delete))",
+      "source <(cat <(cat <(find /tmp -delete)))",
+      "sh <(sh <(find /tmp -delete))",
+    ]) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, cmd).not.toBe("low");
+      expect([...categories], `${cmd} must keep the inner named category`).toContain(
+        "recursive-rm",
+      );
+      expect([...categories], cmd).toContain("inline-code");
+    }
+  });
+
+  it("SEC-R7-1: analysis of a process substitution is size-invariant (a scan bound must not skip a gate)", () => {
+    // R7 監査 SEC-R7-1 (H・R6 で私が導入した回帰)。走査上限を 8192 に固定していたため、
+    //   ~8.2KiB〜16KiB の入力で `substitutionEnd` が未終端扱いになり、process substitution の
+    //   再分類が丸ごと飛んで `low`/`[]` = 通常モードと bypass の**両方**が素通りした。
+    //   閾値を pin するのではなく **サイズ不変性** を pin する (実装が別の上限を持ち込んでも赤くなる)。
+    const pads = [0, 4_000, 8_000, 8_200, 12_000, 16_000] as const;
+    const seen = new Set<string>();
+    for (const pad of pads) {
+      const cmd = `cat <(find /tmp -delete${" ".repeat(pad)})`;
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, `pad=${pad} must stay gated`).not.toBe("low");
+      expect([...categories], `pad=${pad}`).toContain("recursive-rm");
+      seen.add(`${risk}|${[...categories].sort().join(",")}`);
+    }
+    expect(seen.size, `verdict must not depend on padding: ${[...seen].join(" / ")}`).toBe(1);
+  });
+
+  it("SEC-R7-1: an unreadable substitution does not disarm its siblings", () => {
+    // 旧実装は抽出打ち切りで `break` し、以降の置換をすべて捨てた。無害だが巨大な
+    //   `<(echo …)` を 1 つ前置するだけで後続の破壊的 `<(…)` が分類から消えた。
+    const filler = "a".repeat(8_300);
+    for (const [cmd, category] of [
+      [`cat <(echo ${filler}) <(find /tmp -delete)`, "recursive-rm"],
+      [`cat <(echo ${filler}) <(chown -R nobody /srv)`, "perm-change"],
+    ] as ReadonlyArray<readonly [string, PolicyCategory]>) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, "oversized sibling must not de-gate the destructive one").not.toBe("low");
+      expect([...categories]).toContain(category);
+    }
+  });
+
+  it("SEC-R7-2: hitting the recursion limit floors the category, it does not silently empty it", () => {
+    // R7 監査 SEC-R7-2 (H)。深さ上限枝は risk=medium を返すが category を付けていなかった。
+    //   bypass/YOLO は risk 非依存の category 駆動なので空集合は defer = 実行、しかも benign 起動の
+    //   process-sub 経路は呼び出し側が risk を捨てるため通常モードも守られない。
+    //   R6 は上限を 2 段→4 段へ動かしただけで、この「無言の失敗」自体は閉じていなかった。
+    for (const launcher of ["cat", "tee", "wc", "diff", "sort", "head"]) {
+      for (let k = 1; k <= 8; k += 1) {
+        const cmd = `${launcher} <(`.repeat(k) + "find /tmp -delete" + ")".repeat(k);
+        const { risk, categories } = classifyCommandWithCategories(cmd);
+        expect(risk, `${launcher} nest k=${k}`).not.toBe("low");
+        expect(
+          categories.size,
+          `${launcher} nest k=${k} must not have an empty category set`,
+        ).toBeGreaterThan(0);
+      }
+    }
+    // 床が「何でもゲートする」形になっていないこと (浅い benign は low のまま)。
+    expect(classifyCommandRisk("diff <(ls) <(ls)")).toBe("low");
+    expect(classifyCommandRisk("comm -12 <(sort a) <(sort b)")).toBe("low");
+    // **正直な開示**: 解析限界 (4 段以上) を超えた入力は無害でも gated になる。
+    //   分類不能を low に倒すより安全側で、ADR 0015 と同じ設計バイアス。稀な形ゆえ受容する。
+    const deepBenign = "cat <(".repeat(4) + "ls" + ")".repeat(4);
+    expect(classifyCommandRisk(deepBenign)).toBe("medium");
+  });
+
+  it("SEC-R7-1 metatest: a scan bound may never be tighter than the analyzable-command cap", () => {
+    // 「上限が理由でセキュリティ制御が飛ぶ」形を構造的に禁じる (ADR 0015 slice B1 の
+    //   exit-phrase 単一出所 metatest と同じ規律)。source を読んで結合を固定する。
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/normalize.ts", import.meta.url)),
+      "utf8",
+    );
+    // 走査上限はコマンド長 fail-safe から導出されていること (独立リテラルへ戻っていない)。
+    expect(src).toContain("const SUBSTITUTION_SCAN_LIMIT = MAX_ANALYZABLE_COMMAND_LEN;");
+    expect(src).toMatch(/const MAX_ANALYZABLE_COMMAND_LEN = 16 \* 1024;/);
+    expect(src).not.toMatch(/const SUBSTITUTION_SCAN_LIMIT = \d/);
   });
 
   it("SEC-R6-1: an escaped separator before # does not start a comment (the tail must survive)", () => {
@@ -1816,13 +1962,17 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
       ["chmod <<EOF -R 777 /srv\nbody\nEOF", "perm-change"],
       ["rm <<<word -rf /tmp/x", "recursive-rm"],
     ];
+    let checkedHeredocs = 0;
     for (const [cmd, category] of cases) {
       const { risk, categories } = classifyCommandWithCategories(cmd);
       expect(risk, cmd).toBe("high");
       expect([...categories], cmd).toContain(category);
       // elision そのものの証言: 先頭 segment に program と flag が同一語列で残る。
       expect(splitSegments(cmd)[0], cmd).toContain("-");
+      checkedHeredocs += 1;
     }
+    // 非空虚性 (QA-CQ7-4): ループを空にする変異が全 suite 緑で生存していた。
+    expect(checkedHeredocs, "heredoc shapes actually classified").toBe(6);
   });
 
   it("QA-CQ5-1: a benign process-substitution launcher still emits the inner named category", () => {
@@ -1849,11 +1999,15 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
       ["cat <(cat <(find /tmp -delete))", "recursive-rm", "medium"],
       ["wc -l <(chmod -R 777 /srv)", "perm-change", "high"],
     ];
+    let checkedProcsubs = 0;
     for (const [cmd, category, expectedRisk] of cases) {
       const { risk, categories } = classifyCommandWithCategories(cmd);
       expect([...categories], cmd).toContain(category);
       expect(risk, `${cmd} risk must match base (no new false-positive cards)`).toBe(expectedRisk);
+      checkedProcsubs += 1;
     }
+    // 非空虚性 (QA-CQ7-4): このループは SEC-R6-2 の landing でもあるため空虚化を禁じる。
+    expect(checkedProcsubs, "process-substitution shapes actually classified").toBe(6);
     // 対照: 起動が実行/source 系なら従来どおり risk も上がり `inline-code` が付く
     //   (benign 経路の category emission が実行系経路の床上げを弱めていないこと)。
     const exec = classifyCommandWithCategories("source <(find /tmp -delete)");
@@ -2181,7 +2335,9 @@ describe("INV-APPROVAL-CATEGORY-UNION-MERGE: legacy categories merge even when p
 // 一致域の正直な限定 (QA-CQ4-4 で訂正・以前は「quote/#/改行を含まなければ完全一致」と
 // 過大に述べていた):
 //  - **backslash**: quote-aware 側のみ escape を解釈するため構造的に乖離する
-//    (alphabet `{a, space, ;, |, &, \}` の長さ ≤6 全数 37,448 入力中 8,992 件で乖離。
+//    (alphabet `{a, space, ;, |, &, 2, <, \}` (8 記号) の長さ ≤5 全数 37,448 入力中 8,992 件で乖離
+//    (TDA-CQ7-4(f) 訂正: 以前は alphabet を 6 記号・長さ ≤6 と書いていたが、その域は 55,986 入力で
+//     件数と整合しない — 実測は 8 記号 × 深さ 5 の Σ8^1..8^5 = 37,448 だった)。
 //    QA-CQ5-8 の訂正: 以前は測定 alphabet を記録しておらず再現不能だった — 別 alphabet では
 //    件数が変わる)。**向きの主張はこの域に限る**: R5 監査は redirect 記号を域に入れると
 //    62/37,448 で legacy が coarser になることを実測した (`a\>&a` → primary ["a\>","a"] /

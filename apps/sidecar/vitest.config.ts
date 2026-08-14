@@ -54,7 +54,10 @@ export default defineConfig({
         //   destructive 分岐の追加で閾値割れ → CI exit≠0)。再監査#4 round2 の一般化ルール
         //   (D サブシェル/メタ文字 / E prefix ビルトイン / F source procsub) + 赤テストで branch
         //   実測が 76.88% → 79.26% へ上昇したため新実測直下の 79 へ。閾値は決して下げない。
-        "src/normalize.ts": { statements: 85, branches: 79, functions: 95, lines: 90 },
+        // R7 監査 TDA-CQ7-6: +670 行を足しながら floor を据え置いていた。実測 (full suite)
+        //   94.7 / 89.43 / 100 / 96.47 に対し 3-5pt 下へ引き上げる
+        //   (per-file-coverage-floor-below-worst-not-best: BEST でなく観測 WORST の下に置く)。
+        "src/normalize.ts": { statements: 90, branches: 85, functions: 95, lines: 92 },
         // P4#QA-2 (ADR 019f2421): codex-runner.ts は R1/R2/R4/R5 の transport/lifecycle hardening を
         //   担う一次表面 (handshake timeout / stream-error 封じ込め / exit-drain / stop-state)。ここに
         //   per-file 閾値が無いと lifecycle ロジックの被覆が silent に erode しうる。

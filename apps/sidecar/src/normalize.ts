@@ -147,8 +147,23 @@ function splitSegmentsUnparseable(command: string): string[] {
 
 /** fd 指定の走査上限 (SEC-CQ5-3): 末尾からこの文字数までで打ち切り、入力長に対し線形を保つ。 */
 const FD_SCAN_LIMIT = 64;
-/** 置換 (`$(…)` / backtick / `<(…)`) の走査上限。同期 hook パスゆえ有界にする (SEC-CQ5-3 と同方針)。 */
-const SUBSTITUTION_SCAN_LIMIT = 8192;
+/**
+ * 分類器が解析を諦めるコマンド長 (これを超えたら fail-safe high)。
+ * 走査上限系の定数はここから導出し、「上限が理由でセキュリティ制御が飛ぶ」形を作らない。
+ */
+const MAX_ANALYZABLE_COMMAND_LEN = 16 * 1024;
+
+/**
+ * 置換 (`$(…)` / backtick / `<(…)`) の走査上限。同期 hook パスゆえ有界にする (SEC-CQ5-3 と同方針)。
+ *
+ * **コマンド長 fail-safe と同値にする (SEC-R7-1・R7 監査 H・R6 で私が導入した回帰)**:
+ * 8192 に固定していたため、~8.2KiB〜16KiB の入力で `substitutionEnd` が未終端扱い (-1) となり、
+ * process substitution の再分類が丸ごと飛んで `low`/`[]` = 通常モードと bypass の**両方**が
+ * 素通りになった (base は bypass ゲートを保っていたので厳密な回帰)。
+ * この bound は 16KiB のコマンド長 fail-safe が既に与える保証を一切増やさない一方、
+ * その手前に**無言の穴**を作っていた。両者を結合し、-1 は「本当に未終端」だけを意味させる。
+ */
+const SUBSTITUTION_SCAN_LIMIT = MAX_ANALYZABLE_COMMAND_LEN;
 /** `{v}>` の変数名として妥当か (bash の名前規則)。長さは FD_SCAN_LIMIT で既に有界。 */
 const FD_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const WHITESPACE_RE = /\s/;
@@ -236,7 +251,7 @@ function redirectOperatorLength(command: string, i: number): number {
  * ⚠️ 承認ゲート境界の走査範囲 (scope) 変更に当たる — 変更時は finding-registry の full 監査既定。
  * INV-APPROVAL-QUOTED-OPERATORS / INV-APPROVAL-NONQUOTE-CONTEXT-SEPARATORS /
  * INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR / INV-APPROVAL-SPLIT-LAYER-CONTRACT /
- * INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND (演算子 × 位置の 132 組合せマトリクス + escape 形)
+ * INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND (演算子 × 位置の 174 組合せマトリクス + escape 形)
  * が両方向を回帰固定する。
  */
 export function splitSegments(command: string): string[] {
@@ -1217,7 +1232,7 @@ const TRAILING_GROUPING_CHAR_RE = /[)};'"]/;
  * (SEC-CQ5-3 で `stripFdPrefix` を線形化したのと同じクラスの残り)。
  * 文字集合は旧正規表現と byte-equivalent (先頭 `( { 空白 ' "` / 末尾 `) } 空白 ; ' "`)。
  */
-function stripGroupingWrappers(s: string): string {
+export function stripGroupingWrappers(s: string): string {
   let start = 0;
   while (start < s.length) {
     const c = s[start] as string;
@@ -1392,8 +1407,14 @@ function inlineCodeRisk(
 
 /**
  * `$(...)` / backtick の中身を抽出して再分類する (有界・正規表現の再パース無し)。
- * 文字走査でネスト無視の素朴抽出 (最外の開き〜対応する閉じ)。over-extraction しても
- * classifyCommandRisk が安全側に倒すため許容。high を拾えればそれを返す。
+ *
+ * **抽出は正準 `substitutionEnd` を共有する (TDA-CQ7-3・R7 監査 M)**: R6 は
+ * `reclassifyProcessSubstitution` だけを移行し、こちらは `indexOf(")")` の素朴版のままだった。
+ * 結果 (a) 「単一抽出器へ統合した / 第二の並置検出器を作らない」という docstring の主張が
+ * 事実でなくなり、(b) 入れ子 `$()` で最初の閉じ括弧に切れて内側の named category を落としていた
+ * (`echo $(echo $(rm -rf /srv))` が `medium[inline-code]` = recursive-rm 喪失)。
+ * 打ち切り (未終端) は `reclassifyProcessSubstitution` と同じく兄弟を巻き込まず、
+ * 「読めなかった」ことを category の床で表明する。
  */
 function reclassifySubstitution(
   rawSegment: string,
@@ -1402,14 +1423,19 @@ function reclassifySubstitution(
   split: SegmentSplitter,
 ): "high" | "medium" | undefined {
   const inners: string[] = [];
-  // $(...) 抽出 (ネストは無視し、最初の ) で閉じる素朴版)。
+  let aborted = false;
+  // $(...) 抽出 — 括弧の深さを数える正準 `substitutionEnd` を共有する (TDA-CQ7-3)。
   let i = 0;
   while (i < rawSegment.length) {
     if (rawSegment[i] === "$" && rawSegment[i + 1] === "(") {
-      const end = rawSegment.indexOf(")", i + 2);
-      if (end < 0) break;
-      inners.push(rawSegment.slice(i + 2, end));
-      i = end + 1;
+      const end = substitutionEnd(rawSegment, i);
+      if (end < 0) {
+        aborted = true;
+        i += 2;
+        continue;
+      }
+      inners.push(rawSegment.slice(i + 2, end - 1));
+      i = end;
       continue;
     }
     i++;
@@ -1427,6 +1453,11 @@ function reclassifySubstitution(
     const r = classifyCommandRiskInternal(inner, depth + 1, categories, split);
     if (r === "high") risk = "high";
     else if (r === "medium" && risk !== "high") risk = "medium";
+  }
+  // 読めなかった置換は「無害」と区別する (SEC-R7-1 と同一契約)。
+  if (aborted) {
+    categories?.add("high-risk-other");
+    if (risk === undefined) risk = "medium";
   }
   return risk;
 }
@@ -1447,12 +1478,21 @@ function reclassifyProcessSubstitution(
   //   category を落としていた。括弧の深さを数える正準 `substitutionEnd` を共有する
   //   (第二の並置検出器を作らない・security-gate-reuse-canonical-parser)。
   const inners: string[] = [];
+  let aborted = false;
   let i = 0;
   while (i < command.length) {
     const c = command[i];
     if ((c === "<" || c === ">") && command[i + 1] === "(") {
       const end = substitutionEnd(command, i);
-      if (end < 0) break; // 未終端 → これ以上は構造解析不能。
+      if (end < 0) {
+        // **打ち切りは兄弟を巻き込まない (SEC-R7-1)**: 旧実装は `break` で以降の置換を
+        //   すべて捨てたため、無害だが巨大な `<(echo …)` を 1 つ前置するだけで後続の
+        //   `<(chown -R …)` が分類から消えた。ここは 1 つ進めて走査を続け、
+        //   「解析できなかった」ことは aborted で呼び出し側へ伝える。
+        aborted = true;
+        i += 2;
+        continue;
+      }
       const inner = command.slice(i + 2, end - 1);
       inners.push(inner);
       // 内側にさらに置換があれば、その中身も同じ規則で拾う (再帰は classify 側の depth で有界)。
@@ -1467,6 +1507,13 @@ function reclassifyProcessSubstitution(
     const r = classifyCommandRiskInternal(inner, depth + 1, categories, split);
     if (r === "high") risk = "high";
     else if (r === "medium" && risk !== "high") risk = "medium";
+  }
+  // **抽出できなかった置換があれば「low」と区別する (SEC-R7-1)**: 戻り値 undefined は
+  //   「全 inner が無害」と「そもそも読めなかった」の両方を意味していたため、呼び出し側が
+  //   前者と誤解して素通りさせていた。読めなかった場合は分類不能として gated に倒す。
+  if (aborted) {
+    categories?.add("high-risk-other");
+    if (risk === undefined) risk = "medium";
   }
   return risk;
 }
@@ -1856,8 +1903,17 @@ function classifyCommandRiskInternal(
   split: SegmentSplitter,
 ): RiskLevel {
   if (typeof command !== "string" || command.length === 0) return "high"; // fail-safe
-  if (command.length > 16 * 1024) return "high"; // 解析不能に巨大 → fail-safe high
-  if (depth >= MAX_INLINE_DEPTH) return "medium"; // 再帰上限到達 → 分類不能を gated に倒す。
+  if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return "high"; // 解析不能に巨大 → fail-safe high
+  if (depth >= MAX_INLINE_DEPTH) {
+    // 再帰上限到達 → 分類不能を gated に倒す。
+    // **category の床も置く (SEC-R7-2・R7 監査 H)**: risk だけ medium にしても、bypass/YOLO は
+    //   risk 非依存の category 駆動なので空集合だと defer = 実行される。しかも benign 起動の
+    //   process-sub 経路は呼び出し側が risk を捨てるため、通常モードすら守られない。
+    //   R6 は上限を実質 2 段→4 段へ動かしただけで、この「無言の失敗」自体は閉じていなかった。
+    //   多重ラッパで実コマンドを隠した `capExhausted` と同じ扱いに揃える。
+    categories?.add("high-risk-other");
+    return "medium";
+  }
 
   // ADR 019f0c3e: category 収集を完全にするため high で **early-return せず full-scan** で risk を集約する。
   //   戻り値は従来 (high が1つでも見つかれば high) と**同値**＝classifyCommandRisk 非退行 (既存テストが guard)。
@@ -1891,8 +1947,10 @@ function classifyCommandRiskInternal(
     bump("medium");
   } else if (hasProcessSubstitution(command) && depth < MAX_INLINE_DEPTH) {
     // QA-CQ5-1 (R5 監査 H・本ブランチ起因の回帰): 起動が benign (diff/cat/tee/wc) でも
-    //   **inner の named category だけは emit** する。戻り値 (risk) は意図的に捨てるため
-    //   通常モードの verdict は low のまま = 新規 FP ゼロ。
+    //   **inner の named category を emit** する。
+    //   (R6 時点では戻り値 risk を捨て verdict を low のまま保っていたが、SEC-R6-2 で
+    //    「inner が non-low なら verdict も上げる」へ改訂した — 下の bump を参照。
+    //    inner が low なら据え置きなので benign な process-sub の FP は増えない。)
     //   なぜ必要か: bypass/YOLO ゲートは risk 非依存の **category 駆動**
     //   (`matchedPolicyCategories = classifyCommandCategories(cmd) ∩ enabled`) ゆえ、
     //   category が空だと `behavior:"defer"` = 承認カード無しで実行される。R4 の redirect

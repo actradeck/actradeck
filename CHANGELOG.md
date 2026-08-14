@@ -67,8 +67,14 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   without an fd prefix, and with escaped or quoted target words); a generated matrix of operator
   forms by position pins those, and a second matrix covers redirect targets that execute code
   (`>$(...)`, backticks, and process substitution), which is where two of the later regressions
-  hid. Dangerous paths stay gated: stdin shells and real pipes classify as before, and as a
-  structural backstop any command the previous classifier rated high still rates high.
+  hid. Dangerous paths stay gated: stdin shells and real pipes classify as before.
+  A previous revision of this entry promised, as a structural backstop, that any command the old
+  classifier rated high would still rate high. That promise was overstated and is withdrawn: the
+  backstop runs the _legacy_ splitter, and this branch rewrote that splitter too, so it is no
+  longer the old classifier in any strict sense. A counter-example is
+  `find /tmp -delete &> rm -rf /x`, which the old classifier rated high and this one rates medium.
+  Both still gate, and no case is known where the verdict falls to harmless, but "still high" is
+  not something the code enforces and it should not have been written as if it were.
   An earlier revision of this entry claimed command substitution also classified as before. That
   was wrong and is corrected here: eliding a redirect target removed the substitution in that
   position from analysis entirely, so `cp a >$(find /tmp -delete)` — which bash really executes —
@@ -102,10 +108,15 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   restores the rule that the splitter may only discard a region that is genuinely a shell comment.
   Known gaps remain and are tracked rather than claimed closed: a
   quoted assignment whose value contains a space (`FOO='a b' rm -rf /path`) still hides the program
-  from the classifier; a redirect whose target is a process substitution carrying an fd prefix
-  (`tee 2>(rm -rf /path)`) is not classified from the primary split; and the process-substitution
-  medium-floor suppression is decided per command rather than per segment, so a benign
-  `diff <(ls) ;` prefix relaxes it for the whole line.
+  from the classifier; and the process-substitution medium-floor suppression is decided per command
+  rather than per segment, so a benign `diff <(ls) ;` prefix relaxes it for the whole line.
+  (`tee 2>(rm -rf /path)` was listed here as a gap in an earlier revision; it now gates, so the
+  entry is removed rather than left to imply an exposure that no longer exists.)
+  Analysis has limits, and past them the classifier gates rather than waves through: a process
+  substitution nested more than four deep, or one whose body runs past the size at which the
+  classifier stops parsing, is held for approval even when its body is harmless. That costs an
+  occasional card on shapes that are rare in practice, and it is deliberate — an unreadable
+  construct is not evidence of safety.
 
 ## [0.7.0] - 2026-08-10
 

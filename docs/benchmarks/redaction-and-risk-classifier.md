@@ -143,7 +143,7 @@ metric RED.
 ## Results — risk classifier
 
 Measured against `classifyCommandWithCategories` (`apps/sidecar/src/normalize.ts`).
-Classifier results below were regenerated on 2026-08-10.
+Classifier results below were regenerated on 2026-08-14.
 
 **Scope.** This benchmarks the **command-pattern** categories the classifier derives from the
 command string: `recursive-rm`, `disk-destroy`, `history-rewrite`, `db-drop`, `fork-bomb`,
@@ -201,12 +201,17 @@ by whole-command keyword literals:
 | `echo 'see the production runbook'`     | predicted `migrate-prod` | `production` keyword in prose. Off by default.                                                          |
 | `cat docs/migrate-guide.md`             | predicted `migrate-prod` | `migrate` keyword in a filename. Off by default.                                                        |
 
-Risk-level calibration notes (not safety gaps):
+Risk-level calibration notes:
 
 - `psql -c 'DROP DATABASE prod'` classifies as risk `low` while the `db-drop` **category still
-  fires** (so the gate still holds it). `DROP DATABASE` is intentionally a _category-only_ literal:
-  it drives the approval gate without inflating the risk score. The safety outcome (held for
-  approval under default policy) is correct; only the numeric risk label differs from a human's.
+  fires**. An earlier revision of this document called that "not a safety gap" and said the gate
+  still holds it. That is only half true, and the half it gets wrong is the ordinary case: the
+  bypass/YOLO gate is category-driven and does hold it, but ordinary approval keys off the risk
+  verdict alone, so under normal (non-bypass) operation this command produces **no approval card**.
+  An audit round in August 2026 rated the same mechanism H where it appeared elsewhere, so it is
+  recorded here as a real gap rather than a calibration note. `DROP TABLE` and `TRUNCATE` rate
+  `high` and are carded normally; `DROP DATABASE` — the least reversible of the three — is the one
+  that slips, which is the wrong way round. Tracked for correction rather than left implicit.
 - `find … -exec rm {} ;` classifies as `medium` rather than `high`; it is still gated
   (`recursive-rm`).
 

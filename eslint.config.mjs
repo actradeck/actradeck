@@ -48,6 +48,23 @@ export default tseslint.config(
     },
   },
   {
+    // TDA-CQ7-5 (CQ-R7 監査 M): 承認分類器の複雑度 erosion tripwire。
+    //   `splitSegments` は 6 ラウンドで 6 行/cyclo 5 → 317 行/cyclo 95 まで育ち、シェル文法の
+    //   手書き複製が 22 サイト → 82 サイトへ増えた。これが 6 ラウンド連続 H 再発の機構的原因と
+    //   3 レーンが独立に診断している。単一出所化は v0.8 の統合 ADR で行うが、それまでの間
+    //   **現天井を超えたら CI が赤くなる**状態にしておく (無いと次のラウンドでさらに育つ)。
+    //   閾値は現状を通す値。統合 ADR の実施に合わせて段階的に下げること。
+    files: ["apps/sidecar/src/normalize.ts"],
+    rules: {
+      // 閾値は**実測 worst の直上**に置く (現状: normalizeHook が 434 行 / cyclo 112、
+      //   splitSegments が cyclo 95 / nest 8)。「今より育ったら赤」であって「今すぐ直せ」ではない
+      //   — リファクタ自体は v0.8 の統合 ADR の仕事。以後 ratchet down する。
+      complexity: ["error", 113],
+      "max-depth": ["error", 9],
+      "max-lines-per-function": ["error", { max: 435, skipComments: true, skipBlankLines: true }],
+    },
+  },
+  {
     // SEC-1 / TDA-2 / SEC-4: token-isolation 境界。ブラウザグラフ (webui の UI / app と
     //   realtime の **bff.ts を除く全モジュール**) は server 専用 bff.ts (REALTIME_TOKEN 保持) と
     //   backend value import を **禁止**する。
