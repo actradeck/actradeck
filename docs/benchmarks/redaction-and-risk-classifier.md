@@ -46,7 +46,7 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   the strict leak gate over the rest of the tree stays hole-free.
 
 Corpus size: **38 redaction positives** across **29 kind families**, **28 hard negatives**, and
-**59 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
+**67 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
 Git shell-alias, dynamic-executable, and redirect-placement adversarial forms).
 
 ## Results — redaction
@@ -153,19 +153,24 @@ the tool input (not from the command string alone) and are **out of scope** for 
 
 | Category          | Support | Precision | Recall     |
 | ----------------- | ------- | --------- | ---------- |
-| recursive-rm      | 12      | 100.0%    | 100.0%     |
+| recursive-rm      | 17      | 100.0%    | 100.0%     |
 | disk-destroy      | 4       | 80.0%     | 100.0%     |
 | history-rewrite   | 8       | 100.0%    | 100.0%     |
 | db-drop           | 3       | 75.0%     | 100.0%     |
 | fork-bomb         | 1       | 100.0%    | 100.0%     |
-| perm-change       | 4       | 100.0%    | 100.0%     |
-| inline-code       | 5       | 100.0%    | 100.0%     |
+| perm-change       | 5       | 100.0%    | 100.0%     |
+| inline-code       | 9       | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
-| high-risk-other   | 1       | 100.0%    | 100.0%     |
-| **micro-average** | 40      | **90.9%** | **100.0%** |
+| high-risk-other   | 1       | 20.0%     | 100.0%     |
+| **micro-average** | 50      | **86.2%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
-Precision is below 100% only where a keyword literal fires on a benign near-miss (below). This is
+Read that as a statement about _this corpus_, not a general guarantee: the corpus is only as good as
+the shapes it contains, and an audit round in August 2026 found a live gap (redirect targets that
+execute code, such as `>$(...)`) precisely because no vector exercised it. Those shapes are in the
+corpus now, which is why `micro-average` precision moved down — the added vectors legitimately draw
+extra `high-risk-other` predictions. Precision is otherwise below 100% only where a keyword literal
+fires on a benign near-miss (below). This is
 the deliberate design bias: **under-detection (a real destructive op sneaking through) is far worse
 than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "gate it."
 
@@ -173,11 +178,11 @@ than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "g
 
 | Policy                              | Precision | Recall | TP / FP / FN / TN |
 | ----------------------------------- | --------- | ------ | ----------------- |
-| default-gated (out-of-box)          | 94.3%     | 100.0% | 33 / 2 / 0 / 24   |
-| strict-all (every category enabled) | 90.7%     | 100.0% | 39 / 4 / 0 / 16   |
+| default-gated (out-of-box)          | 95.1%     | 100.0% | 39 / 2 / 0 / 26   |
+| strict-all (every category enabled) | 92.0%     | 100.0% | 46 / 4 / 0 / 17   |
 
-- Risk-level exact-match accuracy: **89.8%**.
-- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **97.4%**.
+- Risk-level exact-match accuracy: **91.0%**.
+- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **97.8%**.
 
 Under the out-of-box `DEFAULT_GATED_CATEGORIES`, `inline-code` is **on by default** alongside the
 catastrophic categories: interpreter-mediated operations are held even when the classifier cannot

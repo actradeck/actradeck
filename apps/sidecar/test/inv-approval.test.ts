@@ -1662,6 +1662,169 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     }
   });
 
+  it("TDA-CQ6-2 matrix: a redirect target that executes code is never dropped from analysis", () => {
+    // R6 監査 TDA-CQ6-2 (M・**5 ラウンド見逃しの coverage 側 root cause**)。
+    //   既存の 29x6 マトリクスは対象語がすべて inert (`out.log` / `in.txt` / `a\ b` …) で、
+    //   等価 metatest の alphabet からも R4 で `<` `>` が外れている。よって
+    //   「redirect 対象語が**実行される**」クラスは構造的に赤くなれなかった。
+    //   ここは演算子 x 置換形 x 内側コマンドの独立した軸で、そのクラスだけを固定する。
+    //   ground truth: bash は redirect 対象語の置換を**実行する**
+    //   (`cp a >$(find /tmp -delete)` で find が走ることを監査レーンが stub 実測)。
+    const OPERATORS = [">", ">>", "2>", "1>", "<", "<>", "&>", "&>>", ">|"] as const;
+    const WRAPS: ReadonlyArray<(inner: string) => string> = [
+      (inner) => `$(${inner})`,
+      (inner) => `"$(${inner})"`,
+      (inner) => `\`${inner}\``,
+    ];
+    const INNERS: ReadonlyArray<readonly [string, PolicyCategory]> = [
+      ["find /tmp -delete", "recursive-rm"],
+      ["rm -rf /tmp/x", "recursive-rm"],
+      ["chmod -R 777 /srv", "perm-change"],
+    ];
+    const failures: string[] = [];
+    let combos = 0;
+    for (const op of OPERATORS) {
+      for (const wrap of WRAPS) {
+        for (const [inner, category] of INNERS) {
+          const cmd = `cp a ${op}${wrap(inner)}`;
+          const { risk, categories } = classifyCommandWithCategories(cmd);
+          combos += 1;
+          // 通常モード (risk!=="low") と bypass モード (named category) の両方を要求する。
+          if (risk === "low" || !categories.has(category)) {
+            failures.push(`${cmd} -> ${risk} ${JSON.stringify([...categories])}`);
+          }
+        }
+      }
+    }
+    expect(failures, `${failures.length} executable redirect targets dropped`).toEqual([]);
+    // 非空虚性 (QA-CQ5-3 と同型): 反復回数を実際に数え、構成そのものも固定する。
+    expect(combos, "executable-target combinations actually classified").toBe(81);
+    expect(new Set(OPERATORS).size).toBe(9);
+    expect([...OPERATORS].sort()).toEqual(["&>", "&>>", "1>", "2>", "<", "<>", ">", ">>", ">|"]);
+    expect(new Set(WRAPS.map((w) => w("X"))).size, "substitution wraps must be distinct").toBe(3);
+    // FP 対照: 対象語が実行されない普通の redirect は従来どおり (over-gate になっていない)。
+    expect(classifyCommandRisk("cp a >out.log")).toBe("low");
+    expect(classifyCommandRisk("cp a >$(date)")).not.toBe("high");
+  });
+
+  it("SEC-R6-3: classification stays sub-quadratic on adversarial grouping runs", () => {
+    // R6 監査 SEC-R6-3 (M)。旧 `TRAILING_GROUPING_RE` = /[)}\s;'"]+$/ は**末尾アンカーだが
+    //   先頭非アンカー**で、「該当文字の長い並び + 非該当文字」に対し開始位置ごとに後戻りし
+    //   O(N^2) になった (監査実測 16KiB で 6,882ms)。分類器は hook の同期パスにあるため、
+    //   1 個の command で承認 relay・timeout タイマ・他セッションを止めうる。
+    //
+    // 判定は**比**で行う (絶対時間の閾値は並列負荷で偽 RED を出す — QA-CQ6-7 の教訓)。
+    //   入力 16 倍で線形なら ~16 倍、二次なら ~256 倍。実測は best-of-5 で 8.2〜11.6 倍だったので、
+    //   閾値は観測最悪より十分上・二次より十分下の 40 に置く。
+    const best = (n: number): number => {
+      const cmd = "(" + ")".repeat(n) + "x";
+      let ms = Infinity;
+      for (let k = 0; k < 5; k += 1) {
+        const started = performance.now();
+        classifyCommandRisk(cmd);
+        ms = Math.min(ms, performance.now() - started);
+      }
+      return ms;
+    };
+    const small = Math.max(best(1_000), 0.05);
+    const large = best(16_000);
+    expect(
+      large / small,
+      `16x input must not cost ~256x time (quadratic): t(1k)=${small.toFixed(2)}ms t(16k)=${large.toFixed(2)}ms`,
+    ).toBeLessThan(40);
+  });
+
+  it("QA-CQ6-4/5/6: the fd-prefix and target-word fail-safes are load-bearing", () => {
+    // R6 監査 QA-CQ6-4/5/6 (M x3)。いずれも R5 で **code のみ**着地しフェンスが無く、
+    //   対応する変異が全 suite 緑のまま生存していた。ここで各々に証言を与える。
+
+    // QA-CQ6-5: fd 接頭辞の除去は**語全体が数字/{name} のときだけ**。語末の数字を無条件に
+    //   削ると `pytest2>out.log` が `pytest` に縮約され、実行されていない検証コマンドへ
+    //   check credit が出る (ADR 0015 が禁じる over-credit 方向)。
+    expect(splitSegments("pytest2>out.log")).toEqual(["pytest2"]);
+    expect(splitSegments("base64>out.log")).toEqual(["base64"]);
+    expect(splitSegments("node18>out.log --version")).toEqual(["node18 --version"]);
+    // 正しく fd と解釈する側 (語全体が数字) も固定する。
+    expect(splitSegments("rm 2>out.log -rf /tmp/x")).toEqual(["rm  -rf /tmp/x"]);
+
+    // QA-CQ6-6: 対象語が未終端クォートなら構造解析不能 → legacy fallback へ倒す (over-gate 方向)。
+    //   これが効かないと `rm >"unterminated -rf /tmp/x` が high から low へ落ちる。
+    const unterminated = classifyCommandWithCategories('rm >"unterminated -rf /tmp/x');
+    expect(unterminated.risk).toBe("high");
+    expect([...unterminated.categories]).toContain("recursive-rm");
+
+    // QA-CQ6-4: fd 走査は末尾から有界 (FD_SCAN_LIMIT)。上限より長い数字列は fd と見なさない
+    //   = 走査が打ち切られている証言 (無界だと O(N^2) の再導入になる)。
+    const longDigits = "9".repeat(200);
+    expect(splitSegments(`${longDigits}>out.log`)).toEqual([longDigits]);
+  });
+
+  it("SEC-R6-1: an escaped separator before # does not start a comment (the tail must survive)", () => {
+    // R6 監査 SEC-R6-1 (H・本ブランチ最初のコミット 99a42fc 起因の回帰)。
+    //   `#` の語頭判定が raw な `command[i-1]` を読んでいたため、escape された区切り文字の直後を
+    //   「区切り直後」と誤認し、phantom comment として**行の残りを丸ごと捨てて**いた。
+    //   bash は escape された文字を通常語の一部として扱うのでコメントは始まらず、後続の破壊的
+    //   コマンドは実際に実行される (監査レーンが実 bash の stub 呼び出しで確認)。
+    //   しかもこの破棄は `splitSegmentsUnparseable` を経由しない唯一の経路で、legacy 分割は
+    //   `>` で語を割り program を引数から切り離すため union backstop も救えない = 二層 fail-open。
+    const escapes = ["\\>", "\\<", "\\|", "\\;", "\\&", "\\ "] as const;
+    const payloads: ReadonlyArray<readonly [string, PolicyCategory]> = [
+      ["rm >x -rf /tmp/x", "recursive-rm"],
+      ["chmod -R 777 /srv", "perm-change"],
+      ["chown -R nobody /srv", "perm-change"],
+      ["git reset --hard HEAD~5", "history-rewrite"],
+    ];
+    const failures: string[] = [];
+    let combos = 0;
+    for (const esc of escapes) {
+      for (const [payload, category] of payloads) {
+        const cmd = `echo a${esc}# ; ${payload}`;
+        const { risk, categories } = classifyCommandWithCategories(cmd);
+        combos += 1;
+        // 通常モード (risk!=="low") と bypass モード (category 非空) の両方を固定する。
+        if (risk === "low" || !categories.has(category)) {
+          failures.push(`${cmd} -> ${risk} ${JSON.stringify([...categories])}`);
+        }
+      }
+    }
+    expect(failures, `${failures.length} two-layer fail-opens`).toEqual([]);
+    expect(combos, "escape x payload combinations actually classified").toBe(24);
+    // 捨てられた行末が split に残っていること自体を assert する (分類器を経由しない直接の証言)。
+    expect(splitSegments("echo a\\># ; rm -rf /tmp/x")).toContain("rm -rf /tmp/x");
+    // FP 対照: 本物のコメントは従来どおり low (over-gate になっていない)。
+    for (const benign of [
+      'git commit -m "msg" # done',
+      "npm test # make sure it is green",
+      "curl http://x/y#frag",
+      "echo $#",
+      "# just a comment",
+    ]) {
+      expect(classifyCommandRisk(benign), benign).toBe("low");
+    }
+  });
+
+  it("QA-CQ6-2: a terminated heredoc between a program and its flags stays gated", () => {
+    // R6 監査 QA-CQ6-2 (H)。SEC-CQ4-3 の heredoc elision は **回帰テスト無し**で着地しており、
+    //   elision を戻す変異が全 suite 緑のまま生存した。既存テストは**未終端** heredoc しか見て
+    //   おらず、そちらは whole-command fallback が担保するため elision 自体を証言しない。
+    //   実 bash は該当形を実行する (監査レーンが victim ディレクトリの削除で確認)。
+    const cases: ReadonlyArray<readonly [string, PolicyCategory]> = [
+      ["rm <<EOF -rf /tmp/x\nbody\nEOF", "recursive-rm"],
+      ["rm <<'EOF' -rf /tmp/x\nbody\nEOF", "recursive-rm"],
+      ["rm 2<<EOF -rf /tmp/x\nbody\nEOF", "recursive-rm"],
+      ["rm <<-EOF -rf /tmp/x\n\tbody\n\tEOF", "recursive-rm"],
+      ["chmod <<EOF -R 777 /srv\nbody\nEOF", "perm-change"],
+      ["rm <<<word -rf /tmp/x", "recursive-rm"],
+    ];
+    for (const [cmd, category] of cases) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, cmd).toBe("high");
+      expect([...categories], cmd).toContain(category);
+      // elision そのものの証言: 先頭 segment に program と flag が同一語列で残る。
+      expect(splitSegments(cmd)[0], cmd).toContain("-");
+    }
+  });
+
   it("QA-CQ5-1: a benign process-substitution launcher still emits the inner named category", () => {
     // R5 監査 QA-CQ5-1 (H・本ブランチ起因の回帰)。R4 の redirect 除去モデル以降、primary 分割は
     //   `<(...)`/`>(...)` の中身を segment に残さない。union backstop は legacy が high の
@@ -1671,14 +1834,19 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     //   base(66b202e) 実測: `cat <(find /tmp -delete)` = low + {recursive-rm}。
     //   修正前 HEAD 実測: low + {} ← このテストが RED になる位置。
     //   実 bash では inner が実行されることを監査レーンが stub 呼び出しログで確認済み。
-    // risk は base(66b202e) の実測値を**厳密値**として据え置く。over-gate 方向の「修正」で
-    //   通してしまうと、本ブランチが解消したはずの承認カード FP (インシデントの原因) が再発する。
-    //   `wc -l <(chmod -R 777 /srv)` が high なのは字面 high リテラル (`chmod -R 777`) が
-    //   コマンド全体走査で当たるためで、process-sub 経路とは独立 (base も high)。
+    // **risk も上げる (SEC-R6-2・R6 監査 H で改訂)**: R5 は base の実測値どおり risk を low に
+    //   据え置いたが、`requiresDestructiveApproval` は `risk !== "low"` ちょうどを見るため、
+    //   それでは**通常モードの承認カードが永久に出ない**。R6 裁定 019ffe0c の解決契約は
+    //   「inner が non-low に分類されたときのみ上げる」で、FP 非再発 (下の対照群) と両立する。
+    //   `wc -l <(chmod -R 777 /srv)` が high なのは字面 high リテラルが command 全体走査で
+    //   当たるためで process-sub 経路とは独立 (base も high)。
     const cases: ReadonlyArray<readonly [string, PolicyCategory, RiskLevel]> = [
-      ["cat <(find /tmp -delete)", "recursive-rm", "low"],
-      ["diff <(find /tmp -exec rm {} +) b", "recursive-rm", "low"],
-      ["tee >(chown -R nobody /srv)", "perm-change", "low"],
+      ["cat <(find /tmp -delete)", "recursive-rm", "medium"],
+      ["diff <(find /tmp -exec rm {} +) b", "recursive-rm", "medium"],
+      ["tee >(chown -R nobody /srv)", "perm-change", "medium"],
+      ["paste <(chown -R nobody /srv) <(ls)", "perm-change", "medium"],
+      // QA-CQ6-3: 入れ子も同じ規則で拾う (抽出が最初の `)` で切れていた回帰)。
+      ["cat <(cat <(find /tmp -delete))", "recursive-rm", "medium"],
       ["wc -l <(chmod -R 777 /srv)", "perm-change", "high"],
     ];
     for (const [cmd, category, expectedRisk] of cases) {
@@ -1691,6 +1859,20 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     const exec = classifyCommandWithCategories("source <(find /tmp -delete)");
     expect(exec.risk).toBe("medium");
     expect([...exec.categories].sort()).toEqual(["inline-code", "recursive-rm"]);
+    // **FP 対照 (SEC-R6-2 の修正が over-gate になっていないこと)**: inner が low の
+    //   process substitution は low のまま = 承認カードを増やさない。これが崩れると
+    //   本ブランチ発端のインシデント (無人 timeout deny の量産) が再発する。
+    for (const benign of [
+      "diff <(ls) <(ls)",
+      "diff <(sort a.txt) <(sort b.txt)",
+      "cat <(echo hello)",
+      "comm -12 <(sort a) <(sort b)",
+      "wc -l <(grep -n foo src/x.ts)",
+    ]) {
+      const r = classifyCommandWithCategories(benign);
+      expect(r.risk, `${benign} must stay low (no new approval-card FP)`).toBe("low");
+      expect([...r.categories], benign).toEqual([]);
+    }
     // benign 起動には `inline-code` を付けない (中身を実行しないため・over-gate 防止)。
     expect([...classifyCommandWithCategories("cat <(find /tmp -delete)").categories]).not.toContain(
       "inline-code",

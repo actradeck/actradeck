@@ -65,11 +65,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   harmless with no approval card in any mode. That affected redirect forms placed between a
   program and its arguments (`>`, `>>`, `>|`, `<`, `<>`, `>&`, `<&`, `&>`, `&>>`, `<<<`, with or
   without an fd prefix, and with escaped or quoted target words); a generated matrix of operator
-  forms by position pins those. Heredoc operators and process substitution are handled by the
-  splitter but are not in that matrix, and the remaining known gaps are listed at the end of this
-  entry. Dangerous paths stay gated: command substitution, stdin shells and real
-  pipes classify as before, and as a structural backstop any command the previous classifier
-  rated high still rates high.
+  forms by position pins those, and a second matrix covers redirect targets that execute code
+  (`>$(...)`, backticks, and process substitution), which is where two of the later regressions
+  hid. Dangerous paths stay gated: stdin shells and real pipes classify as before, and as a
+  structural backstop any command the previous classifier rated high still rates high.
+  An earlier revision of this entry claimed command substitution also classified as before. That
+  was wrong and is corrected here: eliding a redirect target removed the substitution in that
+  position from analysis entirely, so `cp a >$(find /tmp -delete)` — which bash really executes —
+  lost both its approval card and its policy category. The elided target is now carried into
+  classification, nested process substitutions are extracted by counting parentheses rather than
+  stopping at the first one, and a destructive body raises the verdict even when the launcher only
+  reads it.
   Honest limits of that guarantee. Changing a splitter is **not monotone** with respect to
   risk: the legacy splitter is also the fallback for unparseable input, so a finer split there
   can lower a verdict as well as raise one — which is how the redirect hole was introduced in
@@ -84,8 +90,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   policy category for a command whose launcher only reads it (`cat <(find /tmp -delete)`). Since
   the bypass/YOLO gate is driven by categories rather than by the risk verdict, that turned
   previously gated forms into ungated ones. The body of a process substitution is now classified
-  for its categories even when the launcher is benign, while the verdict itself stays unchanged,
-  so no new approval cards appear. Known gaps remain and are tracked rather than claimed closed: a
+  even when the launcher only reads it, and a destructive body raises the verdict as well — a
+  category alone leaves the ordinary (non-bypass) approval card missing, which is how
+  `tee >(chown -R nobody /srv)` ran an irreversible ownership change with no card in either mode.
+  A body that classifies as harmless still leaves the verdict alone, so `diff <(ls) <(ls)` and
+  friends produce no new cards.
+  One more hole in the same family closed here: a backslash-escaped separator followed by `#`
+  (`echo a\># ; rm -rf /path`) was read as the start of a comment, and the rest of the line was
+  discarded without even falling back to the conservative splitter. Bash starts no comment there
+  and runs the command. The word-head test now shares the scanner's escape state, which also
+  restores the rule that the splitter may only discard a region that is genuinely a shell comment.
+  Known gaps remain and are tracked rather than claimed closed: a
   quoted assignment whose value contains a space (`FOO='a b' rm -rf /path`) still hides the program
   from the classifier; a redirect whose target is a process substitution carrying an fd prefix
   (`tee 2>(rm -rf /path)`) is not classified from the primary split; and the process-substitution

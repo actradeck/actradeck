@@ -147,6 +147,8 @@ function splitSegmentsUnparseable(command: string): string[] {
 
 /** fd 指定の走査上限 (SEC-CQ5-3): 末尾からこの文字数までで打ち切り、入力長に対し線形を保つ。 */
 const FD_SCAN_LIMIT = 64;
+/** 置換 (`$(…)` / backtick / `<(…)`) の走査上限。同期 hook パスゆえ有界にする (SEC-CQ5-3 と同方針)。 */
+const SUBSTITUTION_SCAN_LIMIT = 8192;
 /** `{v}>` の変数名として妥当か (bash の名前規則)。長さは FD_SCAN_LIMIT で既に有界。 */
 const FD_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const WHITESPACE_RE = /\s/;
@@ -241,6 +243,17 @@ export function splitSegments(command: string): string[] {
   const segments: string[] = [];
   let current = "";
   let quote: '"' | "'" | undefined;
+  /**
+   * 直前に消費した escape ペア (`\x`) の終端 index (SEC-R6-1)。
+   * `escapePairEnd === i` なら「`i-1` の文字は escape 済み」= 区切りとして数えてはならない。
+   * `#` の語頭判定がメイン走査の escape 状態を共有するための唯一の状態 (raw な文字隣接判定を廃止)。
+   */
+  let escapePairEnd = -1;
+  /**
+   * redirect 対象語として除去したが**中身が実行される**置換 (TDA-CQ6-1 ≡ QA-CQ6-1)。
+   * 走査終了後に追加 segment として付け足す (現在の segment を割らない = R4 の不変条件を保つ)。
+   */
+  const elidedExecutableTargets: string[] = [];
   const pendingHeredocs: PendingHeredoc[] = [];
   const push = (): void => {
     const trimmed = current.trim();
@@ -283,6 +296,15 @@ export function splitSegments(command: string): string[] {
         j += 1;
         continue;
       }
+      // **置換は語の一部として読み切る (TDA-CQ6-1 ≡ QA-CQ6-1)**: `>$(find /tmp -delete)` の
+      //   `$( … )` 内の空白は語境界ではない。空白で切ると対象語が `$(find` までになり、
+      //   実行される中身が分類から落ちる。入れ子も同じ出所で扱う (`substitutionEnd`)。
+      const subEnd = substitutionEnd(command, j);
+      if (subEnd > 0) {
+        j = subEnd;
+        continue;
+      }
+      if (subEnd === -1) return -1; // 未終端の置換 = 構造解析不能 → fail-safe。
       if (SEPARATOR_OR_SPACE_RE.test(c)) break;
       j += 1;
     }
@@ -295,7 +317,21 @@ export function splitSegments(command: string): string[] {
    */
   const elideRedirect = (operatorEnd: number): number => {
     stripFdPrefix();
-    return targetEnd(operatorEnd);
+    const end = targetEnd(operatorEnd);
+    if (end < 0) return end;
+    // **TDA-CQ6-1 ≡ QA-CQ6-1 (R6 監査 H・693e782 起因の回帰)**: redirect の対象語は
+    //   「語を供給しないデータ」として除去してよいが、**中身が実行される置換**
+    //   (`$(…)` / backtick / `<(…)` / `>(…)`) の場合は話が別で、bash はそれを実行する
+    //   (`cp a >$(find /tmp -delete)` は実際に find を走らせる — stub 実測済み)。
+    //   除去したまま捨てると分類器から完全に消え、**通常モードの承認カードと bypass の
+    //   category ゲートを同時に失う**。
+    //   ここで segment を分割して残すことはできない (`rm >$(x) -rf DIR` の `rm` が引数から
+    //   切り離され R4 で閉じた穴が再発する)。よって **末尾に追加 segment として付け足す**
+    //   (`splitSegmentsUnparseable` が command 全体を足すのと同じ発想・分割順は分類に無関係)。
+    const target = command.slice(operatorEnd, end).trim();
+    if (target.length > 0 && hasExecutableSubstitution(target))
+      elidedExecutableTargets.push(target);
+    return end;
   };
   /**
    * 直前の語が fd 指定 (`2>` の `2` / `{v}>` の `{v}`) なら segment から外す。
@@ -357,13 +393,24 @@ export function splitSegments(command: string): string[] {
     if (ch === "\\" && i + 1 < command.length) {
       current += ch + (command[i + 1] as string);
       i += 2;
+      escapePairEnd = i; // SEC-R6-1: 直前の 1 単位が escape ペアだったことを記録する。
       continue;
     }
     // `#` コメント (単語頭のみ = 先頭 or 空白/区切り直後)。行末まで shell は読まない (SEC-CQ-1)。
     // `$#` / URL fragment (`http://x#y`) は前が非空白ゆえ字義どおり残る。
+    //
+    // **SEC-R6-1 (R6 監査 H・99a42fc 起因の回帰)**: 語頭判定は raw な `command[i-1]` を読んでいたため、
+    //   escape された区切り文字 (`\>` `\<` `\|` `\;` `\&` `\ `) の直後を「区切り直後」と誤認し、
+    //   phantom comment として**行の残りを丸ごと捨てて**いた。bash は escape された文字を通常語の
+    //   一部として扱うのでコメントは始まらず、`echo a\># ; rm >x -rf DIR` は実際に削除を実行する。
+    //   しかもこの破棄は `splitSegmentsUnparseable` を経由しない唯一の経路で、legacy 分割は
+    //   `>` で語を割り `rm` と引数を切り離すため union backstop も救えない = 二層 fail-open。
+    //   メイン走査の escape 状態 (`escapePairEnd`) を共有し、escape 済み文字は境界と見なさない。
+    //   これは「`splitSegments` が捨ててよいのはシェル的に正当なコメントだけ」という不変条件でもある。
     if (ch === "#") {
       const previous = command[i - 1];
-      if (previous === undefined || SEPARATOR_OR_SPACE_RE.test(previous)) {
+      const previousEscaped = escapePairEnd === i;
+      if (!previousEscaped && (previous === undefined || SEPARATOR_OR_SPACE_RE.test(previous))) {
         const nl = command.indexOf("\n", i);
         i = nl === -1 ? command.length : nl; // `\n` 自体は通常の区切りとして処理させる。
         continue;
@@ -505,7 +552,81 @@ export function splitSegments(command: string): string[] {
   // 未終端クォート / 未消費 heredoc = 構造解析不能 → 旧分割へフォールバック (over-gate 方向)。
   if (quote !== undefined || pendingHeredocs.length > 0) return splitSegmentsUnparseable(command);
   push();
+  // 除去した「実行される redirect 対象語」を末尾に足す (TDA-CQ6-1 ≡ QA-CQ6-1)。
+  for (const target of elidedExecutableTargets) segments.push(target);
   return segments;
+}
+
+/**
+ * `i` が「中身が実行される置換」の開始なら、その**閉じの次**の index を返す (T1 単一出所)。
+ *
+ * 返り値: `0` = 置換の開始でない / `-1` = 開始だが未終端 (構造解析不能) / 正数 = 閉じの次。
+ *
+ * 対応する形は `$( … )` / `` ` … ` `` / `<( … )` / `>( … )`。**入れ子を括弧の深さで数える**
+ * (QA-CQ6-3・R6 監査 H): 従来の `indexOf(")")` は最初の閉じ括弧で切れるため
+ * `cat <(cat <(find /tmp -delete))` の内側を取りこぼし category を落としていた。
+ * 単一クォート内の括弧はデータなので数えない (`$(echo "a)b")` で早期終了しない)。
+ *
+ * 走査は `SUBSTITUTION_SCAN_LIMIT` 文字で打ち切る (同期 hook パスの有界性・SEC-CQ5-3 と同方針)。
+ */
+function substitutionEnd(command: string, i: number): number {
+  const c = command[i];
+  if (c === "`") {
+    for (let j = i + 1; j < command.length && j - i <= SUBSTITUTION_SCAN_LIMIT; j += 1) {
+      const ch = command[j] as string;
+      if (ch === "\\") {
+        j += 1;
+        continue;
+      }
+      if (ch === "`") return j + 1;
+    }
+    return -1;
+  }
+  const opensParen =
+    (c === "$" || c === "<" || c === ">") && command[i + 1] === "(" ? command[i + 1] : undefined;
+  if (opensParen === undefined) return 0;
+  let depth = 0;
+  let quote: '"' | "'" | undefined;
+  for (let j = i + 1; j < command.length && j - i <= SUBSTITUTION_SCAN_LIMIT; j += 1) {
+    const ch = command[j] as string;
+    if (quote === "'") {
+      if (ch === "'") quote = undefined;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === "\\") {
+        j += 1;
+        continue;
+      }
+      if (ch === '"') quote = undefined;
+      continue;
+    }
+    if (ch === "\\") {
+      j += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return j + 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * 「中身が実行される置換」を含むか — process substitution と command substitution の **単一 predicate**。
+ *
+ * TDA-CQ6-1 の勧告どおり、両者を別々に判定する**第二の並置検出器を作らない**
+ * (`security-gate-reuse-canonical-parser`)。R6 の unblock が `<(`/`>(` だけを見たために
+ * 兄弟のコマンド置換が丸ごと開いたままになった、という失敗を構造的に繰り返さないための出所。
+ */
+function hasExecutableSubstitution(s: string): boolean {
+  return hasProcessSubstitution(s) || hasCommandSubstitution(s);
 }
 
 /**
@@ -1080,10 +1201,37 @@ function hasScriptFileOperand(tokens: string[]): boolean {
 const EXECUTABLE_NAME_RE = /^[A-Za-z0-9._/+-]+$/;
 // 先頭の env 代入 (`VAR=val`) — 通常のシェル構文。コマンド名ではないのでスキップする。
 const ASSIGNMENT_TOKEN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
-// 先頭の grouping/quote メタ文字を剥がして内側コマンドを露出させる (有界文字クラス)。
-const LEADING_GROUPING_RE = /^[({\s'"]+/;
-// 末尾の grouping/terminator メタ文字を剥がす。
-const TRAILING_GROUPING_RE = /[)}\s;'"]+$/;
+// 先頭/末尾の grouping/quote メタ文字 (1 文字判定・有界文字クラス)。
+const LEADING_GROUPING_CHAR_RE = /[({'"]/;
+const TRAILING_GROUPING_CHAR_RE = /[)};'"]/;
+
+/**
+ * 先頭の grouping/quote と末尾の grouping/terminator を剥がして内側コマンドを露出させる。
+ *
+ * **線形の両端走査で行う (SEC-R6-3・R6 監査 M)**: 旧実装は `/[)}\s;'"]+$/` という
+ * **末尾アンカーだが先頭非アンカー**の正規表現で、`")".repeat(n) + "x"` のように
+ * 「該当文字の長い並び + 非該当文字」が続く入力に対し開始位置ごとに後戻りし O(N²) になった
+ * (監査実測: 16KiB 入力の分類 1 回で base 1,907ms → 本ブランチ 6,882ms。本ブランチは
+ * primary/legacy の二重走査ぶん増幅する)。分類器は **hook の同期パス**にあるため、
+ * 1 個の `tool_input.command` で承認 relay・timeout タイマ・他セッションの hook を止めうる
+ * (SEC-CQ5-3 で `stripFdPrefix` を線形化したのと同じクラスの残り)。
+ * 文字集合は旧正規表現と byte-equivalent (先頭 `( { 空白 ' "` / 末尾 `) } 空白 ; ' "`)。
+ */
+function stripGroupingWrappers(s: string): string {
+  let start = 0;
+  while (start < s.length) {
+    const c = s[start] as string;
+    if (!LEADING_GROUPING_CHAR_RE.test(c) && !WHITESPACE_RE.test(c)) break;
+    start += 1;
+  }
+  let end = s.length;
+  while (end > start) {
+    const c = s[end - 1] as string;
+    if (!TRAILING_GROUPING_CHAR_RE.test(c) && !WHITESPACE_RE.test(c)) break;
+    end -= 1;
+  }
+  return s.slice(start, end);
+}
 
 /** 先頭トークンがクリーンな実行可能名か (メタ文字を含まない通常コマンド名)。 */
 function isCleanExecutableToken(token: string): boolean {
@@ -1137,7 +1285,7 @@ function unanalyzableSegmentRisk(
 
   // grouping/quote メタ文字を剥がして内側を露出させ、再分類で high を拾う。
   if (depth < MAX_INLINE_DEPTH) {
-    const unwrapped = rawSegment.replace(LEADING_GROUPING_RE, "").replace(TRAILING_GROUPING_RE, "");
+    const unwrapped = stripGroupingWrappers(rawSegment);
     // 剥がしで実際に変化したときのみ再分類 (無限ループ防止)。
     if (unwrapped.length > 0 && unwrapped !== rawSegment) {
       const inner = classifyCommandRiskInternal(unwrapped, depth + 1, categories, split);
@@ -1159,6 +1307,14 @@ function unanalyzableSegmentRisk(
  * 戻り値: "high" (内側が確実に破壊的) / "medium" (ゲート対象・床上げ) / undefined (該当せず)。
  *
  * depth: 再帰深さ。内側コードを classifyCommandRisk で再分類する際、無限再帰を防ぐ上限を設ける。
+ *
+ * **1 ネストあたりの消費は 1 (QA-CQ6-3・R6 監査 H の副次修正)**: 以前は呼び出し側が
+ * `reclassify*(command, depth + 1, …)` とし、その内部でも inner を `depth + 1` で分類していたため
+ * **1 段につき 2 消費**していた。結果 2 段ネスト (`cat <(cat <(find /tmp -delete))`) で上限に達し、
+ * `classifyCommandRiskInternal` の上限枝が **category を付けずに** medium を返して bypass ゲートを
+ * 落としていた (通常モードは呼び出し側が risk を捨てるため low のまま = 二重に無防備)。
+ * 呼び出し側を `depth` 据え置きにして計上を 1 本化した。終了性は
+ * 「`classifyCommandRiskInternal` へ再入するときだけ +1」で保たれる。
  */
 const MAX_INLINE_DEPTH = 4;
 function inlineCodeRisk(
@@ -1225,7 +1381,7 @@ function inlineCodeRisk(
   if (hasCommandSubstitution(rawSegment)) {
     categories?.add("inline-code");
     if (depth < MAX_INLINE_DEPTH) {
-      const innerRisk = reclassifySubstitution(rawSegment, depth + 1, categories, split);
+      const innerRisk = reclassifySubstitution(rawSegment, depth, categories, split);
       if (innerRisk === "high") return "high";
     }
     return "medium"; // 置換あり = 中身が再分類で確定しなくてもゲート対象。
@@ -1286,15 +1442,21 @@ function reclassifyProcessSubstitution(
   categories: Set<PolicyCategory> | undefined,
   split: SegmentSplitter,
 ): "high" | "medium" | undefined {
+  // **入れ子対応の抽出 (QA-CQ6-3・R6 監査 H)**: 旧実装は `indexOf(")")` で最初の閉じ括弧まで
+  //   しか取らず、`cat <(cat <(find /tmp -delete))` の内側 (実際に実行される) を取りこぼして
+  //   category を落としていた。括弧の深さを数える正準 `substitutionEnd` を共有する
+  //   (第二の並置検出器を作らない・security-gate-reuse-canonical-parser)。
   const inners: string[] = [];
   let i = 0;
   while (i < command.length) {
     const c = command[i];
     if ((c === "<" || c === ">") && command[i + 1] === "(") {
-      const end = command.indexOf(")", i + 2);
-      if (end < 0) break;
-      inners.push(command.slice(i + 2, end));
-      i = end + 1;
+      const end = substitutionEnd(command, i);
+      if (end < 0) break; // 未終端 → これ以上は構造解析不能。
+      const inner = command.slice(i + 2, end - 1);
+      inners.push(inner);
+      // 内側にさらに置換があれば、その中身も同じ規則で拾う (再帰は classify 側の depth で有界)。
+      i = end;
       continue;
     }
     i++;
@@ -1725,7 +1887,7 @@ function classifyCommandRiskInternal(
   if (procSubExecutor) {
     categories?.add("inline-code"); // プロセス置換を実行/source するシェル起動 = 動的コード実行。
     if (depth < MAX_INLINE_DEPTH)
-      bump(reclassifyProcessSubstitution(command, depth + 1, categories, split));
+      bump(reclassifyProcessSubstitution(command, depth, categories, split));
     bump("medium");
   } else if (hasProcessSubstitution(command) && depth < MAX_INLINE_DEPTH) {
     // QA-CQ5-1 (R5 監査 H・本ブランチ起因の回帰): 起動が benign (diff/cat/tee/wc) でも
@@ -1738,7 +1900,14 @@ function classifyCommandRiskInternal(
     //   high-only union backstop も non-high な inner を救えないため、base で
     //   `recursive-rm` / `perm-change` が付いていた形 (`cat <(find /tmp -delete)` /
     //   `tee >(chown -R nobody /srv)`) が丸ごと de-gate されていた。
-    reclassifyProcessSubstitution(command, depth + 1, categories, split);
+    //
+    // **SEC-R6-2 (R6 監査 H) の追加**: category だけでは**通常モード**が守れない。
+    //   `requiresDestructiveApproval` は `risk !== "low"` ちょうどを見るため、risk を据え置くと
+    //   破壊的 inner が常に無カードで通る (`tee >(chown -R nobody /srv)` は不可逆な chown を実行)。
+    //   R6 裁定 019ffe0c の解決契約: **inner が non-low に分類されたときのみ risk を上げる**
+    //   (`reclassifyProcessSubstitution` は inner が low なら undefined を返すので、
+    //   `diff <(ls) <(ls)` のような benign は low のまま = R5 が守った FP 非再発と両立する)。
+    bump(reclassifyProcessSubstitution(command, depth, categories, split));
   }
   // process-sub があるが起動がベニーン (diff/cat 等 = 中身を実行しない) なら (D) の medium 床上げを
   //   抑止して low を維持する (over-gate 防止)。内側が high のときは依然 high を拾う

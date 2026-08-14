@@ -384,4 +384,52 @@ export const COMMANDS: readonly CommandVector[] = [
     expectCategories: [],
     note: "ordinary redirects on a benign command — must not become a false positive",
   },
+  {
+    command: "cp report.txt >$(find /var/tmp -delete)",
+    expectRisk: "medium",
+    expectCategories: ["recursive-rm", "inline-code"],
+    note: "command substitution in the redirect target — bash runs the find before the copy (audit TDA-CQ6-1)",
+  },
+  {
+    command: 'cp report.txt >"$(find /var/tmp -delete)"',
+    expectRisk: "medium",
+    expectCategories: ["recursive-rm", "inline-code"],
+    note: "same, quoted target word — quoting does not stop the substitution from executing",
+  },
+  {
+    command: "cp report.txt >`rm -rf /tmp/build-cache`",
+    expectRisk: "high",
+    expectCategories: ["recursive-rm", "inline-code"],
+    note: "backtick substitution in the redirect target — the rm executes",
+  },
+  {
+    command: "cat <(cat <(find /var/tmp -delete))",
+    expectRisk: "medium",
+    expectCategories: ["recursive-rm"],
+    note: "nested process substitution — the innermost body still runs (audit QA-CQ6-3)",
+  },
+  {
+    command: "tee >(chown -R nobody /srv/app)",
+    expectRisk: "medium",
+    expectCategories: ["perm-change"],
+    note: "benign launcher, destructive body — chown runs and is irreversible (audit SEC-R6-2)",
+  },
+  {
+    command: "echo note\\># ; rm -rf /tmp/build-cache",
+    expectRisk: "high",
+    expectCategories: ["recursive-rm"],
+    note: "escaped separator before # starts no comment in bash — the rm runs (audit SEC-R6-1)",
+  },
+  {
+    command: "diff <(sort a.txt) <(sort b.txt)",
+    expectRisk: "low",
+    expectCategories: [],
+    note: "process substitution with harmless bodies — must not become a false positive",
+  },
+  {
+    command: "cp report.txt >$(date +%F).log",
+    expectRisk: "medium",
+    expectCategories: ["inline-code"],
+    note: "substitution in the redirect target that only names a file — no destructive body, but a substitution is dynamic code execution by definition, and the classifier floors substitutions at medium",
+  },
 ];
