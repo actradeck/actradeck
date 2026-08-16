@@ -161,15 +161,19 @@ the tool input (not from the command string alone) and are **out of scope** for 
 | perm-change       | 5       | 100.0%    | 100.0%     |
 | inline-code       | 9       | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
-| high-risk-other   | 1       | 20.0%     | 100.0%     |
-| **micro-average** | 50      | **86.2%** | **100.0%** |
+| high-risk-other   | 1       | 16.7%     | 100.0%     |
+| **micro-average** | 50      | **84.7%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
 Read that as a statement about _this corpus_, not a general guarantee: the corpus is only as good as
 the shapes it contains, and an audit round in August 2026 found a live gap (redirect targets that
 execute code, such as `>$(...)`) precisely because no vector exercised it. Those shapes are in the
 corpus now, which is why `micro-average` precision moved down — the added vectors legitimately draw
-extra `high-risk-other` predictions. Precision is otherwise below 100% only where a keyword literal
+extra `high-risk-other` predictions. A later round moved it down again, for the same kind of reason:
+the "could not analyse this segment" backstop used to be suppressed whenever any _other_ segment had
+already produced a category, which let a harmless-looking prefix strip the gate off an unanalyzable
+segment behind it. Scoping the backstop to its own segment closes that, and costs one extra label on
+the fork-bomb vector, which was already gated by `fork-bomb`. Precision is otherwise below 100% only where a keyword literal
 fires on a benign near-miss (below). This is
 the deliberate design bias: **under-detection (a real destructive op sneaking through) is far worse
 than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "gate it."

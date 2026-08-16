@@ -57,7 +57,7 @@ const PUBLISHED = {
     kindFamilies: 29,
   },
   classifier: {
-    micro: { support: 50, precisionPct: "86.2", recallPct: "100.0" },
+    micro: { support: 50, precisionPct: "84.7", recallPct: "100.0" },
     // support / precision% / recall% per the "Results — risk classifier" table.
     byCategory: [
       { category: "recursive-rm", support: 17, precisionPct: "100.0", recallPct: "100.0" },
@@ -68,7 +68,7 @@ const PUBLISHED = {
       { category: "perm-change", support: 5, precisionPct: "100.0", recallPct: "100.0" },
       { category: "inline-code", support: 9, precisionPct: "100.0", recallPct: "100.0" },
       { category: "migrate-prod", support: 2, precisionPct: "50.0", recallPct: "100.0" },
-      { category: "high-risk-other", support: 1, precisionPct: "20.0", recallPct: "100.0" },
+      { category: "high-risk-other", support: 1, precisionPct: "16.7", recallPct: "100.0" },
     ],
     gate: [
       {

@@ -117,23 +117,39 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   classifier stops parsing, is held for approval even when its body is harmless. That costs an
   occasional card on shapes that are rare in practice, and it is deliberate — an unreadable
   construct is not evidence of safety.
-  Where a shell appears in the command no longer changes whether it is gated. The check that
-  recognises "this launcher executes what the process substitution produces" only ever looked at
-  the first segment, so `bash <(echo rm -rf /srv)` gated but `ls; bash <(echo rm -rf /srv)` — the
-  same execution, one harmless command earlier — classified as harmless with no card in either
-  mode. Every segment is scanned now, and a generated prefix-by-launcher matrix pins it.
-  The floor added for unreadable substitutions was also drawing false positives, because the
-  detection points did not track quote state: `grep -rn '<(' .` was read as an unterminated
-  process substitution and held for approval, which is precisely the class of spurious card this
-  release set out to remove. Extraction of `$( )`, backticks, and `<( )` / `>( )` now happens in a
-  single quote-aware pass, so text inside single quotes is treated as data — as bash treats it —
-  while a genuinely unterminated substitution outside quotes still gates. One consequence is
-  narrower than before: `echo 'a$(rm -rf /srv)b'` no longer reports the inner command's category,
-  since bash does not run it; the command still holds an approval card.
-  That same pass is now bounded. Each unterminated substitution used to be rescanned to the end of
-  the command, so a 16 KiB command of repeated `$(` cost roughly 850 ms of synchronous work on the
-  hook path — enough for one command to stall approval relays and timeout timers. Repeated failures
-  now stop the scan, which is safe because the first failure has already forced the gate.
+  Neither where a shell appears in the command nor how it is written changes whether it is gated.
+  The check that recognises "this launcher executes what the process substitution produces" looked
+  only at the first segment, so `bash <(echo rm -rf /srv)` gated while `ls; bash <(echo rm -rf
+/srv)` — the same execution, one harmless command earlier — classified as harmless with no card
+  in either mode. It was also, alone among the five places that derive a program name, skipping the
+  leading-assignment step, so `FOO=1 bash <(...)` fell through the same hole. Both are closed, and
+  the check is now bound to the command that actually carries the substitution rather than to the
+  command string as a whole — an earlier attempt at position-independence scanned every segment,
+  which made `diff <(sort a) <(sort b) && node build.js` raise a card. A generated matrix over
+  prefixes, runner wrappers, launchers and trailing commands pins all of it.
+  Quoting is read the way bash reads it. `$'…'` processes backslash escapes, so `$'a\'b'` does not
+  end at that quote; treating it as an ordinary `$` followed by an ordinary `'` shifted the quote
+  phase for the rest of the command and made `;`, `>` and `<(` land on the wrong side of it —
+  destructive commands after such a string disappeared from classification entirely while bash ran
+  them. One scanner now reads quote spans for the splitter, the word reader and the substitution
+  collector. Text inside single quotes is data: `grep -rn '<(' .` and `git commit -m 'use $( )
+syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a literal string rather than a
+  gated command, while `echo "$(rm -rf /srv)"` — which bash does expand — still classifies high.
+  Comments are data too, so an apostrophe in a trailing `# don't` no longer manufactures a card.
+  Substitution scanning is bounded. Each unterminated substitution used to be rescanned to the end
+  of the command, so a 16 KiB command of repeated `$(` cost roughly 850 ms of synchronous work on
+  the hook path — enough for one command to stall approval relays and timeout timers. Repeated
+  failures now stop the scan, and stopping escalates the verdict rather than softening it: an
+  earlier revision of this entry claimed stopping was safe "because the first failure has already
+  forced the gate", which was true of the risk level but not of the named category, and an operator
+  gating on that category specifically would have lost it.
+  Two more holes of the same family closed here. The "could not analyse this segment" backstop was
+  suppressed whenever any earlier segment had produced a category, so a harmless-looking prefix
+  stripped the gate off an unanalyzable segment behind it; it is scoped to its own segment now. And
+  a quoted script handed to a remote or in-container shell (`ssh host '… | sh'`, `docker exec`,
+  `kubectl exec`) was only ever caught by accident, because the old quote-blind splitter tore the
+  operand apart at the pipe; the operand is classified as inner code now, and only gates when that
+  inner code is itself dangerous, so `ssh host 'ls -la'` stays silent.
 
 ## [0.7.0] - 2026-08-10
 

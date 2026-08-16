@@ -56,12 +56,23 @@ export default tseslint.config(
     //   閾値は現状を通す値。統合 ADR の実施に合わせて段階的に下げること。
     files: ["apps/sidecar/src/normalize.ts"],
     rules: {
-      // 閾値は**実測 worst の直上**に置く (現状: normalizeHook が 434 行 / cyclo 112、
-      //   splitSegments が cyclo 95 / nest 8)。「今より育ったら赤」であって「今すぐ直せ」ではない
+      // 閾値は**実測 worst の直上**に置く。「今より育ったら赤」であって「今すぐ直せ」ではない
       //   — リファクタ自体は v0.8 の統合 ADR の仕事。以後 ratchet down する。
+      //
+      // 実測 (eslint 自身のルールを閾値 1 で走らせて採取・R9 時点):
+      //   complexity              worst 112 (normalizeHook)   次点 62 (splitSegments)
+      //   max-lines-per-function  worst 434 (normalizeHook)   次点 254 (splitSegments)
+      //   max-depth               worst 7                     ← R9 で 9→8 へ ratchet
+      //   max-lines (file)        worst 1839 (skipComments + skipBlankLines)
+      //   TDA-CQ9-7 (R9 監査 L) の訂正: 以前ここに書いていた「splitSegments が cyclo 95 / nest 8」は
+      //   再現しない値だった (eslint の complexity は入れ子アロー関数を別関数として数えるため)。
+      //   記録は実測コマンドで再現できる値だけにする。
       complexity: ["error", 113],
-      "max-depth": ["error", 9],
+      "max-depth": ["error", 8],
       "max-lines-per-function": ["error", { max: 435, skipComments: true, skipBlankLines: true }],
+      // ファイル総量も ratchet する (TDA-CQ9-7)。1 ブランチで 2086 → 3104 行 (実行行 1839) まで
+      //   育った。統合 ADR で下げる前提の天井。
+      "max-lines": ["error", { max: 1900, skipComments: true, skipBlankLines: true }],
     },
   },
   {
