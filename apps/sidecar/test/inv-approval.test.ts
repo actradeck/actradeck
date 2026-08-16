@@ -1843,28 +1843,68 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     //   閾値を pin するのではなく **サイズ不変性** を pin する (実装が別の上限を持ち込んでも赤くなる)。
     const pads = [0, 4_000, 8_000, 8_200, 12_000, 16_000] as const;
     const seen = new Set<string>();
+    let checkedPads = 0;
     for (const pad of pads) {
       const cmd = `cat <(find /tmp -delete${" ".repeat(pad)})`;
       const { risk, categories } = classifyCommandWithCategories(cmd);
       expect(risk, `pad=${pad} must stay gated`).not.toBe("low");
       expect([...categories], `pad=${pad}`).toContain("recursive-rm");
       seen.add(`${risk}|${[...categories].sort().join(",")}`);
+      checkedPads += 1;
     }
+    // 非空虚性 (QA-CQ8-2): `pads` を 1 要素へ縮める変異が全 suite 緑で生存していた。
+    expect(checkedPads, "padding sizes actually classified").toBe(6);
     expect(seen.size, `verdict must not depend on padding: ${[...seen].join(" / ")}`).toBe(1);
   });
 
-  it("SEC-R7-1: an unreadable substitution does not disarm its siblings", () => {
-    // 旧実装は抽出打ち切りで `break` し、以降の置換をすべて捨てた。無害だが巨大な
-    //   `<(echo …)` を 1 つ前置するだけで後続の破壊的 `<(…)` が分類から消えた。
-    const filler = "a".repeat(8_300);
-    for (const [cmd, category] of [
-      [`cat <(echo ${filler}) <(find /tmp -delete)`, "recursive-rm"],
-      [`cat <(echo ${filler}) <(chown -R nobody /srv)`, "perm-change"],
-    ] as ReadonlyArray<readonly [string, PolicyCategory]>) {
+  it("QA-CQ8-1: an unreadable substitution floors the category instead of reading as harmless", () => {
+    // R8 監査 QA-CQ8-1 (H)。SEC-R7-1 の契約は「抽出できなかった置換は『無害』と区別し、
+    //   分類不能として gated へ倒す」だが、**その契約を検証するテストが 1 本も無かった**。
+    //   前ラウンドの専用テストは filler 8,300 字を使っていたのに、同じコミットが走査上限を
+    //   8192→16384 へ広げたため 8,333 字は**完全に読める** — abort 経路を一度も通らず、
+    //   可読な兄弟から出る `recursive-rm` で緑になっていた (自分で自分を空虚化した典型)。
+    //   ここは **真に未終端な置換** (閉じ括弧が無い) で床そのものを assert する。
+    const cases: ReadonlyArray<readonly [string, PolicyCategory]> = [
+      // 閉じ括弧が無い = どれだけ読んでも終端に達しない → aborted。
+      ["cat <(find /tmp -delete", "high-risk-other"],
+      ["cp a >$(find /tmp -delete", "high-risk-other"],
+      ["diff <(chown -R nobody /srv", "high-risk-other"],
+      // 未終端の置換が**兄弟を巻き込まない**こと (旧実装は break で以降を全部捨てた)。
+      ["cat <(find /tmp -delete <(chown -R nobody /srv)", "perm-change"],
+    ];
+    let checkedAborts = 0;
+    for (const [cmd, category] of cases) {
       const { risk, categories } = classifyCommandWithCategories(cmd);
-      expect(risk, "oversized sibling must not de-gate the destructive one").not.toBe("low");
-      expect([...categories]).toContain(category);
+      expect(risk, `${cmd} must not read as harmless`).not.toBe("low");
+      expect([...categories], cmd).toContain(category);
+      checkedAborts += 1;
     }
+    expect(checkedAborts, "unreadable-substitution shapes actually classified").toBe(4);
+    // 対照: 読める置換は abort 床を引かない (床が万能スタンプになっていないこと)。
+    const readable = classifyCommandWithCategories("cat <(find /tmp -delete)");
+    expect([...readable.categories]).toContain("recursive-rm");
+    expect([...readable.categories], "readable input must not get the abort floor").not.toContain(
+      "high-risk-other",
+    );
+  });
+
+  it("QA-CQ8-3: nested command substitution keeps the inner named category", () => {
+    // R8 監査 QA-CQ8-3 (M)。`$()` 側を正準 `substitutionEnd` へ移行した (TDA-CQ7-3) が、
+    //   素朴な `indexOf(")")` へ戻す変異が全 suite 緑で生存していた。入れ子で最初の閉じ括弧に
+    //   切れると内側の named category が落ちる (risk も降格する)。
+    const cases: ReadonlyArray<readonly [string, PolicyCategory]> = [
+      ["echo $(echo $(rm -rf /srv))", "recursive-rm"],
+      ["echo $(echo $(git push --force origin main))", "history-rewrite"],
+      ["echo $(echo $(chmod -R 777 /srv))", "perm-change"],
+    ];
+    let checkedNested = 0;
+    for (const [cmd, category] of cases) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, cmd).not.toBe("low");
+      expect([...categories], `${cmd} must keep the inner named category`).toContain(category);
+      checkedNested += 1;
+    }
+    expect(checkedNested, "nested command substitutions actually classified").toBe(3);
   });
 
   it("SEC-R7-2: hitting the recursion limit floors the category, it does not silently empty it", () => {
@@ -1872,6 +1912,7 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     //   bypass/YOLO は risk 非依存の category 駆動なので空集合は defer = 実行、しかも benign 起動の
     //   process-sub 経路は呼び出し側が risk を捨てるため通常モードも守られない。
     //   R6 は上限を 2 段→4 段へ動かしただけで、この「無言の失敗」自体は閉じていなかった。
+    let checkedLadder = 0;
     for (const launcher of ["cat", "tee", "wc", "diff", "sort", "head"]) {
       for (let k = 1; k <= 8; k += 1) {
         const cmd = `${launcher} <(`.repeat(k) + "find /tmp -delete" + ")".repeat(k);
@@ -1881,8 +1922,12 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
           categories.size,
           `${launcher} nest k=${k} must not have an empty category set`,
         ).toBeGreaterThan(0);
+        checkedLadder += 1;
       }
     }
+    // 非空虚性 (QA-CQ8-2): ラダーは深さ上限 category 床の**唯一の**フェンスなので、
+    //   `k <= 1` へ縮める 1 文字編集で武装解除できてはならない。
+    expect(checkedLadder, "launcher x nesting combinations actually classified").toBe(48);
     // 床が「何でもゲートする」形になっていないこと (浅い benign は low のまま)。
     expect(classifyCommandRisk("diff <(ls) <(ls)")).toBe("low");
     expect(classifyCommandRisk("comm -12 <(sort a) <(sort b)")).toBe("low");
@@ -1903,6 +1948,122 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     expect(src).toContain("const SUBSTITUTION_SCAN_LIMIT = MAX_ANALYZABLE_COMMAND_LEN;");
     expect(src).toMatch(/const MAX_ANALYZABLE_COMMAND_LEN = 16 \* 1024;/);
     expect(src).not.toMatch(/const SUBSTITUTION_SCAN_LIMIT = \d/);
+  });
+
+  it("SEC-CQ8-1: a shell launched from any segment is gated, not only from the first", () => {
+    // R8 監査 SEC-CQ8-1 (H・693e782 起因)。`launchesShellWithProcessSubstitution` が
+    //   `split(command)[0]` しか見ておらず、**先行セグメントを 1 つ足すだけ**でゲートが外れた。
+    //   base では `ls; bash <(echo rm -rf /srv)` が medium[inline-code] だったのに low[] へ落ち、
+    //   通常モード (risk!=="low") でも bypass モード (category 非空) でも承認カードが出なくなる。
+    //   実 bash は `<(...)` を実行するので、これは**実害のある fail-open** だった。
+    //   693e782 で `<(` を redirect として lex するようになって以降、この位置判定が唯一の砦。
+    const prefixes = ["", "ls; ", "echo start; ", "cd /tmp && ", "x=1 ; ", "true || "] as const;
+    const launchers = ["bash", "sh", "zsh", "source", "."] as const;
+    const failures: string[] = [];
+    let combos = 0;
+    for (const prefix of prefixes) {
+      for (const launcher of launchers) {
+        const cmd = `${prefix}${launcher} <(echo rm -rf /srv)`;
+        const { risk, categories } = classifyCommandWithCategories(cmd);
+        combos += 1;
+        if (risk === "low") failures.push(`${cmd} -> risk=low`);
+        if (!categories.has("inline-code")) failures.push(`${cmd} -> no inline-code`);
+      }
+    }
+    expect(combos, "prefix x launcher combinations actually classified").toBe(30);
+    expect(failures, `position must not disarm the gate:\n${failures.join("\n")}`).toEqual([]);
+    // 対照: 中身を実行しない起動 (diff/cat) は据え置き = この修正が over-gate ではないこと。
+    expect(classifyCommandRisk("ls; diff <(ls) <(ls)")).toBe("low");
+  });
+
+  it("SEC-CQ8-3: quoted `<(` / `$(` literals do not draw the unreadable-substitution floor", () => {
+    // R8 監査 SEC-CQ8-3。R7 で入れた `aborted` 床 (読めなかった置換を無害と区別する) は
+    //   正しいが、**検出点が引用状態を見ていなかった**ため `grep -rn '<(' .` のような
+    //   引用内リテラルまで「未終端の置換」と誤認し、medium[high-risk-other] = 偽の承認カードを
+    //   出していた。本ブランチが潰そうとしている症状 (偽陽性 → timeout → deny) そのもの。
+    const quotedLiterals = [
+      "grep -rn '<(' .",
+      "grep -rn '>(' src/",
+      "rg --fixed-strings '<(' apps/",
+      "echo '<('",
+      "awk '{print $1}' <in.txt",
+    ] as const;
+    let checkedQuoted = 0;
+    for (const cmd of quotedLiterals) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, `${cmd} must stay low (quoted literal is data)`).toBe("low");
+      expect([...categories], cmd).not.toContain("high-risk-other");
+      checkedQuoted += 1;
+    }
+    expect(checkedQuoted, "quoted-literal shapes actually classified").toBe(5);
+    // 対照 (床が消えていないこと): 引用の外にある**本物の未終端置換**は依然 gated。
+    for (const cmd of ["cat <(find /tmp -delete", "cp a >$(find /tmp -delete"]) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, `${cmd} must keep the unreadable floor`).not.toBe("low");
+      expect([...categories], cmd).toContain("high-risk-other");
+    }
+    // 対照 (引用対応で本物を取りこぼしていないこと): 二重引用内の `$(` は bash では展開される。
+    expect(classifyCommandRisk('echo "$(rm -rf /srv)"')).toBe("high");
+    // 単一引用内の backtick / `$(` は bash では展開されない = データ。旧実装 (naive split と
+    //   引用非対応の `$(` 走査) はここを**中身として切り出して** high[recursive-rm] を付けていた。
+    //   引用対応後は inner を拾わないが、粗い前置判定 (`hasCommandSubstitution`) が残るため
+    //   verdict は medium[inline-code] のまま = **どちらのモードでもゲートは外れない** (安全側)。
+    for (const cmd of ["echo 'a`rm -rf /srv`b'", "echo 'a$(rm -rf /srv)b'"]) {
+      const { risk, categories } = classifyCommandWithCategories(cmd);
+      expect(risk, `${cmd} must not read as executing its quoted text`).not.toBe("high");
+      expect([...categories], cmd).not.toContain("recursive-rm");
+      expect(risk, `${cmd} must still be gated (coarse precondition holds the floor)`).not.toBe(
+        "low",
+      );
+      expect([...categories], cmd).toContain("inline-code");
+    }
+  });
+
+  it("SEC-CQ8-2: repeated unterminated substitutions stay bounded (no quadratic rescan)", () => {
+    // R8 監査 SEC-CQ8-2。未終端の置換は `substitutionEnd` が走査上限まで走るため、
+    //   `echo '` + `$(`xN が開始位置ごとに再走査され O(N^2) だった (実測 16KiB で 915ms・
+    //   4 倍入力で 15.9 倍)。分類器は hook の同期パスにあるので、1 コマンドで承認 relay と
+    //   timeout タイマを止めうる。失敗回数の上限で打ち切る (床は既に立っているので安全側)。
+    //
+    // 判定は**同一長の良性入力との比**で行う (絶対時間の閾値は負荷で偽 RED を出す)。
+    //   分子分母が同じ長さなので負荷は両側に等しく効き、比が自然に正規化される
+    //   (4k/16k 比だと分母が 0.2ms 台になりノイズに埋もれた — 実測で確認済)。
+    //
+    // 実測 (best-of-5・load≈4.9): 修正後 1.58〜3.70 / 上限を外すと 1131〜1291 (path 850ms)。
+    //   閾値 25 = 観測 worst (3.70) の約 6.8 倍上・上限なし側 best (1131) の約 45 倍下。
+    //   「観測 worst でなく best の下に閾値を置かない」規律 (per-file coverage floor と同じ)。
+    const best = (cmd: string): number => {
+      let ms = Infinity;
+      for (let k = 0; k < 5; k += 1) {
+        const started = performance.now();
+        classifyCommandRisk(cmd);
+        ms = Math.min(ms, performance.now() - started);
+      }
+      return ms;
+    };
+    const n = 8_000;
+    const benign = Math.max(best(`echo ${"ab".repeat(n)}`), 0.05);
+    const pathological = best(`echo ${"$(".repeat(n)}`);
+    expect(
+      pathological / benign,
+      `same-size input must not cost orders of magnitude more: benign=${benign.toFixed(2)}ms pathological=${pathological.toFixed(2)}ms`,
+    ).toBeLessThan(25);
+  });
+
+  it("SEC-CQ8-2/3 metatest: substitution extraction has a single quote-aware source", () => {
+    // 3 つあった並置スキャナ (process / command / backtick の naive split) を
+    //   `collectSubstitutionInners` へ畳んだ結合を固定する。片側だけを手書きへ戻すと RED。
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/normalize.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(src).toContain("function collectSubstitutionInners(");
+    // 両 reclassify が同じ収集器を消費していること (第二の検出器を作らない)。
+    expect(src.match(/collectSubstitutionInners\(/g)?.length).toBe(3);
+    // backtick の naive split が復活していないこと。
+    expect(src).not.toMatch(/\.split\("`"\)/);
+    // 失敗上限は定数として存在し、有界性の根拠が literal に散らばっていないこと。
+    expect(src).toContain("const MAX_SUBSTITUTION_SCAN_FAILURES =");
   });
 
   it("SEC-R6-1: an escaped separator before # does not start a comment (the tail must survive)", () => {

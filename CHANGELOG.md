@@ -117,6 +117,23 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   classifier stops parsing, is held for approval even when its body is harmless. That costs an
   occasional card on shapes that are rare in practice, and it is deliberate — an unreadable
   construct is not evidence of safety.
+  Where a shell appears in the command no longer changes whether it is gated. The check that
+  recognises "this launcher executes what the process substitution produces" only ever looked at
+  the first segment, so `bash <(echo rm -rf /srv)` gated but `ls; bash <(echo rm -rf /srv)` — the
+  same execution, one harmless command earlier — classified as harmless with no card in either
+  mode. Every segment is scanned now, and a generated prefix-by-launcher matrix pins it.
+  The floor added for unreadable substitutions was also drawing false positives, because the
+  detection points did not track quote state: `grep -rn '<(' .` was read as an unterminated
+  process substitution and held for approval, which is precisely the class of spurious card this
+  release set out to remove. Extraction of `$( )`, backticks, and `<( )` / `>( )` now happens in a
+  single quote-aware pass, so text inside single quotes is treated as data — as bash treats it —
+  while a genuinely unterminated substitution outside quotes still gates. One consequence is
+  narrower than before: `echo 'a$(rm -rf /srv)b'` no longer reports the inner command's category,
+  since bash does not run it; the command still holds an approval card.
+  That same pass is now bounded. Each unterminated substitution used to be rescanned to the end of
+  the command, so a 16 KiB command of repeated `$(` cost roughly 850 ms of synchronous work on the
+  hook path — enough for one command to stall approval relays and timeout timers. Repeated failures
+  now stop the scan, which is safe because the first failure has already forced the gate.
 
 ## [0.7.0] - 2026-08-10
 

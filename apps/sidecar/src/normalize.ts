@@ -634,6 +634,86 @@ function substitutionEnd(command: string, i: number): number {
 }
 
 /**
+ * 抽出に失敗 (未終端) してよい回数の上限。
+ *
+ * SEC-CQ8-2 (R8 監査): 未終端の置換は `substitutionEnd` が走査上限まで走るため、
+ * `echo '` + `$(`×N のような入力が O(N²) になっていた (同期 hook パス上の DoS 面・
+ * 実測 4 倍入力で 15.9 倍)。**1 回でも失敗すれば `aborted` 床 (medium + high-risk-other) は
+ * 既に立っている**ので、以降の兄弟を諦めても判定は安全側にしか動かない。
+ */
+const MAX_SUBSTITUTION_SCAN_FAILURES = 8;
+
+/**
+ * 「中身が実行される置換」の**中身**を引用状態つきで集める正準収集器 (T1 単一出所)。
+ *
+ * **なぜ引用を見るのか (SEC-CQ8-3・R8 監査)**: 検出点が引用を見ないと
+ * `grep -rn '<(' .` のような**引用内のリテラル**まで「未終端の置換」と誤認し、
+ * R7 で入れた `aborted` 床が medium[high-risk-other] を付けて**偽の承認カード**を出す
+ * (本ブランチが潰そうとしている症状そのもの)。bash の意味論に合わせて
+ * - process substitution `<(` / `>(` … 単一/二重どちらの引用内でも起きない
+ * - command substitution `$(` / backtick … 単一引用内では起きない (二重引用内では起きる)
+ * とし、**引用が閉じないまま終わったら `aborted`** に倒す (構造解析不能 = fail-safe)。
+ *
+ * 3 つあった並置スキャナ (process / command / backtick の naive split) をここへ畳む
+ * (`security-gate-reuse-canonical-parser`・第二の検出器を作らない)。
+ */
+function collectSubstitutionInners(
+  s: string,
+  kind: "process" | "command",
+): { inners: string[]; aborted: boolean } {
+  const inners: string[] = [];
+  let aborted = false;
+  let failures = 0;
+  let quote: "'" | '"' | undefined;
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i] as string;
+    if (c === "\\" && quote !== "'" && i + 1 < s.length) {
+      i += 2;
+      continue;
+    }
+    if (quote === undefined) {
+      if (c === "'" || c === '"') {
+        quote = c;
+        i += 1;
+        continue;
+      }
+    } else if (c === quote) {
+      quote = undefined;
+      i += 1;
+      continue;
+    }
+    const opensHere =
+      kind === "process"
+        ? quote === undefined && (c === "<" || c === ">") && s[i + 1] === "("
+        : quote !== "'" && ((c === "$" && s[i + 1] === "(") || c === "`");
+    if (opensHere) {
+      const end = substitutionEnd(s, i);
+      if (end < 0) {
+        // **打ち切りは兄弟を巻き込まない (SEC-R7-1)**: 旧実装は `break` で以降の置換を
+        //   すべて捨てたため、無害だが巨大な `<(echo …)` を 1 つ前置するだけで後続の
+        //   `<(chown -R …)` が分類から消えた。1 つ進めて走査を続け、「解析できなかった」
+        //   ことは aborted で呼び出し側へ伝える。ただし失敗の反復は二次挙動になるため
+        //   上限で打ち切る (SEC-CQ8-2・床は既に立っているので安全側)。
+        aborted = true;
+        failures += 1;
+        if (failures >= MAX_SUBSTITUTION_SCAN_FAILURES) break;
+        i += c === "`" ? 1 : 2;
+        continue;
+      }
+      // backtick は 1 文字開き、`$(`/`<(`/`>(` は 2 文字開き。閉じは 1 文字。
+      inners.push(s.slice(i + (c === "`" ? 1 : 2), end - 1));
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  // 閉じられていない引用はコマンドとして構造解析できない → 「読めなかった」と同義に倒す。
+  if (quote !== undefined) aborted = true;
+  return { inners, aborted };
+}
+
+/**
  * 「中身が実行される置換」を含むか — process substitution と command substitution の **単一 predicate**。
  *
  * TDA-CQ6-1 の勧告どおり、両者を別々に判定する**第二の並置検出器を作らない**
@@ -1422,30 +1502,11 @@ function reclassifySubstitution(
   categories: Set<PolicyCategory> | undefined,
   split: SegmentSplitter,
 ): "high" | "medium" | undefined {
-  const inners: string[] = [];
-  let aborted = false;
-  // $(...) 抽出 — 括弧の深さを数える正準 `substitutionEnd` を共有する (TDA-CQ7-3)。
-  let i = 0;
-  while (i < rawSegment.length) {
-    if (rawSegment[i] === "$" && rawSegment[i + 1] === "(") {
-      const end = substitutionEnd(rawSegment, i);
-      if (end < 0) {
-        aborted = true;
-        i += 2;
-        continue;
-      }
-      inners.push(rawSegment.slice(i + 2, end - 1));
-      i = end;
-      continue;
-    }
-    i++;
-  }
-  // backtick `...` 抽出。
-  const bt = rawSegment.split("`");
-  for (let k = 1; k < bt.length; k += 2) {
-    const seg = bt[k];
-    if (seg !== undefined && seg.length > 0) inners.push(seg);
-  }
+  // `$(...)` と backtick を**引用状態つきの単一収集器**で拾う (SEC-CQ8-3・R8 監査)。
+  //   旧実装は `$(` を引用非対応で走査し、backtick は `split("`")` という**第三の並置検出器**
+  //   だった。前者は `echo '$(' ` を未終端の置換と誤認して R7 の床で偽陽性を出し、
+  //   後者は引用内の backtick を中身として切り出していた。
+  const { inners, aborted } = collectSubstitutionInners(rawSegment, "command");
   // ADR 019f0c3e: high で early-return せず全 inner を走査して category を漏れなく集約する
   // (戻り値は従来「high が1つでもあれば high」と同値)。
   let risk: "high" | "medium" | undefined;
@@ -1477,30 +1538,10 @@ function reclassifyProcessSubstitution(
   //   しか取らず、`cat <(cat <(find /tmp -delete))` の内側 (実際に実行される) を取りこぼして
   //   category を落としていた。括弧の深さを数える正準 `substitutionEnd` を共有する
   //   (第二の並置検出器を作らない・security-gate-reuse-canonical-parser)。
-  const inners: string[] = [];
-  let aborted = false;
-  let i = 0;
-  while (i < command.length) {
-    const c = command[i];
-    if ((c === "<" || c === ">") && command[i + 1] === "(") {
-      const end = substitutionEnd(command, i);
-      if (end < 0) {
-        // **打ち切りは兄弟を巻き込まない (SEC-R7-1)**: 旧実装は `break` で以降の置換を
-        //   すべて捨てたため、無害だが巨大な `<(echo …)` を 1 つ前置するだけで後続の
-        //   `<(chown -R …)` が分類から消えた。ここは 1 つ進めて走査を続け、
-        //   「解析できなかった」ことは aborted で呼び出し側へ伝える。
-        aborted = true;
-        i += 2;
-        continue;
-      }
-      const inner = command.slice(i + 2, end - 1);
-      inners.push(inner);
-      // 内側にさらに置換があれば、その中身も同じ規則で拾う (再帰は classify 側の depth で有界)。
-      i = end;
-      continue;
-    }
-    i++;
-  }
+  //   R8 監査 SEC-CQ8-3: 検出点が引用を見ていなかったため `grep -rn '<(' .` のような
+  //   **引用内リテラル**を未終端の置換と誤認し、R7 の床で偽の承認カードを出していた。
+  //   引用状態つきの正準収集器へ統合する。
+  const { inners, aborted } = collectSubstitutionInners(command, "process");
   // ADR 019f0c3e: high で early-return せず全 inner を走査して category を漏れなく集約する。
   let risk: "high" | "medium" | undefined;
   for (const inner of inners) {
@@ -1539,11 +1580,17 @@ function isProcessSubstitutionExecutor(name: string): boolean {
  */
 function launchesShellWithProcessSubstitution(command: string, split: SegmentSplitter): boolean {
   if (!hasProcessSubstitution(command)) return false;
-  const firstSeg = split(command)[0];
-  if (firstSeg === undefined) return false;
-  const { tokens } = stripRunnerWrappers(tokenize(firstSeg));
-  const name = commandName(tokens);
-  return isProcessSubstitutionExecutor(name);
+  // **全セグメントを走査する (SEC-CQ8-1・R8 監査 H)**: 以前は `split(command)[0]` だけを見ており、
+  //   先行セグメントが 1 つ付くだけでゲートが外れた — `ls; bash <(echo rm -rf /srv)` は
+  //   base で medium[inline-code] だったのに low[] へ落ちていた (実 bash は rm を実行する)。
+  //   693e782 で `<(` を redirect として lex するようになって以降、起動コマンドは
+  //   `bash script.sh` 形に見えるため、この位置判定が唯一の砦になっていた。
+  //   セキュリティゲートが「1 箇所しか見ない」形は同クラスの穴を繰り返し生むため、位置不変にする。
+  for (const seg of split(command)) {
+    const { tokens } = stripRunnerWrappers(tokenize(seg));
+    if (isProcessSubstitutionExecutor(commandName(tokens))) return true;
+  }
+  return false;
 }
 
 /**
