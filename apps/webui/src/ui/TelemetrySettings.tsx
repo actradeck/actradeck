@@ -1,5 +1,6 @@
 "use client";
 
+import { TELEMETRY_PRIVACY_CONTACT } from "@actradeck/telemetry-contract";
 import { useState } from "react";
 
 import { Button, InlineAlert, Tag } from "./kit";
@@ -50,7 +51,7 @@ export function TelemetrySettings({ active }: TelemetrySettingsProps): React.JSX
         </div>
         <div>
           <h3>{t("telemetry.retention.title")}</h3>
-          <p>{t("telemetry.retention.body")}</p>
+          <p>{t("telemetry.retention.body", { contact: TELEMETRY_PRIVACY_CONTACT })}</p>
         </div>
       </div>
 

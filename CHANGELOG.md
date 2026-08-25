@@ -24,9 +24,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   every per-row field (including `app_version` and coarse `platform`, which were previously
   omitted), states that `cockpit_started` is a once-per-day presence marker rather than a launch
   count, and adds a "Retention and deletion" block: 24-month purge, "Stop and delete ID" is
-  local-only, and deleting already-sent rows earlier requires sending the operator the
-  installation ID before it is deleted locally (the identifier is stored only as a keyed hash).
-  Same facts added to `docs/anonymous-telemetry.md` and the README.
+  local-only, and deleting already-sent rows earlier requires emailing the installation ID to
+  **privacy@actradeck.io** (`TELEMETRY_PRIVACY_CONTACT` in the contract) before it is deleted
+  locally (the identifier is stored only as a keyed hash). Same facts added to
+  `docs/anonymous-telemetry.md`, the README, and a new "Privacy requests" section in
+  `SECURITY.md`.
 
 ### Added
 

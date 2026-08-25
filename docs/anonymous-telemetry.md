@@ -104,8 +104,9 @@ made on facts rather than on the button labels:
   however: a user who sends their anonymous installation ID (shown in **Settings → Privacy** and
   by `actradeck telemetry status` while enabled) lets the operator recompute the hash and delete
   exactly those rows. Do this **before** running `disable` or `reset-id` — once the local ID is
-  gone, nobody can identify the rows any more. Send the ID through a private channel (the
-  reporting path in `SECURITY.md`), never in a public issue. There is no self-service deletion
+  gone, nobody can identify the rows any more. Email the ID to **privacy@actradeck.io**
+  (`TELEMETRY_PRIVACY_CONTACT` in `@actradeck/telemetry-contract`; also listed in
+  `SECURITY.md`), never in a public issue. There is no self-service deletion
   endpoint; without an ID the operator can only delete in bulk (by day range or by dropping the
   table).
 - **Purpose.** The aggregates exist to judge whether the product is actually used (the funnel in

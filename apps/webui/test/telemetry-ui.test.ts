@@ -1,4 +1,7 @@
-import { TELEMETRY_RETENTION_MONTHS } from "@actradeck/telemetry-contract";
+import {
+  TELEMETRY_PRIVACY_CONTACT,
+  TELEMETRY_RETENTION_MONTHS,
+} from "@actradeck/telemetry-contract";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -146,6 +149,12 @@ describe("telemetry UI response projection", () => {
     expect(ja).toContain("送信済みの行は24か月の期限までサーバーに残ります");
     expect(ja).toContain("IDを削除する前に");
     expect(ja).toContain("IDを失うと行を特定できず削除できません");
+    // 連絡先: 契約定数が実際に補間されて描画される (placeholder 残留 = RED)。
+    expect(TELEMETRY_PRIVACY_CONTACT).toBe("privacy@actradeck.io");
+    expect(ja).toContain(`${TELEMETRY_PRIVACY_CONTACT} へ依頼してください`);
+    expect(ja).not.toContain("{contact}");
+    expect(en).toContain(`email ${TELEMETRY_PRIVACY_CONTACT} with the anonymous installation ID`);
+    expect(en).not.toContain("{contact}");
     expect(en).toContain(`for ${TELEMETRY_RETENTION_MONTHS} months`);
     expect(en).toContain("automatically deletes older days every day");
     expect(en).toContain("rows already sent stay on the server until the 24-month limit");

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   TELEMETRY_EVENT_NAMES,
+  TELEMETRY_PRIVACY_CONTACT,
   TELEMETRY_RETENTION_MONTHS,
   TelemetryBatch,
   TelemetryInstallationId,
@@ -17,6 +18,11 @@ describe("retention policy (single source for purge + disclosure)", () => {
   it("is the operator-decided 24 months", () => {
     // 二重リテラル pin: 数値を変える変更は collector purge と同意文言の両方に波及する。
     expect(TELEMETRY_RETENTION_MONTHS).toBe(24);
+  });
+
+  it("names the verified privacy mailbox on the product domain", () => {
+    // 実在確認済み alias (2026-08-26)。個人アドレスやサブドメインへの差し替えを RED にする。
+    expect(TELEMETRY_PRIVACY_CONTACT).toBe("privacy@actradeck.io");
   });
 
   it("computes the cutoff as exactly N months back in UTC", () => {

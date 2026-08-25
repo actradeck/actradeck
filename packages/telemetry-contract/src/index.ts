@@ -21,6 +21,13 @@ export const TELEMETRY_MAX_COUNT = 1_000_000_000 as const;
 export const TELEMETRY_RETENTION_MONTHS = 24 as const;
 
 /**
+ * Operator mailbox for privacy requests about already-sent rows (deletion by installation ID).
+ * Verified to exist on 2026-08-26 (Workspace alias). One source for the consent panel, the docs,
+ * and SECURITY.md — change it here, never in copy.
+ */
+export const TELEMETRY_PRIVACY_CONTACT = "privacy@actradeck.io" as const;
+
+/**
  * Oldest `occurred_on` day still retained at `now`; rows strictly older are purged.
  * Month arithmetic is done in UTC; a day-of-month overflow (e.g. 31st → a 30-day month) rolls
  * forward by JS Date semantics, which shifts the cutoff by at most one day and never retains

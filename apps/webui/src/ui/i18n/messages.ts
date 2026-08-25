@@ -77,7 +77,7 @@ const ja = {
     "プロンプト、コマンド、パス、リポジトリ名、セッション／イベントID、secret、監査イベント本文。IPはpayloadに含めずD1にも保存しません（Cloudflareが接続処理とrate limitで一時処理）。",
   "telemetry.retention.title": "保持と削除",
   "telemetry.retention.body":
-    "収集先は日次行を24か月保持し、それより古い日付の行は毎日自動削除します。「停止してIDを削除」が消すのはこの端末のIDだけで、送信済みの行は24か月の期限までサーバーに残ります。IDはサーバー側で秘密鍵付きハッシュとして保存され、運営者はどの行がどの端末のものか判別できません。送信済みの行の削除を求める場合は、IDを削除する前に、この画面に表示される匿名インストールIDを添えて運営者に依頼してください（IDを失うと行を特定できず削除できません）。ID再生成・再有効化後に送る行は、それ以前の行と結び付きません。",
+    "収集先は日次行を24か月保持し、それより古い日付の行は毎日自動削除します。「停止してIDを削除」が消すのはこの端末のIDだけで、送信済みの行は24か月の期限までサーバーに残ります。IDはサーバー側で秘密鍵付きハッシュとして保存され、運営者はどの行がどの端末のものか判別できません。送信済みの行の削除を求める場合は、IDを削除する前に、この画面に表示される匿名インストールIDを添えて {contact} へ依頼してください（公開のissueには書かないでください。IDを失うと行を特定できず削除できません）。ID再生成・再有効化後に送る行は、それ以前の行と結び付きません。",
   "telemetry.endpoint": "収集先HTTPS URL",
   "telemetry.endpointHint":
     "空欄ならActraDeck公式収集先を使います。セルフホスト時だけ独自URLを入力します。",
@@ -961,7 +961,7 @@ const en: Record<MessageKey, string> = {
     "Prompts, commands, paths, repository names, session/event IDs, secrets, or audit event bodies. IP is absent from the payload and D1; Cloudflare processes it transiently for the connection and rate limit.",
   "telemetry.retention.title": "Retention and deletion",
   "telemetry.retention.body":
-    'The collector keeps daily rows for 24 months and automatically deletes older days every day. "Stop and delete ID" removes only this machine\'s ID — rows already sent stay on the server until the 24-month limit. The ID is stored server-side as a keyed hash, so the operator cannot tell which rows came from which machine. To have already-sent rows deleted, contact the operator with the anonymous installation ID shown on this screen before you delete it (once the ID is gone, the rows can no longer be identified or deleted). Rows sent after a reset or re-enable are unlinkable from earlier rows.',
+    'The collector keeps daily rows for 24 months and automatically deletes older days every day. "Stop and delete ID" removes only this machine\'s ID — rows already sent stay on the server until the 24-month limit. The ID is stored server-side as a keyed hash, so the operator cannot tell which rows came from which machine. To have already-sent rows deleted, email {contact} with the anonymous installation ID shown on this screen before you delete it (never post the ID in a public issue; once the ID is gone, the rows can no longer be identified or deleted). Rows sent after a reset or re-enable are unlinkable from earlier rows.',
   "telemetry.endpoint": "Collector HTTPS URL",
   "telemetry.endpointHint":
     "Leave blank for the official ActraDeck collector. Enter a custom URL only when self-hosting.",
