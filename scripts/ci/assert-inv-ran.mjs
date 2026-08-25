@@ -69,7 +69,15 @@ function main() {
     "usage: RC=<rc> node scripts/ci/assert-inv-ran.mjs <report.json> --suite <" +
     Object.keys(SUITES).join("|") +
     ">  (or: <report.json> <label> <pattern>)";
-  let reportPath, label, patternSource;
+  // `matches` decides which reported tests count as "the invariant". The two argument forms
+  // deliberately differ in how the selector is interpreted (CodeQL js/regex-injection):
+  //   --suite  -> the selector is a regex source read from the module-local SUITES table, so it
+  //               is developer-authored and alternation (`|`) is load-bearing.
+  //   raw form -> the selector arrives on argv. Building a RegExp from it would let a caller
+  //               inject a catastrophically backtracking pattern, so it is matched as a plain
+  //               substring instead. Behaviour-preserving: every raw-form caller (the metatest
+  //               in scripts/test-ci-preflight.sh) passes a literal test-name fragment.
+  let reportPath, label, patternSource, matches;
   if (argv[1] === "--suite") {
     reportPath = argv[0];
     const suite = SUITES[argv[2]];
@@ -79,12 +87,16 @@ function main() {
       process.exit(1);
     }
     ({ label, pattern: patternSource } = suite);
+    const suiteRe = new RegExp(patternSource);
+    matches = (name) => suiteRe.test(name);
   } else {
     [reportPath, label, patternSource] = argv;
     if (!reportPath || !label || !patternSource) {
       console.error(usage);
       process.exit(1);
     }
+    const literal = patternSource;
+    matches = (name) => name.includes(literal);
   }
   const rc = Number.parseInt(process.env.RC ?? "0", 10) || 0;
 
@@ -120,8 +132,7 @@ function main() {
     process.exit(rc);
   }
 
-  const pattern = new RegExp(patternSource);
-  const inv = all.filter((t) => pattern.test(t.name));
+  const inv = all.filter((t) => matches(t.name));
   if (inv.length === 0) {
     console.error(`${label}: did not appear — test file missing/renamed?`);
     process.exit(1);
