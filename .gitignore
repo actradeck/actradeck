@@ -72,6 +72,11 @@ CLAUDE.md
 AGENTS.md
 plan.md
 .claude/
+# Same treatment as .claude/: local agent tooling, not part of the product.
+# .codex/ holds machine-specific config.toml, hooks, and agent definitions;
+# .agents/ mirrors the skills for agent-agnostic runtimes.
+.codex/
+.agents/
 .ossfilter
 .overlay.git/
 internal/
