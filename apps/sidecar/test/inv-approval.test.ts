@@ -7,7 +7,7 @@
  *   ユーザー自身の permission 設定を上書きする anti-pattern (decision 019e8e4b)。
  * - shutdown 時の保留は deny で drain。
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
@@ -3129,5 +3129,218 @@ describe("INV-APPROVAL-R10-H: remote-runner substitutions, heredoc bodies, compo
     ]) {
       expect(classifyCommandRisk(benign), benign).toBe("low");
     }
+  });
+});
+
+/**
+ * R10 裁定 (decision 01a0125f) の M 群を閉じる契約 (v0.8 統合 part 3)。
+ *
+ * bash 側の期待値は実 bash で確認した (marker 方式・破壊的 argv は使わない):
+ *   `echo $$'a\'; touch M; echo 'x'`    → M を作る   (`$$` = PID + 通常の単一引用。後続は実行される)
+ *   `echo $$$'a\'; touch M; echo 'x'`   → 作らない   (`$$` + ANSI-C `$'…'`。未終端で構文エラー)
+ *   `echo \$$'a\'; touch M; echo 'x'`   → 作らない   (`\$` + ANSI-C)
+ *   `echo \\$$'a\'; touch M; echo 'x'`  → M を作る   (`\\` + `$$` + 通常の単一引用)
+ *   `echo 'a\' ; touch M`               → M を作る   (単一引用内の backslash は字義)
+ *   `node build.js && paste <(ls) …×9`  → paste は置換の中身を実行しない (通常の入力)
+ */
+describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor binding, and fences", () => {
+  const RMRF = ["rm", "-rf", "/srv"].join(" ");
+  const RM_REDIRECT = ["rm", ">x", "-rf", "/srv"].join(" ");
+
+  it("`$$'…'` is the PID parameter followed by an ordinary single quote, not ANSI-C quoting", () => {
+    // 偶数長の `$` 連なり → 通常引用: 閉じは 2 つ目の `'` で、後続セグメントが主分割で読める。
+    expect(splitSegments(`echo $$'a\\'; ${RMRF}; echo 'x'`)).toEqual([
+      `echo $$'a\\'`,
+      RMRF,
+      "echo 'x'",
+    ]);
+    expect(splitSegments(`echo \\\\$$'a\\'; ${RMRF}; echo 'x'`)).toEqual([
+      `echo \\\\$$'a\\'`,
+      RMRF,
+      "echo 'x'",
+    ]);
+    // 奇数長 → ANSI-C: `\'` は escape なので閉じず、未終端 = fail-safe fallback
+    //   (末尾に whole-command が付く形)。bash も構文エラーで何も実行しない。
+    for (const cmd of [`echo $$$'a\\'; ${RMRF}; echo 'x'`, `echo \\$$'a\\'; ${RMRF}; echo 'x'`]) {
+      const segs = splitSegments(cmd);
+      expect(segs[segs.length - 1], cmd).toBe(cmd);
+    }
+    // 語の読み方も同じ規則から出る (`$$` は語に残り、引用は剥がれる)。
+    expect(tokenize(`echo $$'a\\'`)).toEqual(["echo", "$$a\\"]);
+    // 後続の破壊的コマンドは主分割で読める。旧実装は未終端扱い → low[] へ倒れ、redirect 付きの
+    //   形は legacy union も救えなかった (実 bash は rm を実行する = fail-open)。
+    const verdict = classifyCommandWithCategories(`echo $$'a\\'; ${RM_REDIRECT}; echo 'x'`);
+    expect(verdict.risk).toBe("high");
+    expect([...verdict.categories]).toContain("recursive-rm");
+    // FP 対照: 無害な後続はカードを出さない。
+    expect(classifyCommandRisk(`echo $$'a\\'; ls`)).toBe("low");
+    expect(classifyCommandRisk(`echo $$"a"; ls`)).toBe("low");
+  });
+
+  it("executor binding is bounded by total work, not by site count (R8 false positive regression)", () => {
+    const sites = (n: number): string =>
+      Array.from({ length: n }, (_, i) => `<(echo ${i})`).join(" ");
+    // 12 サイトでも束縛は効く: paste/diff は中身を実行しないので、前段の interpreter に釣られない。
+    //   旧実装は「サイト 8 個超」で全セグメント走査へ縮退し、`node build.js && paste <(a) … <(i)`
+    //   を medium[inline-code] にしていた (R8 の偽陽性の再来・実 bash は何も実行しない)。
+    for (const cmd of [
+      `node build.js && paste ${sites(12)}`,
+      `python3 build.py && paste ${sites(12)}`,
+      `ls; diff ${sites(9)}`,
+    ]) {
+      const v = classifyCommandWithCategories(cmd);
+      expect(v.risk, cmd).toBe("low");
+      expect([...v.categories], cmd).not.toContain("inline-code");
+    }
+    // 対照: 実行する起動は位置に関わらず gated (SEC-CQ8-1 を弱めていない)。
+    expect([
+      ...classifyCommandWithCategories(`node build.js && bash ${sites(12)}`).categories,
+    ]).toContain("inline-code");
+    // 総量上限 (解析可能長 8 本分) を超える病的入力 = 長さ上限近くに 9 サイト → 束縛できず
+    //   全セグメント走査へ縮退する (over-gate = 安全側)。同じ形で 7 サイトなら上限内で low。
+    const pad = `echo ${"a".repeat(14_900)}`;
+    const pathological = `node build.js; ${pad} ; paste ${"<(ls) ".repeat(9)}`;
+    expect(pathological.length).toBeLessThanOrEqual(16 * 1024);
+    expect([...classifyCommandWithCategories(pathological).categories]).toContain("inline-code");
+    expect(classifyCommandRisk(`node build.js; ${pad} ; paste ${"<(ls) ".repeat(7)}`)).toBe("low");
+    // 上限は解析可能コマンド長から導出されていること (SEC-R7-1 の規律・サイト数上限へ戻っていない)。
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/normalize.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(src).toContain("const MAX_EXECUTOR_BINDING_WORK = 8 * MAX_ANALYZABLE_COMMAND_LEN;");
+    expect(src).not.toMatch(/MAX_EXECUTOR_BINDING_SITES/);
+  });
+
+  it("the unreadable-substitution fallback of the executor binding is load-bearing", () => {
+    // 未終端の `<(` で収集器が aborted → 束縛できないので全セグメント走査へ (安全側)。
+    //   ここを `return false` にすると interpreter 前置の起動判定が消える。
+    const v = classifyCommandWithCategories("python3 x.py; cat <(echo hi");
+    expect(v.risk).not.toBe("low");
+    expect([...v.categories]).toContain("inline-code");
+    expect([...v.categories]).toContain("high-risk-other"); // 読めなかったことの床 (SEC-R7-1)
+  });
+
+  it("the basename step of segmentProgramName is fenced (`/bin/bash <(…)` gates)", () => {
+    for (const cmd of [
+      "/bin/bash <(echo rm -rf /srv)",
+      "ls; /usr/bin/zsh <(echo rm -rf /srv)",
+      "/BIN/BASH <(echo rm -rf /srv)",
+      "FOO=1 /usr/local/bin/python3 <(echo rm -rf /srv)",
+    ]) {
+      const v = classifyCommandWithCategories(cmd);
+      expect(v.risk, cmd).not.toBe("low");
+      expect([...v.categories], cmd).toContain("inline-code");
+    }
+    // 対照: パス付きでも中身を実行しない起動は low のまま。
+    expect(classifyCommandRisk("/usr/bin/diff <(ls) <(ls)")).toBe("low");
+  });
+
+  it("exhausting the substitution-scan failure cap escalates to high on the process side too", () => {
+    // TDA-CQ9-5 の high 化は command 側だけがテストされ、process 側は 0-hit だった (R10 M)。
+    const ladder = (n: number): string => `cat ${"<(".repeat(n)}true`;
+    expect(classifyCommandWithCategories(ladder(7)).risk).toBe("medium"); // aborted 床
+    expect(classifyCommandWithCategories(ladder(8)).risk).toBe("high"); // cap 到達 → high
+    for (const n of [7, 8]) {
+      expect([...classifyCommandWithCategories(ladder(n)).categories], `n=${n}`).toContain(
+        "high-risk-other",
+      );
+    }
+  });
+
+  it("a backslash inside single quotes is literal — the rule carries named categories", () => {
+    expect(splitSegments(`echo 'a\\' ; ${RMRF}`)).toEqual([`echo 'a\\'`, RMRF]);
+    expect(tokenize(`'a\\'`)).toEqual(["a\\"]);
+    // 単一引用が escape を処理する変異では行全体が未終端 → low[] へ倒れ、実 bash が実行する rm が
+    //   無カードになる (redirect 付きの形は legacy union も救えない — 変異体で実測)。
+    const v = classifyCommandWithCategories(`echo 'a\\' ; ${RM_REDIRECT}`);
+    expect(v.risk).toBe("high");
+    expect([...v.categories]).toContain("recursive-rm");
+    // 対照: ANSI-C / 二重引用は escape を処理する (SEC-CQ9-1)。
+    expect(splitSegments(`echo $'a\\'; ls'`)).toEqual([`echo $'a\\'; ls'`]);
+    expect(splitSegments(`echo "a\\"; ls"`)).toEqual([`echo "a\\"; ls"`]);
+  });
+
+  // ---- 単一出所メタテスト: 個数 tripwire ではなく src/** の exclusivity 型 (R10 M) ----
+  const srcDir = fileURLToPath(new URL("../src/", import.meta.url));
+  const SINGLE_SOURCE_FILE = "normalize.ts";
+  const srcFiles = (): string[] =>
+    readdirSync(srcDir, { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
+      .sort();
+  /** コメントを落としたコード本文 (識別子の出現をコメント文言の増減から独立させる)。 */
+  const codeOf = (file: string): string =>
+    readFileSync(`${srcDir}${file}`, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^[ \t]*\/\/.*$/gm, "");
+  const identifierRe = (name: string): RegExp => new RegExp(`\\b${name}\\b`, "g");
+  /**
+   * シェルを読む原語と、そのコード出現数 (定義 + 消費)。**別ファイルでの出現は 0** = 手書きコピーも
+   * 別名での移送も RED。件数を変える正当な変更はこの map を更新する (増分は単一出所経由をレビュー)。
+   */
+  const SHELL_READING_PRIMITIVES: Readonly<Record<string, number>> = {
+    quoteSpanEnd: 5,
+    quotedSpanLiteral: 2,
+    dollarPairsIntoPid: 2,
+    readWord: 4,
+    segmentWords: 3,
+    substitutionEnd: 4,
+    collectSubstitutionInners: 6,
+    startsComment: 3,
+  };
+
+  it("metatest: the shell-reading primitives live only in normalize.ts (form-independent exclusivity)", () => {
+    const files = srcFiles();
+    expect(files, "scan set is non-vacuous").toContain(SINGLE_SOURCE_FILE);
+    expect(files.length).toBeGreaterThan(10);
+    const observed: Record<string, Record<string, number>> = {};
+    for (const file of files) {
+      const code = codeOf(file);
+      for (const name of Object.keys(SHELL_READING_PRIMITIVES)) {
+        const n = code.match(identifierRe(name))?.length ?? 0;
+        if (n > 0) (observed[file] ??= {})[name] = n;
+      }
+    }
+    // POSITIVE: 単一出所側に実際の定義がある (vacuity guard)。
+    const single = codeOf(SINGLE_SOURCE_FILE);
+    for (const name of Object.keys(SHELL_READING_PRIMITIVES)) {
+      expect(single, `${name} is defined in ${SINGLE_SOURCE_FILE}`).toMatch(
+        new RegExp(`^(?:export )?function\\*? ${name}\\(`, "m"),
+      );
+    }
+    expect(observed).toEqual({ [SINGLE_SOURCE_FILE]: SHELL_READING_PRIMITIVES });
+    // 第二パーサの tripwire: 引用文字との直接比較・naive な置換切り出しは単一出所の外に存在しない。
+    const secondParserRe = /=== "'"|=== '"'|=== "`"|\.split\("`"\)|indexOf\("\)"\)/;
+    for (const file of files) {
+      if (file === SINGLE_SOURCE_FILE) continue;
+      expect(codeOf(file), `${file} must not hand-read shell syntax`).not.toMatch(secondParserRe);
+    }
+  });
+
+  it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {
+    // eslint の天井は peak (最悪関数・単一ファイル) にしか効かない — 関数を 2 つに割る・ファイルを
+    //   2 つに割るだけで抜けられる (R10 M)。原語の exclusivity 集合 = 分類器モジュール集合として、
+    //   その**合計**に天井を置く。集合へファイルを足すには上の map を更新せねばならず、合計は残る。
+    const moduleSet = srcFiles().filter((file) => {
+      const code = codeOf(file);
+      return Object.keys(SHELL_READING_PRIMITIVES).some((name) => identifierRe(name).test(code));
+    });
+    expect(moduleSet).toContain(SINGLE_SOURCE_FILE);
+    let executableLines = 0;
+    let branchTokens = 0;
+    for (const file of moduleSet) {
+      const code = codeOf(file);
+      executableLines += code.split("\n").filter((line) => line.trim().length > 0).length;
+      branchTokens +=
+        code.match(/\bif \(|\belse\b|\bfor \(|\bwhile \(|\bcase |\?\?|\?|&&|\|\|/g)?.length ?? 0;
+    }
+    // 天井は実測の直上に置き、以後 ratchet down のみ (「今より育ったら赤」)。実測 (v0.8 part 3):
+    //   executable 1916 / branch tokens 667 (normalize.ts のみ)。
+    expect(
+      executableLines,
+      "executable lines across the classifier module set",
+    ).toBeLessThanOrEqual(1_920);
+    expect(branchTokens, "branch tokens across the classifier module set").toBeLessThanOrEqual(670);
   });
 });

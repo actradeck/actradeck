@@ -584,12 +584,23 @@ export function splitSegments(command: string): string[] {
  * `;` や `>` や `<(` が引用の内外を取り違え、`cat $'a\\'b' x; > /tmp/o rm -rf /srv` の rm が
  * 丸ごと分類から消えた (実 bash は実行する — 監査レーンが stub-argv オラクルで確認)。
  * 引用の読み方を**複数箇所で手書きしない**ための単一出所 (security-gate-reuse-canonical-parser)。
+ *
+ * **`$$'…'` は ANSI-C ではない (R10 M・R9 起因)**: bash は `$$` を PID パラメータとして先に消費する
+ * ので、`$$'a\'` は「PID + 通常の単一引用 `'a\'`」= backslash は字義で 2 つ目の `'` で閉じる。
+ * `$'` だけを見ると ANSI-C と誤読して `\'` を escape 扱いし、閉じを取りこぼして位相がずれる
+ * (実 bash: `echo $$'a\'; touch M; echo 'x'` は M を作る = 後続コマンドが実行される)。
+ * 規則は「`i` で終わる **escape されていない `$` の連なり**が偶数長なら、この `$` は `$$` の
+ * 片割れで引用の開始ではない」。`$$$'…'` (奇数) は `$$` + `$'…'` で ANSI-C、`\$$'…'` は
+ * `\$` + `$'…'` で ANSI-C、`\\$$'…'` は `\\` + `$$` + `'…'` で通常引用 (すべて実 bash で確認)。
+ * 連なりの走査はこの `$` が引用文字に隣接するときだけ起きる (先行する `$` は `open` 判定で即 return)
+ * ので線形性は保たれる。
  */
 function quoteSpanEnd(s: string, i: number): number {
   const c = s[i];
   const dollar = c === "$" && (s[i + 1] === "'" || s[i + 1] === '"');
   const open = dollar ? (s[i + 1] as string) : c;
   if (open !== "'" && open !== '"') return 0;
+  if (dollar && dollarPairsIntoPid(s, i)) return 0;
   // 単一引用だけが escape を処理しない。ANSI-C (`$'…'`) と二重引用は処理する。
   const escapes = dollar || open === '"';
   for (let j = dollar ? i + 2 : i + 1; j < s.length; j += 1) {
@@ -601,6 +612,27 @@ function quoteSpanEnd(s: string, i: number): number {
     if (ch === open) return j + 1;
   }
   return -1;
+}
+
+/**
+ * `i` の `$` が (`$$` の PID パラメータとして) 直前の `$` と対を成すか — `quoteSpanEnd` の下請け。
+ * `i` で終わる `$` の連なりを数え、その手前の backslash が奇数個なら連なりの先頭は escape 済み
+ * (`\$`) として除外する。偶数長 = この `$` は片割れ、奇数長 = この `$` が `$'…'` / `$"…"` を開く。
+ */
+function dollarPairsIntoPid(s: string, i: number): boolean {
+  let run = 0;
+  let k = i;
+  while (k >= 0 && s[k] === "$") {
+    run += 1;
+    k -= 1;
+  }
+  let backslashes = 0;
+  while (k >= 0 && s[k] === "\\") {
+    backslashes += 1;
+    k -= 1;
+  }
+  if (backslashes % 2 === 1) run -= 1;
+  return run % 2 === 0;
 }
 
 /**
@@ -1992,9 +2024,18 @@ function segmentProgramName(segment: string): string {
 }
 
 /**
- * 起動判定を束縛する置換サイトの上限。超えたら全セグメント走査 (より広い = 安全側) へ戻す。
+ * 起動判定の束縛に許す総走査量 (文字数)。束縛はサイトごとに `command.slice(0, start)` を正準
+ * splitter で読み直すので、コストは Σ start (サイト数 × 位置) で決まる。
+ *
+ * **サイト数ではなく総量で有界化する (R10 M・R8 の偽陽性への縮退)**: 以前は「サイト 8 個超」で
+ * 全セグメント走査へ縮退していたが、それは R8 の偽陽性 (`node build.js && paste <(a) … <(i)` が
+ * medium[inline-code]) を**サイト数だけで**呼び戻す形だった — 短いコマンドに置換が 9 個並ぶのは
+ * `paste` / `diff` の日常形で、実 bash はどれも実行しない。総量の上限は「解析可能コマンド長
+ * 8 本分」= 長さ上限いっぱいのコマンドで末尾近くにサイトが 8 個あってもなお束縛が効く量で、
+ * 縮退するのは長大かつ多数の置換を持つ病的入力だけになる (それでも縮退先は over-gate = 安全側)。
+ * 上限系の定数は `MAX_ANALYZABLE_COMMAND_LEN` から導出する (SEC-R7-1 の規律)。
  */
-const MAX_EXECUTOR_BINDING_SITES = 8;
+const MAX_EXECUTOR_BINDING_WORK = 8 * MAX_ANALYZABLE_COMMAND_LEN;
 
 function launchesShellWithProcessSubstitution(command: string, split: SegmentSplitter): boolean {
   if (!hasProcessSubstitution(command)) return false;
@@ -2012,7 +2053,8 @@ function launchesShellWithProcessSubstitution(command: string, split: SegmentSpl
   //   **正準 splitter** で切り、その最後のセグメント = bash 的な「その置換を持つ単純コマンド」
   //   のプログラム名だけを見る。位置不変性 (R8 の SEC-CQ8-1) はそのまま保たれる。
   const { starts, aborted } = collectSubstitutionInners(command, "process");
-  if (!aborted && starts.length <= MAX_EXECUTOR_BINDING_SITES) {
+  const bindingWork = starts.reduce((sum, start) => sum + start, 0);
+  if (!aborted && bindingWork <= MAX_EXECUTOR_BINDING_WORK) {
     for (const start of starts) {
       const before = split(command.slice(0, start));
       const owner = before[before.length - 1];
@@ -2021,7 +2063,7 @@ function launchesShellWithProcessSubstitution(command: string, split: SegmentSpl
     }
     return false;
   }
-  // 読めなかった / サイト数が上限超過 → 束縛できないので従来の全セグメント走査 (安全側)。
+  // 読めなかった / 総走査量が上限超過 → 束縛できないので従来の全セグメント走査 (安全側)。
   for (const seg of split(command)) {
     if (isProcessSubstitutionExecutor(segmentProgramName(seg))) return true;
   }

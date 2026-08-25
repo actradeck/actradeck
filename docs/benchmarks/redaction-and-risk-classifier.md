@@ -200,15 +200,25 @@ their noisier keyword matches therefore do not affect default-gated precision.
 
 ### Divergences from human labels (findings / calibration notes)
 
-The harness prints every divergence. All false positives are **safe-direction over-gates** driven
-by whole-command keyword literals:
+The harness prints every divergence, and this table lists every one of them (an earlier revision
+listed four of ten; the six `high-risk-other` rows were missing). All false positives are
+**safe-direction over-gates**. Four come from whole-command keyword literals; six are the
+`high-risk-other` marker — the classifier's "this segment could not be analysed" floor — riding
+alongside a named category that _is_ correct, which is why that category's precision (14.3%) is the
+lowest in the table above. No divergence loses a label or lowers a verdict below the human one.
 
-| Command                                 | Divergence               | Nature                                                                                                  |
-| --------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `dd if=backup.iso of=restore.iso bs=4M` | predicted `disk-destroy` | `dd if=` literal fires even for a file-to-file copy (no block device). Intentional safe-side over-gate. |
-| `grep -rn 'DROP TABLE' migrations/`     | predicted `db-drop`      | The literal `DROP TABLE` string appears in a _search_ argument. Keyword match, not intent.              |
-| `echo 'see the production runbook'`     | predicted `migrate-prod` | `production` keyword in prose. Off by default.                                                          |
-| `cat docs/migrate-guide.md`             | predicted `migrate-prod` | `migrate` keyword in a filename. Off by default.                                                        |
+| Command                                        | Divergence                                                     | Nature                                                                                                                                                                                           |
+| ---------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `dd if=backup.iso of=restore.iso bs=4M`        | predicted `disk-destroy`                                       | `dd if=` literal fires even for a file-to-file copy (no block device). Intentional safe-side over-gate.                                                                                          |
+| `grep -rn 'DROP TABLE' migrations/`            | predicted `db-drop`                                            | The literal `DROP TABLE` string appears in a _search_ argument. Keyword match, not intent.                                                                                                       |
+| `echo 'see the production runbook'`            | predicted `migrate-prod`                                       | `production` keyword in prose. Off by default.                                                                                                                                                   |
+| `cat docs/migrate-guide.md`                    | predicted `migrate-prod`                                       | `migrate` keyword in a filename. Off by default.                                                                                                                                                 |
+| `:(){ :\|:& };:`                               | extra `high-risk-other` (label: `fork-bomb`)                   | The function-definition syntax splits into segments (`:(){ :`, `}`) that have no readable program name; each draws the unanalyzable-segment marker. `fork-bomb` is still detected.               |
+| `cp report.txt >$(find /var/tmp -delete)`      | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | The executable redirect target is carried into classification as its own segment whose only token is the raw `$(…)`; that segment draws the marker while its body yields the correct categories. |
+| `cp report.txt >"$(find /var/tmp -delete)"`    | extra `high-risk-other` (same labels)                          | Same mechanism, quoted target.                                                                                                                                                                   |
+| `` cp report.txt >`rm -rf /tmp/build-cache` `` | extra `high-risk-other` (same labels)                          | Same mechanism, backtick form.                                                                                                                                                                   |
+| `echo note\># ; rm -rf /tmp/build-cache`       | extra `high-risk-other` (label: `recursive-rm`)                | The escaped `\>` stays in the `echo` segment's token; the fail-safe marker fires on that segment. `rm -rf` is classified normally — this vector pins the phantom-comment fix (SEC-R6-1).         |
+| `cp report.txt >$(date +%F).log`               | extra `high-risk-other` (label: `inline-code`)                 | Same elided-target mechanism with a harmless body: `inline-code` is the correct label, the marker is the cost of carrying the target into analysis at all.                                       |
 
 Risk-level calibration notes:
 

@@ -106,10 +106,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   discarded without even falling back to the conservative splitter. Bash starts no comment there
   and runs the command. The word-head test now shares the scanner's escape state, which also
   restores the rule that the splitter may only discard a region that is genuinely a shell comment.
-  Known gaps remain and are tracked rather than claimed closed: a
-  quoted assignment whose value contains a space (`FOO='a b' rm -rf /path`) still hides the program
-  from the classifier; and the process-substitution medium-floor suppression is decided per command
-  rather than per segment, so a benign `diff <(ls) ;` prefix relaxes it for the whole line.
+  A known gap remains and is tracked rather than claimed closed: the process-substitution
+  medium-floor suppression is decided per command rather than per segment, so a benign
+  `diff <(ls) ;` prefix relaxes it for the whole line. (A quoted assignment whose value contains a
+  space — `FOO='a b' rm -rf /path` — was listed here as a second gap; the single word reader
+  described below now reads it the way bash does, so that entry is removed.)
   (`tee 2>(rm -rf /path)` was listed here as a gap in an earlier revision; it now gates, so the
   entry is removed rather than left to imply an exposure that no longer exists.)
   Analysis has limits, and past them the classifier gates rather than waves through: a process
@@ -150,6 +151,28 @@ syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a literal strin
   `kubectl exec`) was only ever caught by accident, because the old quote-blind splitter tore the
   operand apart at the pipe; the operand is classified as inner code now, and only gates when that
   inner code is itself dangerous, so `ssh host 'ls -la'` stays silent.
+  Every shell word is now read by one reader. Nine audit rounds of this classifier produced the
+  same class of hole each time — quoting, escaping and word boundaries were hand-copied into four
+  places (the splitter, redirect targets, heredoc delimiters, the tokenizer) and one of them was
+  always a character out of step. Those copies are gone: a single word reader owns quote spans,
+  backslash escapes and concatenation, and the splitter, the redirect-target reader, the heredoc
+  delimiter reader and the tokenizer all call it. That also closed the quoted-assignment hole
+  (`FOO='a b' rm -rf /path` hid the program because the old tokenizer turned quotes into spaces),
+  the `ssh host $(rm -rf /srv)` hole (an early return in the remote-runner branch made the
+  command-substitution gate unreachable — every runner, both substitution forms), a heredoc-body
+  hole (shell quoting was applied to text that has none, so an even number of apostrophes in the
+  body swallowed a real `$(…)`), and shell compound statements (`if …; then rm -rf /; fi`,
+  `for`/`while`/`case`, whose keywords were taken for the program name). Two bash-parity edges
+  follow the same reader: `$$'…'` is the PID parameter followed by an ordinary quote, not ANSI-C
+  quoting, and a backslash inside single quotes is literal. The executor-binding check that stops
+  `diff <(sort a) <(sort b) && node build.js` from raising a card is now bounded by total scan work
+  rather than by a count of substitution sites, so `node build.js && paste <(a) … <(l)` with a
+  dozen sites stays silent instead of degrading to the earlier position-blind scan. Expected
+  behaviour throughout was checked against what bash actually executes, using a stub `PATH` and
+  marker files rather than destructive commands. Honest accounting: the file did not get smaller
+  — the single reader builds word literals the old approximations skipped, and the audit fixes
+  landed alongside it — so the size tripwires now record 1916 executable lines and a summed
+  ceiling that a file split cannot dodge.
 
 ## [0.8.0] - 2026-08-25
 
