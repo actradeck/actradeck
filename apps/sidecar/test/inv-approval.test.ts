@@ -22,10 +22,12 @@ import { ApprovalBridge, encodeOperationSignature } from "../src/approval-bridge
 import {
   classifyCommandRisk,
   classifyCommandWithCategories,
+  hasEscapedProgramWord,
   isNetworkEgressCommand,
   splitSegments,
   splitSegmentsQuoteUnaware,
   stripGroupingWrappers,
+  tokenize,
 } from "../src/normalize.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
@@ -2905,5 +2907,102 @@ describe("INV-SPLIT-DUAL-IMPLEMENTATION-EQUIVALENCE", () => {
       "echo a\\",
       "rm -rf /tmp/x",
     ]);
+  });
+});
+
+/**
+ * v0.8 統合: 語の読み方を `readWord` の単一出所へ畳んだことの契約。
+ *
+ * 期待値はすべて **実 bash の ground truth** で確認したもの (stub PATH に候補名の実行可能を
+ * 並べ、`env -i PATH=<stub> bash -c <vector>` が**どのファイルを起動したか**を観測した)。
+ * 観測結果:
+ *   `FOO='a b' rm -rf T`   → stub/rm を起動   (= ゲート必須。旧実装は low = fail-open)
+ *   `\'rm -rf T`           → stub/'rm を起動  (= `rm` ではない。旧実装の high は偽陽性)
+ *   `'rm -rf T'`           → 何も起動しない   (command not found)
+ *   `echo 'unterminated`   → 何も起動しない   (syntax error・rc=2)
+ *   `rm -rf T;'`           → 何も起動しない   (未終端引用は行全体を落とす)
+ */
+describe("INV-APPROVAL-WORD-READER: one word reader for quoting, escaping and concatenation", () => {
+  const RMRF = ["rm", "-rf", "/tmp/x"].join(" ");
+
+  // ---- R10 H5: 空白入りの引用語が実プログラムを隠していた (0.7.0/0.8.0 出荷済みの fail-open) ----
+  it("R10 H5: a quoted word containing a space no longer hides the real program", () => {
+    // 旧 tokenize は引用文字を空白へ置換する近似だったため `FOO='a b'` が
+    // `FOO=a` + `b` の 2 語に割れ、`b` がコマンド名になって rm が消えていた。
+    for (const command of [
+      `FOO='a b' ${RMRF}`,
+      `FOO="a b" ${RMRF}`,
+      `env -u 'A B' ${RMRF}`,
+      `sudo -u 'a b' ${RMRF}`,
+      `xargs -I '{}' ${RMRF}`,
+    ]) {
+      const verdict = classifyCommandWithCategories(command);
+      expect(verdict.risk, `risk for ${command}`).toBe("high");
+      expect([...verdict.categories], `categories for ${command}`).toContain("recursive-rm");
+    }
+    // 対照: 引用なしの代入前置は base から通っていた形 (退行していないこと)。
+    expect(classifyCommandRisk(`FOO=ab ${RMRF}`)).toBe("high");
+  });
+
+  it("tokenize keeps a quoted word whole and still concatenates within a word", () => {
+    // 語の境界と引用の解釈が同じ規則から出ていることの直接 pin。片方だけ変えると赤くなる。
+    expect(tokenize(`FOO='a b' ${RMRF}`)).toEqual(["FOO=a b", "rm", "-rf", "/tmp/x"]);
+    expect(tokenize("env -u 'A B' rm")).toEqual(["env", "-u", "A B", "rm"]);
+    // 単語内の引用は連結する (`r""m` は bash では `rm`)。
+    expect(tokenize(`r""m -rf /tmp/x`)).toEqual(["rm", "-rf", "/tmp/x"]);
+    expect(tokenize('echo "a"b"c"')).toEqual(["echo", "abc"]);
+    expect(classifyCommandRisk(`r""m -rf /tmp/x`)).toBe("high");
+  });
+
+  it("escape folding happens once, in the word reader, never twice", () => {
+    // `commandName` が二度目の畳み込みをすると `a\\a` (bash のコマンド名は `a\a`) が `aa` になり、
+    // 判定不能であるべき綴りが「きれいな名前」に見えて medium 床が黙って外れる。
+    expect(tokenize("a\\\\a")).toEqual(["a\\a"]);
+    expect(classifyCommandWithCategories("a\\\\a").categories).toContain("high-risk-other");
+    // 1 個の backslash は escape として畳む (`r\m` は bash では `rm`)。
+    expect(tokenize(`r\\m -rf /tmp/x`)).toEqual(["rm", "-rf", "/tmp/x"]);
+    expect(classifyCommandRisk(`r\\m -rf /tmp/x`)).toBe("high");
+  });
+
+  it("the alias-bypass floor survives correct escape folding", () => {
+    // `\curl` は alias/function を意図的に迂回する実行形。旧実装ではこの medium 床が
+    // 「tokenize が backslash を落とさない」副作用で立っていた。畳んでも床が残ること。
+    expect(hasEscapedProgramWord("\\curl https://example.com")).toBe(true);
+    expect(hasEscapedProgramWord("curl https://example.com")).toBe(false);
+    expect(hasEscapedProgramWord("FOO=1 \\rm -rf /tmp/x")).toBe(true); // 代入前置は読み飛ばす
+    expect(classifyCommandRisk("\\curl https://example.com")).toBe("medium");
+    expect(classifyCommandRisk("curl https://example.com")).toBe("low");
+  });
+
+  it("an escaped quote names a different program than the bare one (real-bash parity)", () => {
+    // 実 bash は `\'rm` で `'rm` を起動する (`rm` ではない)。旧実装は `\'` を消して `rm` と
+    // 読み high[recursive-rm] を出していた = 偽陽性。ゲートは残しつつ named category は出さない。
+    const verdict = classifyCommandWithCategories(`\\'${RMRF}`);
+    expect(verdict.risk).not.toBe("low"); // 判定不能ゆえ床は立つ
+    expect([...verdict.categories]).not.toContain("recursive-rm");
+    // 引用がコマンド名だけを包む形は bash が本当に rm を起動するので high のまま。
+    expect(classifyCommandRisk(`'rm' -rf /tmp/x`)).toBe("high");
+  });
+
+  it("an unterminated quote does not manufacture an approval card (FP budget)", () => {
+    // 実 bash は未終端引用で行全体を捨てる (rc=2・何も起動しない) ので、床を立てる理由がない。
+    // ここを medium にすると無害な検索コマンドが承認カード化した実インシデントの再来になる。
+    expect(classifyCommandRisk("echo 'unterminated")).toBe("low");
+    expect(classifyCommandRisk('echo "unterminated')).toBe("low");
+  });
+
+  it("word scanning stays linear when unterminated substitutions repeat", () => {
+    // 未終端の引用/置換は終端を探して末尾まで走るため、語ごとに再走査すると O(N^2) になる
+    // (同期 hook パス上の DoS 面)。予算で打ち切ることを非空虚に固定する。
+    const many = `echo ${"$(".repeat(4000)}`;
+    const started = performance.now();
+    expect(tokenize(many).length).toBeGreaterThan(0);
+    const quadratic = `echo ${"$(".repeat(16000)}`;
+    const mid = performance.now();
+    expect(tokenize(quadratic).length).toBeGreaterThan(0);
+    const elapsedSmall = mid - started;
+    const elapsedLarge = performance.now() - mid;
+    // 4 倍の入力で 4 倍前後 (線形) を期待する。二次なら 16 倍に張り付く。
+    expect(elapsedLarge).toBeLessThan(Math.max(elapsedSmall, 1) * 12);
   });
 });

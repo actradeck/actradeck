@@ -161,8 +161,8 @@ the tool input (not from the command string alone) and are **out of scope** for 
 | perm-change       | 5       | 100.0%    | 100.0%     |
 | inline-code       | 9       | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
-| high-risk-other   | 1       | 16.7%     | 100.0%     |
-| **micro-average** | 50      | **84.7%** | **100.0%** |
+| high-risk-other   | 1       | 14.3%     | 100.0%     |
+| **micro-average** | 50      | **83.3%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
 Read that as a statement about _this corpus_, not a general guarantee: the corpus is only as good as
@@ -173,7 +173,12 @@ extra `high-risk-other` predictions. A later round moved it down again, for the 
 the "could not analyse this segment" backstop used to be suppressed whenever any _other_ segment had
 already produced a category, which let a harmless-looking prefix strip the gate off an unanalyzable
 segment behind it. Scoping the backstop to its own segment closes that, and costs one extra label on
-the fork-bomb vector, which was already gated by `fork-bomb`. Precision is otherwise below 100% only where a keyword literal
+the fork-bomb vector, which was already gated by `fork-bomb`. The v0.8 consolidation moved it down
+once more, by one label on `` cp report.txt >`rm -rf …` ``: backtick substitutions are now read
+through the same word reader as `$(…)`, so a redirect target that is nothing but a substitution
+draws the same "could not analyse this segment" label that the `$(…)` spelling already drew. That
+is the two spellings agreeing rather than a new class — the vector keeps its `recursive-rm` and
+`inline-code` labels and was gated before and after. Precision is otherwise below 100% only where a keyword literal
 fires on a benign near-miss (below). This is
 the deliberate design bias: **under-detection (a real destructive op sneaking through) is far worse
 than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "gate it."

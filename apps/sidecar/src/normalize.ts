@@ -125,7 +125,46 @@ interface PendingHeredoc {
   readonly stripTabs: boolean;
 }
 
-const SEPARATOR_OR_SPACE_RE = /[\s;|&<>]/;
+/**
+ * 語境界文字か — シェル文法における「語を終わらせる非クォート文字」の**単一出所**。
+ *
+ * **TDA-CQ6-3 (v0.8 統合)**: この判定はかつて 3 通りに手書きされ、互いに食い違っていた
+ * (`SEPARATOR_OR_SPACE_RE` = `/[\s;|&<>]/` / `WHITESPACE_RE` = `/\s/` / インライン
+ * `=== " " || === "\t"`)。どれを使うかで「語がどこで終わるか」が変わるため、redirect 対象語・
+ * heredoc delimiter・fd 接頭辞・コメント語頭判定が別々の境界観を持ち、R2〜R9 の各ラウンドで
+ * 「一方だけが正しく、もう一方が 1 文字ずれる」形の H を生み続けた。境界の定義は 1 本にする
+ * (security-gate-reuse-canonical-parser)。
+ *
+ * 空白だけを見たい箇所 (「語頭か」でなく「行内の詰め物か」) は `isBlank` を使う。両者は目的が
+ * 違うので統合しない — 名前で区別し、どちらを意図したかがコードから読めるようにする。
+ */
+export function isWordBoundaryChar(c: string | undefined): boolean {
+  return c !== undefined && WORD_BOUNDARY_RE.test(c);
+}
+const WORD_BOUNDARY_RE = /[\s;|&<>]/;
+
+/** 語の途中に現れうる詰め物 (空白/タブ)。`isWordBoundaryChar` とは目的が異なる。 */
+function isBlank(c: string | undefined): boolean {
+  return c === " " || c === "\t";
+}
+
+/**
+ * 空白だけを語境界とみなす述語 (`tokenize` 用)。
+ *
+ * `tokenize` の入力は既に `splitSegments` が区切った**セグメント**なので、そこに残っている
+ * `;` `|` `&` `<` `>` は「正常な区切り」ではなく **解析不能の痕跡**である
+ * (`splitSegmentsUnparseable` は諦めたときコマンド全体を 1 セグメントとして渡す)。
+ * ここで区切ると `aa;'` が `["aa"]` = クリーンな実行可能名に見え、`unanalyzableSegmentRisk` の
+ * medium 床が黙って外れる。メタ文字は語に貼り付けたまま残し「このセグメントは構造判定できない」
+ * という信号を保つ (fail-safe / over-gate 方向)。
+ *
+ * 語の読み方そのものは `readWord` の単一出所を共有し、違うのは**境界集合だけ**である点が要点
+ * (以前は語の読み方ごと別実装で、引用の扱いが食い違っていた = R10 H5)。
+ */
+function isWhitespaceBoundaryChar(c: string | undefined): boolean {
+  return c !== undefined && WHITESPACE_RE.test(c);
+}
+
 /**
  * 構造解析不能な入力の fail-safe 分割 (SEC-CQ5-2・R5 監査 H)。
  *
@@ -166,6 +205,7 @@ const MAX_ANALYZABLE_COMMAND_LEN = 16 * 1024;
 const SUBSTITUTION_SCAN_LIMIT = MAX_ANALYZABLE_COMMAND_LEN;
 /** `{v}>` の変数名として妥当か (bash の名前規則)。長さは FD_SCAN_LIMIT で既に有界。 */
 const FD_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** grouping ラッパの前後トリム専用の空白判定 (語境界とは目的が違う・`isWordBoundaryChar` を参照)。 */
 const WHITESPACE_RE = /\s/;
 
 /**
@@ -257,7 +297,6 @@ function redirectOperatorLength(command: string, i: number): number {
 export function splitSegments(command: string): string[] {
   const segments: string[] = [];
   let current = "";
-  let quote: '"' | "'" | undefined;
   /**
    * 直前に消費した escape ペア (`\x`) の終端 index (SEC-R6-1)。
    * `escapePairEnd === i` なら「`i-1` の文字は escape 済み」= 区切りとして数えてはならない。
@@ -288,53 +327,13 @@ export function splitSegments(command: string): string[] {
    */
   const targetEnd = (from: number): number => {
     let j = from;
-    while (command[j] === " " || command[j] === "\t") j += 1;
-    let wordQuote: '"' | "'" | undefined;
-    while (j < command.length) {
-      const c = command[j] as string;
-      if (wordQuote !== undefined) {
-        // ダブルクォート内のみ backslash が次の 1 文字を字義化する (メインループと同一)。
-        if (c === "\\" && wordQuote === '"' && j + 1 < command.length) {
-          j += 2;
-          continue;
-        }
-        j += 1;
-        if (c === wordQuote) wordQuote = undefined;
-        continue;
-      }
-      if (c === "\\" && j + 1 < command.length) {
-        j += 2; // escape された空白・区切りは語の一部。
-        continue;
-      }
-      // `$'…'` / `$"…"` は 1 スパンで読む (SEC-CQ9-1 と同一規則・単一出所)。
-      const wordSpan =
-        c === "$" && (command[j + 1] === "'" || command[j + 1] === '"')
-          ? quoteSpanEnd(command, j)
-          : 0;
-      if (wordSpan === -1) return -1;
-      if (wordSpan > 0) {
-        j = wordSpan;
-        continue;
-      }
-      if (c === '"' || c === "'") {
-        wordQuote = c;
-        j += 1;
-        continue;
-      }
-      // **置換は語の一部として読み切る (TDA-CQ6-1 ≡ QA-CQ6-1)**: `>$(find /tmp -delete)` の
-      //   `$( … )` 内の空白は語境界ではない。空白で切ると対象語が `$(find` までになり、
-      //   実行される中身が分類から落ちる。入れ子も同じ出所で扱う (`substitutionEnd`)。
-      const subEnd = substitutionEnd(command, j);
-      if (subEnd > 0) {
-        j = subEnd;
-        continue;
-      }
-      if (subEnd === -1) return -1; // 未終端の置換 = 構造解析不能 → fail-safe。
-      if (SEPARATOR_OR_SPACE_RE.test(c)) break;
-      j += 1;
-    }
-    // 未終端 quote = 構造解析不能。黙って飲み込まず fail-safe の legacy 分割へ倒す (TDA-CQ5-L2)。
-    return wordQuote === undefined ? j : -1;
+    while (isBlank(command[j])) j += 1;
+    // 語の読み方はメインループ・heredoc delimiter と**同一出所** (`readWord`)。
+    //   置換 (`>$(find …)`) は語の一部として読み切る — 空白で切ると対象語が `$(find` までになり、
+    //   実行される中身が分類から落ちる (TDA-CQ6-1 ≡ QA-CQ6-1)。
+    //   未終端 quote/置換 = 構造解析不能。黙って飲み込まず fail-safe の legacy 分割へ倒す。
+    const word = readWord(command, j, isWordBoundaryChar, { failures: 0 });
+    return word.unterminated ? -1 : word.end;
   };
   /**
    * fd 指定 + 演算子 + 対象語を segment から取り除く (redirect は語を供給しない)。
@@ -382,7 +381,7 @@ export function splitSegments(command: string): string[] {
       if (k < floor) return;
       const name = current.slice(k + 1, end - 1);
       if (!FD_VAR_NAME_RE.test(name)) return;
-      if (k > 0 && !WHITESPACE_RE.test(current[k - 1] as string)) return; // 語の一部。
+      if (k > 0 && !isWordBoundaryChar(current[k - 1])) return; // 語の一部。
       current = current.slice(0, k);
       return;
     }
@@ -390,30 +389,12 @@ export function splitSegments(command: string): string[] {
     while (k > floor && (current[k - 1] as string) >= "0" && (current[k - 1] as string) <= "9")
       k -= 1;
     if (k === end) return; // 末尾が数字でない。
-    if (k > 0 && !WHITESPACE_RE.test(current[k - 1] as string)) return; // `base64` / `pytest2` は fd でない。
+    if (k > 0 && !isWordBoundaryChar(current[k - 1])) return; // `base64` / `pytest2` は fd でない。
     current = current.slice(0, k);
   }
   let i = 0;
   while (i < command.length) {
     const ch = command[i] as string;
-    if (quote === "'") {
-      current += ch;
-      if (ch === "'") quote = undefined;
-      i += 1;
-      continue;
-    }
-    if (quote === '"') {
-      // ダブルクォート内の backslash は次の 1 文字を字義どおりにする (\" で閉じない)。
-      if (ch === "\\" && i + 1 < command.length) {
-        current += ch + (command[i + 1] as string);
-        i += 2;
-        continue;
-      }
-      current += ch;
-      if (ch === '"') quote = undefined;
-      i += 1;
-      continue;
-    }
     // quote 外: backslash は次の 1 文字を字義どおりにする (\" \| \; は開閉/分割に使わない)。
     if (ch === "\\" && i + 1 < command.length) {
       current += ch + (command[i + 1] as string);
@@ -449,17 +430,19 @@ export function splitSegments(command: string): string[] {
     //   流し `'` で単一引用を開く素の状態機械は 1 文字早く閉じ、以降の quote 位相が反転する。
     //   反転すると `;` `>` `<(` が引用の内外を取り違え、
     //   `cat $'a\'b' x; > /tmp/o rm -rf /srv` の rm が分類から丸ごと消えた (実 bash は実行する)。
-    if (ch === "$" && (command[i + 1] === "'" || command[i + 1] === '"')) {
-      const spanEnd = quoteSpanEnd(command, i);
-      if (spanEnd === -1) return splitSegmentsUnparseable(command); // 未終端 → fail-safe。
+    // **引用は 1 スパンとして消費する (v0.8 統合 + SEC-CQ9-1・R9 監査 H)**:
+    //   `'…'` / `"…"` / `$'…'` / `$"…"` のどれも `quoteSpanEnd` が単一出所で読む。以前はここだけ
+    //   独自の `quote` 状態変数を持ち、ANSI-C (`$'…'`) の escape 規則が後付けの特例分岐だった。
+    //   `$'a\'b'` は bash が backslash を処理するため `\'` では閉じない。素の状態機械は 1 文字
+    //   早く閉じ、以降の quote 位相が全部反転して `;` `>` `<(` の内外を取り違える
+    //   (`cat $'a\'b' x; > /tmp/o rm -rf /srv` の rm が分類から丸ごと消えた・実 bash は実行する)。
+    //   引用の**開き・閉じ・escape 規則**を 1 箇所に閉じ込めることで、この位相ずれのクラスを
+    //   構造的に消す (security-gate-reuse-canonical-parser)。
+    const spanEnd = quoteSpanEnd(command, i);
+    if (spanEnd === -1) return splitSegmentsUnparseable(command); // 未終端 → fail-safe。
+    if (spanEnd > 0) {
       current += command.slice(i, spanEnd);
       i = spanEnd;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      current += ch;
-      i += 1;
       continue;
     }
     if (ch === ";") {
@@ -540,34 +523,17 @@ export function splitSegments(command: string): string[] {
           stripTabs = true;
           i += 1;
         }
-        while (i < command.length && (command[i] === " " || command[i] === "\t")) i += 1;
-        let delimiter = "";
-        let delimiterQuoted = false;
-        const q = command[i];
-        if (q === "'" || q === '"') {
-          delimiterQuoted = true;
-          i += 1;
-          while (i < command.length && command[i] !== q) {
-            delimiter += command[i] as string;
-            i += 1;
-          }
-          if (i >= command.length) return splitSegmentsUnparseable(command); // 未終端。
-          i += 1;
-        } else {
-          while (i < command.length && !SEPARATOR_OR_SPACE_RE.test(command[i] as string)) {
-            if (command[i] === "\\") {
-              delimiterQuoted = true; // escape 込み delimiter は quoted 意味論 (展開不活性)。
-              i += 1;
-              if (i < command.length) {
-                delimiter += command[i] as string;
-                i += 1;
-              }
-              continue;
-            }
-            delimiter += command[i] as string;
-            i += 1;
-          }
-        }
+        while (i < command.length && isBlank(command[i])) i += 1;
+        // delimiter も**同じ語読取り**で読む。以前はここだけ独自の状態機械で、引用内 escape も
+        //   `$'…'` も扱わなかった (語の読み方が 4 箇所に分かれていたことが R2〜R10 で同一クラスの
+        //   H を生み続けた機構的原因・CQ-R6 裁定 019ffe0c)。
+        const delimiterStart = i;
+        const delimiterWord = readWord(command, i, isWordBoundaryChar, { failures: 0 });
+        if (delimiterWord.unterminated) return splitSegmentsUnparseable(command); // 未終端。
+        const delimiter = delimiterWord.literal;
+        // bash: delimiter のどこか 1 文字でも引用/escape されていれば本文の展開は不活性になる。
+        const delimiterQuoted = delimiter !== command.slice(delimiterStart, delimiterWord.end);
+        i = delimiterWord.end;
         if (delimiter.length === 0) return splitSegmentsUnparseable(command); // 解析不能。
         pendingHeredocs.push({ delimiter, quoted: delimiterQuoted, stripTabs });
         continue;
@@ -586,8 +552,10 @@ export function splitSegments(command: string): string[] {
     current += ch;
     i += 1;
   }
-  // 未終端クォート / 未消費 heredoc = 構造解析不能 → 旧分割へフォールバック (over-gate 方向)。
-  if (quote !== undefined || pendingHeredocs.length > 0) return splitSegmentsUnparseable(command);
+  // 未消費 heredoc = 構造解析不能 → 旧分割へフォールバック (over-gate 方向)。
+  // 未終端クォートは `quoteSpanEnd` が -1 を返した時点で既に fail-safe へ倒れている
+  // (状態変数を持たないので「閉じ忘れの検査を忘れる」形の穴が構造的に作れない)。
+  if (pendingHeredocs.length > 0) return splitSegmentsUnparseable(command);
   push();
   // 除去した「実行される redirect 対象語」を末尾に足す (TDA-CQ6-1 ≡ QA-CQ6-1)。
   for (const target of elidedExecutableTargets) segments.push(target);
@@ -628,6 +596,142 @@ function quoteSpanEnd(s: string, i: number): number {
 }
 
 /**
+ * 引用スパン `[from, end)` の**中身**を、bash の展開規則で 1 度だけ剥がして返す。
+ *
+ * `readWord` が語のリテラルを組み立てるための下請け。スパンの境界判定は `quoteSpanEnd` が
+ * 単一出所で、ここは「その中身をどう字義化するか」だけを担う。
+ *  - `'…'`   何も解釈しない (backslash も字義)。
+ *  - `"…"`   backslash は `$` `` ` `` `"` `\` と改行の**前でだけ** escape として働く。
+ *            それ以外の前では backslash 自体が字義として残る (bash の規則)。
+ *  - `$'…'`  ANSI-C。`\\` `\'` `\"` `\n` `\t` `\r` を解釈し、他は escape された 1 文字を返す。
+ */
+function quotedSpanLiteral(s: string, from: number, end: number): string {
+  const dollar = s[from] === "$";
+  const open = (dollar ? s[from + 1] : s[from]) as string;
+  const body = s.slice(dollar ? from + 2 : from + 1, end - 1);
+  if (open === "'" && !dollar) return body;
+  let out = "";
+  for (let i = 0; i < body.length; i += 1) {
+    const c = body[i] as string;
+    if (c !== "\\" || i + 1 >= body.length) {
+      out += c;
+      continue;
+    }
+    const next = body[i + 1] as string;
+    if (dollar) {
+      out += ANSI_C_ESCAPES[next] ?? next;
+      i += 1;
+      continue;
+    }
+    // 二重引用: escape が効くのは限られた文字の前だけ。
+    if (next === "$" || next === "`" || next === '"' || next === "\\" || next === "\n") {
+      out += next;
+      i += 1;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+const ANSI_C_ESCAPES: Readonly<Record<string, string>> = {
+  n: "\n",
+  t: "\t",
+  r: "\r",
+  "\\": "\\",
+  "'": "'",
+  '"': '"',
+};
+
+/** `readWord` の結果。`end` は語の**次**の index、`literal` は引用/escape を剥がした語。 */
+interface WordScan {
+  readonly end: number;
+  readonly unterminated: boolean;
+  readonly literal: string;
+  /**
+   * 非クォートの backslash escape を消費したか (`\curl` / `r\m` の alias 迂回形)。
+   *
+   * 引用による綴り変更 (`r""m`) は含めない — base 実装の床と同じ範囲に保つため。
+   * 引用形まで広げるのは境界ゲートの適用範囲変更なので、独立した判断として扱う。
+   */
+  readonly escaped: boolean;
+}
+
+/**
+ * `from` からシェルの 1 語を読む — **語の読み方の単一出所** (v0.8 統合・TDA-CQ6-3)。
+ *
+ * シェルの 1 語は「引用断片・escape・置換が連結したもの」で、途中の空白や区切りは
+ * それらの内側にある限り語を終わらせない (`>"a b"c` / `>a\ b` / `FOO='a b'` / `$(f x)`)。
+ * この規則はかつて **4 箇所に手書き複製**されていた (メインループ / `targetEnd` /
+ * heredoc delimiter 読み取り / `tokenize`) 。R2〜R9 の H はすべて「そのうち 1 箇所だけが
+ * 1 文字ずれる」形で生まれており、複製そのものが機構的原因だった (CQ-R6 裁定 019ffe0c)。
+ *
+ * 返す `literal` は引用と escape を剥がした語 — `tokenize` はこれを使うので、
+ * 「トークン分割」と「語の境界」が同じ規則になる (以前の `tokenize` は引用文字を空白へ
+ * 置き換える近似で、`FOO='a b' rm -rf /` を 2 語に割って実プログラムを隠していた = R10 H5)。
+ * 置換 (`$(…)` / backtick / `<(…)`) は**生のまま** literal に含める — 中身は語ではなくコードで、
+ * 再分類は `reclassifySubstitution` 等の専用経路が生文字列に対して行うため。
+ */
+type BoundaryPredicate = (c: string | undefined) => boolean;
+
+/**
+ * 1 回の語走査シリーズで許す「未終端の引用/置換」検出回数の予算。
+ *
+ * 未終端の引用も置換も終端を探して入力末尾まで走るため、`$(`×N のような入力で語ごとに
+ * 再走査すると O(N²) になる (同期 hook パス上の DoS 面・SEC-CQ8-2 が同じクラスを
+ * `collectSubstitutionInners` で閉じたのと同一の理由)。1 度でも未終端を見たら入力は既に
+ * 構造解析不能なので、以降は開き文字を通常文字として扱っても判定は安全側にしか動かない。
+ */
+interface WordScanBudget {
+  failures: number;
+}
+
+function readWord(
+  s: string,
+  from: number,
+  atBoundary: BoundaryPredicate,
+  budget: WordScanBudget,
+): WordScan {
+  let j = from;
+  let literal = "";
+  let escaped = false;
+  while (j < s.length) {
+    const c = s[j] as string;
+    if (c === "\\" && j + 1 < s.length) {
+      literal += s[j + 1] as string;
+      escaped = true;
+      j += 2;
+      continue;
+    }
+    if (budget.failures < MAX_SUBSTITUTION_SCAN_FAILURES) {
+      const quoteEnd = quoteSpanEnd(s, j);
+      if (quoteEnd === -1) {
+        budget.failures += 1;
+        return { end: j, unterminated: true, literal, escaped };
+      }
+      if (quoteEnd > 0) {
+        literal += quotedSpanLiteral(s, j, quoteEnd);
+        j = quoteEnd;
+        continue;
+      }
+      const subEnd = substitutionEnd(s, j);
+      if (subEnd === -1) {
+        budget.failures += 1;
+        return { end: j, unterminated: true, literal, escaped };
+      }
+      if (subEnd > 0) {
+        literal += s.slice(j, subEnd);
+        j = subEnd;
+        continue;
+      }
+    }
+    if (atBoundary(c)) break;
+    literal += c;
+    j += 1;
+  }
+  return { end: j, unterminated: false, literal, escaped };
+}
+
+/**
  * `i` の `#` がシェルのコメント開始か — 語頭 (先頭 or **escape されていない**空白/区切りの直後) のみ。
  *
  * `splitSegments` と置換収集器の**単一出所** (SEC-R6-1 の escape 規則を含む)。片方だけが
@@ -636,7 +740,7 @@ function quoteSpanEnd(s: string, i: number): number {
 function startsComment(s: string, i: number, escapePairEnd: number): boolean {
   if (s[i] !== "#" || escapePairEnd === i) return false;
   const previous = s[i - 1];
-  return previous === undefined || SEPARATOR_OR_SPACE_RE.test(previous);
+  return previous === undefined || isWordBoundaryChar(previous);
 }
 
 /**
@@ -841,22 +945,54 @@ function hasExecutableSubstitution(s: string): boolean {
  *
  * 純粋な文字走査 (正規表現の置換ループ無し・O(n) 線形) で実装し ReDoS 経路を増やさない。
  */
-const QUOTE_CHARS = new Set(['"', "'", "`"]);
-function isWordChar(ch: string | undefined): boolean {
-  return ch !== undefined && !/\s/.test(ch);
-}
 export function tokenize(segment: string): string[] {
-  let out = "";
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i];
-    if (ch !== undefined && QUOTE_CHARS.has(ch)) {
-      // 前後とも非空白 (単語内) なら連結のため空文字化、さもなくば区切りとして空白化。
-      out += isWordChar(segment[i - 1]) && isWordChar(segment[i + 1]) ? "" : " ";
+  const out: string[] = [];
+  const budget: WordScanBudget = { failures: 0 };
+  let i = 0;
+  while (i < segment.length) {
+    if (isWhitespaceBoundaryChar(segment[i])) {
+      i += 1;
       continue;
     }
-    out += ch;
+    const word = readWord(segment, i, isWhitespaceBoundaryChar, budget);
+    if (word.literal.length > 0) out.push(word.literal);
+    if (word.unterminated) {
+      // 未終端の引用/置換はシェル的に意味が確定しない。語をそこで打ち切り、開き文字を
+      // **区切りとして読み飛ばして**残りを別語として露出させる (fail-safe / over-gate 方向)。
+      // 末尾まで黙って飲み込むと `a;\'rm -rf /path` のように実プログラムが分類から消える —
+      // splitSegments は未終端引用を legacy 分割へ倒すので、その断片は必ずここへ来る。
+      i = word.end + 1;
+      continue;
+    }
+    // `end` は必ず進む (`readWord` は境界文字でしか止まらず、境界はループ先頭で消費される)。
+    i = word.end > i ? word.end : i + 1;
   }
-  return out.split(/\s+/).filter((t) => t.length > 0);
+  return out;
+}
+
+/**
+ * セグメント先頭の実行語が非クォート backslash で綴りを変えた形か (`\curl` / `r\m`)。
+ *
+ * `\curl https://x` は shell の alias/function を意図的に迂回する実行形で、分類器は base から
+ * **medium 床**を保っている (`persistable=false` を弱めない)。この床はかつて「旧 `tokenize` が
+ * backslash を落とさないので先頭トークンが `isCleanExecutableToken` を通らない」という
+ * **副作用**で立っていた。語を正しく読むと綴りが `curl` に畳まれて床が黙って外れるため、
+ * 判定を明示述語として独立させる (`readWord` の単一出所をそのまま共有し、第二の走査器を作らない)。
+ */
+export function hasEscapedProgramWord(segment: string): boolean {
+  const budget: WordScanBudget = { failures: 0 };
+  let i = 0;
+  while (i < segment.length) {
+    if (isWhitespaceBoundaryChar(segment[i])) {
+      i += 1;
+      continue;
+    }
+    const word = readWord(segment, i, isWhitespaceBoundaryChar, budget);
+    // 先頭の env 代入 (`FOO=bar`) は実行語ではないので読み飛ばす (分類路と同じ規則)。
+    if (!ASSIGNMENT_TOKEN_RE.test(word.literal)) return word.escaped;
+    i = word.end > i ? word.end : i + 1;
+  }
+  return false;
 }
 
 /**
@@ -872,16 +1008,12 @@ export function tokenize(segment: string): string[] {
 export function commandName(tokens: string[]): string {
   const first = tokens[0];
   if (typeof first !== "string" || first.length === 0) return "";
-  let shellName = "";
-  for (let i = 0; i < first.length; i++) {
-    const ch = first[i];
-    if (ch === "\\" && i + 1 < first.length) {
-      shellName += first[i + 1];
-      i++;
-      continue;
-    }
-    shellName += ch;
-  }
+  // **backslash escape はここで畳まない (v0.8 統合)**: 語の読み取り (`readWord`) が既に
+  //   shell の escape/quote 規則を適用してトークンを作っている。ここで二度目を畳むと
+  //   `a\\a` (bash では `a\a` という名前) が `aa` になり、判定不能であるべき綴りが
+  //   「きれいな名前」に見えて medium 床が黙って外れる。escape の解釈は 1 箇所だけ
+  //   (security-gate-reuse-canonical-parser)。
+  const shellName = first;
   const base = shellName.includes("/") ? (shellName.split("/").pop() ?? shellName) : shellName;
   return base.toLowerCase();
 }
@@ -997,6 +1129,30 @@ export function stripRunnerWrappers(tokens: string[]): { tokens: string[]; capEx
           i += 2;
           continue;
         } // timeout -s SIG / -k DUR
+        // **xargs の値つきオプション (v0.8 統合・R10 H5 と同一クラス)**: `xargs -I '{}' rm -rf /x`
+        //   は `-I` を単独オプション扱いしたため置換文字列 `{}` が実コマンドに見え、配下の rm を
+        //   取りこぼして low になっていた (実 bash は rm を起動する)。**引数が必須で分離して置ける
+        //   形だけ**を載せる — 任意引数の `-i` / `--replace` / `--max-lines` を含めると値の無いとき
+        //   実コマンドを 1 つ食い、ゲートを弱める方向に倒れる。
+        if (
+          name === "xargs" &&
+          (t === "-I" ||
+            t === "-d" ||
+            t === "-E" ||
+            t === "-L" ||
+            t === "-n" ||
+            t === "-P" ||
+            t === "-s" ||
+            t === "-a" ||
+            t === "--delimiter" ||
+            t === "--max-args" ||
+            t === "--max-procs" ||
+            t === "--max-chars" ||
+            t === "--arg-file")
+        ) {
+          i += 2;
+          continue;
+        }
         i++; // それ以外の単独オプション (-i / --signal=KILL 等)。
         continue;
       }
@@ -1493,12 +1649,22 @@ function unanalyzableSegmentRisk(
   const startIdx = skipLeadingAssignments(rawTokens);
   const first = rawTokens[startIdx];
   if (first === undefined) return undefined; // 代入のみ (`FOO=bar`) → コマンド無し。委ねる。
-  if (isCleanExecutableToken(first)) return undefined; // 通常コマンド名 → 既存判定に委ねる。
+  // **escape で綴りを変えた実行形は canonical 名に畳めても床を保つ (v0.8 統合)**: `\curl` は
+  //   alias/function を迂回する意図的な回避形で、base から medium 床を保っている。床の根拠を
+  //   「旧 tokenize が backslash を落とさない」という副作用でなく明示判定に置く。範囲は base と
+  //   同じ **非クォートの escape のみ**に保つ (引用形 `r""m` まで広げるのは適用範囲の変更ゆえ別判断)。
+  const escapedProgram = hasEscapedProgramWord(rawSegment);
+  if (isCleanExecutableToken(first) && !escapedProgram) return undefined; // 通常コマンド名。
   // POSIX shell の backslash escape を畳めば通常 basename になる形 (`r\m`, `\/bin\/rm`) は
   // commandName と各構造述語で危険名を解析できる。ただし非 canonical な実行形自体は従来どおり
   // medium 床を保つ (`\curl` 等の persistable=false を弱めない)。named category は後続述語に委ね、
   // high-risk-other を重複付与しない。
-  const normalizedName = commandName(rawTokens.slice(startIdx));
+  // **空白を含むプログラム語は canonical basename に畳まない (v0.8 統合)**: 正しく語を読むと
+  //   `'rm -rf /srv'` が 1 トークンになり、`commandName` の `/` 分割が `srv` という**でっち上げの
+  //   basename** を作って「きれいな実行可能名」に見せてしまう。bash はこの綴りのコマンドを
+  //   探して見つけられない (何も実行されない) が、判定不能であることに変わりはないので
+  //   named category を伴う床へ倒す (bypass が空 category で defer するのを防ぐ)。
+  const normalizedName = /\s/.test(first) ? "" : commandName(rawTokens.slice(startIdx));
   if (isCleanExecutableToken(normalizedName)) return "medium";
 
   // grouping/quote メタ文字を剥がして内側を露出させ、再分類で high を拾う。
