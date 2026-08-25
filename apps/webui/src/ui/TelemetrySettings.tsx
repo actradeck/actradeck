@@ -37,6 +37,10 @@ export function TelemetrySettings({ active }: TelemetrySettingsProps): React.JSX
 
       <div className="ad-telemetry__privacy">
         <div>
+          <h3>{t("telemetry.purpose.title")}</h3>
+          <p>{t("telemetry.purpose.body")}</p>
+        </div>
+        <div>
           <h3>{t("telemetry.collects.title")}</h3>
           <p>{t("telemetry.collects.body")}</p>
         </div>

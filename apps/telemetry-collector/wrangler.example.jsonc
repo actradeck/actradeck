@@ -5,15 +5,20 @@
   "compatibility_date": "2026-08-13",
   "workers_dev": true,
   "observability": {
-    "enabled": false
+    "enabled": false,
+  },
+  // Daily retention purge (TELEMETRY_RETENTION_MONTHS in @actradeck/telemetry-contract).
+  // Registered on `wrangler deploy`; the handler is `scheduled` in src/index.ts.
+  "triggers": {
+    "crons": ["23 4 * * *"],
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "actradeck-telemetry",
       "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations"
-    }
+      "migrations_dir": "migrations",
+    },
   ],
   "ratelimits": [
     {
@@ -21,8 +26,8 @@
       "namespace_id": "1001",
       "simple": {
         "limit": 120,
-        "period": 60
-      }
-    }
-  ]
+        "period": 60,
+      },
+    },
+  ],
 }

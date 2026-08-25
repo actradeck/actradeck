@@ -13,14 +13,20 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
+- **Telemetry collector purges rows after 24 months.** `TELEMETRY_RETENTION_MONTHS` (new, in
+  `@actradeck/telemetry-contract`) is the single source for a daily cron-triggered `scheduled`
+  handler that deletes rows whose `occurred_on` is older than 24 months, and for the retention
+  statement in the consent copy. Operators redeploy the Worker to register the trigger
+  (`triggers.crons` in `wrangler.example.jsonc`). Wire contract unchanged.
 - **Telemetry consent copy now matches the wire contract and the collector.** The Settings →
-  Privacy panel lists every per-row field (including `app_version` and coarse `platform`, which
-  were previously omitted), states that `cockpit_started` is a once-per-day presence marker rather
-  than a launch count, and adds a "Retention and deletion" block: the collector never deletes
-  automatically, "Stop and delete ID" is local-only, and deleting already-sent rows requires
-  sending the operator the installation ID before it is deleted locally (the identifier is stored
-  only as a keyed hash). Same facts added to `docs/anonymous-telemetry.md` and the README. No
-  wire, collector, or behavior change.
+  Privacy panel gains a "Purpose" block (aggregate product-usage judgement and development
+  prioritisation only — not billing, advertising, identification, or third-party sharing), lists
+  every per-row field (including `app_version` and coarse `platform`, which were previously
+  omitted), states that `cockpit_started` is a once-per-day presence marker rather than a launch
+  count, and adds a "Retention and deletion" block: 24-month purge, "Stop and delete ID" is
+  local-only, and deleting already-sent rows earlier requires sending the operator the
+  installation ID before it is deleted locally (the identifier is stored only as a keyed hash).
+  Same facts added to `docs/anonymous-telemetry.md` and the README.
 
 ### Added
 

@@ -2,14 +2,36 @@ import { describe, expect, it } from "vitest";
 
 import {
   TELEMETRY_EVENT_NAMES,
+  TELEMETRY_RETENTION_MONTHS,
   TelemetryBatch,
   TelemetryInstallationId,
   isUtcDay,
   nonNegativeCount,
   parseTelemetryBatch,
   telemetryPlatform,
+  telemetryRetentionCutoff,
   utcDay,
 } from "./index.js";
+
+describe("retention policy (single source for purge + disclosure)", () => {
+  it("is the operator-decided 24 months", () => {
+    // 二重リテラル pin: 数値を変える変更は collector purge と同意文言の両方に波及する。
+    expect(TELEMETRY_RETENTION_MONTHS).toBe(24);
+  });
+
+  it("computes the cutoff as exactly N months back in UTC", () => {
+    expect(telemetryRetentionCutoff(new Date("2026-08-26T12:00:00.000Z"))).toBe("2024-08-26");
+    expect(telemetryRetentionCutoff(new Date("2026-01-01T00:00:00.000Z"))).toBe("2024-01-01");
+    // 年跨ぎ + 日付境界: 23:59:59Z でも同じ UTC 日として扱う。
+    expect(telemetryRetentionCutoff(new Date("2026-03-15T23:59:59.999Z"))).toBe("2024-03-15");
+  });
+
+  it("day-of-month overflow rolls forward by at most one day (never retains longer)", () => {
+    // 2026-04-30 → 2024-04-30 (存在する)。2026-03-31 → 2024-03-31 (存在する)。
+    // 2026-05-31 → 2024-05-31 (存在する)。閏日: 2028-02-29 - 24 か月 = 2026-02-29 は存在せず 03-01 へ。
+    expect(telemetryRetentionCutoff(new Date("2028-02-29T12:00:00.000Z"))).toBe("2026-03-01");
+  });
+});
 
 const valid = {
   schema_version: 1,

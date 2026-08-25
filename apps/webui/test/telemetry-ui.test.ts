@@ -1,3 +1,4 @@
+import { TELEMETRY_RETENTION_MONTHS } from "@actradeck/telemetry-contract";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -137,14 +138,25 @@ describe("telemetry UI response projection", () => {
     // cockpit_started は回数でなく 1 日 1 回上限の日次プレゼンス。
     expect(ja).toContain("1日1回");
     expect(en).toContain("at most once per day");
-    // 保持と削除: 自動削除なし・disable はローカル ID のみ・削除依頼は ID 添付が前提 (ID 消失後は不可)。
-    expect(ja).toContain("自動削除はありません");
-    expect(ja).toContain("送信済みの行はサーバーに残ります");
+    // 保持と削除: 保持期間は契約の TELEMETRY_RETENTION_MONTHS と結合 (purge と開示の単一出所)・
+    // disable はローカル ID のみ・削除依頼は ID 添付が前提 (ID 消失後は不可)。
+    expect(TELEMETRY_RETENTION_MONTHS).toBe(24);
+    expect(ja).toContain(`${TELEMETRY_RETENTION_MONTHS}か月保持し`);
+    expect(ja).toContain("毎日自動削除します");
+    expect(ja).toContain("送信済みの行は24か月の期限までサーバーに残ります");
     expect(ja).toContain("IDを削除する前に");
     expect(ja).toContain("IDを失うと行を特定できず削除できません");
-    expect(en).toContain("no automatic deletion");
-    expect(en).toContain("rows already sent stay on the server");
+    expect(en).toContain(`for ${TELEMETRY_RETENTION_MONTHS} months`);
+    expect(en).toContain("automatically deletes older days every day");
+    expect(en).toContain("rows already sent stay on the server until the 24-month limit");
     expect(en).toContain("before you delete it");
     expect(en).toContain("once the ID is gone, the rows can no longer be identified or deleted");
+    // 目的: 集計での利用判断 + 開発優先順位のみ。課金/広告/特定/第三者提供に使わないことを明示。
+    expect(ja).toContain("開発の優先順位を決めるためだけに使います");
+    expect(ja).toContain("課金・広告・個人の特定・生データの第三者提供には使いません");
+    expect(en).toContain("prioritise development");
+    expect(en).toContain(
+      "not used for billing, advertising, identifying anyone, or sharing raw rows with third parties",
+    );
   });
 });

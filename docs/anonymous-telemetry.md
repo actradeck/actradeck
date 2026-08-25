@@ -88,11 +88,16 @@ numbers separately.
 These are the actual properties of the shipped collector, stated so that the consent decision is
 made on facts rather than on the button labels:
 
-- **No automatic deletion.** The Worker has no scheduled purge and exposes no delete endpoint
-  (its only routes are `/health`, `POST /v1/events`, and `GET /v1/admin/report`). Daily rows stay
-  in D1 until the operator deletes them manually.
+- **Rows are kept for 24 months, then purged automatically.** `TELEMETRY_RETENTION_MONTHS` in
+  `@actradeck/telemetry-contract` is the single source (operator decision, 2026-08-26). A daily
+  cron trigger (`triggers.crons` in the Worker config) runs the `scheduled` handler, which
+  deletes every row whose `occurred_on` is strictly older than 24 months at run time; the cutoff
+  day itself is retained. There is no delete endpoint (the only routes are `/health`,
+  `POST /v1/events`, and `GET /v1/admin/report`), so nothing except the purge and the operator's
+  manual action removes rows before that.
 - **`disable` is local.** "Stop and delete ID" removes the random installation UUID from the
-  local state file. Rows already received under that UUID's hash remain on the server.
+  local state file. Rows already received under that UUID's hash remain on the server until the
+  24-month purge reaches them.
 - **Deletion of already-sent rows requires the installation ID.** The UUID is stored only as an
   HMAC under a server-side secret, and the admin report never returns hashes, so the operator
   cannot tell which rows belong to which installation on their own. The HMAC is deterministic,
@@ -103,6 +108,11 @@ made on facts rather than on the button labels:
   reporting path in `SECURITY.md`), never in a public issue. There is no self-service deletion
   endpoint; without an ID the operator can only delete in bulk (by day range or by dropping the
   table).
+- **Purpose.** The aggregates exist to judge whether the product is actually used (the funnel in
+  [PMF interpretation](#pmf-interpretation)) and to prioritise development. They are not used for
+  billing, advertising, identifying anyone, or sharing raw rows with third parties; Cloudflare
+  hosts the Worker and D1 as the infrastructure provider. The consent panel states the same
+  purpose before opt-in.
 - **Reset and re-enable start a new lineage.** A regenerated or newly created UUID hashes to a
   different value; rows sent afterwards are unlinkable from earlier rows. Rotating `HASH_SECRET`
   server-side has the same effect for every installation at once.
@@ -141,8 +151,11 @@ cp apps/telemetry-collector/wrangler.example.jsonc \
   apps/telemetry-collector/wrangler.local.jsonc
 ```
 
-Put the returned `database_id` into `wrangler.local.jsonc`. This local file is ignored. Then apply
-the migration and deploy:
+Put the returned `database_id` into `wrangler.local.jsonc`. This local file is ignored. Keep
+everything else identical to the example, including `triggers.crons`: the deploy registers that
+daily cron, which runs the `scheduled` retention purge (see
+[Retention and deletion](#retention-and-deletion)). A Worker deployed from a config without the
+trigger never purges. Then apply the migration and deploy:
 
 ```bash
 pnpm --filter @actradeck/telemetry-collector db:migrate:remote
