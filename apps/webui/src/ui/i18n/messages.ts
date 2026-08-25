@@ -66,12 +66,18 @@ const ja = {
   "telemetry.defaultOff": "初期設定はOFFです",
   "telemetry.lead":
     "有効化するまで送信しません。日次の匿名カウンターだけを送信し、いつでも停止できます。",
+  "telemetry.purpose.title": "目的",
+  "telemetry.purpose.body":
+    "製品が実際に使われているか（インストール→初回観測→保護セッション→継続）を集計で判断し、開発の優先順位を決めるためだけに使います。運営者が見るのは集計値のみで、課金・広告・個人の特定・生データの第三者提供には使いません。",
   "telemetry.collects.title": "送るもの",
   "telemetry.collects.body":
-    "起動・デモ完了・観測／保護セッション・承認判断・利用日のUTC日次件数と、無作為なインストールID。",
+    "稼働日（1日1回のUTC日次プレゼンス。再起動しても増えません）、デモ開始／完了、観測／保護セッション、承認要求／判断、利用日のUTC日次件数。各行にActraDeckのバージョン（semver）とOS種別（linux／darwin／win32／other）が付き、バッチ全体に無作為なインストールIDが1つ付きます。",
   "telemetry.excludes.title": "送らないもの",
   "telemetry.excludes.body":
     "プロンプト、コマンド、パス、リポジトリ名、セッション／イベントID、secret、監査イベント本文。IPはpayloadに含めずD1にも保存しません（Cloudflareが接続処理とrate limitで一時処理）。",
+  "telemetry.retention.title": "保持と削除",
+  "telemetry.retention.body":
+    "収集先は日次行を24か月保持し、それより古い日付の行は毎日自動削除します。「停止してIDを削除」が消すのはこの端末のIDだけで、送信済みの行は24か月の期限までサーバーに残ります。IDはサーバー側で秘密鍵付きハッシュとして保存され、運営者はどの行がどの端末のものか判別できません。送信済みの行の削除を求める場合は、IDを削除する前に、この画面に表示される匿名インストールIDを添えて {contact} へ依頼してください（公開のissueには書かないでください。IDを失うと行を特定できず削除できません）。ID再生成・再有効化後に送る行は、それ以前の行と結び付きません。",
   "telemetry.endpoint": "収集先HTTPS URL",
   "telemetry.endpointHint":
     "空欄ならActraDeck公式収集先を使います。セルフホスト時だけ独自URLを入力します。",
@@ -944,12 +950,18 @@ const en: Record<MessageKey, string> = {
   "telemetry.defaultOff": "Off by default",
   "telemetry.lead":
     "Nothing is sent until you enable it. Only anonymous daily counters are sent, and you can stop at any time.",
+  "telemetry.purpose.title": "Purpose",
+  "telemetry.purpose.body":
+    "Used only to judge, in aggregate, whether the product is actually used (install → first observation → protected session → retention) and to prioritise development. The operator sees aggregates only; the data is not used for billing, advertising, identifying anyone, or sharing raw rows with third parties.",
   "telemetry.collects.title": "Sent",
   "telemetry.collects.body":
-    "UTC daily counts for starts, demo completion, observed/protected sessions, approval decisions and active days, plus a random installation ID.",
+    "UTC daily counts for cockpit presence (at most once per day; restarts do not add), demo start/completion, observed/protected sessions, approval requests/decisions and active days. Every row carries the ActraDeck version (semver) and coarse OS (linux/darwin/win32/other), and the batch carries one random installation ID.",
   "telemetry.excludes.title": "Never sent",
   "telemetry.excludes.body":
     "Prompts, commands, paths, repository names, session/event IDs, secrets, or audit event bodies. IP is absent from the payload and D1; Cloudflare processes it transiently for the connection and rate limit.",
+  "telemetry.retention.title": "Retention and deletion",
+  "telemetry.retention.body":
+    'The collector keeps daily rows for 24 months and automatically deletes older days every day. "Stop and delete ID" removes only this machine\'s ID — rows already sent stay on the server until the 24-month limit. The ID is stored server-side as a keyed hash, so the operator cannot tell which rows came from which machine. To have already-sent rows deleted, email {contact} with the anonymous installation ID shown on this screen before you delete it (never post the ID in a public issue; once the ID is gone, the rows can no longer be identified or deleted). Rows sent after a reset or re-enable are unlinkable from earlier rows.',
   "telemetry.endpoint": "Collector HTTPS URL",
   "telemetry.endpointHint":
     "Leave blank for the official ActraDeck collector. Enter a custom URL only when self-hosting.",

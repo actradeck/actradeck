@@ -12,6 +12,7 @@ import {
   TelemetryBatch,
   isUtcDay,
   nonNegativeCount,
+  telemetryRetentionCutoff,
   utcDay,
   type TelemetryBatch as TelemetryBatchValue,
 } from "@actradeck/telemetry-contract";
@@ -397,6 +398,21 @@ async function handleRequest(request: Request, env: Env, now: () => Date): Promi
   return json({ error: "not found" }, 404);
 }
 
+/**
+ * Retention purge (operator decision 2026-08-26: TELEMETRY_RETENTION_MONTHS in the contract).
+ * Deletes rows whose `occurred_on` is strictly older than the cutoff; the cutoff day itself is
+ * retained. Runs from the cron trigger declared in wrangler config. Errors are not swallowed:
+ * a failed purge must surface in the Worker's error metrics rather than silently retain data.
+ */
+async function purgeExpiredRows(db: D1Database, now: Date): Promise<number> {
+  const cutoff = telemetryRetentionCutoff(now);
+  const result = await db
+    .prepare("DELETE FROM telemetry_daily WHERE occurred_on < ?")
+    .bind(cutoff)
+    .run();
+  return nonNegativeCount(result.meta?.changes);
+}
+
 export function createTelemetryWorker(options: WorkerOptions = {}): ExportedHandler<Env> {
   const now = options.now ?? (() => new Date());
   return {
@@ -407,6 +423,9 @@ export function createTelemetryWorker(options: WorkerOptions = {}): ExportedHand
         // Do not leak D1 errors or secret/configuration details to public clients.
         return json({ error: "service unavailable" }, 503);
       }
+    },
+    async scheduled(_controller, env): Promise<void> {
+      await purgeExpiredRows(env.DB, now());
     },
   };
 }

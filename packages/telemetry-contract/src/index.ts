@@ -12,6 +12,33 @@ export const TELEMETRY_SCHEMA_VERSION = 1 as const;
 export const TELEMETRY_MAX_EVENTS_PER_BATCH = 500 as const;
 export const TELEMETRY_MAX_COUNT = 1_000_000_000 as const;
 
+/**
+ * Server-side retention of daily rows, measured in months of `occurred_on` age
+ * (operator decision, 2026-08-26). One source for two consumers: the collector's scheduled
+ * purge (`apps/telemetry-collector`) and the consent copy shown before opt-in (`apps/webui`
+ * i18n + docs). Changing it here changes both; changing only one is a disclosure drift.
+ */
+export const TELEMETRY_RETENTION_MONTHS = 24 as const;
+
+/**
+ * Operator mailbox for privacy requests about already-sent rows (deletion by installation ID).
+ * Verified to exist on 2026-08-26 (Workspace alias). One source for the consent panel, the docs,
+ * and SECURITY.md — change it here, never in copy.
+ */
+export const TELEMETRY_PRIVACY_CONTACT = "privacy@actradeck.io" as const;
+
+/**
+ * Oldest `occurred_on` day still retained at `now`; rows strictly older are purged.
+ * Month arithmetic is done in UTC; a day-of-month overflow (e.g. 31st → a 30-day month) rolls
+ * forward by JS Date semantics, which shifts the cutoff by at most one day and never retains
+ * rows past the stated policy by more than that.
+ */
+export function telemetryRetentionCutoff(now: Date): string {
+  const cutoff = new Date(now.getTime());
+  cutoff.setUTCMonth(cutoff.getUTCMonth() - TELEMETRY_RETENTION_MONTHS);
+  return utcDay(cutoff);
+}
+
 export const TelemetryEventName = z.enum([
   "install_verified",
   "cockpit_started",

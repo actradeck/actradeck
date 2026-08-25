@@ -11,6 +11,25 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Changed
+
+- **Telemetry collector purges rows after 24 months.** `TELEMETRY_RETENTION_MONTHS` (new, in
+  `@actradeck/telemetry-contract`) is the single source for a daily cron-triggered `scheduled`
+  handler that deletes rows whose `occurred_on` is older than 24 months, and for the retention
+  statement in the consent copy. Operators redeploy the Worker to register the trigger
+  (`triggers.crons` in `wrangler.example.jsonc`). Wire contract unchanged.
+- **Telemetry consent copy now matches the wire contract and the collector.** The Settings →
+  Privacy panel gains a "Purpose" block (aggregate product-usage judgement and development
+  prioritisation only — not billing, advertising, identification, or third-party sharing), lists
+  every per-row field (including `app_version` and coarse `platform`, which were previously
+  omitted), states that `cockpit_started` is a once-per-day presence marker rather than a launch
+  count, and adds a "Retention and deletion" block: 24-month purge, "Stop and delete ID" is
+  local-only, and deleting already-sent rows earlier requires emailing the installation ID to
+  **privacy@actradeck.io** (`TELEMETRY_PRIVACY_CONTACT` in the contract) before it is deleted
+  locally (the identifier is stored only as a keyed hash). Same facts added to
+  `docs/anonymous-telemetry.md`, the README, and a new "Privacy requests" section in
+  `SECURITY.md`.
+
 ### Added
 
 - **Anonymous telemetry, off by default.** An explicitly opted-in, closed-schema daily counter
@@ -49,7 +68,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   removes the stale view (fresh databases are unaffected).
 - **Approval cards can no longer be hidden by a terminated session projection.** Pending
   approvals now follow the request's own lifecycle: reaching a terminal state still clears that
-  run's open approvals, but a request arriving *after* the terminal state — a live daemon
+  run's open approvals, but a request arriving _after_ the terminal state — a live daemon
   holding a real round-trip — stays visible and actionable instead of silently timing out to
   deny. Post-terminal cards are cleared by the request's own resolution, or — if the daemon
   died first — by the synthetic relay-lost retire on the daemon's next reconnect; a card whose

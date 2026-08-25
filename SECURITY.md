@@ -67,3 +67,14 @@ long-term-support branches yet.
 We aim to acknowledge a valid report quickly, work with you on a fix, and
 coordinate public disclosure once a fix is available. We are happy to credit
 reporters who wish to be named.
+
+## Privacy requests
+
+Privacy matters that are not vulnerabilities — in particular a request to
+delete already-sent anonymous telemetry rows — go to **privacy@actradeck.io**,
+not to the vulnerability channel and never to a public issue. Include the
+anonymous installation ID shown in **Settings → Privacy** (or by
+`actradeck telemetry status`) _before_ you stop telemetry locally; once that
+ID is deleted the rows can no longer be identified. What is collected, for how
+long, and how deletion works is documented in
+[docs/anonymous-telemetry.md](docs/anonymous-telemetry.md).
