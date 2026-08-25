@@ -115,4 +115,36 @@ describe("telemetry UI response projection", () => {
     expect(en).toContain("Off by default");
     expect(en).toContain("Prompts, commands, paths");
   });
+
+  // 同意画面の「送るもの」は wire 契約の全 per-row field を名指しし、保持/削除の限界を開示する
+  // (2026-08-26 disclosure drift: version/platform が UI から欠落・retention 未記載)。
+  // 各 assert は当該語を消す変異で RED になる (フェンスは変異で実測済み)。
+  it("consent copy names every per-row wire field and discloses retention limits", () => {
+    const render = (locale: "ja" | "en") =>
+      renderToStaticMarkup(
+        createElement(FixedLocaleProvider, {
+          locale,
+          children: createElement(TelemetrySettings, { active: true }),
+        }),
+      );
+    const ja = render("ja");
+    const en = render("en");
+    // app_version / platform — wire 契約 TelemetryDailyEvent の per-row field。
+    expect(ja).toContain("バージョン（semver）");
+    expect(ja).toContain("linux／darwin／win32／other");
+    expect(en).toContain("version (semver)");
+    expect(en).toContain("linux/darwin/win32/other");
+    // cockpit_started は回数でなく 1 日 1 回上限の日次プレゼンス。
+    expect(ja).toContain("1日1回");
+    expect(en).toContain("at most once per day");
+    // 保持と削除: 自動削除なし・disable はローカル ID のみ・削除依頼は ID 添付が前提 (ID 消失後は不可)。
+    expect(ja).toContain("自動削除はありません");
+    expect(ja).toContain("送信済みの行はサーバーに残ります");
+    expect(ja).toContain("IDを削除する前に");
+    expect(ja).toContain("IDを失うと行を特定できず削除できません");
+    expect(en).toContain("no automatic deletion");
+    expect(en).toContain("rows already sent stay on the server");
+    expect(en).toContain("before you delete it");
+    expect(en).toContain("once the ID is gone, the rows can no longer be identified or deleted");
+  });
 });

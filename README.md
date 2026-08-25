@@ -119,8 +119,11 @@ outgoing daily-counter batch, opt in, stop and delete the random identifier from
 ./scripts/actradeck telemetry preview
 ```
 
-It cannot represent prompts, commands, paths, repository names, session/event IDs, secrets, or
-audit bodies. See the [anonymous telemetry contract and collector](./docs/anonymous-telemetry.md).
+Each row is an event name, UTC day, count, ActraDeck version, and coarse OS; it cannot represent
+prompts, commands, paths, repository names, session/event IDs, secrets, or audit bodies. Received
+rows are kept until the operator deletes them; deleting your own rows requires sending the
+operator your installation ID before you delete it locally — see the
+[anonymous telemetry contract, collector, and retention notes](./docs/anonymous-telemetry.md).
 
 Prefer to inspect scripts before running them? Use the
 [manual and verified installation paths](./docs/getting-started.md), or diagnose the

@@ -44,6 +44,10 @@ export function TelemetrySettings({ active }: TelemetrySettingsProps): React.JSX
           <h3>{t("telemetry.excludes.title")}</h3>
           <p>{t("telemetry.excludes.body")}</p>
         </div>
+        <div>
+          <h3>{t("telemetry.retention.title")}</h3>
+          <p>{t("telemetry.retention.body")}</p>
+        </div>
       </div>
 
       {telemetry.error ? <InlineAlert kind="error" title={t("telemetry.error")} /> : null}

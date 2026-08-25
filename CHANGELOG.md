@@ -11,6 +11,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Changed
+
+- **Telemetry consent copy now matches the wire contract and the collector.** The Settings →
+  Privacy panel lists every per-row field (including `app_version` and coarse `platform`, which
+  were previously omitted), states that `cockpit_started` is a once-per-day presence marker rather
+  than a launch count, and adds a "Retention and deletion" block: the collector never deletes
+  automatically, "Stop and delete ID" is local-only, and deleting already-sent rows requires
+  sending the operator the installation ID before it is deleted locally (the identifier is stored
+  only as a keyed hash). Same facts added to `docs/anonymous-telemetry.md` and the README. No
+  wire, collector, or behavior change.
+
 ### Added
 
 - **Anonymous telemetry, off by default.** An explicitly opted-in, closed-schema daily counter
@@ -49,7 +60,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   removes the stale view (fresh databases are unaffected).
 - **Approval cards can no longer be hidden by a terminated session projection.** Pending
   approvals now follow the request's own lifecycle: reaching a terminal state still clears that
-  run's open approvals, but a request arriving *after* the terminal state — a live daemon
+  run's open approvals, but a request arriving _after_ the terminal state — a live daemon
   holding a real round-trip — stays visible and actionable instead of silently timing out to
   deny. Post-terminal cards are cleared by the request's own resolution, or — if the daemon
   died first — by the synthetic relay-lost retire on the daemon's next reconnect; a card whose

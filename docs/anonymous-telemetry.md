@@ -20,9 +20,10 @@ before enabling or sending:
 ```
 
 The Cockpit's **Settings → Privacy** panel exposes the same controls. `disable` deletes the random
-installation identifier from the local state file. Enabling again creates a new identifier. The
-state file is mode `0600` and defaults to `~/.actradeck/telemetry.json` (or beside an overridden
-`ACTRADECK_PGDATA`).
+installation identifier from the local state file — it does not remove rows already received by
+the collector (see [Retention and deletion](#retention-and-deletion)). Enabling again creates a new
+identifier. The state file is mode `0600` and defaults to `~/.actradeck/telemetry.json` (or beside
+an overridden `ACTRADECK_PGDATA`).
 
 The official collector is
 `https://actradeck-telemetry.actradeck-telemetry-collector.workers.dev/v1/events`. This public URL
@@ -81,6 +82,32 @@ only the aggregate admin report; the API never returns installation UUIDs or the
 no shared dashboard embedded in every clone, because publishing a live global report would expose
 product metrics and make metric poisoning easier. Maintainers may publish selected aggregate
 numbers separately.
+
+## Retention and deletion
+
+These are the actual properties of the shipped collector, stated so that the consent decision is
+made on facts rather than on the button labels:
+
+- **No automatic deletion.** The Worker has no scheduled purge and exposes no delete endpoint
+  (its only routes are `/health`, `POST /v1/events`, and `GET /v1/admin/report`). Daily rows stay
+  in D1 until the operator deletes them manually.
+- **`disable` is local.** "Stop and delete ID" removes the random installation UUID from the
+  local state file. Rows already received under that UUID's hash remain on the server.
+- **Deletion of already-sent rows requires the installation ID.** The UUID is stored only as an
+  HMAC under a server-side secret, and the admin report never returns hashes, so the operator
+  cannot tell which rows belong to which installation on their own. The HMAC is deterministic,
+  however: a user who sends their anonymous installation ID (shown in **Settings → Privacy** and
+  by `actradeck telemetry status` while enabled) lets the operator recompute the hash and delete
+  exactly those rows. Do this **before** running `disable` or `reset-id` — once the local ID is
+  gone, nobody can identify the rows any more. Send the ID through a private channel (the
+  reporting path in `SECURITY.md`), never in a public issue. There is no self-service deletion
+  endpoint; without an ID the operator can only delete in bulk (by day range or by dropping the
+  table).
+- **Reset and re-enable start a new lineage.** A regenerated or newly created UUID hashes to a
+  different value; rows sent afterwards are unlinkable from earlier rows. Rotating `HASH_SECRET`
+  server-side has the same effect for every installation at once.
+- **Each row carries `app_version` and `platform`** in addition to the event name, UTC day, and
+  count. Both are listed in the consent panel and visible in the preview.
 
 ## Operating the Cloudflare collector
 
