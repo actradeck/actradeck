@@ -1,6 +1,6 @@
 {
   "name": "@actradeck/telemetry-contract",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Privacy-minimal anonymous product telemetry contract shared by the local sender and central collector.",

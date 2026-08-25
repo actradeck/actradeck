@@ -11,6 +11,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-25
+
 ### Changed
 
 - **Telemetry collector purges rows after 24 months.** `TELEMETRY_RETENTION_MONTHS` (new, in
@@ -430,7 +432,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/actradeck/actradeck/releases/tag/v0.8.0
 [0.7.0]: https://github.com/actradeck/actradeck/releases/tag/v0.7.0
 [0.6.0]: https://github.com/actradeck/actradeck/releases/tag/v0.6.0
 [0.5.2]: https://github.com/actradeck/actradeck/releases/tag/v0.5.2
