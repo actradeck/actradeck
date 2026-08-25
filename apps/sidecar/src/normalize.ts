@@ -455,7 +455,7 @@ export function splitSegments(command: string): string[] {
         // heredoc 本文の消費 (FIFO・POSIX)。quoted delimiter は真のデータゆえ破棄、
         // unquoted は $()/backtick が活性なため本文を segment に残して置換検出を保つ。
         i += 1;
-        let bodyKeep = "";
+        let body = "";
         while (pendingHeredocs.length > 0) {
           const heredoc = pendingHeredocs.shift() as PendingHeredoc;
           let matched = false;
@@ -469,16 +469,24 @@ export function splitSegments(command: string): string[] {
               matched = true;
               break;
             }
-            if (!heredoc.quoted) bodyKeep += `\n${line}`;
+            if (!heredoc.quoted) body += `\n${line}`;
             if (nl === -1) break; // 入力末尾に到達 (delimiter 不一致のまま)。
           }
           if (!matched) return splitSegmentsUnparseable(command); // 未終端 heredoc → fail-safe。
         }
-        // コマンド語 (redirect 演算子・delimiter を除去済み) を先に確定し、本文は別 segment に
-        // 残す (unquoted delimiter のみ・$()/backtick の検出点を保つ)。
+        // コマンド語 (redirect 演算子・delimiter を除去済み) を確定する。
         push();
-        current = bodyKeep;
-        push();
+        // **本文はシェルの語ではない (SEC-CQ10-2・R10 監査 H・R9 起因)**: unquoted delimiter の
+        //   本文で bash が実行するのは `$(…)` と backtick だけで、アポストロフィや二重引用は
+        //   **データ**である (実 bash: `don't $(rm …) isn't` の rm は起動する・stub PATH で確認)。
+        //   R9 は本文を通常セグメントとして流したため、下流の走査が引用意味論を当て、
+        //   偶数個のアポストロフィが phantom 引用スパンを作って本物の `$()` を飲み込んだ
+        //   (奇数個なら gated = 1 文字足すだけでゲートが外れる)。本文をセグメントに流すのを
+        //   やめ、**heredoc の展開規則で置換だけを取り出して**末尾セグメントにする
+        //   (`elideRedirect` が `>$(…)` を残すのと同じ発想)。quoted delimiter は展開なし = 何も出ない。
+        const substitutions = heredocBodySubstitutions(body);
+        if (substitutions === undefined) return splitSegmentsUnparseable(command); // 未終端置換。
+        for (const sub of substitutions) elidedExecutableTargets.push(sub);
         continue;
       }
       push();
@@ -641,6 +649,36 @@ const ANSI_C_ESCAPES: Readonly<Record<string, string>> = {
   "'": "'",
   '"': '"',
 };
+
+/**
+ * unquoted heredoc 本文から**展開される置換** (`$(…)` / backtick) を取り出す (SEC-CQ10-2)。
+ *
+ * heredoc 本文の展開規則は通常の語と違う: 引用文字はデータで、backslash は `$` `` ` `` `\\`
+ * の前でだけ展開を止める。それ以外の語意味論を当ててはいけない (当てたのが R10 H2)。
+ * 置換の**内側**はシェルコードなので `substitutionEnd` (引用対応・入れ子対応) で読み切る。
+ * 未終端の置換は `undefined` (構造解析不能 → 呼び出し側が fail-safe へ倒す)。1 回で打ち切るので
+ * 二次挙動にならない。
+ */
+function heredocBodySubstitutions(body: string): string[] | undefined {
+  const found: string[] = [];
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i];
+    if (c === "\\" && i + 1 < body.length) {
+      i += 2; // `\$(` `\`` は展開されない (実 bash で確認)。
+      continue;
+    }
+    if ((c === "$" && body[i + 1] === "(") || c === "`") {
+      const end = substitutionEnd(body, i);
+      if (end < 0) return undefined;
+      found.push(body.slice(i, end));
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  return found;
+}
 
 /** `readWord` の結果。`end` は語の**次**の index、`literal` は引用/escape を剥がした語。 */
 interface WordScan {
@@ -947,6 +985,18 @@ function hasExecutableSubstitution(s: string): boolean {
  */
 export function tokenize(segment: string): string[] {
   const out: string[] = [];
+  for (const word of segmentWords(segment)) if (word.literal.length > 0) out.push(word.literal);
+  return out;
+}
+
+/**
+ * セグメントの語を順に読む唯一のイテレータ (`tokenize` と `hasEscapedProgramWord` が共有)。
+ * 未終端の引用/置換は語をそこで打ち切り、開き文字を**区切りとして読み飛ばして**残りを別語として
+ * 露出させる (fail-safe / over-gate 方向)。末尾まで黙って飲み込むと `a;\'rm -rf /path` の
+ * 実プログラムが分類から消える — splitSegments は未終端引用を legacy 分割へ倒すので、その断片は
+ * 必ずここへ来る。`end` は必ず進む (境界文字でしか止まらず、境界はループ先頭で消費される)。
+ */
+function* segmentWords(segment: string): Generator<WordScan> {
   const budget: WordScanBudget = { failures: 0 };
   let i = 0;
   while (i < segment.length) {
@@ -955,19 +1005,9 @@ export function tokenize(segment: string): string[] {
       continue;
     }
     const word = readWord(segment, i, isWhitespaceBoundaryChar, budget);
-    if (word.literal.length > 0) out.push(word.literal);
-    if (word.unterminated) {
-      // 未終端の引用/置換はシェル的に意味が確定しない。語をそこで打ち切り、開き文字を
-      // **区切りとして読み飛ばして**残りを別語として露出させる (fail-safe / over-gate 方向)。
-      // 末尾まで黙って飲み込むと `a;\'rm -rf /path` のように実プログラムが分類から消える —
-      // splitSegments は未終端引用を legacy 分割へ倒すので、その断片は必ずここへ来る。
-      i = word.end + 1;
-      continue;
-    }
-    // `end` は必ず進む (`readWord` は境界文字でしか止まらず、境界はループ先頭で消費される)。
-    i = word.end > i ? word.end : i + 1;
+    yield word;
+    i = word.unterminated ? word.end + 1 : word.end > i ? word.end : i + 1;
   }
-  return out;
 }
 
 /**
@@ -980,18 +1020,9 @@ export function tokenize(segment: string): string[] {
  * 判定を明示述語として独立させる (`readWord` の単一出所をそのまま共有し、第二の走査器を作らない)。
  */
 export function hasEscapedProgramWord(segment: string): boolean {
-  const budget: WordScanBudget = { failures: 0 };
-  let i = 0;
-  while (i < segment.length) {
-    if (isWhitespaceBoundaryChar(segment[i])) {
-      i += 1;
-      continue;
-    }
-    const word = readWord(segment, i, isWhitespaceBoundaryChar, budget);
-    // 先頭の env 代入 (`FOO=bar`) は実行語ではないので読み飛ばす (分類路と同じ規則)。
+  // 先頭の env 代入 (`FOO=bar`) は実行語ではないので読み飛ばす (分類路と同じ規則)。
+  for (const word of segmentWords(segment))
     if (!ASSIGNMENT_TOKEN_RE.test(word.literal)) return word.escaped;
-    i = word.end > i ? word.end : i + 1;
-  }
   return false;
 }
 
@@ -1017,6 +1048,14 @@ export function commandName(tokens: string[]): string {
   const base = shellName.includes("/") ? (shellName.split("/").pop() ?? shellName) : shellName;
   return base.toLowerCase();
 }
+
+/**
+ * xargs の**値を必ず取る**オプション (分離形のみ)。任意引数の `-i` / `--replace` / `--max-lines`
+ * は入れない — 値が無いとき実コマンドを 1 つ食ってゲートを弱める方向に倒れる。
+ */
+const XARGS_VALUE_OPTIONS: ReadonlySet<string> = new Set(
+  "-I -d -E -L -n -P -s -a --delimiter --max-args --max-procs --max-chars --arg-file".split(" "),
+);
 
 /**
  * 既知の command-runner ラッパ (再#3 QA-1 / QA-3)。
@@ -1134,22 +1173,7 @@ export function stripRunnerWrappers(tokens: string[]): { tokens: string[]; capEx
         //   取りこぼして low になっていた (実 bash は rm を起動する)。**引数が必須で分離して置ける
         //   形だけ**を載せる — 任意引数の `-i` / `--replace` / `--max-lines` を含めると値の無いとき
         //   実コマンドを 1 つ食い、ゲートを弱める方向に倒れる。
-        if (
-          name === "xargs" &&
-          (t === "-I" ||
-            t === "-d" ||
-            t === "-E" ||
-            t === "-L" ||
-            t === "-n" ||
-            t === "-P" ||
-            t === "-s" ||
-            t === "-a" ||
-            t === "--delimiter" ||
-            t === "--max-args" ||
-            t === "--max-procs" ||
-            t === "--max-chars" ||
-            t === "--arg-file")
-        ) {
+        if (name === "xargs" && XARGS_VALUE_OPTIONS.has(t)) {
           i += 2;
           continue;
         }
@@ -1607,14 +1631,44 @@ function isCleanExecutableToken(token: string): boolean {
 }
 
 /**
- * セグメント先頭の env 代入トークン (`VAR=val`) をスキップして実コマンド先頭の index を返す。
- * `FOO=bar ls` のような正当な代入プレフィックスを「解析不能メタ文字」と誤認しないため。
+ * コマンド位置に来ても**プログラム名にならない**予約語 (SEC-CQ10-4・R10 監査 H・pre-existing)。
+ *
+ * `if true; then rm -rf /srv; fi` は `;` で切ると `then rm -rf /srv` になり、`then` が
+ * プログラム名に見えて rm が消えた (`for…do` / `while…do` / `else` / `elif` / `!` / `time` も同型。
+ * 実 bash は 11 形すべてで rm を起動 — stub PATH で確認)。bash の文法上これらの直後は再び
+ * コマンド位置なので、代入前置と同じ「前置語」として読み飛ばす。
+ * `in` は含めない (`for f in …` / `case x in` の中でだけ現れ、コマンド位置には来ない)。
+ * `{` `(` は grouping wrapper が別途扱う。
  */
-export function skipLeadingAssignments(tokens: string[]): number {
+const COMMAND_POSITION_RESERVED_WORDS: ReadonlySet<string> = new Set(
+  "if then else elif fi for while until do done case esac time !".split(" "),
+);
+
+/**
+ * セグメント先頭の**前置語**をスキップして実コマンド先頭の index を返す —
+ * env 代入 (`VAR=val`) と、コマンド位置の予約語 (`then` / `do` / `!` / `time` …) の両方。
+ * どちらも「その直後がコマンド位置」であり、順不同で連なりうる (`then FOO=1 rm`)。
+ * `FOO=bar ls` を「解析不能メタ文字」と誤認しない・`then rm` を `then` プログラムと誤認しない、
+ * の両方を 1 箇所で扱う (分類器・check-classifier・egress 判定の全消費者で一様)。
+ */
+export function skipCommandPrefixWords(tokens: string[]): number {
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i];
-    if (t !== undefined && ASSIGNMENT_TOKEN_RE.test(t)) {
+    if (t === undefined) break;
+    if (t === "case") {
+      // `case WORD in PATTERN) cmd` — WORD・`in`・最初の `PATTERN)` まではコマンドではない。
+      //   `PATTERN)` が無い (パターンが `|` で別セグメントへ割れた) ときは末尾まで消費する =
+      //   このセグメントにコマンドは無い。後続の `b) rm …` は先頭が clean 名でないので
+      //   unanalyzable の床 (medium + high-risk-other) が受ける。
+      i += 1;
+      if (i < tokens.length) i += 1; // WORD
+      if (tokens[i] === "in") i += 1;
+      while (i < tokens.length && !(tokens[i] as string).endsWith(")")) i += 1;
+      if (i < tokens.length) i += 1; // `PATTERN)`
+      continue;
+    }
+    if (ASSIGNMENT_TOKEN_RE.test(t) || COMMAND_POSITION_RESERVED_WORDS.has(t)) {
       i++;
       continue;
     }
@@ -1646,7 +1700,7 @@ function unanalyzableSegmentRisk(
   //   bypass DEFAULT がゲートするのに、前置があると空になり defer = 実行になる)。
   //   backstop の意味は「**このセグメントを**解析できなかった」であり、他セグメントの成果とは無関係。
   const categoriesAtEntry = categories?.size ?? 0;
-  const startIdx = skipLeadingAssignments(rawTokens);
+  const startIdx = skipCommandPrefixWords(rawTokens);
   const first = rawTokens[startIdx];
   if (first === undefined) return undefined; // 代入のみ (`FOO=bar`) → コマンド無し。委ねる。
   // **escape で綴りを変えた実行形は canonical 名に畳めても床を保つ (v0.8 統合)**: `\curl` は
@@ -1720,16 +1774,31 @@ function inlineCodeRisk(
   // 遠隔/コンテナ実行の引用オペランドを内側コードとして再分類する (TDA-CQ9-4・R9 監査 M)。
   //   **内側が non-low のときだけ**ゲートする — `ssh host 'ls -la'` のような日常操作で
   //   承認カードを出さないため (over-gate は本ブランチが潰そうとしている症状そのもの)。
+  //   **この分岐は加算であって置換ではない (SEC-CQ10-1 ≡ TDA-CQ10-1 ≡ QA-CQ10-1・R10 監査 H・
+  //   3 レーン一致)**: R9 は分岐末尾に無条件の `return undefined` を置いたため、後続の
+  //   `isInlineShell` / `hasLiveCommandSubstitution` が**構造的に到達不能**になり、
+  //   `ssh host $(rm -rf /srv)` (base は high[recursive-rm]) が low/[] へ落ちた — 9 runner 全部・
+  //   `$()`/backtick の両方で。引用オペランドが危険なら**それを**返し、そうでなければ以降の
+  //   ゲートへ流す (早期 return しない)。
+  //   **全引用スパンを見る (SEC/TDA/QA 3 レーン一致の M)**: `lastQuotedOperand` は最後のスパンだけ
+  //   を返したため `ssh host 'rm -rf /' 'note'` で外れた。各スパンを再分類し最大 risk を採る。
   if (REMOTE_EXEC_RUNNERS.has(name) && depth < MAX_INLINE_DEPTH) {
-    const remote = lastQuotedOperand(rawSegment);
-    if (remote !== undefined && remote.trim().length > 0) {
+    let remoteRisk: "high" | "medium" | undefined;
+    for (const remote of quotedOperands(rawSegment)) {
+      if (remote.trim().length === 0) continue;
       const innerRisk = classifyCommandRiskInternal(remote, depth + 1, categories, split);
-      if (innerRisk !== "low") {
-        categories?.add("inline-code");
-        return innerRisk;
+      if (innerRisk === "high") {
+        remoteRisk = "high";
+        break;
       }
+      if (innerRisk === "medium") remoteRisk = "medium";
     }
-    return undefined;
+    if (remoteRisk !== undefined) {
+      categories?.add("inline-code");
+      return remoteRisk;
+    }
+    // fall through: 引用オペランドが無害でも、同じ segment の置換 (`$(…)` / backtick) や
+    // inline-shell 形は下のゲートが見る。
   }
 
   // シェルのインラインコード (sh -c "..." 等)。SEC-1 #5: python3.11 等のバージョン付きでも拾う。
@@ -1910,7 +1979,7 @@ function isProcessSubstitutionExecutor(name: string): boolean {
  * どのゲートでも同じでなければならない。
  *
  * **SEC-CQ9-2 ≡ TDA-CQ9-1 (R9 監査 H)**: 5 つある commandName ゲートのうち
- * `launchesShellWithProcessSubstitution` だけが `skipLeadingAssignments` を通しておらず、
+ * `launchesShellWithProcessSubstitution` だけが `skipCommandPrefixWords` (現 `skipCommandPrefixWords`) を通しておらず、
  * `commandName(["FOO=1","bash",…])` が `"foo=1"` を返すため `FOO=1 bash <(echo rm -rf /srv)` で
  * 通常モードも全 bypass preset もゲートが外れた (base は medium[inline-code] でゲートしていた
  * = 明確な回帰・実 bash は rm を実行する)。R8 が閉じたのは「位置」の軸で、「正規化」の軸が
@@ -1918,7 +1987,7 @@ function isProcessSubstitutionExecutor(name: string): boolean {
  */
 function segmentProgramName(segment: string): string {
   const raw = tokenize(segment);
-  const { tokens } = stripRunnerWrappers(raw.slice(skipLeadingAssignments(raw)));
+  const { tokens } = stripRunnerWrappers(raw.slice(skipCommandPrefixWords(raw)));
   return commandName(tokens);
 }
 
@@ -1960,18 +2029,19 @@ function launchesShellWithProcessSubstitution(command: string, split: SegmentSpl
 }
 
 /**
- * セグメント内の**最後の引用スパンの中身**を返す (無ければ undefined・未終端も undefined)。
+ * セグメント内の**全引用スパンの中身**を出現順に返す (未終端に当たったらそこまで)。
  * `ssh host 'cmd'` / `docker exec c sh -c 'cmd'` のように、引用済みオペランドを別のシェルへ
  * 丸ごと渡す形の内側コードを取り出すための正準ヘルパ (引用の読み方は `quoteSpanEnd` 単一出所)。
+ * 最後のスパンだけを返していた R9 版は `ssh host 'rm -rf /' 'note'` で外れた (R10 M・3 レーン一致)。
  */
-function lastQuotedOperand(segment: string): string | undefined {
-  let found: string | undefined;
+function quotedOperands(segment: string): string[] {
+  const found: string[] = [];
   let i = 0;
   while (i < segment.length) {
     const span = quoteSpanEnd(segment, i);
-    if (span === -1) return undefined;
+    if (span === -1) return found; // 未終端 → ここまでに読めた分だけ (fail-safe は呼び出し側の床)。
     if (span > 0) {
-      found = segment.slice(i + (segment[i] === "$" ? 2 : 1), span - 1);
+      found.push(segment.slice(i + (segment[i] === "$" ? 2 : 1), span - 1));
       i = span;
       continue;
     }
@@ -2110,7 +2180,7 @@ export function classifyCommandCategories(command: string): Set<PolicyCategory> 
 /**
  * network-egress (外部へデータを送出しうる) program を起動するか (secret-egress カテゴリの composite 片側)。
  * approval-bridge が `isNetworkEgressCommand(cmd) && detectSecretInInput(...)` で secret-egress を確定する。
- * 分類器と同一の tokenize/skipLeadingAssignments/stripRunnerWrappers/commandName/normalizeCommandName で
+ * 分類器と同一の tokenize/skipCommandPrefixWords/stripRunnerWrappers/commandName/normalizeCommandName で
  * 正規化し、path/quote/wrapper/version 接尾辞 非依存に basename を照合する (`/usr/bin/curl`/`'curl'`/`sudo curl`)。
  */
 /**
@@ -2141,7 +2211,7 @@ export function isNetworkEgressCommand(command: string): boolean {
   const scan = (segments: string[]): boolean => {
     for (const seg of segments) {
       const raw = tokenize(seg);
-      const { tokens } = stripRunnerWrappers(raw.slice(skipLeadingAssignments(raw)));
+      const { tokens } = stripRunnerWrappers(raw.slice(skipCommandPrefixWords(raw)));
       if (tokens.length === 0) continue;
       if (NETWORK_EGRESS_PROGRAMS.has(normalizeCommandName(commandName(tokens)))) return true;
     }
@@ -2455,7 +2525,7 @@ function classifyCommandRiskInternal(
     // SEC-1 (round D 再監査): bare な先頭 env 代入 (`FOO=bar rm -rf /`) は RUNNER_WRAPPERS に無く
     //   commandName が `FOO=bar` を返すため、全構造述語が実コマンドを取りこぼし承認ゲートを素通り
     //   させていた。構造判定の前に先頭代入を skip し、ラッパ剥がしと同列に正規化する (skip 後に剥がす)。
-    const deassigned = rawTokens.slice(skipLeadingAssignments(rawTokens));
+    const deassigned = rawTokens.slice(skipCommandPrefixWords(rawTokens));
     // 再#3 QA-1/QA-3: env / timeout / sudo 等の runner ラッパを再帰的に剥がし、配下の実コマンドを判定対象に。
     const { tokens, capExhausted } = stripRunnerWrappers(deassigned);
     if (tokens.length === 0) continue;

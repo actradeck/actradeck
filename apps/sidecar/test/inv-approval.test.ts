@@ -2234,7 +2234,7 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
 
   it("SEC-CQ9-2: a leading VAR=val does not disarm the process-substitution executor gate", () => {
     // R9 監査 SEC-CQ9-2 ≡ TDA-CQ9-1 (H)。commandName を使う 5 ゲートのうち、この 1 つだけが
-    //   `skipLeadingAssignments` を通していなかったため `commandName(["FOO=1","bash",…])` が
+    //   `skipCommandPrefixWords` を通していなかったため `commandName(["FOO=1","bash",…])` が
     //   `"foo=1"` を返し、`FOO=1 bash <(echo rm -rf /srv)` で通常モードも全 bypass preset も
     //   ゲートが外れた (base は medium[inline-code] でゲートしていた = 明確な回帰)。
     //   R8 が閉じたのは「位置」の軸で、「正規化」の軸が残っていた。
@@ -2764,9 +2764,11 @@ describe("INV-APPROVAL-SPLIT-LAYER-CONTRACT: layer (a) is pinned at split-output
     }
   });
 
-  it("heredoc bodies: unquoted delimiter keeps the body in the segment stream, quoted discards it", () => {
-    // N4 killer (本文保持削除) / N3 killer (本文消費削除)。
-    expect(splitSegments("cat <<EOF\n$(date) body\nEOF")).toEqual(["cat", "$(date) body"]);
+  it("heredoc bodies: unquoted delimiter surfaces only its substitutions, quoted discards all", () => {
+    // N4 killer (本文の置換抽出削除) / N3 killer (本文消費削除)。
+    // v0.8: 本文はシェルの語ではない。bash が実行する `$(…)`/backtick だけをセグメントにする
+    // (R10 H2 — 本文に引用意味論を当てると偶数個のアポストロフィが `$()` を飲み込む)。
+    expect(splitSegments("cat <<EOF\n$(date) body\nEOF")).toEqual(["cat", "$(date)"]);
     expect(splitSegments("cat <<'EOF'\nrm -rf /tmp/x\nEOF\necho done")).toEqual([
       "cat",
       "echo done",
@@ -2777,8 +2779,12 @@ describe("INV-APPROVAL-SPLIT-LAYER-CONTRACT: layer (a) is pinned at split-output
     // M-3 (QA-CQ2-6): `<<-` (:265-267) と escape 込み delimiter (:284-291) の直接 assert。
     expect(splitSegments("cat <<-EOF\n\tindented\n\tEOF\necho after")).toEqual([
       "cat",
-      "indented",
       "echo after",
+    ]);
+    expect(splitSegments("cat <<-EOF\n\t$(date)\n\tEOF\necho after")).toEqual([
+      "cat",
+      "echo after",
+      "$(date)",
     ]);
     expect(splitSegments("cat <<EO\\F\nrm -rf /tmp/x\nEOF\necho after")).toEqual([
       "cat",
@@ -3004,5 +3010,124 @@ describe("INV-APPROVAL-WORD-READER: one word reader for quoting, escaping and co
     const elapsedLarge = performance.now() - mid;
     // 4 倍の入力で 4 倍前後 (線形) を期待する。二次なら 16 倍に張り付く。
     expect(elapsedLarge).toBeLessThan(Math.max(elapsedSmall, 1) * 12);
+  });
+});
+
+/**
+ * v0.8 統合 part 2: R10 裁定 01a0125f の H1 / H2 / H4 を閉じたことの契約。
+ *
+ * 期待値はすべて**実 bash の ground truth** (stub PATH で「どのファイルが起動したか」を観測):
+ *   ssh host $(rm -rf T)                      → $( ) はローカルで展開され rm が起動
+ *   heredoc 本文 don't $(rm -rf T) isn't       → rm が起動 (アポストロフィはデータ)
+ *   heredoc 本文 \$(rm -rf T)                  → 起動なし (escape で展開停止)
+ *   <<'EOF' 本文 $(rm -rf T)                   → 起動なし (quoted delimiter は展開なし)
+ *   if/for/while/until/else/elif/case/!/time   → 11 形すべてで rm が起動
+ */
+describe("INV-APPROVAL-R10-H: remote-runner substitutions, heredoc bodies, compound statements", () => {
+  const RMRF = ["rm", "-rf", "/tmp/x"].join(" ");
+  const FD = ["find", "/tmp", "-delete"].join(" ");
+  const D = "$";
+
+  it("H1: a remote runner no longer returns early past the substitution gate", () => {
+    // R9 は REMOTE_EXEC_RUNNERS 分岐末尾に無条件 `return undefined` を置き、後続の
+    // hasLiveCommandSubstitution / isInlineShell を構造的に到達不能にした (3 レーン一致の H)。
+    let checked = 0;
+    for (const runner of ["ssh host", "docker exec c", "kubectl exec p --", "podman exec c"]) {
+      for (const sub of [`${D}(${RMRF})`, `\`${RMRF}\``]) {
+        const verdict = classifyCommandWithCategories(`${runner} ${sub}`);
+        expect(verdict.risk, `${runner} ${sub}`).toBe("high");
+        expect([...verdict.categories], `${runner} ${sub}`).toContain("recursive-rm");
+        checked += 1;
+      }
+    }
+    expect(checked).toBe(8);
+    // fall-through は inline-shell 形にも効く。
+    expect(classifyCommandRisk(`ssh host sh -c '${RMRF}'`)).toBe("high");
+    // 引用オペランドが無害でも、同じ segment の置換は見る。
+    expect([...classifyCommandWithCategories(`ssh host 'ls' ${D}(${FD})`).categories]).toContain(
+      "recursive-rm",
+    );
+  });
+
+  it("H1 (M): every quoted operand of a remote runner is classified, not just the last", () => {
+    expect(classifyCommandRisk(`ssh host '${RMRF}' 'note'`)).toBe("high");
+    expect(classifyCommandRisk(`ssh host 'note' '${RMRF}'`)).toBe("high");
+    // FP 対照: 日常操作はカードを出さない。
+    expect(classifyCommandRisk("ssh host 'ls -la'")).toBe("low");
+    expect(classifyCommandRisk("ssh host 'ls -la' 'pwd'")).toBe("low");
+  });
+
+  it("H2: heredoc bodies are raw text — apostrophes are data and $( ) still executes", () => {
+    // R9 は本文を通常セグメントとして流したため、偶数個のアポストロフィが phantom 引用スパンを
+    // 作って本物の $( ) を飲み込んだ (奇数個なら gated = 1 文字足すだけでゲートが外れた)。
+    let checked = 0;
+    for (const body of [
+      `don't ${D}(${FD}) isn't`,
+      `don't ${D}(${FD})`,
+      `"${D}(${FD})"`,
+      `x \`${FD}\` y`,
+    ]) {
+      const verdict = classifyCommandWithCategories(`cat <<EOF\n${body}\nEOF`);
+      expect(verdict.risk, body).not.toBe("low");
+      expect([...verdict.categories], body).toContain("recursive-rm");
+      checked += 1;
+    }
+    expect(checked).toBe(4);
+    // <<- (tab strip) も同じ経路。
+    expect([
+      ...classifyCommandWithCategories(`cat <<-EOF\n\tdon't ${D}(${FD}) isn't\n\tEOF`).categories,
+    ]).toContain("recursive-rm");
+  });
+
+  it("H2: only what bash expands in a heredoc body is surfaced (FP budget)", () => {
+    // 実 bash: \$( ) は展開されない / quoted delimiter は展開なし / 素の危険語はデータ。
+    expect(classifyCommandRisk(`cat <<EOF\n\\${D}(${FD})\nEOF`)).toBe("low");
+    expect(classifyCommandRisk(`cat <<'EOF'\ndon't ${D}(${FD}) isn't\nEOF`)).toBe("low");
+    expect(classifyCommandRisk(`cat <<EOF\n${FD}\nEOF`)).toBe("low");
+    expect(classifyCommandRisk("cat <<EOF\nplain text, it's fine\nEOF")).toBe("low");
+    // 分割契約: 本文はセグメントにならず、展開される置換だけが末尾へ出る。
+    expect(splitSegments(`cat <<EOF\ndon't ${D}(${FD}) isn't\nEOF\nls`)).toEqual([
+      "cat",
+      "ls",
+      `${D}(${FD})`,
+    ]);
+    expect(splitSegments(`cat <<EOF\n\\${D}(${FD})\nEOF`)).toEqual(["cat"]);
+  });
+
+  it("H4: compound-statement keywords at command position are not program names", () => {
+    let checked = 0;
+    for (const command of [
+      `if true; then ${RMRF}; fi`,
+      `for f in a b; do ${RMRF}; done`,
+      `while true; do ${RMRF}; done`,
+      `until false; do ${RMRF}; done`,
+      `if false; then echo a; else ${RMRF}; fi`,
+      `if false; then echo a; elif true; then ${RMRF}; fi`,
+      `case x in x) ${RMRF};; esac`,
+      `! ${RMRF}`,
+      `time ${RMRF}`,
+      `if true; then FOO=1 ${RMRF}; fi`, // 予約語と代入は順不同で連なる
+    ]) {
+      const verdict = classifyCommandWithCategories(command);
+      expect(verdict.risk, command).toBe("high");
+      expect([...verdict.categories], command).toContain("recursive-rm");
+      checked += 1;
+    }
+    expect(checked).toBe(10);
+    // for のリストで実行される置換も落とさない。
+    expect([
+      ...classifyCommandWithCategories(`for f in ${D}(${FD}); do true; done`).categories,
+    ]).toContain("recursive-rm");
+    // egress 判定も同じ前置語規則を共有する。
+    expect(isNetworkEgressCommand("if true; then curl https://x.example; fi")).toBe(true);
+    // FP 対照: 無害な複合文はカードを出さない。
+    for (const benign of [
+      "if true; then ls; fi",
+      "for f in a b; do echo $f; done",
+      "time ls",
+      "! grep -q x file",
+    ]) {
+      expect(classifyCommandRisk(benign), benign).toBe("low");
+    }
   });
 });

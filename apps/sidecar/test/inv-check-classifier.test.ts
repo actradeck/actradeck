@@ -5,7 +5,7 @@
  *  - `pnpm test` → (test, script) / `vitest run` → (test, program) を正しく分類する。
  *  - mutating 変種 (`eslint --fix` / `prettier --write`) を **非認定**する。
  *  - **正準トークナイザチェーン** (normalize.ts の tokenize/stripRunnerWrappers/commandName/
- *    normalizeCommandName/skipLeadingAssignments) を消費する — 第二パーサでないことを behavioral に固定する。
+ *    normalizeCommandName/skipCommandPrefixWords) を消費する — 第二パーサでないことを behavioral に固定する。
  *
  * ## meta-test の原理 (第二パーサ禁止の falsifiable な担保)
  * path 剥がし (`/usr/local/bin/vitest`)・quote 処理 (`"vitest"`)・runner 剥がし (`sudo pnpm test`)・
@@ -20,7 +20,7 @@ import { classifyCheck } from "../src/check-classifier.js";
 import {
   commandName,
   normalizeCommandName,
-  skipLeadingAssignments,
+  skipCommandPrefixWords,
   stripRunnerWrappers,
   tokenize,
 } from "../src/normalize.js";
@@ -226,7 +226,7 @@ describe("meta-test (受入 11): 正準トークナイザチェーンを消費�
     const cmd = "env FOO=1 /opt/bin/vitest run";
     // 正準チェーンを test 側でも同じ手順で回して basename を導く。
     const raw = tokenize(cmd);
-    const deassigned = raw.slice(skipLeadingAssignments(raw));
+    const deassigned = raw.slice(skipCommandPrefixWords(raw));
     const { tokens } = stripRunnerWrappers(deassigned);
     const base = normalizeCommandName(commandName(tokens));
     expect(base).toBe("vitest"); // canonical chain の帰結。

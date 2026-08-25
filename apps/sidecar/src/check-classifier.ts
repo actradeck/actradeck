@@ -6,7 +6,7 @@
  * command を一切パースしない (§D6 layering + `security-gate-reuse-canonical-parser`)。
  *
  * ⚠️ **第二パーサ禁止**: 危険コマンド分類器 (normalize.ts) と **同一の正準チェーン**
- *   (`splitSegments` → `tokenize` → `skipLeadingAssignments` → `stripRunnerWrappers` →
+ *   (`splitSegments` → `tokenize` → `skipCommandPrefixWords` → `stripRunnerWrappers` →
  *    `commandName` → `normalizeCommandName`) を import して使う。独自のトークナイズ/basename 抽出を
  *   書かない (path/quote/wrapper/version 接尾辞の扱いがドリフトする source を作らない・受入 11 の meta-test
  *   が正準チェーン消費を behavioral に固定する)。
@@ -29,7 +29,7 @@ import type { CheckKind, CheckMatch } from "@actradeck/event-model";
 import {
   commandName,
   normalizeCommandName,
-  skipLeadingAssignments,
+  skipCommandPrefixWords,
   splitSegments,
   stripRunnerWrappers,
   tokenize,
@@ -329,7 +329,7 @@ function classifyStrippedTokens(
 function classifySegment(segment: string): CheckClassification | undefined {
   const rawTokens = tokenize(segment);
   if (rawTokens.length === 0) return undefined;
-  const deassigned = rawTokens.slice(skipLeadingAssignments(rawTokens));
+  const deassigned = rawTokens.slice(skipCommandPrefixWords(rawTokens));
   const { tokens } = stripRunnerWrappers(deassigned);
   return classifyStrippedTokens(tokens, 0);
 }
