@@ -151,6 +151,72 @@ syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a literal strin
   operand apart at the pipe; the operand is classified as inner code now, and only gates when that
   inner code is itself dangerous, so `ssh host 'ls -la'` stays silent.
 
+## [0.8.0] - 2026-08-25
+
+### Changed
+
+- **Telemetry collector purges rows after 24 months.** `TELEMETRY_RETENTION_MONTHS` (new, in
+  `@actradeck/telemetry-contract`) is the single source for a daily cron-triggered `scheduled`
+  handler that deletes rows whose `occurred_on` is older than 24 months, and for the retention
+  statement in the consent copy. Operators redeploy the Worker to register the trigger
+  (`triggers.crons` in `wrangler.example.jsonc`). Wire contract unchanged.
+- **Telemetry consent copy now matches the wire contract and the collector.** The Settings →
+  Privacy panel gains a "Purpose" block (aggregate product-usage judgement and development
+  prioritisation only — not billing, advertising, identification, or third-party sharing), lists
+  every per-row field (including `app_version` and coarse `platform`, which were previously
+  omitted), states that `cockpit_started` is a once-per-day presence marker rather than a launch
+  count, and adds a "Retention and deletion" block: 24-month purge, "Stop and delete ID" is
+  local-only, and deleting already-sent rows earlier requires emailing the installation ID to
+  **privacy@actradeck.io** (`TELEMETRY_PRIVACY_CONTACT` in the contract) before it is deleted
+  locally (the identifier is stored only as a keyed hash). Same facts added to
+  `docs/anonymous-telemetry.md`, the README, and a new "Privacy requests" section in
+  `SECURITY.md`.
+
+### Added
+
+- **Anonymous telemetry, off by default.** An explicitly opted-in, closed-schema daily counter
+  batch (random installation UUID, event enum, UTC day, version, coarse platform, count — no
+  prompts, commands, paths, repository names, or session/event identifiers can be represented).
+  Controlled from **Settings → Privacy** or `actradeck telemetry`; the exact outgoing batch is
+  previewable before enabling. The independently deployed Cloudflare Worker collector stores an
+  HMAC of the installation UUID and rejects out-of-window days. See
+  `docs/anonymous-telemetry.md`.
+- **`actradeck usage` — local-only aggregate usage report.** UTC-day buckets for demo runs, real
+  and governance-protected sessions, and approval activity, computed range-bounded on the local
+  store. Nothing leaves the machine.
+- **`governance_mode` on `session.started`** (closed enum `enforcement` / `observe_only` /
+  `unavailable`) recording whether the approval gate is in the execution path; never inferred
+  when missing.
+- **Daily public distribution snapshot workflow** (npm downloads and release-asset counters —
+  deliberately no repository traffic, which GitHub scopes to push-access holders).
+- `ACTRADECK_TELEMETRY_ENDPOINT` / `ACTRADECK_TELEMETRY_STATE` / `ACTRADECK_TELEMETRY_DISABLED`
+  operator settings (see `docs/configuration.md`).
+
+### Fixed
+
+- **Approvals from resumed sessions are actionable again.** Sessions that resumed without a
+  SessionStart hook folded into their previous terminated run, whose projection suppresses
+  pending approvals — approval cards never appeared in the Inbox or Live Wall and every request
+  timed out to deny. The sidecar now reopens a new run on any first hook after a terminal reap,
+  preserving lineage (`resumed_from`).
+- **Telemetry flush no longer follows redirects.** The endpoint gate (HTTPS-only, loopback-HTTP
+  only for development, no credentials) validated only the first hop; a 3xx from the configured
+  collector could forward the batch to a destination the gate would reject directly. The send
+  now uses `redirect: "error"` and a redirect fails closed as `send_failed`.
+- **`migrate:down` works again on databases that applied the interim `usage_daily` view.** The
+  view migration briefly existed on this branch and was deleted after the aggregation moved to
+  range-bounded queries; it is restored as an idempotent cleanup (`DROP VIEW IF EXISTS`), so
+  mid-branch databases regain a working migration chain, and running `migrate:down` there also
+  removes the stale view (fresh databases are unaffected).
+- **Approval cards can no longer be hidden by a terminated session projection.** Pending
+  approvals now follow the request's own lifecycle: reaching a terminal state still clears that
+  run's open approvals, but a request arriving _after_ the terminal state — a live daemon
+  holding a real round-trip — stays visible and actionable instead of silently timing out to
+  deny. Post-terminal cards are cleared by the request's own resolution, or — if the daemon
+  died first — by the synthetic relay-lost retire on the daemon's next reconnect; a card whose
+  daemon never returns stays in the store but is hidden by Inbox presence gating and can never
+  auto-allow.
+
 ## [0.7.0] - 2026-08-10
 
 ### Added
@@ -506,7 +572,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/actradeck/actradeck/releases/tag/v0.8.0
 [0.7.0]: https://github.com/actradeck/actradeck/releases/tag/v0.7.0
 [0.6.0]: https://github.com/actradeck/actradeck/releases/tag/v0.6.0
 [0.5.2]: https://github.com/actradeck/actradeck/releases/tag/v0.5.2

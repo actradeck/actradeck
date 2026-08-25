@@ -17,11 +17,21 @@ export function isBypassPermissionMode(mode: string | undefined): boolean {
 
 /**
  * session.started に載せる governance_mode の宣言を permission_mode から導出する (SEC-R3-1)。
- * 宣言 (normalize) とゲート (approval-bridge) が **同一 predicate の同一評価** から分岐する
- * ことをこの関数が構造的に保証する — 宣言側がこの関数を、ゲート側が isBypassPermissionMode を
- * 消費し、両者の bypass 集合は定義上一致する。ゲート側だけに bypass 扱いモードを足す変更は
- * inv-governance-bypass-coupling の排他 assert (permission_mode の値比較は本モジュール外に
- * 存在しない + bridge 条件形 pin) が RED にする。
+ * 宣言 (normalize) とゲート (approval-bridge) は **同一の bypass 集合** をこの単一出所から
+ * 消費する — ただし評価時点は同一ではない (R5 SEC-R5-1≡TDA-R5-2 で訂正): 宣言は run 起点
+ * (session.started) の 1 回・ゲートは操作ごと。run 途中で bypassPermissions へ切り替わった
+ * session は、ゲートでは操作単位で正しく bypass 経路へ分岐する (既定は DEFAULT_GATED
+ * カテゴリ該当で Web UI 承認カード経路・非該当のみ defer — R5T TDA-R5T-4 で訂正) 一方、
+ * start 時の enforcement 宣言は残る (指標側の over-report 方向として docs/usage-metrics.md
+ * に開示・demote は v0.8 follow-up task 019ffc38-92ac)。
+ * ゲート側だけに bypass 扱いモードを足す変更を実際に討ち取るのは inv-approval.test.ts の
+ * gate 側 mode 列挙テスト (bypass 集合の挙動 pin) であり、その列挙は現行 CC の closed set
+ * に閉じている — **未列挙の将来 mode を使う第二ゲートはどのテストにも当たらない** (R5T
+ * QA-R5T-1 で probe 実証・構造閉塞は follow-up task 019ffc38-b973)。
+ * inv-governance-bypass-coupling の permission_mode 出現 allowlist は**純増方向のみ**の
+ * tripwire で、コメント予算を使う件数保存 comment↔code swap には可換 (同 test docstring
+ * 参照)。既知の限界: 動的プロパティ構成・件数保存 swap・未列挙 mode は本モジュール周辺の
+ * ガード群単体では検知しない。
  */
 export function governanceModeFor(mode: string | undefined): "unavailable" | "enforcement" {
   return isBypassPermissionMode(mode) ? "unavailable" : "enforcement";

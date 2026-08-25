@@ -51,8 +51,21 @@ The aggregation runs range-bounded against the base tables and reports UTC day b
 Honest boundaries of `protected_sessions`: the guarantee is only recorded when a session **start**
 was observed carrying governance evidence. Sessions stored before the governance-mode upgrade,
 and sessions whose start ActraDeck never observed (mid-flight attach), stay unclassified (NULL)
-and are never inferred as protected — so the protected ratio under-reports rather than
-over-claims.
+and are never inferred as protected — for those enumerated cases the direction is strictly
+under-reporting. Two disclosures go the other way (broader than their evidence):
+
+1. **Managed Codex constant declaration** (TDA-R4-2): a managed Codex session declares
+   `enforcement` as a constant because ActraDeck's shared approval bridge supervises it, but
+   ActraDeck does not read Codex's own approval configuration — an operator `approval_policy`
+   that suppresses approval requests would not demote the declaration. Deriving that
+   declaration from observed approval traffic is tracked as a follow-up.
+2. **Mid-session bypass switch** (SEC-R5-1): the governance declaration is evaluated once at
+   session start, while the approval gate re-evaluates `permission_mode` per operation. A
+   session that starts under a gated mode and is switched to `bypassPermissions` mid-run keeps
+   its start-time `enforcement` declaration, so `protected_sessions` (and the derived
+   `governed_session_started` telemetry counter) can over-count such sessions. The live gate
+   itself is unaffected — per-operation evaluation stays correct. Demoting the stored
+   declaration when the observed mode weakens is tracked as a follow-up.
 
 The endpoint and CLI never return prompts, commands, paths, repository names, session/event IDs,
 or sub-day timestamps. These metrics stay on the machine unless the operator explicitly exports
@@ -80,3 +93,6 @@ Missing and `unavailable` values are never inferred as protected. Codex rollout 
 throwaway cockpit demo are `observe_only`; an ordinary managed/Claude hook session declares
 `enforcement`. A Claude `bypassPermissions` session is conservatively `unavailable` because the
 effective per-repository gate cannot be proven by the synchronous session-start normalizer.
+A managed Codex session declares `enforcement` from the shared approval bridge that supervises
+it; unlike the Claude path, this declaration is not demoted by Codex-side approval settings
+(see the boundary note above).

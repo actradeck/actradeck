@@ -795,40 +795,44 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
   //   (trust 境界 = REALTIME_TOKEN + loopback + single-operator)。
   app.post<{
     Body: { manifest?: unknown; manifest_b64?: unknown; expected_fingerprint?: unknown };
-  }>("/realtime/audit/verify", { bodyLimit: AUDIT_VERIFY_BODY_LIMIT }, async (req, reply) => {
-    try {
-      const body = req.body ?? {};
-      // SEC-R4-2: decode は version を string へ広げた Decoded 型を返す (現行版の確定は verify)。
-      let manifest: AuditManifest | DecodedAuditManifest | undefined;
-      if (typeof body.manifest_b64 === "string") {
-        manifest = decodeManifestBase64(body.manifest_b64);
-      } else if (body.manifest !== null && typeof body.manifest === "object") {
-        manifest = body.manifest as AuditManifest;
+  }>(
+    "/realtime/audit/verify",
+    { bodyLimit: AUDIT_VERIFY_BODY_LIMIT, config: { rateLimit: AUDIT_VERIFY_RATE_LIMIT } },
+    async (req, reply) => {
+      try {
+        const body = req.body ?? {};
+        // SEC-R4-2: decode は version を string へ広げた Decoded 型を返す (現行版の確定は verify)。
+        let manifest: AuditManifest | DecodedAuditManifest | undefined;
+        if (typeof body.manifest_b64 === "string") {
+          manifest = decodeManifestBase64(body.manifest_b64);
+        } else if (body.manifest !== null && typeof body.manifest === "object") {
+          manifest = body.manifest as AuditManifest;
+        }
+        if (manifest === undefined) {
+          return reply
+            .code(400)
+            .send({ error: "missing or invalid manifest (send manifest or manifest_b64)" });
+        }
+        // SEC-2: fingerprint pin。client 指定を優先し、無ければ **server 自身の署名鍵 fingerprint** を
+        // 既定 pin にする (同一 server で署名・検証すれば自動 pin で ok=true)。未 pin (client 未指定 かつ
+        // server 鍵なし) の署名済み manifest は verify が ok=false(unpinned) を返す。
+        const clientExpected =
+          typeof body.expected_fingerprint === "string" ? body.expected_fingerprint : undefined;
+        const expected = clientExpected ?? resolveAuditSignerFromEnv()?.fingerprint;
+        // verifyAuditManifest は untrusted manifest を構造ガードで受け ok=false(malformed) を返す
+        // (throw しない)。防御的一貫性のため route も try/catch で 500 化を防ぐ (QA-2/SEC-4)。
+        return reply.send(
+          verifyAuditManifest(
+            manifest,
+            expected !== undefined ? { expectedFingerprint: expected } : {},
+          ),
+        );
+      } catch (err) {
+        req.log.error({ err }, "audit verify failed");
+        return reply.code(500).send({ error: "internal error" });
       }
-      if (manifest === undefined) {
-        return reply
-          .code(400)
-          .send({ error: "missing or invalid manifest (send manifest or manifest_b64)" });
-      }
-      // SEC-2: fingerprint pin。client 指定を優先し、無ければ **server 自身の署名鍵 fingerprint** を
-      // 既定 pin にする (同一 server で署名・検証すれば自動 pin で ok=true)。未 pin (client 未指定 かつ
-      // server 鍵なし) の署名済み manifest は verify が ok=false(unpinned) を返す。
-      const clientExpected =
-        typeof body.expected_fingerprint === "string" ? body.expected_fingerprint : undefined;
-      const expected = clientExpected ?? resolveAuditSignerFromEnv()?.fingerprint;
-      // verifyAuditManifest は untrusted manifest を構造ガードで受け ok=false(malformed) を返す
-      // (throw しない)。防御的一貫性のため route も try/catch で 500 化を防ぐ (QA-2/SEC-4)。
-      return reply.send(
-        verifyAuditManifest(
-          manifest,
-          expected !== undefined ? { expectedFingerprint: expected } : {},
-        ),
-      );
-    } catch (err) {
-      req.log.error({ err }, "audit verify failed");
-      return reply.code(500).send({ error: "internal error" });
-    }
-  });
+    },
+  );
 
   // 強み #2 レビュー・パケット (ADR 6点強化 #2): 複数セッションを 1 つの改竄検知パケットに束ねて
   //   html/md/json で返す。?sessions=id1,id2,... (カンマ区切り・MAX_PACKET_SESSIONS 上限)。各セッションの
@@ -883,7 +887,7 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
     Body: { manifest?: unknown; manifest_b64?: unknown; expected_fingerprint?: unknown };
   }>(
     "/realtime/audit/packet/verify",
-    { bodyLimit: AUDIT_VERIFY_BODY_LIMIT },
+    { bodyLimit: AUDIT_VERIFY_BODY_LIMIT, config: { rateLimit: AUDIT_VERIFY_RATE_LIMIT } },
     async (req, reply) => {
       try {
         const body = req.body ?? {};
@@ -997,6 +1001,22 @@ async function buildSessionReport(
  * MAX_VERIFY_BODY_BYTES(replay-proxy.ts)と手動整合(どちらか小さい方が実効上限・TDA-1)。
  */
 const AUDIT_VERIFY_BODY_LIMIT = 16 * 1024 * 1024;
+
+/**
+ * Per-route rate limit for the two audit-manifest verify endpoints.
+ *
+ * Both recompute a canonical hash chain and verify an Ed25519 signature over caller-supplied
+ * input, so the work per request is chosen by the caller (bounded only by AUDIT_VERIFY_BODY_LIMIT)
+ * and, unlike the rest of /realtime, is not gated behind a database round trip. The bearer
+ * REALTIME_TOKEN plus the loopback / single-operator deployment remain the primary control;
+ * this bounds how much CPU one already-authenticated caller can spend.
+ *
+ * The ceiling is far above operator use (verification is a manual, per-report action) and above
+ * what the route's own tests issue, so it never turns a legitimate flow into a 429.
+ * `@fastify/rate-limit` is registered with `global: false` in ingestion-server.ts; a route only
+ * takes part by naming this config.
+ */
+const AUDIT_VERIFY_RATE_LIMIT = { max: 60, timeWindow: "1 minute" } as const;
 
 /** 監査レポートを JSON / CSV / HTML / Markdown (?format=) で返す。 */
 function sendAudit(

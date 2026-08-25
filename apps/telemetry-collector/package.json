@@ -1,6 +1,6 @@
 {
   "name": "@actradeck/telemetry-collector",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Privacy-minimal Cloudflare Worker and D1 aggregate PMF API for explicit ActraDeck opt-in telemetry.",

@@ -1,6 +1,6 @@
 {
   "name": "@actradeck/webui",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Web UI (Phase 4): Next.js cockpit — session list / detail (4-pane) / Approval Inbox / Replay",
   "scripts": {

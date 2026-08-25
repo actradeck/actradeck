@@ -1,6 +1,6 @@
 {
   "name": "@actradeck/backend",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Backend (Phase 3): Fastify Ingestion(HTTP/WS) + State Engine + Realtime + PostgreSQL",
@@ -23,6 +23,7 @@
     "@actradeck/telemetry-contract": "workspace:*",
     "@electric-sql/pglite": "0.5.3",
     "@electric-sql/pglite-socket": "0.2.6",
+    "@fastify/rate-limit": "^11.2.0",
     "@fastify/websocket": "^11.2.0",
     "fastify": "5.8.5",
     "pg": "8.21.0",

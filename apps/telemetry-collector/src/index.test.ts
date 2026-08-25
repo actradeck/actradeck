@@ -285,4 +285,49 @@ describe("Cloudflare telemetry collector", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "service unavailable" });
   });
+
+  // 保持期間 (operator decision 2026-08-26): occurred_on が 24 か月より古い行を cron で削除する。
+  // 期待 cutoff は契約 helper を経由せず**リテラル**で pin する (helper 経由だと 24→23 の変異も
+  // `<`→`<=` の変異も同値になり殺せない)。NOW=2026-08-13 ⇒ cutoff=2024-08-13。
+  it("scheduled purge deletes rows older than 24 months of occurred_on and keeps the cutoff day", async () => {
+    const insert = env.DB.prepare(
+      "INSERT INTO telemetry_daily (installation_hash, event_name, occurred_on, app_version, platform, count) VALUES (?, 'active_day', ?, '0.5.0', 'linux', 1)",
+    );
+    const hash = "f".repeat(64);
+    // 受理窓 (90 日) を迂回して直接 seed する: 太古行は本番では過去の受理分に相当。
+    await env.DB.batch([
+      insert.bind(hash, "2024-08-12"), // cutoff - 1 day → 削除
+      insert.bind(hash, "2024-08-13"), // cutoff 当日 → 保持 (strict <)
+      insert.bind(hash, "2026-08-13"), // 現在 → 保持
+    ]);
+    const worker = createTelemetryWorker({ now: () => NOW });
+    if (!worker.scheduled) throw new Error("test worker has no scheduled handler");
+    await worker.scheduled(
+      { scheduledTime: NOW.getTime(), cron: "23 4 * * *", noRetry: () => undefined },
+      testEnv(),
+      {} as ExecutionContext,
+    );
+    const remaining = await env.DB.prepare(
+      "SELECT occurred_on FROM telemetry_daily ORDER BY occurred_on",
+    ).all<{ occurred_on: string }>();
+    expect(remaining.results.map((r) => r.occurred_on)).toEqual(["2024-08-13", "2026-08-13"]);
+  });
+
+  it("scheduled purge is a no-op on a table with nothing expired", async () => {
+    await dispatch(eventRequest(validBatch));
+    const before = await env.DB.prepare("SELECT COUNT(*) AS n FROM telemetry_daily").first<number>(
+      "n",
+    );
+    const worker = createTelemetryWorker({ now: () => NOW });
+    await worker.scheduled?.(
+      { scheduledTime: NOW.getTime(), cron: "23 4 * * *", noRetry: () => undefined },
+      testEnv(),
+      {} as ExecutionContext,
+    );
+    const after = await env.DB.prepare("SELECT COUNT(*) AS n FROM telemetry_daily").first<number>(
+      "n",
+    );
+    expect(before).toBe(1);
+    expect(after).toBe(1);
+  });
 });

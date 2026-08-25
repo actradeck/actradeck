@@ -27,6 +27,7 @@
  *    の再 truncation。詳細は @actradeck/redaction redact-for-persist.ts。直 POST 経路の権威は backend。
  *  - **preClose**: graceful shutdown で接続を閉じる。
  */
+import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyWebsocket from "@fastify/websocket";
 import { parseEvent } from "@actradeck/event-model";
 import { redactEventWithAuthoritativeCounts, tokenEquals } from "@actradeck/redaction";
@@ -219,6 +220,18 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
       }
     },
   });
+
+  // Rate limiting, opt-in per route (`global: false`). Registered here because the plugin
+  // installs an onRoute hook, which only sees routes added after it in this scope — the same
+  // ordering constraint as @fastify/websocket above.
+  //
+  // Only the audit-manifest verify routes opt in (see AUDIT_VERIFY_RATE_LIMIT in
+  // realtime-server.ts). Those recompute a canonical hash chain and an Ed25519 signature on
+  // caller-supplied input, so their cost is attacker-chosen within the body limit, and unlike
+  // the rest of /realtime they touch no database and are therefore unbounded by query latency.
+  // This is defence in depth, not the primary control: /realtime already requires a bearer
+  // REALTIME_TOKEN before any handler runs, and the deployment is loopback + single-operator.
+  await app.register(fastifyRateLimit, { global: false });
 
   /**
    * upgrade 前認証: WS / HTTP 双方の /ingest* に onRequest フックを掛ける。

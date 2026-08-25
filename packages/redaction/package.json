@@ -1,6 +1,6 @@
 {
   "name": "@actradeck/redaction",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "T1 canonical secret redactor (INV-REDACTION) plus node-only shared security primitives (constant-time tokenEquals). Single source shared by the sidecar sink choke and the backend ingress floor (ADR 019f2d2c).",
