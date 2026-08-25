@@ -3000,16 +3000,34 @@ describe("INV-APPROVAL-WORD-READER: one word reader for quoting, escaping and co
   it("word scanning stays linear when unterminated substitutions repeat", () => {
     // 未終端の引用/置換は終端を探して末尾まで走るため、語ごとに再走査すると O(N^2) になる
     // (同期 hook パス上の DoS 面)。予算で打ち切ることを非空虚に固定する。
-    const many = `echo ${"$(".repeat(4000)}`;
-    const started = performance.now();
-    expect(tokenize(many).length).toBeGreaterThan(0);
-    const quadratic = `echo ${"$(".repeat(16000)}`;
-    const mid = performance.now();
-    expect(tokenize(quadratic).length).toBeGreaterThan(0);
-    const elapsedSmall = mid - started;
-    const elapsedLarge = performance.now() - mid;
-    // 4 倍の入力で 4 倍前後 (線形) を期待する。二次なら 16 倍に張り付く。
-    expect(elapsedLarge).toBeLessThan(Math.max(elapsedSmall, 1) * 12);
+    //
+    // **較正 (v0.8 part 3・preflight で 1 回赤になった flake の是正)**: 初版は 4 倍入力・単発計測・
+    //   閾値 12 で、分母が 0.6〜2.5ms のノイズ支配 + 二次実装の理論比 16 に対し余裕 1.3 倍しかなかった
+    //   (静穏時の値で閾値を決めた = 自分で記録した規律の違反)。best-of-5 の min で測り、入力比を
+    //   16 倍にして線形 (実測 best-of-5 で 3〜6) と二次 (予算を外した変異体で実測 106) を離し、
+    //   閾値 32 を両側から 3 倍以上離れた位置に置く (SEC-CQ9-3 と同じ較正規律・人工負荷下 10 回で緑を実測)。
+    const best = (s: string): number => {
+      let min = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < 5; i += 1) {
+        const started = performance.now();
+        expect(tokenize(s).length).toBeGreaterThan(0);
+        min = Math.min(min, performance.now() - started);
+      }
+      return min;
+    };
+    const small = best(`echo ${"$(".repeat(2000)}`);
+    const large = best(`echo ${"$(".repeat(32000)}`);
+    expect(
+      large,
+      `16x input must not cost quadratically: small=${small.toFixed(2)}ms large=${large.toFixed(2)}ms`,
+    ).toBeLessThan(Math.max(small, 0.25) * 32);
+    // 負荷に依らない構造 pin: 予算が語読取りで消費・計上されていること (比だけに頼らない)。
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/normalize.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(src).toMatch(/budget\.failures < MAX_SUBSTITUTION_SCAN_FAILURES/);
+    expect(src).toMatch(/budget\.failures \+= 1/);
   });
 });
 
