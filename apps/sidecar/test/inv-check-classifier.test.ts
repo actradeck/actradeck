@@ -410,12 +410,19 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       //   (`WS`) に無かったため、`run \<nl> (\t\<nl>\t){` の H を構造的に検出できなかった。文法上
       //   同じ変種が入りうる位置には同じ要素を置く。監査で見つかった綴りは vector でなく**軸**として
       //   足す。R16 追加軸: 前置 `time -- ` / wrapper (subshell・group の中の定義・SEC-CQ16-2)。
-      const PREFIXES = ["", "time ", "time -p ", "time -- ", "\t"];
+      // **軸は追加のみ・削除禁止 (R17・QA-CQ17-1 の unblock 条件)**: R16 は軸を足すと同時に WS / INNER /
+      //   BODIES から要素を落とし、その差分を拡張 sweep が再発見した (SEC-CQ17-4 ≡ TDA-CQ17-5)。
+      //   R17 追加軸: 前置 `FOO=1 ` (代入・SEC-CQ17-1 族 B) / `\<nl> ` と `\<nl>` (語頭の行継続・QA-CQ17-1) /
+      //   wrapper `({ … } )` `{( … ) }` (合成 opener・SEC-CQ17-1 族 A) / `$( … )` (置換)。
+      const PREFIXES = ["", "time ", "time -p ", "time -- ", "\t", "FOO=1 ", "\\\n ", "\\\n"];
       const WRAPS: ReadonlyArray<(s: string) => string> = [
         (s) => s,
         (s) => `( ${s}\n)`,
         (s) => `(${s}\n)`, // 語頭に融合した opener
         (s) => `{ ${s}\n}`,
+        (s) => `({ ${s}\n} )`, // 合成 opener (subshell の中の group)
+        (s) => `{( ${s}\n) }`,
+        (s) => `$(${s}\n)`, // コマンド置換 (出力が空なら何も実行されない)
       ];
       const KEYWORDS = ["", "function "];
       const NAME = "run";
@@ -466,8 +473,9 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       }
       // 非空虚: 生成軸が実際に fake-green 綴りを大量に含むこと (R13 が見た 9 形より桁で多い)、かつ
       //   本体が実行される形も含むこと (marker 連言が両側で実効)。
-      // 5 prefix × 4 wrap × 3 body × (ヘッダ無し 1 + 括弧綴り 2 kw × 12 + `function` のみ 1) = 1560
-      expect(templates.length).toBe(1560);
+      // 8 prefix × 7 wrap × 3 body × (ヘッダ無し 1 + 括弧綴り 2 kw × 12 + `function` のみ 1) = 4368
+      expect(templates.length).toBe(4368);
+      expect(new Set(templates).size).toBe(templates.length);
       expect(
         defineOnly.length,
         `define-only spellings (ran=${ran}, rejected=${rejected})`,
@@ -495,8 +503,9 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       }
     },
     // 1,560 回の bash spawn は静穏時 ~5s、preflight の全 suite 並走下で 13s (vitest 既定 5s を超過して
-    //   RED になった実例・R16)。CI runner の遅さも見込み 120s。時間でなく leak 0 が検証対象。
-    120_000,
+    //   RED になった実例・R16)。R17 で 4,368 回 (静穏 ~10s・3× oversubscribe で ~45s 見込み) → 240s。
+    //   軸を足したら件数に合わせてここを見直す。時間でなく leak 0 が検証対象。
+    240_000,
   );
 
   it("R15 H1/H2 (SEC-CQ15-1/2 ≡ QA-CQ15-1/2 ≡ TDA-CQ15-1): `time` prefix and line-continued empty parentheses are refused", () => {
@@ -609,12 +618,125 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     //   normalize.ts の単一出所を使い (SEC-CQ16-1/3)、語窓の切り詰めは無い (QA-CQ16-1)。
     expect(src).toContain("const tokens = stripTransparentPrefix(tokenize(segment));");
     expect(src).not.toMatch(/head === "time"\) continue/);
-    expect(src).toContain("TIME_OPTION_WORDS.has(rest[0])");
+    expect(src).toContain("isTimespecWord(rest[0])");
     expect(src).not.toMatch(/rest\[1\] === "-p"/);
+    // R17: 残渣 (空語・語頭空白) を落とし、代入は risk 側の regex を共有し、exit を隠すラッパは正準チェーンの
+    //   `wrappers` で見る。どれも check 側で再定義しない (単一出所)。
+    expect(src).toContain('if (head.trim() === "") {');
+    expect(src).toContain("ASSIGNMENT_TOKEN_RE.test(head)");
+    expect(src).toContain("EXIT_MASKING_WRAPPERS.has(w)");
+    expect(src).toContain("programTokens([...tokens], { reservedWords: false })");
+    expect(src).not.toMatch(
+      /const (?:ASSIGNMENT_TOKEN_RE|EXIT_MASKING_WRAPPERS|TIME_OPTION_WORDS)\b/,
+    );
+    expect(src).not.toMatch(/function isTimespecWord/);
     expect(src).toContain('if (tokens[0] === "function") return true;');
     expect(src).toContain('FUNCTION_HEADER_RE.test(tokens.join(""))');
     expect(src).not.toMatch(/slice\(0, 4\)/);
     expect(src).not.toMatch(/COMMAND_POSITION_RESERVED_WORDS\.add\(/);
     expect(src).toContain("if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return undefined;");
   });
+});
+
+/**
+ * CQ-R17 裁定 (decision 01a03cac) の unblock 契約 — **透過前置の残渣**と**exit を隠すラッパ**。
+ *
+ * SEC-CQ17-1 ≡ QA-CQ17-1 (H): `stripTransparentPrefix` が (a) 行継続 `\<newline>` の生む `"\n"` 語を透過せず
+ * (b) 融合 opener `({` を剥がした `""` で即 return し (c) 代入前置 `FOO=1` を知らなかったため (`$(` 自体は
+ * `tokenize` が `$` を落として `(` の融合 opener として届く)、
+ * その後ろの `function run {…}` が position-0 検査から外れ credit された。vector は裁定者が実 bash marker で
+ * 「定義のみ・本体未実行」を確認した綴りを逐語で pin する (finding-registry の landing 規約)。
+ */
+describe("INV-CHECK-R17: transparent-prefix residue and exit-masking wrappers are refused (SEC-CQ17-1 ≡ QA-CQ17-1)", () => {
+  const BASH = "/bin/bash";
+  const DEFINE_ONLY = [
+    "\\\n function run {\n  pytest\n}",
+    "({ function run {\n  pytest\n}\n}\n)",
+    "( \\\n function run {\n  pytest\n}\n)",
+    "\\\nfunction run {\n  pytest\n}",
+    "({ function run\n{\n  pytest\n}\n} )",
+    "{( function run\n{\n  pytest\n}\n) }",
+    "(({ function run\n{\n  pytest\n}\n} ) )",
+    "FOO=1 $(run() {\n  pytest\n}\n)",
+    "CI=1 $(function run {\n  pytest\n})",
+    "time -p FOO=1 $(run() {\n  pytest\n}\n)",
+    "$(run() {\n  pytest\n}\n)",
+  ];
+
+  it.skipIf(!existsSync(BASH))(
+    "every pinned vector is define-only in real bash (marker method)",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "actradeck-r17-"));
+      try {
+        for (const cmd of DEFINE_ONLY) {
+          execFileSync(BASH, ["-c", cmd.replace("pytest", "touch m")], {
+            cwd: dir,
+            stdio: "ignore",
+          });
+          expect(existsSync(join(dir, "m")), `body must not run: ${JSON.stringify(cmd)}`).toBe(
+            false,
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("refuses every pinned define-only spelling", () => {
+    for (const cmd of DEFINE_ONLY) expect(classifyCheck(cmd), JSON.stringify(cmd)).toBeUndefined();
+  });
+
+  it("controls that run their body keep the credit", () => {
+    for (const cmd of [
+      "(\n  pytest\n)",
+      "time -p pytest",
+      "CI=1 pytest",
+      "FOO=1 BAR=2 pytest",
+      "flock /tmp/l pytest",
+      "ionice -c3 pytest",
+      "taskset 1 pytest",
+      "unshare -r pytest",
+      "time -- flock -n /tmp/l pytest",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toEqual({ check_kind: "test", check_match: "program" });
+    }
+  });
+
+  it.skipIf(!existsSync(BASH))(
+    "exit-masking wrappers hide the child's status in real bash and are refused",
+    () => {
+      // `script` は `-e` 無しで子の exit を返さない (rc=0)。`flock` は伝播する。両方を同じ harness で採る。
+      const dir = mkdtempSync(join(tmpdir(), "actradeck-r17-mask-"));
+      const rcOf = (cmd: string): number => {
+        try {
+          execFileSync(BASH, ["-c", cmd], { cwd: dir, stdio: "ignore" });
+          return 0;
+        } catch (error) {
+          return (error as { status?: number }).status ?? -1;
+        }
+      };
+      try {
+        if (existsSync("/usr/bin/script")) {
+          expect(rcOf("script -qc 'exit 3' /dev/null")).toBe(0);
+          expect(rcOf("script -qec 'exit 3' /dev/null")).toBe(3);
+        }
+        if (existsSync("/usr/bin/flock")) expect(rcOf("flock ./l sh -c 'exit 3'")).toBe(3);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      for (const cmd of [
+        "script -qc 'pytest' /dev/null",
+        "script -c pytest log.txt",
+        "watch pytest",
+        "watch -n 1 pytest",
+        "nice script -c pytest log.txt",
+        "time -p watch pytest",
+        "FOO=1 script -qc 'pytest' /dev/null",
+        "cd . && script -qc 'pytest' /dev/null",
+      ]) {
+        expect(classifyCheck(cmd), cmd).toBeUndefined();
+      }
+    },
+  );
 });

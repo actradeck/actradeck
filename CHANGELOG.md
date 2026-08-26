@@ -203,15 +203,30 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   parenthesis-interior and body axes, runs each through bash itself with a marker file, and
   requires every spelling that bash defines without executing to be refused. That guarantee is
   bounded by the generated axes — spellings outside them are not covered, and an audit round
-  that finds one adds it as an axis. On the same `time` prefix the risk verdict had regressed:
+  that finds one adds it as an axis. Axes are only ever added, never removed: one round dropped
+  variants while adding others, and the next found definitions hiding in exactly the dropped shapes. On the same `time` prefix the risk verdict had regressed:
   `time -p rm -rf …` was rated low with no category because the word after `time` was taken as
-  the program; the timespec words are now skipped from one shared set, and the approval verdict
-  for a `time -p` / `time --` prefixed command is pinned equal to the bare command. Under-crediting
+  the program; every option word after `time` is now skipped through one shared predicate (a
+  closed `-p` / `--` set left `time -v rm …` unrated, and `/bin/sh` runs that form through the
+  external `time`), and the risk level, categories and egress result of a `time`-prefixed command
+  are pinned equal to the bare command's — the persistent-allowlist gate is a separate structural
+  check and is not part of that pin. The transparent-prefix strip on the check side also drops the
+  empty or whitespace-only word a leading backslash-newline produces, keeps going after a fused
+  opener such as `({` leaves nothing behind, and looks through assignment prefixes; each of those
+  had hidden a `function` definition from the check. Wrappers that do not return their
+  child's exit status (`script` without `-e`, `watch`) never credit a check under them, even though
+  the risk verdict looks through them. Under-crediting
   is the safe direction for a verification badge. Sequencing after a check (`pytest ; echo done`,
   `npm test || true`) still credits it, as it always has, and is tracked rather than claimed
   closed. The check classifier also gained the command-length guard the risk verdict already had:
   it was the one consumer of the splitter without one, and a 4 MiB hook payload held the daemon
-  for three minutes. The egress predicate gained the same guard, `time` and `builtin` joined the
+  for three minutes. The risk verdict also learned the command-running wrappers `ionice`, `chroot`,
+  `unshare`, `taskset`, `flock`, `watch` and `script` — all unrecognised programs in v0.8.0, so
+  `ionice -c3 rm -rf …` was rated low with no category and raised no approval card; the `-c` string
+  form of `flock` and `script` is routed through the existing inline-shell path rather than parsed
+  again, and each listed wrapper form is checked against bash itself in the test suite. The wrapper
+  table remains an allowlist: a wrapper not in it still hides the command it runs. The egress
+  predicate gained the same guard, `time` and `builtin` joined the
   persistent-allowlist deny set alongside every other runner wrapper, and the executor-gate
   matrices pin every axis by literal. The benchmark corpus grew from 67 to 80 vectors with one
   shape from each audit round since the sixth, and the published numbers were regenerated from

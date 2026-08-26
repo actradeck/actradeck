@@ -91,7 +91,11 @@ export default tseslint.config(
       //   置き normalize.ts は 1951 のまま (天井 1955 据え置き)。
       //   R16 unblock (decision 01a03c6c) で 1951 → 1957: `time` の timespec 語 (`-p` / `--`) を読み飛ばす
       //   分岐 + 単一出所 `TIME_OPTION_WORDS` (SEC-CQ16-1 の承認ゲート回帰の修正)。天井は実測 + 4。
-      "max-lines": ["error", { max: 1961, skipComments: true, skipBlankLines: true }],
+      //   R17 unblock (decision 01a03cac) で 1957 → 2041: 実 bash GT で透過を確認したラッパ 7 語と
+      //   その位置引数 / 値つき option 表・`flock -c` / `script -c` の文字列形を `sh -c` へ書き換える分岐・
+      //   `isTimespecWord` (option 形すべて)・`EXIT_MASKING_WRAPPERS`・`StrippedProgram.wrappers`
+      //   (TDA-CQ17-1 ≡ SEC-CQ17-3 / SEC-CQ17-2 の承認ゲート修正)。天井は実測 + 4。
+      "max-lines": ["error", { max: 2045, skipComments: true, skipBlankLines: true }],
     },
   },
   {

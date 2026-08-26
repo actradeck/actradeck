@@ -123,7 +123,8 @@ listing the shapes the implementation happens to catch, is not a landing — whe
 space is a grammar (shell spellings, escape forms), derive the vectors from the real
 interpreter instead of by hand, keep the generated axes symmetric (the same variants at every
 position the grammar allows them), and when a later audit finds a spelling the generator
-missed, add it as an axis rather than as one more vector.
+missed, add it as an axis rather than as one more vector. Never remove an axis or a variant while
+adding another: the coverage you drop is exactly what the next round finds.
 
 **Credit.** Your merged commits are the primary, durable record.
 [`CONTRIBUTORS.md`](./CONTRIBUTORS.md) additionally credits contributors.

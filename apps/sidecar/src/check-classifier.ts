@@ -25,6 +25,14 @@
  *   vector は手で数え上げず、実 bash に「定義のみで本体を走らせない」綴りを判定させて導出する。
  *   `function` を risk 側と共有する予約語集合へ足してはならない (前置語 skip 段の意味が変わる)。
  *   対照の `{ … }` グループ / `( … )` サブシェルは本体を実行するので credit される。
+ *   透過前置の**残渣**が定義を隠していた (R17 H・SEC-CQ17-1 ≡ QA-CQ17-1): 行継続 `\<newline>` が語頭で
+ *   生む `"\n"` 語、融合 opener `({` を剥がした残り `""`、代入前置 `FOO=1` (`FOO=1 $(run() {…})` 族) の
+ *   どれもが `function run {…}` を position-0 検査の外へ押し出していた。`stripTransparentPrefix` は空語を落とし、
+ *   剥離後も return せず回り続け、代入は risk 側と同じ `ASSIGNMENT_TOKEN_RE` で読む。
+ * - **exit を隠すラッパの配下** (R17・実 bash GT): `script -qc 'pytest' log` は `-e` 無しで rc=0、
+ *   `watch pytest` は終わらない。normalize.ts の `EXIT_MASKING_WRAPPERS` (単一出所) が正準チェーンの
+ *   剥がしたラッパ列に現れたら credit しない。`flock` / `ionice` / `taskset` / `unshare` / `chroot` は exit を
+ *   伝播するので透過する (`flock /tmp/l pytest` は credit)。
  * - **解析可能長を超えるコマンド** (R12 M・SEC-CQ12-1): `splitSegments` の唯一のガード無し消費者
  *   だったため 4 MiB の入力で同期 hook パスが 3 分停止した。`MAX_ANALYZABLE_COMMAND_LEN` 超は
  *   証拠なし (undefined)。
@@ -47,14 +55,16 @@
 import type { CheckKind, CheckMatch } from "@actradeck/event-model";
 
 import {
+  ASSIGNMENT_TOKEN_RE,
   COMMAND_POSITION_RESERVED_WORDS,
   commandName,
+  EXIT_MASKING_WRAPPERS,
+  isTimespecWord,
   MAX_ANALYZABLE_COMMAND_LEN,
   normalizeCommandName,
   programTokens,
   splitSegments,
   stripRunnerWrappers,
-  TIME_OPTION_WORDS,
   tokenize,
 } from "./normalize.js";
 
@@ -370,7 +380,7 @@ function classifySegment(segment: string): CheckClassification | undefined {
  * bash は body を実行せず rc=0 で終わるので、そのまま credit すると failed test が passed バッジになる
  * (ADR 0015 が禁じる fake-green)。いずれかのセグメントの先頭語がコマンド位置の予約語なら
  * 「このコマンドは複合文を含む」とみなし、認定側は全体を undefined に倒す (under-credit = 安全方向)。
- * `time` は透過する (`stripTimePrefix`): runner ラッパで exit が配下のものになるので `time pytest` は
+ * `time` は透過する (`stripTransparentPrefix`): runner ラッパで exit が配下のものになるので `time pytest` は
  * 正当な credit だが、配下の構造 (予約語・関数定義ヘッダ) は見る (R15 H)。
  * 予約語集合は normalize.ts の `COMMAND_POSITION_RESERVED_WORDS` (単一出所) を共有する。消費者は本ファイルのみ。
  *
@@ -388,28 +398,46 @@ function hasCompoundStatement(segments: readonly string[]): boolean {
     if (head === undefined) continue;
     if (COMMAND_POSITION_RESERVED_WORDS.has(head)) return true;
     if (isFunctionDefinitionHeader(tokens)) return true;
+    // exit を隠すラッパが前置にあれば exit はチェックの結果でない (R17)。剥がしたラッパ列は正準チェーン
+    //   (`programTokens`) が返す — ここで語を数え直さない。
+    const { wrappers } = programTokens([...tokens], { reservedWords: false });
+    if (wrappers.some((w) => EXIT_MASKING_WRAPPERS.has(w))) return true;
   }
   return false;
 }
 
 /**
- * 判定の前に透過する前置 (R15 H → R16 H): `time` + timespec 語 (`-p` / `--`)、grouping opener (`(` / `{`
- * の単独語と、語頭に融合した `(` / `{`)。いずれも exit を配下へ素通しし、配下が関数定義なら定義のみで
- * rc=0 になる — `time -- function run {…}` (SEC-CQ16-3)・`( run()\n{…}\n)` (SEC-CQ16-2)。timespec 語集合は
- * normalize.ts の `TIME_OPTION_WORDS` (risk 側 `skipCommandPrefixWords` と共有・単一出所・SEC-CQ16-1)。
- * 多重前置 (`time -p time -p run () {…}`) も剥がし切る (QA-CQ16-3)。
+ * 判定の前に透過する前置 (R15 H → R16 H → R17 H): `time` + timespec 語、grouping opener (`(` / `{` の
+ * 単独語と、語頭に融合した `(` / `{`)、代入前置 `VAR=val`、行継続 `\<newline>` が語頭で生む空白だけの語。
+ * コマンド置換 `$(…)` はここに来ない: `tokenize` が未終端置換の `$` を落とすので `$(run()` は `(run()` として
+ * 届き、融合 opener の分岐が受ける (R17 変異 V4 で `\$?` 分岐が等価と判明し除去)。いずれも exit を配下へ素通しし、配下が関数定義なら定義のみで rc=0 になる —
+ * `time -- function run {…}` (SEC-CQ16-3)・`( run()\n{…}\n)` (SEC-CQ16-2)・`({ function run {…}` /
+ * `FOO=1 $(run() {…})` / `\<newline> function run {…}` (SEC-CQ17-1 ≡ QA-CQ17-1)。timespec は normalize.ts の
+ * `isTimespecWord`、代入は `ASSIGNMENT_TOKEN_RE` (どちらも risk 側 `skipCommandPrefixWords` と共有・単一出所)。
+ * 多重前置 (`time -p time -p run () {…}`) も剥がし切る (QA-CQ16-3)。**剥離の残りが `""` でも return しない**:
+ * R16 は `({` を剥がした `""` が `/^[({]/` に外れて即 return し、次語の `function` を見なかった。
+ * ここは refuse 判定の入力を作るだけで credit の経路 (`classifySegment` → `programTokens`) には触れない
+ * ので、過剰に剥がしても under-credit 側にしか倒れない。
  */
 function stripTransparentPrefix(tokens: readonly string[]): readonly string[] {
   let rest = tokens;
   for (;;) {
     const head = rest[0];
-    if (head === "time") {
+    if (head === undefined) return rest;
+    if (head.trim() === "") {
+      rest = rest.slice(1); // 行継続が語頭で生む `"\n"` / opener 剥離の残り `""`。
+    } else if (/^\s/.test(head)) {
+      rest = [head.replace(/^\s+/, ""), ...rest.slice(1)]; // `\<newline>function` は 1 語 `"\nfunction"`。
+    } else if (head === "time") {
       rest = rest.slice(1);
-      while (rest[0] !== undefined && TIME_OPTION_WORDS.has(rest[0])) rest = rest.slice(1);
-    } else if (head === "(" || head === "{") rest = rest.slice(1);
-    else if (head !== undefined && /^[({]/.test(head))
+      while (rest[0] !== undefined && isTimespecWord(rest[0])) rest = rest.slice(1);
+    } else if (ASSIGNMENT_TOKEN_RE.test(head)) {
+      rest = rest.slice(1);
+    } else if (head === "(" || head === "{") {
+      rest = rest.slice(1);
+    } else if (/^[({]/.test(head)) {
       rest = [head.replace(/^[({]+/, ""), ...rest.slice(1)];
-    else return rest;
+    } else return rest;
   }
 }
 

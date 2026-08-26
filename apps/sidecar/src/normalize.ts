@@ -1140,7 +1140,86 @@ const RUNNER_WRAPPERS = new Set([
   // stripping this layer, `busybox rm -rf /` and `toybox rm -rf /` looked like benign commands.
   "busybox",
   "toybox",
+  // R17 M (TDA-CQ17-1 ≡ SEC-CQ17-3・base main 2a9042a から存在): 実 bash marker GT で配下を実行することを
+  //   確認したラッパ (inv-approval R17 が bash 由来で固定)。`ionice -c3 rm -rf …` / `chroot /srv …` /
+  //   `unshare -r …` / `taskset 1 …` / `flock /tmp/l …` / `watch …` が commandName=ラッパで low/[] に落ち、
+  //   `!== "low"` の承認カードが出なかった。`flock FILE -c '…'` / `script -c '…'` の文字列形は
+  //   `stripRunnerWrappers` が `sh -c …` へ書き換えて既存の inline-shell 経路に流す (第二パーサを作らない)。
+  //   `script` (既定で子の exit を返さない) と `watch` (終了しない) は exit を隠すので check 側は
+  //   `EXIT_MASKING_WRAPPERS` で credit を拒否する。
+  "ionice",
+  "chroot",
+  "unshare",
+  "taskset",
+  "flock",
+  "watch",
+  "script",
 ]);
+
+/**
+ * 配下の exit code を**自分の exit として返さない**ラッパ (R17・実 bash GT): `script -qc 'exit 3' log` は
+ * `-e` 無しで rc=0、`watch` は割り込まれるまで終わらず rc は watch 自身のもの。risk 側は配下を見るために
+ * 剥がすが、check 側 (ADR 0015「exit がそのチェックの結果か」) は前置に含まれていれば credit しない。
+ * `⊆ RUNNER_WRAPPERS` を inv-approval R17 が pin する (剥がされないラッパはここにあっても check 側に届かない)。
+ */
+export const EXIT_MASKING_WRAPPERS: ReadonlySet<string> = new Set(["script", "watch"]);
+
+/** ラッパの位置引数 (実コマンドの前に 1 つ置かれる duration / newroot / mask / lockfile)。 */
+const WRAPPER_POSITIONAL_ARGS: ReadonlyMap<string, number> = new Map([
+  ["timeout", 1],
+  ["chroot", 1],
+  ["taskset", 1],
+  ["flock", 1],
+]);
+
+/**
+ * ラッパごとの値つきオプション (値を別トークンで取る形だけ。任意値の形は載せない — 値の無いとき
+ * 実コマンドを 1 つ食いゲートを弱める方向に倒れる・xargs と同じ規律)。
+ */
+const WRAPPER_VALUE_OPTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["ionice", new Set(["-c", "-n", "-p", "--class", "--classdata", "--pid"])],
+  [
+    "unshare",
+    new Set([
+      "-S",
+      "-G",
+      "-w",
+      "-R",
+      "--setuid",
+      "--setgid",
+      "--map-user",
+      "--map-group",
+      "--setgroups",
+      "--propagation",
+      "--wd",
+      "--root",
+    ]),
+  ],
+  ["flock", new Set(["-w", "-E", "--timeout", "--conflict-exit-code"])],
+  ["watch", new Set(["-n", "--interval"])],
+  [
+    "script",
+    new Set([
+      "-o",
+      "-O",
+      "-I",
+      "-B",
+      "-T",
+      "-m",
+      "-E",
+      "--output-limit",
+      "--log-out",
+      "--log-in",
+      "--log-io",
+      "--log-timing",
+      "--logging-format",
+      "--echo",
+    ]),
+  ],
+]);
+
+/** 引用文字列を `sh -c` 相当で実行するラッパ (`flock FILE -c CMD` / `script -c CMD LOG`)。 */
+const SHELL_STRING_WRAPPERS: ReadonlySet<string> = new Set(["flock", "script"]);
 
 /** ラッパ剥がしの最大反復 (二重・多重ラッパでも有界に止める。ReDoS/無限ループ防止)。 */
 const MAX_WRAPPER_STRIP = 8;
@@ -1155,14 +1234,17 @@ const MAX_WRAPPER_STRIP = 8;
  * 戻り値の `capExhausted`: 反復上限に達してもなお先頭がラッパのとき true。ラッパを多重に
  * 積んで実コマンドを上限の奥へ隠す回避を fail-safe (gated) に倒すためのシグナル。
  */
-export function stripRunnerWrappers(tokens: string[]): { tokens: string[]; capExhausted: boolean } {
+export function stripRunnerWrappers(tokens: string[]): StrippedProgram {
   let cur = tokens;
+  const wrappers: string[] = [];
   for (let iter = 0; iter < MAX_WRAPPER_STRIP; iter++) {
-    if (cur.length === 0) return { tokens: cur, capExhausted: false };
+    if (cur.length === 0) return { tokens: cur, capExhausted: false, wrappers };
     const name = commandName(cur);
-    if (!RUNNER_WRAPPERS.has(name)) return { tokens: cur, capExhausted: false };
+    if (!RUNNER_WRAPPERS.has(name)) return { tokens: cur, capExhausted: false, wrappers };
 
     let i = 1; // ラッパ自身の次から実コマンドを探す。
+    let positional = WRAPPER_POSITIONAL_ARGS.get(name) ?? 0;
+    let rewritten: string[] | undefined;
     while (i < cur.length) {
       const t = cur[i];
       if (t === undefined) break; // 防御 (noUncheckedIndexedAccess)。到達しないが型安全。
@@ -1176,6 +1258,21 @@ export function stripRunnerWrappers(tokens: string[]): { tokens: string[]; capEx
         continue;
       }
       if (t.startsWith("-")) {
+        // 文字列形 (`flock FILE -c 'cmd'` / `script -qc 'cmd' log`): 残りを `sh -c …` に書き換えて既存の
+        //   inline-shell 経路 (`inlineCodeRisk`) へ流す。`-c` を単独 option と見ると引用文字列が lockfile /
+        //   実コマンドに見え、`flock /tmp/l -c 'rm -rf x'` が low に落ちる (R17 M)。
+        if (
+          SHELL_STRING_WRAPPERS.has(name) &&
+          (SHELL_INLINE_FLAG_RE.test(t) || t === "--command")
+        ) {
+          rewritten =
+            t === "--command" ? ["sh", "-c", ...cur.slice(i + 1)] : ["sh", ...cur.slice(i)];
+          break;
+        }
+        if (WRAPPER_VALUE_OPTIONS.get(name)?.has(t)) {
+          i += 2;
+          continue;
+        }
         // オプション。値を別トークンで取るものをラッパ別にスキップする。
         if (name === "env" && (t === "-u" || t === "-S")) {
           i += 2;
@@ -1216,21 +1313,35 @@ export function stripRunnerWrappers(tokens: string[]): { tokens: string[]; capEx
         i++; // それ以外の単独オプション (-i / --signal=KILL 等)。
         continue;
       }
-      // 非オプション・非代入トークン = 実コマンド or ラッパ固有の位置引数。
-      // timeout は最初の非オプション位置引数が duration なのでスキップして次を実コマンドとみなす。
-      if (name === "timeout") {
-        i++; // duration をスキップ。
-        break;
+      // 非オプション・非代入トークン = 実コマンド or ラッパ固有の位置引数 (timeout の duration /
+      //   chroot の newroot / taskset の mask / flock の lockfile・`WRAPPER_POSITIONAL_ARGS`)。位置引数の
+      //   後もオプションを読む (`flock FILE -c 'cmd'` の `-c` は位置引数の後ろに来る)。
+      if (positional > 0) {
+        positional -= 1;
+        i++;
+        continue;
       }
       break; // env/sudo/nice/xargs/... はここが実コマンド。
     }
-    const next = cur.slice(i);
-    if (next.length === 0) return { tokens: cur, capExhausted: false }; // ラッパ単体 → 剥がさない。
-    if (next.length === cur.length) return { tokens: cur, capExhausted: false }; // 進捗なし → 停止。
+    const next = rewritten ?? cur.slice(i);
+    if (next.length === 0) return { tokens: cur, capExhausted: false, wrappers }; // ラッパ単体 → 剥がさない。
+    if (rewritten === undefined && next.length === cur.length)
+      return { tokens: cur, capExhausted: false, wrappers }; // 進捗なし → 停止。
+    wrappers.push(name);
     cur = next;
   }
   // 上限到達。なお先頭がラッパなら「実コマンドを上限の奥へ隠した」可能性 → fail-safe gated。
-  return { tokens: cur, capExhausted: RUNNER_WRAPPERS.has(commandName(cur)) };
+  return { tokens: cur, capExhausted: RUNNER_WRAPPERS.has(commandName(cur)), wrappers };
+}
+
+/**
+ * `stripRunnerWrappers` / `programTokens` の戻り値。`wrappers` は剥がしたラッパ名の列 (外側から順)。
+ * check-classifier はこれで `EXIT_MASKING_WRAPPERS` を見る (語を数え直さない・単一出所)。
+ */
+export interface StrippedProgram {
+  tokens: string[];
+  capExhausted: boolean;
+  wrappers: string[];
 }
 
 /** rm が再帰かつ強制か (フラグの順不同・融合・分割・long を全許容)。 */
@@ -1628,7 +1739,9 @@ function hasScriptFileOperand(tokens: string[]): boolean {
 // 有界文字クラスのみ (量化子 + は線形)。シェルメタ文字 ( ) { } $ < > | & ` ; * ? は含まない。
 const EXECUTABLE_NAME_RE = /^[A-Za-z0-9._/+-]+$/;
 // 先頭の env 代入 (`VAR=val`) — 通常のシェル構文。コマンド名ではないのでスキップする。
-const ASSIGNMENT_TOKEN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+//   check-classifier の透過前置 (`stripTransparentPrefix`) も同じ regex を使う (R17 H・SEC-CQ17-1 族 B:
+//   `FOO=1 $(run() {…})` — 第二の代入リーダを作らない・単一出所)。
+export const ASSIGNMENT_TOKEN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 // 先頭/末尾の grouping/quote メタ文字 (1 文字判定・有界文字クラス)。
 const LEADING_GROUPING_CHAR_RE = /[({'"]/;
 const TRAILING_GROUPING_CHAR_RE = /[)};'"]/;
@@ -1681,12 +1794,18 @@ export const COMMAND_POSITION_RESERVED_WORDS: ReadonlySet<string> = new Set(
 );
 
 /**
- * `time` の直後に許される timespec 語 (bash: `time [-p] [--] pipeline`)。`time` を読み飛ばした直後は
- * これらも読み飛ばす — R16 H (SEC-CQ16-1): `time -p rm -rf …` が `-p` をクリーンな実行可能名と見て
- * low/[] に落ちていた (3b6d5b0 の回帰・base main は high/recursive-rm)。check-classifier の `time` 透過も
- * この集合を使う (第二の前置語パーサを作らない・単一出所)。
+ * `time` の直後の語が timespec (option 形) か。bash の文法は `time [-p] [--] pipeline` だが、R16 の
+ * `-p` / `--` の閉集合では `time -v rm -rf …` が `-v` をクリーンな実行可能名と見て low/[] に落ちる
+ * (R17 M・SEC-CQ17-2)。bash 自身は `-v` を command と見て rc=127 で止まる (rm は走らない) が、
+ * `/bin/sh` (dash) には予約語 `time` が無く外部 `/usr/bin/time -v rm …` として**実行する**。分類器は
+ * shell を選べないので `-` で始まる語をすべて timespec として読み飛ばす (安全側の過大近似・
+ * `stripRunnerWrappers` の汎用 option skip と同じ規則)。R16 H (SEC-CQ16-1) の `-p` 回帰 (3b6d5b0・
+ * base main は high/recursive-rm) もこの述語が閉じる。check-classifier の `time` 透過も同じ述語を使う
+ * (第二の前置語パーサを作らない・単一出所)。
  */
-export const TIME_OPTION_WORDS: ReadonlySet<string> = new Set(["-p", "--"]);
+export function isTimespecWord(word: string): boolean {
+  return word.startsWith("-");
+}
 
 /**
  * セグメント先頭の**前置語**をスキップして実コマンド先頭の index を返す —
@@ -1732,9 +1851,10 @@ export function skipCommandPrefixWords(
       continue;
     }
     if (reservedWords && t === "time") {
-      // `time [-p] [--] pipeline` — timespec 語はコマンドではない (R16 H・SEC-CQ16-1)。
+      // `time [-p] [--] pipeline` — timespec 語はコマンドではない (R16 H・SEC-CQ16-1)。option 形の語は
+      //   すべて読み飛ばす (R17 M・SEC-CQ17-2: dash は `time -v rm …` を外部 time で実行する)。
       i += 1;
-      while (i < tokens.length && TIME_OPTION_WORDS.has(tokens[i] as string)) i += 1;
+      while (i < tokens.length && isTimespecWord(tokens[i] as string)) i += 1;
       continue;
     }
     if (ASSIGNMENT_TOKEN_RE.test(t) || (reservedWords && COMMAND_POSITION_RESERVED_WORDS.has(t))) {
@@ -1766,7 +1886,7 @@ export function skipCommandPrefixWords(
 export function programTokens(
   rawTokens: string[],
   options: CommandPrefixOptions = {},
-): { tokens: string[]; capExhausted: boolean } {
+): StrippedProgram {
   return stripRunnerWrappers(rawTokens.slice(skipCommandPrefixWords(rawTokens, options)));
 }
 
@@ -2427,6 +2547,10 @@ const PERSIST_DENY_PROGRAMS: ReadonlySet<string> = new Set([
   "nohup",
   "chroot",
   "unshare",
+  // R17: RUNNER_WRAPPERS に足したラッパは永続 allowlist の構造ゲートでも deny する (M8 の ⊆ INV)。
+  "taskset",
+  "flock",
+  "script",
   "busybox",
   "toybox",
   // shell 起動 (inline -c / スクリプト実行)。
