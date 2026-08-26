@@ -414,6 +414,7 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       const WRAPS: ReadonlyArray<(s: string) => string> = [
         (s) => s,
         (s) => `( ${s}\n)`,
+        (s) => `(${s}\n)`, // 語頭に融合した opener
         (s) => `{ ${s}\n}`,
       ];
       const KEYWORDS = ["", "function "];
@@ -465,8 +466,8 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       }
       // 非空虚: 生成軸が実際に fake-green 綴りを大量に含むこと (R13 が見た 9 形より桁で多い)、かつ
       //   本体が実行される形も含むこと (marker 連言が両側で実効)。
-      // 5 prefix × 3 wrap × 3 body × (ヘッダ無し 1 + 括弧綴り 2 kw × 12 + `function` のみ 1) = 1170
-      expect(templates.length).toBe(1170);
+      // 5 prefix × 4 wrap × 3 body × (ヘッダ無し 1 + 括弧綴り 2 kw × 12 + `function` のみ 1) = 1560
+      expect(templates.length).toBe(1560);
       expect(
         defineOnly.length,
         `define-only spellings (ran=${ran}, rejected=${rejected})`,
@@ -526,6 +527,8 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       "( run()\n{\n  pytest\n}\n)",
       "{ run() {\n  pytest\n}\n}",
       "(run() { pytest; })",
+      "(run() {\n  pytest\n}\n)", // 語頭に融合した `(`・後続セグメントが check (V5 fence)
+      "(function run {\n  pytest\n}\n)",
       "( function run {\n  pytest\n}\n)",
       "time -- function run {\n  pytest\n}",
       "time -- run() {\n  pytest\n}",
