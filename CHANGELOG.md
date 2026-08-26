@@ -120,8 +120,9 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   construct is not evidence of safety.
   Neither where a shell appears in the command nor how it is written changes whether it is gated.
   The check that recognises "this launcher executes what the process substitution produces" looked
-  only at the first segment, so `bash <(echo rm -rf /srv)` gated while `ls; bash <(echo rm -rf
-/srv)` — the same execution, one harmless command earlier — classified as harmless with no card
+  only at the first segment, so `bash <(echo rm -rf /srv)` gated while
+  `ls; bash <(echo rm -rf /srv)` — the same execution, one harmless command earlier — classified
+  as harmless with no card
   in either mode. It was also, alone among the five places that derive a program name, skipping the
   leading-assignment step, so `FOO=1 bash <(...)` fell through the same hole. Both are closed, and
   the check is now bound to the command that actually carries the substitution rather than to the
@@ -133,8 +134,9 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   phase for the rest of the command and made `;`, `>` and `<(` land on the wrong side of it —
   destructive commands after such a string disappeared from classification entirely while bash ran
   them. One scanner now reads quote spans for the splitter, the word reader and the substitution
-  collector. Text inside single quotes is data: `grep -rn '<(' .` and `git commit -m 'use $( )
-syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a literal string rather than a
+  collector. Text inside single quotes is data: `grep -rn '<(' .` and
+  `git commit -m 'use $( ) syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a
+  literal string rather than a
   gated command, while `echo "$(rm -rf /srv)"` — which bash does expand — still classifies high.
   Comments are data too, so an apostrophe in a trailing `# don't` no longer manufactures a card.
   Substitution scanning is bounded. Each unterminated substitution used to be rescanned to the end
@@ -155,8 +157,9 @@ syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a literal strin
   same class of hole each time — quoting, escaping and word boundaries were hand-copied into four
   places (the splitter, redirect targets, heredoc delimiters, the tokenizer) and one of them was
   always a character out of step. Those copies are gone: a single word reader owns quote spans,
-  backslash escapes and concatenation, and the splitter, the redirect-target reader, the heredoc
-  delimiter reader and the tokenizer all call it. That also closed the quoted-assignment hole
+  backslash escapes and concatenation; the redirect-target reader, the heredoc delimiter reader and
+  the tokenizer call it, and the splitter's own loop consumes quote spans and escapes through the
+  same quote-span reader rather than a copy. That also closed the quoted-assignment hole
   (`FOO='a b' rm -rf /path` hid the program because the old tokenizer turned quotes into spaces),
   the `ssh host $(rm -rf /srv)` hole (an early return in the remote-runner branch made the
   command-substitution gate unreachable — every runner, both substitution forms), a heredoc-body
@@ -181,18 +184,24 @@ syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a literal strin
   program name and the real command classified as harmless with no card in any mode — bash reads
   such a heredoc to end of input and runs the command; the splitter now does the same, removing the
   operator and delimiter like any other redirect. A substitution standing where the program name
-  goes (` ` rm -rf /path ``, `$() rm -rf /path`) lost its named category once words were read
+  goes (an empty backtick substitution or `$()` followed by `rm -rf /path`) lost its named category once words were read
   correctly, because the old tokenizer had turned backticks into spaces by accident; the flattened
   form is now classified in addition, never instead, so the category returns without lowering any
   verdict. And the check classifier that labels commands as tests or lint runs had started sharing
-  the reserved-word skipping introduced for compound statements, which credited `if false; then
-  pytest; fi`(exit 0, pytest never runs) and`! pytest`(exit inverted) as passed checks; it now
-  skips only environment assignments, so a check inside a compound statement is not credited at
-  all — under-crediting is the safe direction for a verification badge. The egress predicate gained
-  the same command-length guard the risk verdict already had,`time`and`builtin` joined the
-  persistent-allowlist deny set alongside every other runner wrapper, and the executor-gate matrices
-  pin every axis by literal. The benchmark corpus grew from 67 to 80 vectors with one shape from
-  each audit round since the sixth, and the published numbers were regenerated from it.
+  the reserved-word skipping introduced for compound statements, which credited
+  `if false; then pytest; fi` (exit 0, pytest never runs) and `! pytest` (exit inverted) as
+  passed checks. It now skips only environment assignments, and a command that contains a
+  compound statement anywhere — on one line, or across several lines where the newline had put
+  the check in a segment of its own — is not credited at all; under-crediting is the safe
+  direction for a verification badge. Sequencing after a check (`pytest ; echo done`,
+  `npm test || true`) still credits it, as it always has, and is tracked rather than claimed
+  closed. The check classifier also gained the command-length guard the risk verdict already had:
+  it was the one consumer of the splitter without one, and a 4 MiB hook payload held the daemon
+  for three minutes. The egress predicate gained the same guard, `time` and `builtin` joined the
+  persistent-allowlist deny set alongside every other runner wrapper, and the executor-gate
+  matrices pin every axis by literal. The benchmark corpus grew from 67 to 80 vectors with one
+  shape from each audit round since the sixth, and the published numbers were regenerated from
+  it.
 
 ## [0.8.0] - 2026-08-25
 

@@ -6,10 +6,21 @@
  * command を一切パースしない (§D6 layering + `security-gate-reuse-canonical-parser`)。
  *
  * ⚠️ **第二パーサ禁止**: 危険コマンド分類器 (normalize.ts) と **同一の正準チェーン**
- *   (`splitSegments` → `tokenize` → `skipCommandPrefixWords` → `stripRunnerWrappers` →
+ *   (`splitSegments` → `tokenize` → `programTokens` (前置語 skip → `stripRunnerWrappers`) →
  *    `commandName` → `normalizeCommandName`) を import して使う。独自のトークナイズ/basename 抽出を
  *   書かない (path/quote/wrapper/version 接尾辞の扱いがドリフトする source を作らない・受入 11 の meta-test
- *   が正準チェーン消費を behavioral に固定する)。
+ *   が正準チェーン消費を behavioral に固定する)。`programTokens` へは `reservedWords:false` を渡す
+ *   (R11 H2) — 予約語を読み飛ばす段は check 認定では**使わない** (下記「複合文」参照)。
+ *
+ * ## 認定しない形 (安全方向 = under-credit)
+ * - **複合文を含むコマンド** (R12 H・QA-CQ12-1): `if false; then pytest; fi` は exit 0 で pytest を
+ *   実行せず、`! pytest` は exit を反転する。単一行はセグメント内の予約語で、複数行 (`if …; then` /
+ *   `pytest` / `fi` が別セグメント) は `hasCompoundStatement` で、いずれも undefined に倒す。
+ * - **解析可能長を超えるコマンド** (R12 M・SEC-CQ12-1): `splitSegments` の唯一のガード無し消費者
+ *   だったため 4 MiB の入力で同期 hook パスが 3 分停止した。`MAX_ANALYZABLE_COMMAND_LEN` 超は
+ *   証拠なし (undefined)。
+ * - 既知の未対応 (pre-existing・v0.9 task 01a03bb7): `pytest ; echo done` / `npm test || true` のように
+ *   check の後ろに sequencing が続き全体 exit が check の結果でなくなる形は依然 credit される。
  *
  * ## 判定の性質 (§D6)
  * - false-negative は「証拠なし」= 正直な既定。`other_check` backstop は作らない (security gate でない)。
@@ -27,7 +38,9 @@
 import type { CheckKind, CheckMatch } from "@actradeck/event-model";
 
 import {
+  COMMAND_POSITION_RESERVED_WORDS,
   commandName,
+  MAX_ANALYZABLE_COMMAND_LEN,
   normalizeCommandName,
   programTokens,
   splitSegments,
@@ -147,7 +160,7 @@ const SUBCOMMAND_KIND: ReadonlyMap<string, ReadonlyMap<string, CheckKind>> = new
 /**
  * script runner (pnpm/npm/yarn/make/…)。script/target 名をチェック語彙へ写す (match=script・弱い証拠)。
  *
- * QA-B1-2 (comment 整合): npx/pnpx 等の exec-runner は canonical chain (stripRunnerWrappers) が **剥がさない**
+ * QA-B1-2 (comment 整合): npx/pnpx 等の exec-runner は 正準チェーンのラッパ剥がし段 (`stripRunnerWrappers`) が **扱わない**
  *   (RUNNER_WRAPPERS 非収録)。以前の「canonical chain が扱う対象」というコメントは誤記で、実際は分類器が
  *   `npx vitest run` を undefined にしていた。exec-runner (`npx` / `pnpx` / `bunx` / `pnpm exec|dlx` 等) は
  *   下記 `unwrapExecRunner` で **check-classifier 局所に** 貫通させ、内側 program を program-match で再分類する
@@ -278,7 +291,8 @@ function classifyStrippedTokens(
     const inner = unwrapExecRunner(name, args);
     if (inner !== undefined) {
       if (inner.length === 0) return undefined;
-      // 内側にラッパが積まれている稀な形も正準チェーンで剥がしてから再分類する。
+      // 内側にラッパが積まれている稀な形は、正準チェーンの**ラッパ剥がし段のみ**を当ててから再分類する
+      //   (`inner` は argv であって shell の語ではないので、前置語 skip 段は当てない・TDA-CQ12-5)。
       const { tokens: stripped } = stripRunnerWrappers([...inner]);
       return classifyStrippedTokens(stripped, depth + 1);
     }
@@ -338,13 +352,39 @@ function classifySegment(segment: string): CheckClassification | undefined {
 }
 
 /**
+ * 分割済みセグメント列に**複合文の構造**が含まれるか (QA-CQ12-1・R12 監査 H)。
+ *
+ * check-classifier 用。`\n` はセグメント区切りなので、`if false; then` / `  pytest` / `fi` のように
+ * 複数行に書かれた複合文は予約語が**自分のセグメント**に落ち、セグメント単位の
+ * `reservedWords:false` (R11 H2) では届かない — `pytest` セグメント単体は普通の check に見える。
+ * bash は body を実行せず rc=0 で終わるので、そのまま credit すると failed test が passed バッジになる
+ * (ADR 0015 が禁じる fake-green)。いずれかのセグメントの先頭語がコマンド位置の予約語なら
+ * 「このコマンドは複合文を含む」とみなし、認定側は全体を undefined に倒す (under-credit = 安全方向)。
+ * `time` は除く: runner ラッパで exit が配下のものになるので `time pytest` は正当な credit。
+ * 予約語集合は normalize.ts の `COMMAND_POSITION_RESERVED_WORDS` (単一出所) を共有する。消費者は本ファイルのみ。
+ */
+function hasCompoundStatement(segments: readonly string[]): boolean {
+  for (const segment of segments) {
+    const head = tokenize(segment)[0];
+    if (head !== undefined && head !== "time" && COMMAND_POSITION_RESERVED_WORDS.has(head))
+      return true;
+  }
+  return false;
+}
+
+/**
  * command 文字列を check 分類する (§D6)。複数セグメント (`ruff check . && pytest`) は **最初に
  * チェック認定できたセグメント**を返す (最頻の単一チェックを拾い、false-positive を避ける保守判定)。
  * どのセグメントもチェックでなければ undefined (= 証拠なし・honest)。
  */
 export function classifyCheck(command: string): CheckClassification | undefined {
   if (typeof command !== "string" || command.length === 0) return undefined;
-  for (const seg of splitSegments(command)) {
+  // 解析可能長を超える入力は証拠なし (SEC-CQ12-1): `splitSegments` は上限超で超線形になりうる。
+  if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return undefined;
+  const segments = splitSegments(command);
+  // 複合文を含むコマンドは全体を認定しない (QA-CQ12-1): exit が check の結果でない。
+  if (hasCompoundStatement(segments)) return undefined;
+  for (const seg of segments) {
     const c = classifySegment(seg);
     if (c !== undefined) return c;
   }

@@ -306,6 +306,52 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     });
   });
 
+  it("R12 H1 (QA-CQ12-1): multi-line compound statements are not credited either", () => {
+    // `\n` はセグメント区切りなので予約語が自分のセグメントに落ち、セグメント単位のフェンスは届かない。
+    //   実 bash: `if false; then\n  touch M\nfi` は M を作らず rc=0 = passed バッジになる形。
+    let checked = 0;
+    for (const cmd of [
+      "if false; then\n  pytest\nfi",
+      "while false; do\n  npm test\ndone",
+      "until true; do\n  eslint .\ndone",
+      "if false\nthen\n  tsc --noEmit\nfi",
+      "case y in\n  x) pytest;;\nesac",
+      "for f in; do\n  pytest\ndone",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+      checked += 1;
+    }
+    expect(checked).toBe(6);
+    // 複合文を含まない複数行は普通に credit される (ガードが過剰でないこと)。
+    expect(classifyCheck("cd app\npytest")).toEqual({ check_kind: "test", check_match: "program" });
+  });
+
+  it("R12 M1 (SEC-CQ12-1): oversized commands yield no evidence, and fast", () => {
+    // `checkFields` は `splitSegments` の唯一のガード無し消費者で、4 MiB の入力で同期 hook パスが
+    //   3 分停止した。解析可能長を超えたら証拠なし (undefined) で即帰る。
+    const huge = `pytest ${">o ".repeat(12_000)}`; // 36 KiB > 16 KiB
+    expect(huge.length).toBeGreaterThan(16 * 1024);
+    let best = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 3; i += 1) {
+      const started = performance.now();
+      expect(classifyCheck(huge)).toBeUndefined();
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best, "oversized input must short-circuit").toBeLessThan(50);
+  });
+
+  it("known pre-existing gap (v0.9 task 01a03bb6): sequencing after the check still credits it", () => {
+    // exit がコマンド全体のものになる形 (SEC-CQ12-2・base 同値・32 combos)。R12 では意図的に触らない。
+    expect(classifyCheck("pytest ; echo done")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("npm test || true")).toEqual({
+      check_kind: "test",
+      check_match: "script",
+    });
+  });
+
   it("source coupling: the check classifier derives the program through the canonical chain with reserved words off", () => {
     const src = readFileSync(
       fileURLToPath(new URL("../src/check-classifier.ts", import.meta.url)),
@@ -313,5 +359,8 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     );
     expect(src).toContain("programTokens(rawTokens, { reservedWords: false })");
     expect(src).not.toMatch(/skipCommandPrefixWords\(/);
+    // R12: 複合文ガードと長さガードは classifyCheck の入口にあること。
+    expect(src).toContain("if (hasCompoundStatement(segments)) return undefined;");
+    expect(src).toContain("if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return undefined;");
   });
 });

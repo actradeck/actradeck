@@ -190,7 +190,7 @@ const FD_SCAN_LIMIT = 64;
  * 分類器が解析を諦めるコマンド長 (これを超えたら fail-safe high)。
  * 走査上限系の定数はここから導出し、「上限が理由でセキュリティ制御が飛ぶ」形を作らない。
  */
-const MAX_ANALYZABLE_COMMAND_LEN = 16 * 1024;
+export const MAX_ANALYZABLE_COMMAND_LEN = 16 * 1024;
 
 /**
  * 置換 (`$(…)` / backtick / `<(…)`) の走査上限。同期 hook パスゆえ有界にする (SEC-CQ5-3 と同方針)。
@@ -1676,7 +1676,7 @@ function isCleanExecutableToken(token: string): boolean {
  * `in` は含めない (`for f in …` / `case x in` の中でだけ現れ、コマンド位置には来ない)。
  * `{` `(` は grouping wrapper が別途扱う。
  */
-const COMMAND_POSITION_RESERVED_WORDS: ReadonlySet<string> = new Set(
+export const COMMAND_POSITION_RESERVED_WORDS: ReadonlySet<string> = new Set(
   "if then else elif fi for while until do done case esac time !".split(" "),
 );
 
@@ -1739,8 +1739,15 @@ export function skipCommandPrefixWords(
  * check-classifier に**別々に手組み**されており、R9 の H (`launchesShellWithProcessSubstitution`
  * だけが 1 段を飛ばした) はまさにこの class だった。段の集合を 1 箇所に閉じ、消費者は皆ここを通す。
  * `capExhausted` はラッパ多重で実コマンドを隠した疑い (分類本体だけが床に使う)。
- * `isPersistDeniedCommand` は意図的にここを通さない — 永続 allowlist は前置語やラッパが**ある時点で**
- * deny する構造ゲートであり、実プログラムへ「届く」ことが目的ではない。
+ * 正準チェーンを通さない箇所は 3 つあり、いずれも意図的である (TDA-CQ12-5):
+ *  - `isPersistDeniedCommand` — 永続 allowlist は前置語やラッパが**ある時点で** deny する構造ゲートで、
+ *    実プログラムへ「届く」ことが目的ではない。
+ *  - `unanalyzableSegmentRisk` — **段 1 (前置語 skip) のみ**。「このセグメントを構造解析できるか」の
+ *    判定であり、ラッパ名自体がクリーンな実行可能名なのでラッパ剥がしは答えを変えない。加えて
+ *    `rawTokens.slice(startIdx)` に**索引**が必要で、トークン列を返す本関数では表せない。
+ *  - `check-classifier.ts` の exec-runner 貫通後 — **段 2 (ラッパ剥がし) のみ**。`unwrapExecRunner` が
+ *    返すのは shell の語ではなく **argv** で、先頭の `FOO=bar` は runner へのリテラル引数 (shell 代入
+ *    ではない) ゆえ段 1 を当ててはならない。
  */
 export function programTokens(
   rawTokens: string[],
