@@ -3977,6 +3977,9 @@ describe("INV-APPROVAL-R17: time options and command-running wrappers keep the a
             execFileSync("timeout", ["2", BASH, "-c", `${form}touch m`], {
               cwd: dir,
               stdio: "ignore",
+              // `watch` は ncurses を初期化するので TERM 無し (CI runner) では "Error opening terminal"
+              //   で子を一度も走らせない。tty 非依存の `dumb` を既定にして実走を保つ (skip にしない)。
+              env: { ...process.env, TERM: process.env.TERM ?? "dumb" },
             });
           } catch {
             // watch は終了しないので timeout に殺される (rc 124) — marker で判定する。
