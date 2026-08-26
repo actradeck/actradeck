@@ -494,6 +494,9 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
         rmSync(controlDir, { recursive: true, force: true });
       }
     },
+    // 1,560 回の bash spawn は静穏時 ~5s、preflight の全 suite 並走下で 13s (vitest 既定 5s を超過して
+    //   RED になった実例・R16)。CI runner の遅さも見込み 120s。時間でなく leak 0 が検証対象。
+    120_000,
   );
 
   it("R15 H1/H2 (SEC-CQ15-1/2 ≡ QA-CQ15-1/2 ≡ TDA-CQ15-1): `time` prefix and line-continued empty parentheses are refused", () => {
