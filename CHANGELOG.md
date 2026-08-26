@@ -196,12 +196,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   nothing, and exits 0) is not credited. The function-definition check is structural: bash's
   grammar puts empty parentheses only in a function header, so a leading name followed by empty
   parentheses (whitespace or a backslash-newline inside them included) or the `function`
-  keyword is refused, and a leading `time` is looked through rather than skipped, so
-  `time run() { … }` is refused while `time pytest` keeps its credit. The vectors for this are
-  not listed by hand: the test suite generates spellings along prefix, keyword, spacing,
+  keyword is refused, and a leading `time` (with its `-p` / `--` words), subshell or group
+  opener is looked through rather than skipped, so `time run() { … }` and `( run() { … } )` are
+  refused while `time pytest` and `( pytest )` keep their credit. The vectors for this are not
+  listed by hand: the test suite generates spellings along prefix, wrapper, keyword, spacing,
   parenthesis-interior and body axes, runs each through bash itself with a marker file, and
-  requires every spelling that bash defines without executing to be refused; the accepted
-  spelling set is therefore whatever bash accepts, verified on each test run. Under-crediting
+  requires every spelling that bash defines without executing to be refused. That guarantee is
+  bounded by the generated axes — spellings outside them are not covered, and an audit round
+  that finds one adds it as an axis. On the same `time` prefix the risk verdict had regressed:
+  `time -p rm -rf …` was rated low with no category because the word after `time` was taken as
+  the program; the timespec words are now skipped from one shared set, and the approval verdict
+  for a `time -p` / `time --` prefixed command is pinned equal to the bare command. Under-crediting
   is the safe direction for a verification badge. Sequencing after a check (`pytest ; echo done`,
   `npm test || true`) still credits it, as it always has, and is tracked rather than claimed
   closed. The check classifier also gained the command-length guard the risk verdict already had:

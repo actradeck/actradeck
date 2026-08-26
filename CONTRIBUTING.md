@@ -121,7 +121,9 @@ because it shapes how fixes are reviewed: **a test that lands an audit finding m
 finding's evidence verbatim.** Matching the finding's count with a different vector, or
 listing the shapes the implementation happens to catch, is not a landing — where the input
 space is a grammar (shell spellings, escape forms), derive the vectors from the real
-interpreter instead of by hand.
+interpreter instead of by hand, keep the generated axes symmetric (the same variants at every
+position the grammar allows them), and when a later audit finds a spelling the generator
+missed, add it as an axis rather than as one more vector.
 
 **Credit.** Your merged commits are the primary, durable record.
 [`CONTRIBUTORS.md`](./CONTRIBUTORS.md) additionally credits contributors.

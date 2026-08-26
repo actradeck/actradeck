@@ -1681,6 +1681,14 @@ export const COMMAND_POSITION_RESERVED_WORDS: ReadonlySet<string> = new Set(
 );
 
 /**
+ * `time` の直後に許される timespec 語 (bash: `time [-p] [--] pipeline`)。`time` を読み飛ばした直後は
+ * これらも読み飛ばす — R16 H (SEC-CQ16-1): `time -p rm -rf …` が `-p` をクリーンな実行可能名と見て
+ * low/[] に落ちていた (3b6d5b0 の回帰・base main は high/recursive-rm)。check-classifier の `time` 透過も
+ * この集合を使う (第二の前置語パーサを作らない・単一出所)。
+ */
+export const TIME_OPTION_WORDS: ReadonlySet<string> = new Set(["-p", "--"]);
+
+/**
  * セグメント先頭の**前置語**をスキップして実コマンド先頭の index を返す —
  * env 代入 (`VAR=val`) と、コマンド位置の予約語 (`then` / `do` / `!` / `time` …) の両方。
  * どちらも「その直後がコマンド位置」であり、順不同で連なりうる (`then FOO=1 rm`)。
@@ -1721,6 +1729,12 @@ export function skipCommandPrefixWords(
       if (tokens[i] === "in") i += 1;
       while (i < tokens.length && !(tokens[i] as string).endsWith(")")) i += 1;
       if (i < tokens.length) i += 1; // `PATTERN)`
+      continue;
+    }
+    if (reservedWords && t === "time") {
+      // `time [-p] [--] pipeline` — timespec 語はコマンドではない (R16 H・SEC-CQ16-1)。
+      i += 1;
+      while (i < tokens.length && TIME_OPTION_WORDS.has(tokens[i] as string)) i += 1;
       continue;
     }
     if (ASSIGNMENT_TOKEN_RE.test(t) || (reservedWords && COMMAND_POSITION_RESERVED_WORDS.has(t))) {

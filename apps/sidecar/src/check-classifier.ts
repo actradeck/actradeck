@@ -54,6 +54,7 @@ import {
   programTokens,
   splitSegments,
   stripRunnerWrappers,
+  TIME_OPTION_WORDS,
   tokenize,
 } from "./normalize.js";
 
@@ -378,11 +379,11 @@ function classifySegment(segment: string): CheckClassification | undefined {
  */
 function hasCompoundStatement(segments: readonly string[]): boolean {
   for (const segment of segments) {
-    // `time` [-p] は**透過**する (skip ではない・R15 H・SEC-CQ15-2 ≡ QA-CQ15-1 ≡ TDA-CQ15-1): exit は
-    //   配下のものになるので `time pytest` は正当な credit だが、配下が予約語や関数定義ヘッダなら
-    //   `time run() {…}` も定義のみで rc=0 になる。R12〜R14 の `continue` はセグメントごと検査を飛ばし、
-    //   この形を素通ししていた。
-    const tokens = stripTimePrefix(tokenize(segment));
+    // 透明な前置 (`time` + timespec・grouping opener) は**透過**する (skip ではない・R15 H → R16 H):
+    //   exit は配下のものになるので `time pytest` / `( pytest )` は正当な credit だが、配下が予約語や
+    //   関数定義ヘッダなら `time run() {…}` / `( run() {…} )` も定義のみで rc=0 になる。R12〜R14 の
+    //   `continue` はセグメントごと検査を飛ばし、この形を素通ししていた。
+    const tokens = stripTransparentPrefix(tokenize(segment));
     const head = tokens[0];
     if (head === undefined) continue;
     if (COMMAND_POSITION_RESERVED_WORDS.has(head)) return true;
@@ -391,11 +392,25 @@ function hasCompoundStatement(segments: readonly string[]): boolean {
   return false;
 }
 
-/** 先頭の `time` (と直後の `-p`) を剥がした語列。`time` は exit を配下へ素通しする透明なラッパ。 */
-function stripTimePrefix(tokens: readonly string[]): readonly string[] {
+/**
+ * 判定の前に透過する前置 (R15 H → R16 H): `time` + timespec 語 (`-p` / `--`)、grouping opener (`(` / `{`
+ * の単独語と、語頭に融合した `(` / `{`)。いずれも exit を配下へ素通しし、配下が関数定義なら定義のみで
+ * rc=0 になる — `time -- function run {…}` (SEC-CQ16-3)・`( run()\n{…}\n)` (SEC-CQ16-2)。timespec 語集合は
+ * normalize.ts の `TIME_OPTION_WORDS` (risk 側 `skipCommandPrefixWords` と共有・単一出所・SEC-CQ16-1)。
+ * 多重前置 (`time -p time -p run () {…}`) も剥がし切る (QA-CQ16-3)。
+ */
+function stripTransparentPrefix(tokens: readonly string[]): readonly string[] {
   let rest = tokens;
-  while (rest[0] === "time") rest = rest.slice(rest[1] === "-p" ? 2 : 1);
-  return rest;
+  for (;;) {
+    const head = rest[0];
+    if (head === "time") {
+      rest = rest.slice(1);
+      while (rest[0] !== undefined && TIME_OPTION_WORDS.has(rest[0])) rest = rest.slice(1);
+    } else if (head === "(" || head === "{") rest = rest.slice(1);
+    else if (head !== undefined && /^[({]/.test(head))
+      rest = [head.replace(/^[({]+/, ""), ...rest.slice(1)];
+    else return rest;
+  }
 }
 
 /**
@@ -412,11 +427,13 @@ const FUNCTION_HEADER_RE = /^[^()]+\(\s*\)/;
  * R13 は `function` 語・`()` で終わる語・`()` 単独語の 3 形を列挙したが、`tokenize` は空白でしか語を
  * 切らないため `(` `)` が名前や `{` と融合する綴り (`run(){` / `run ( ) {` / `run( ) {` / `run()(`) を
  * 取りこぼした (64 綴り中 52 が credit・SEC 実測)。綴りを足すのではなく**構造**で判定する:
- *  - bash の文法で**空括弧**は関数定義にしか現れない (空サブシェル `( )` は構文エラー)。先頭 4 語を
- *    空白なしで連結し「括弧を含まない名前 + `()`」に一致すれば関数定義ヘッダ。
+ *  - bash の文法で**空括弧**は関数定義にしか現れない (空サブシェル `( )` は構文エラー)。セグメントの
+ *    全語を空白なしで連結し「括弧を含まない名前 + `()`」に一致すれば関数定義ヘッダ。regex は `^` 起点で
+ *    **最初の**空括弧だけを見るので語数の上限は要らない — R15 の `slice(0, 4)` 窓は、行継続で語が
+ *    分割された `run \<nl> (\t\<nl>\t){` の `)` を窓外へ落とし credit していた (R16 H・QA-CQ16-1)。
  *  - `function` 語が command 位置にあれば括弧の有無によらず関数定義。
  * 判定は正準 `tokenize` の語に対する検査のみで文字レベルの読解 (第二パーサ) は持たない。
- * under-credit 側に倒れる既知の形 (安全方向・開示): 引用された `'run()'`、先頭 4 語内の空置換 `$()`、
+ * under-credit 側に倒れる既知の形 (安全方向・開示): 引用された `'run()'`、語列内の空置換 `$()`、
  * `pytest -k '[()]'` のような空括弧を含む引数。いずれも「証拠なし」に倒れるだけで fake-green ではない。
  * 対照 (bash が本体を実行し credit が正しい形): `{\n pytest\n}` / `(\n pytest\n)` — 空括弧を含まない。
  * テストは綴りを手で列挙せず、実 bash (marker 方式) に「定義のみ・本体未実行」と判定させた綴り集合を
@@ -424,7 +441,7 @@ const FUNCTION_HEADER_RE = /^[^()]+\(\s*\)/;
  */
 function isFunctionDefinitionHeader(tokens: readonly string[]): boolean {
   if (tokens[0] === "function") return true;
-  return FUNCTION_HEADER_RE.test(tokens.slice(0, 4).join(""));
+  return FUNCTION_HEADER_RE.test(tokens.join(""));
 }
 
 /**

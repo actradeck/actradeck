@@ -89,7 +89,9 @@ export default tseslint.config(
       //   inert (TDA-CQ11-2) — 分類器の合計は test 側 metatest (import 閉包の合計天井) が固定し、
       //   `normalizeHook` の分離 + 分類器専用天井は v0.9 task。R13 unblock は check-classifier.ts 側に
       //   置き normalize.ts は 1951 のまま (天井 1955 据え置き)。
-      "max-lines": ["error", { max: 1955, skipComments: true, skipBlankLines: true }],
+      //   R16 unblock (decision 01a03c6c) で 1951 → 1957: `time` の timespec 語 (`-p` / `--`) を読み飛ばす
+      //   分岐 + 単一出所 `TIME_OPTION_WORDS` (SEC-CQ16-1 の承認ゲート回帰の修正)。天井は実測 + 4。
+      "max-lines": ["error", { max: 1961, skipComments: true, skipBlankLines: true }],
     },
   },
   {

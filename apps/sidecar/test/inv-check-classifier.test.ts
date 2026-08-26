@@ -406,31 +406,41 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       // 生成軸 (R15 で 2 軸追加・SEC-CQ15-1/2 ≡ QA-CQ15-1/2 ≡ TDA-CQ15-1/2): 前置 (`time` は exit を
       //   素通しする透明ラッパ・タブ) と括弧内 (行継続 `\<newline>` を含む)。R14 の軸にはどちらも無く、
       //   「実インタプリタ由来」の規約が同クラスを止められなかった。
-      const PREFIXES = ["", "time ", "time -p ", "\t"];
+      // **軸は左右対称に保つ (R16 H・QA-CQ16-2)**: R15 は行継続を `INNER` にだけ入れ、名前と `(` の間
+      //   (`WS`) に無かったため、`run \<nl> (\t\<nl>\t){` の H を構造的に検出できなかった。文法上
+      //   同じ変種が入りうる位置には同じ要素を置く。監査で見つかった綴りは vector でなく**軸**として
+      //   足す。R16 追加軸: 前置 `time -- ` / wrapper (subshell・group の中の定義・SEC-CQ16-2)。
+      const PREFIXES = ["", "time ", "time -p ", "time -- ", "\t"];
+      const WRAPS: ReadonlyArray<(s: string) => string> = [
+        (s) => s,
+        (s) => `( ${s}\n)`,
+        (s) => `{ ${s}\n}`,
+      ];
       const KEYWORDS = ["", "function "];
       const NAME = "run";
-      const WS = ["", " ", "\t"]; // 名前と `(` の間
-      const INNER = ["", " ", "\t", "\\\n"]; // `(` と `)` の間 (最後は行継続)
+      const WS = ["", " ", " \\\n "]; // 名前と `(` の間 (空白付き行継続を含む)
+      const INNER = ["", "\t", "\\\n", "\t\\\n\t"]; // `(` と `)` の間 (行継続・空白付き行継続を含む)
       const BODIES: ReadonlyArray<(c: string) => string> = [
         (c) => `{\n  ${c}\n}`,
-        (c) => ` {\n  ${c}\n}`,
-        (c) => `\n{\n  ${c}\n}`,
         (c) => `(\n  ${c}\n)`,
         (c) => `{ ${c}; }`,
       ];
       const templates: string[] = [];
       for (const prefix of PREFIXES)
-        for (const body of BODIES) {
-          // ヘッダ無し = 本体が実行される形。harness の marker 連言 (`rc === 0 && !marker`) が inert で
-          //   ないことの証人 (QA-CQ15-3): これらは marker を作り `ran` に数えられなければならない。
-          templates.push(`${prefix}${body("__CMD__").trimStart()}`);
-          for (const kw of KEYWORDS) {
-            if (kw !== "") templates.push(`${prefix}${kw}${NAME}${body("__CMD__")}`);
-            for (const ws1 of WS)
-              for (const inner of INNER)
-                templates.push(`${prefix}${kw}${NAME}${ws1}(${inner})${body("__CMD__")}`);
+        for (const wrap of WRAPS)
+          for (const body of BODIES) {
+            // ヘッダ無し = 本体が実行される形。harness の marker 連言 (`rc === 0 && !marker`) が inert で
+            //   ないことの証人 (QA-CQ15-3): これらは marker を作り `ran` に数えられなければならない。
+            templates.push(`${prefix}${wrap(body("__CMD__").trimStart())}`);
+            for (const kw of KEYWORDS) {
+              if (kw !== "") templates.push(`${prefix}${wrap(`${kw}${NAME}${body("__CMD__")}`)}`);
+              for (const ws1 of WS)
+                for (const inner of INNER)
+                  templates.push(
+                    `${prefix}${wrap(`${kw}${NAME}${ws1}(${inner})${body("__CMD__")}`)}`,
+                  );
+            }
           }
-        }
       const dir = mkdtempSync(join(tmpdir(), "actradeck-fn-gt-"));
       const defineOnly: string[] = [];
       let ran = 0;
@@ -455,11 +465,12 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       }
       // 非空虚: 生成軸が実際に fake-green 綴りを大量に含むこと (R13 が見た 9 形より桁で多い)、かつ
       //   本体が実行される形も含むこと (marker 連言が両側で実効)。
-      expect(templates.length).toBe(520); // 4 prefix × 5 body × (ヘッダ無し 1 + 括弧綴り 2 kw × 12 + `function` のみ 1)
+      // 5 prefix × 3 wrap × 3 body × (ヘッダ無し 1 + 括弧綴り 2 kw × 12 + `function` のみ 1) = 1170
+      expect(templates.length).toBe(1170);
       expect(
         defineOnly.length,
         `define-only spellings (ran=${ran}, rejected=${rejected})`,
-      ).toBeGreaterThan(300);
+      ).toBeGreaterThan(700);
       expect(ran, "some generated spellings must actually run their body").toBeGreaterThan(10);
       const leaked = defineOnly.filter((cmd) => classifyCheck(cmd) !== undefined);
       expect(leaked, "define-only spellings credited as checks").toEqual([]);
@@ -505,6 +516,35 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       check_kind: "test",
       check_match: "program",
     });
+  });
+
+  it("R16 H (SEC-CQ16-2/3 ≡ QA-CQ16-1/3): grouped definitions, `time --`, stacked `time`, and split headers are refused", () => {
+    // 裁定者の実 bash GT: いずれも rc=0 かつ marker 不作成 (定義のみ)。R15 までは (a) 先頭 `(`/`{` で
+    //   join が `(` 始まりになり regex が外れ、(b) `time --` を剥がさず、(c) 行継続で語が分割されると
+    //   `)` が 4 語窓の外へ落ちていた。
+    for (const cmd of [
+      "( run()\n{\n  pytest\n}\n)",
+      "{ run() {\n  pytest\n}\n}",
+      "(run() { pytest; })",
+      "( function run {\n  pytest\n}\n)",
+      "time -- function run {\n  pytest\n}",
+      "time -- run() {\n  pytest\n}",
+      "time -- time -- run ( ) {\n  pytest\n}",
+      "time -p time -p run () { pytest; }",
+      "time time run() {\n  pytest\n}",
+      "run \\\n (\t\\\n\t){\n  pytest\n}",
+      "run \\\n ( \\\n ) {\n  pytest\n}",
+      "time -- ( run \\\n ( ) {\n  pytest\n}\n)",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+    }
+    // 対照: grouping opener と `time` は透過であって拒否ではない。
+    expect(classifyCheck("(\n  pytest\n)")).toEqual({ check_kind: "test", check_match: "program" });
+    expect(classifyCheck("time (\n  pytest\n)")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("time -p pytest")).toEqual({ check_kind: "test", check_match: "program" });
   });
 
   it("QA-CQ13-2: the compound-statement guard scans every segment, not only the first", () => {
@@ -559,11 +599,15 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     //   かつ構造判定 (空括弧 regex + `function` 語)。綴りの列挙へ戻す変異はここで RED。
     expect(src).toContain("if (isFunctionDefinitionHeader(tokens)) return true;");
     expect(src).toContain("const FUNCTION_HEADER_RE = /^[^()]+\\(\\s*\\)/;");
-    // R15: `time` は skip でなく透過 — `continue` へ戻す変異はここで RED。
-    expect(src).toContain("const tokens = stripTimePrefix(tokenize(segment));");
+    // R15/R16: 透明な前置は skip でなく透過 — `continue` へ戻す変異はここで RED。timespec 語集合は
+    //   normalize.ts の単一出所を使い (SEC-CQ16-1/3)、語窓の切り詰めは無い (QA-CQ16-1)。
+    expect(src).toContain("const tokens = stripTransparentPrefix(tokenize(segment));");
     expect(src).not.toMatch(/head === "time"\) continue/);
+    expect(src).toContain("TIME_OPTION_WORDS.has(rest[0])");
+    expect(src).not.toMatch(/rest\[1\] === "-p"/);
     expect(src).toContain('if (tokens[0] === "function") return true;');
-    expect(src).toContain('FUNCTION_HEADER_RE.test(tokens.slice(0, 4).join(""))');
+    expect(src).toContain('FUNCTION_HEADER_RE.test(tokens.join(""))');
+    expect(src).not.toMatch(/slice\(0, 4\)/);
     expect(src).not.toMatch(/COMMAND_POSITION_RESERVED_WORDS\.add\(/);
     expect(src).toContain("if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return undefined;");
   });
