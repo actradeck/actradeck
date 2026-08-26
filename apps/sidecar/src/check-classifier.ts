@@ -16,12 +16,15 @@
  * - **複合文を含むコマンド** (R12 H・QA-CQ12-1): `if false; then pytest; fi` は exit 0 で pytest を
  *   実行せず、`! pytest` は exit を反転する。単一行はセグメント内の予約語で、複数行 (`if …; then` /
  *   `pytest` / `fi` が別セグメント) は `hasCompoundStatement` で、いずれも undefined に倒す。
- * - **関数定義を含むコマンド** (R13 H・SEC-CQ13-1 ≡ QA-CQ13-1): `run() {` / `run () {` /
- *   `function run` のヘッダは予約語集合に無く、bash は定義だけして本体を実行せず rc=0 で終わる
- *   (`run() {\n  pytest\n}` は failed test を passed バッジにする)。同じ `hasCompoundStatement` が
- *   check 局所のカーブアウトで拾い undefined に倒す — `function` を risk 側と共有する予約語集合へ
- *   足してはならない (前置語 skip 段の意味が変わる)。対照の `{ … }` グループ / `( … )` サブシェルは
- *   本体を実行するので credit される。
+ * - **関数定義を含むコマンド** (R13 H・SEC-CQ13-1 ≡ QA-CQ13-1 → R14 H・SEC/QA/TDA-CQ14-1):
+ *   `run() {` / `run(){` / `run ( ) {` / `function run` のヘッダは予約語集合に無く、bash は定義だけ
+ *   して本体を実行せず rc=0 で終わる (failed test が passed バッジになる)。R13 は綴りを列挙して閉じよう
+ *   として取りこぼした (`(` `)` が語に融合するか分離するかは周辺空白で変わる)。R14 からは**構造判定**:
+ *   bash の文法で空括弧は関数定義にしか現れない (空サブシェルは構文エラー) ので、先頭語列を連結した
+ *   「名前 + 空括弧」または `function` 語で refuse する (`isFunctionDefinitionHeader`)。テストの
+ *   vector は手で数え上げず、実 bash に「定義のみで本体を走らせない」綴りを判定させて導出する。
+ *   `function` を risk 側と共有する予約語集合へ足してはならない (前置語 skip 段の意味が変わる)。
+ *   対照の `{ … }` グループ / `( … )` サブシェルは本体を実行するので credit される。
  * - **解析可能長を超えるコマンド** (R12 M・SEC-CQ12-1): `splitSegments` の唯一のガード無し消費者
  *   だったため 4 MiB の入力で同期 hook パスが 3 分停止した。`MAX_ANALYZABLE_COMMAND_LEN` 超は
  *   証拠なし (undefined)。
@@ -369,20 +372,45 @@ function classifySegment(segment: string): CheckClassification | undefined {
  * `time` は除く: runner ラッパで exit が配下のものになるので `time pytest` は正当な credit。
  * 予約語集合は normalize.ts の `COMMAND_POSITION_RESERVED_WORDS` (単一出所) を共有する。消費者は本ファイルのみ。
  *
- * **関数定義ヘッダも同じ扱い** (R13 H・SEC-CQ13-1 ≡ QA-CQ13-1): `name() {` / `name () {` /
- * `function name` は予約語でないが、bash は定義だけして rc=0 で終わる (本体は走らない)。判定は正準
- * `tokenize` の語に対する形の検査のみ (`function` 語・`()` で終わる語・`()` 単独の第 2 語) で、文字
- * レベルの読解 (第二パーサ) は持たない。引用された `'run()'` も拾うが under-credit 側 (安全方向)。
+ * **関数定義ヘッダも同じ扱い** (R13 H → R14 H): `isFunctionDefinitionHeader` を参照。
  * 全セグメントを走査する (先頭だけでは `pytest\nrun() { :; }` の exit 0 を見落とす・QA-CQ13-2)。
  */
 function hasCompoundStatement(segments: readonly string[]): boolean {
   for (const segment of segments) {
-    const [head, second] = tokenize(segment);
+    const tokens = tokenize(segment);
+    const head = tokens[0];
     if (head === undefined || head === "time") continue;
     if (COMMAND_POSITION_RESERVED_WORDS.has(head)) return true;
-    if (head === "function" || head.endsWith("()") || second === "()") return true;
+    if (isFunctionDefinitionHeader(tokens)) return true;
   }
   return false;
+}
+
+/**
+ * 先頭語列 (連結) が「名前 + 空括弧」なら関数定義ヘッダ。`^` から括弧を含まない名前、直後に `()`。
+ * 連結は空白を落とすので `run()` / `run ()` / `run ( )` / `run( )` / `run(){` / `run()(` を同一視する。
+ */
+const FUNCTION_HEADER_RE = /^[^()]+\(\)/;
+
+/**
+ * セグメントの語列が bash の関数定義ヘッダか (R14 H・SEC-CQ14-1 ≡ QA-CQ14-1 ≡ TDA-CQ14-1)。
+ *
+ * R13 は `function` 語・`()` で終わる語・`()` 単独語の 3 形を列挙したが、`tokenize` は空白でしか語を
+ * 切らないため `(` `)` が名前や `{` と融合する綴り (`run(){` / `run ( ) {` / `run( ) {` / `run()(`) を
+ * 取りこぼした (64 綴り中 52 が credit・SEC 実測)。綴りを足すのではなく**構造**で判定する:
+ *  - bash の文法で**空括弧**は関数定義にしか現れない (空サブシェル `( )` は構文エラー)。先頭 4 語を
+ *    空白なしで連結し「括弧を含まない名前 + `()`」に一致すれば関数定義ヘッダ。
+ *  - `function` 語が command 位置にあれば括弧の有無によらず関数定義。
+ * 判定は正準 `tokenize` の語に対する検査のみで文字レベルの読解 (第二パーサ) は持たない。
+ * under-credit 側に倒れる既知の形 (安全方向・開示): 引用された `'run()'`、先頭 4 語内の空置換 `$()`、
+ * `pytest -k '[()]'` のような空括弧を含む引数。いずれも「証拠なし」に倒れるだけで fake-green ではない。
+ * 対照 (bash が本体を実行し credit が正しい形): `{\n pytest\n}` / `(\n pytest\n)` — 空括弧を含まない。
+ * テストは綴りを手で列挙せず、実 bash (marker 方式) に「定義のみ・本体未実行」と判定させた綴り集合を
+ * そのまま vector にする (inv-check-classifier.test.ts R14 H1)。
+ */
+function isFunctionDefinitionHeader(tokens: readonly string[]): boolean {
+  if (tokens[0] === "function") return true;
+  return FUNCTION_HEADER_RE.test(tokens.slice(0, 4).join(""));
 }
 
 /**

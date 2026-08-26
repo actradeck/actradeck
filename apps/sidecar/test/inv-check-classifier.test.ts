@@ -14,7 +14,10 @@
  * 各変種が plain 形と同一分類になることを assert することで、分類器が正準チェーンを消費している事実を固定する
  * (naive パーサなら少なくとも 1 変種で分類が崩れる)。
  */
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -346,7 +349,12 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       "t() {\n  tsc --noEmit\n}",
       "pytest; run() { :; }", // 定義が後ろでも全体の exit は定義の 0 になる
     ];
-    for (const cmd of FUNCTION_DEFINITIONS) expect(classifyCheck(cmd), cmd).toBeUndefined();
+    let refused = 0;
+    for (const cmd of FUNCTION_DEFINITIONS) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+      refused += 1;
+    }
+    expect(refused).toBe(FUNCTION_DEFINITIONS.length);
     // 対照: 本体を実行する grouping / subshell は credit される (ガードが過剰でないこと)。
     expect(classifyCheck("{\n  pytest\n}")).toEqual({ check_kind: "test", check_match: "program" });
     expect(classifyCheck("(\n  pytest\n)")).toEqual({ check_kind: "test", check_match: "program" });
@@ -354,6 +362,113 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     //   安全方向・本ラウンドで変えない)。
     expect(classifyCheck("{ pytest; }")).toBeUndefined();
   });
+
+  it("R14 H1 (SEC-CQ14-1 ≡ QA-CQ14-1 ≡ TDA-CQ14-1): the spellings R13 missed are refused structurally", () => {
+    // `tokenize` は空白でしか切らないので `(` `)` は周辺空白次第で名前や `{` と融合する。R13 の 3 形
+    //   列挙 (`function` / `()` で終わる語 / `()` 単独語) はこれらを素通しした。裁定者の実 bash GT:
+    //   いずれも rc=0 かつ marker 不作成 (定義のみ)。
+    for (const cmd of [
+      "run(){\n  pytest\n}",
+      "run ( ) {\n  pytest\n}",
+      "run (  ) {\n  pytest\n}",
+      "run (\t) {\n  pytest\n}",
+      "run ( )\n{\n  pytest\n}",
+      "run( ) {\n  pytest\n}",
+      "run()(\n  pytest\n)",
+      "run ( ) (\n  pytest\n)",
+      "function run ( ) {\n  pytest\n}",
+      "pytest\nrun ( ) { :; }",
+      "run\t(\t)\t{\n  pytest\n}",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+    }
+    // 対照: 空括弧を含まない括弧引数・置換は credit を失わない (構造判定が過剰でないこと)。
+    expect(classifyCheck("pytest $(git rev-parse HEAD)")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("pytest -k 'not (slow or gpu)'")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+  });
+
+  const BASH = "/bin/bash";
+  it.skipIf(!existsSync(BASH))(
+    "R14 H1: every function-definition spelling that bash defines without running is refused (bash-derived ground truth)",
+    () => {
+      // 手で列挙した vector は 3 ラウンド続けて綴りを取りこぼした (SEC-CQ14-2)。ここでは綴りを生成軸から
+      //   組み立て、**実 bash** に marker 方式で「定義のみ・本体未実行 (rc=0 かつ marker 不在)」を判定
+      //   させ、そう判定された綴りだけを fake-green の vector として分類器へ掛ける。bash が構文エラー
+      //   にする綴りは fake-green でないので対象外 (件数は開示)。破壊的 argv は使わない (marker は touch)。
+      const KEYWORDS = ["", "function "];
+      const NAMES = ["run", "test_all"];
+      const WS = ["", " ", "\t"];
+      const BODIES: ReadonlyArray<(c: string) => string> = [
+        (c) => `{\n  ${c}\n}`,
+        (c) => ` {\n  ${c}\n}`,
+        (c) => `\n{\n  ${c}\n}`,
+        (c) => `(\n  ${c}\n)`,
+        (c) => `{ ${c}; }`,
+      ];
+      const templates: string[] = [];
+      for (const kw of KEYWORDS)
+        for (const name of NAMES)
+          for (const body of BODIES) {
+            if (kw !== "") templates.push(`${kw}${name}${body("__CMD__")}`);
+            for (const ws1 of WS)
+              for (const ws2 of WS) templates.push(`${kw}${name}${ws1}(${ws2})${body("__CMD__")}`);
+          }
+      const dir = mkdtempSync(join(tmpdir(), "actradeck-fn-gt-"));
+      const defineOnly: string[] = [];
+      let ran = 0;
+      let rejected = 0;
+      try {
+        for (const t of templates) {
+          const script = t.replace("__CMD__", "touch m");
+          let rc = 0;
+          try {
+            execFileSync(BASH, ["-c", script], { cwd: dir, stdio: "ignore" });
+          } catch {
+            rc = 1;
+          }
+          const marker = existsSync(join(dir, "m"));
+          if (marker) rmSync(join(dir, "m"));
+          if (rc === 0 && !marker) defineOnly.push(t.replace("__CMD__", "pytest"));
+          else if (marker) ran += 1;
+          else rejected += 1;
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      // 非空虚: 生成軸が実際に fake-green 綴りを大量に含むこと (R13 が見た 9 形より桁で多い)。
+      expect(templates.length).toBe(190); // 2 kw × 2 name × 5 body × (9 括弧綴り + function のみ 1)
+      expect(
+        defineOnly.length,
+        `define-only spellings (ran=${ran}, rejected=${rejected})`,
+      ).toBeGreaterThan(100);
+      const leaked = defineOnly.filter((cmd) => classifyCheck(cmd) !== undefined);
+      expect(leaked, "define-only spellings credited as checks").toEqual([]);
+      // 対照 (bash が本体を実行する形) は credit を保つ: marker GT を同じ harness で取る。
+      const controlDir = mkdtempSync(join(tmpdir(), "actradeck-fn-ctl-"));
+      try {
+        for (const t of ["{\n  __CMD__\n}", "(\n  __CMD__\n)", "cd .\n__CMD__", "CI=1 __CMD__"]) {
+          execFileSync(BASH, ["-c", t.replace("__CMD__", "touch m")], {
+            cwd: controlDir,
+            stdio: "ignore",
+          });
+          expect(existsSync(join(controlDir, "m")), `control ran: ${t}`).toBe(true);
+          rmSync(join(controlDir, "m"));
+          expect(classifyCheck(t.replace("__CMD__", "pytest")), t).toEqual({
+            check_kind: "test",
+            check_match: "program",
+          });
+        }
+      } finally {
+        rmSync(controlDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("QA-CQ13-2: the compound-statement guard scans every segment, not only the first", () => {
     // `segments[0]` だけを見る変異は R12 の vector (すべて予約語が先頭セグメント) では生き残った。
@@ -403,8 +518,12 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     expect(src).not.toMatch(/skipCommandPrefixWords\(/);
     // R12: 複合文ガードと長さガードは classifyCheck の入口にあること。
     expect(src).toContain("if (hasCompoundStatement(segments)) return undefined;");
-    // R13: 関数定義ヘッダの腕は check 局所 (risk 側と共有する予約語集合へ `function` を足さない)。
-    expect(src).toContain('head === "function" || head.endsWith("()") || second === "()"');
+    // R13/R14: 関数定義ヘッダの判定は check 局所 (risk 側と共有する予約語集合へ `function` を足さない)
+    //   かつ構造判定 (空括弧 regex + `function` 語)。綴りの列挙へ戻す変異はここで RED。
+    expect(src).toContain("if (isFunctionDefinitionHeader(tokens)) return true;");
+    expect(src).toContain("const FUNCTION_HEADER_RE = /^[^()]+\\(\\)/;");
+    expect(src).toContain('if (tokens[0] === "function") return true;');
+    expect(src).toContain('FUNCTION_HEADER_RE.test(tokens.slice(0, 4).join(""))');
     expect(src).not.toMatch(/COMMAND_POSITION_RESERVED_WORDS\.add\(/);
     expect(src).toContain("if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return undefined;");
   });

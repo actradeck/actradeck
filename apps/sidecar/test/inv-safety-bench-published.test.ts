@@ -192,12 +192,40 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
     expect(categoryMisses.length).toBe(12);
     expect(doc).toContain("twelve **category** divergences");
     expect(doc).toContain("seven **risk-level** divergences");
-    const start = doc.indexOf("Risk-level calibration notes");
+    const start = doc.indexOf("\nRisk-level calibration notes"); // 見出し行 (本文中の言及でなく)
     const end = doc.indexOf("## External corpus cross-evaluation");
     expect(start).toBeGreaterThan(0);
     expect(end).toBeGreaterThan(start);
     const notes = doc.slice(start, end);
     for (const m of riskMisses) expect(notes, m.detail).toContain(`\`${m.command}\``);
-    for (const m of categoryMisses) expect(doc, m.detail).toContain("high-risk-other");
+    // category 12 件も command を逐語 pin する (TDA-CQ14-2: 以前はここが空虚ループで、doc の 1 行が
+    //   corpus と乖離していた)。表のセルは `|` を `\|` にエスケープする。複数行 heredoc と空 backtick
+    //   の 2 件だけは markdown のセル 1 行に verbatim で置けないので、doc 側に載せる断片を明示 allowlist
+    //   で対応付ける (allowlist の断片自体が corpus と一致することも下で確認)。
+    const tableStart = doc.indexOf("| Command");
+    const tableEnd = doc.indexOf("\nRisk-level calibration notes");
+    expect(tableStart).toBeGreaterThan(0);
+    expect(tableEnd).toBeGreaterThan(tableStart);
+    const table = doc.slice(tableStart, tableEnd);
+    const DOC_CELL_FRAGMENT: Readonly<Record<string, string>> = {
+      "cat <<EOF\ndon't $(rm -rf /srv) isn't\nEOF": "`don't $(rm -rf /srv) isn't`",
+      "`` rm -rf /srv": "empty backtick substitution before `rm -rf /srv`",
+    };
+    for (const [command, fragment] of Object.entries(DOC_CELL_FRAGMENT)) {
+      expect(
+        categoryMisses.map((m) => m.command),
+        "allowlist entry is a live miss",
+      ).toContain(command);
+      const span = fragment.match(/`([^`]+)`(?!.*`)/)?.[1] ?? fragment;
+      expect(command, `fragment names its miss: ${fragment}`).toContain(span);
+    }
+    const rows = table
+      .split("\n")
+      .filter((line) => line.startsWith("| `") || line.startsWith("| empty"));
+    expect(rows.length).toBe(categoryMisses.length);
+    for (const m of categoryMisses) {
+      const cell = DOC_CELL_FRAGMENT[m.command] ?? m.command.replace(/\|/g, "\\|");
+      expect(table, m.detail).toContain(cell);
+    }
   });
 });
