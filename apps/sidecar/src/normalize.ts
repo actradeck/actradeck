@@ -458,21 +458,23 @@ export function splitSegments(command: string): string[] {
         let body = "";
         while (pendingHeredocs.length > 0) {
           const heredoc = pendingHeredocs.shift() as PendingHeredoc;
-          let matched = false;
           while (i <= command.length) {
             const nl = command.indexOf("\n", i);
             const end = nl === -1 ? command.length : nl;
             const line = command.slice(i, end);
             const compare = heredoc.stripTabs ? line.replace(/^\t+/, "") : line;
             i = nl === -1 ? command.length : nl + 1;
-            if (compare === heredoc.delimiter) {
-              matched = true;
-              break;
-            }
+            if (compare === heredoc.delimiter) break;
             if (!heredoc.quoted) body += `\n${line}`;
             if (nl === -1) break; // 入力末尾に到達 (delimiter 不一致のまま)。
           }
-          if (!matched) return splitSegmentsUnparseable(command); // 未終端 heredoc → fail-safe。
+          // **delimiter 不一致のまま入力末尾 = bash は EOF を終端として扱い、コマンドを実行する**
+          //   (SEC-CQ11-4・R11 監査 H・pre-existing): 以前はここで legacy 分割へ倒していたが、legacy は
+          //   `<<` を区切りとして割るため delimiter 語がプログラム名になり (`echo a ; <<EOF rm -rf /srv`
+          //   → `["echo a", "EOF rm -rf /srv"]`)、実 bash が rm を実行するのに low[] = 二層とも素通り
+          //   だった (12 形・`git push --force` も)。R5 SEC-CQ5-2 はプログラム先行形しか閉じていない。
+          //   bash の意味論どおり「本文は EOF まで・展開規則は通常どおり」として読み切る方が、
+          //   演算子と delimiter を除去済みの主分割 (`rm -rf /srv` が残る) をそのまま使えて厳密に安全側。
         }
         // コマンド語 (redirect 演算子・delimiter を除去済み) を確定する。
         push();
@@ -560,10 +562,12 @@ export function splitSegments(command: string): string[] {
     current += ch;
     i += 1;
   }
-  // 未消費 heredoc = 構造解析不能 → 旧分割へフォールバック (over-gate 方向)。
+  // 未消費 heredoc (delimiter の後に改行が無い) = bash は空本文を EOF で終端してコマンドを実行する
+  //   (SEC-CQ11-4)。演算子と delimiter は既に除去済みなので、残った語がそのまま実コマンド。
+  //   以前の「旧分割へフォールバック」は over-gate ではなく fail-open だった (上の本文ループ参照)。
   // 未終端クォートは `quoteSpanEnd` が -1 を返した時点で既に fail-safe へ倒れている
   // (状態変数を持たないので「閉じ忘れの検査を忘れる」形の穴が構造的に作れない)。
-  if (pendingHeredocs.length > 0) return splitSegmentsUnparseable(command);
+  pendingHeredocs.length = 0;
   push();
   // 除去した「実行される redirect 対象語」を末尾に足す (TDA-CQ6-1 ≡ QA-CQ6-1)。
   for (const target of elidedExecutableTargets) segments.push(target);
@@ -1683,12 +1687,31 @@ const COMMAND_POSITION_RESERVED_WORDS: ReadonlySet<string> = new Set(
  * `FOO=bar ls` を「解析不能メタ文字」と誤認しない・`then rm` を `then` プログラムと誤認しない、
  * の両方を 1 箇所で扱う (分類器・check-classifier・egress 判定の全消費者で一様)。
  */
-export function skipCommandPrefixWords(tokens: string[]): number {
+export interface CommandPrefixOptions {
+  /**
+   * コマンド位置の予約語 (`then` / `do` / `!` / `time` …) も前置語として読み飛ばすか (既定 true)。
+   *
+   * **check-classifier は false を渡す (QA-CQ11-2 ≡ SEC-CQ11-2・R11 監査 H)**: 承認ゲートは
+   * 「その先に何が実行されうるか」を見るので予約語を飛ばして実コマンドへ届くのが安全側だが、
+   * ADR 0015 の check 認定は「exit code が**そのチェックの結果**か」を主張するので逆になる —
+   * `if false; then pytest; fi` は exit 0 で pytest を実行せず、`! pytest` は exit を反転する。
+   * 予約語を飛ばすとこれらが check=test/program に認定され、失敗したテストが「passed」バッジになる
+   * (fake-green・ADR 0015 が禁じる方向)。認定側は env 代入だけを読み飛ばし、複合文の内側は
+   * 認定しない (under-credit = 安全方向)。読み手は 1 つのまま (第二の前置語パーサを作らない)。
+   */
+  readonly reservedWords?: boolean;
+}
+
+export function skipCommandPrefixWords(
+  tokens: string[],
+  options: CommandPrefixOptions = {},
+): number {
+  const reservedWords = options.reservedWords ?? true;
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i];
     if (t === undefined) break;
-    if (t === "case") {
+    if (reservedWords && t === "case") {
       // `case WORD in PATTERN) cmd` — WORD・`in`・最初の `PATTERN)` まではコマンドではない。
       //   `PATTERN)` が無い (パターンが `|` で別セグメントへ割れた) ときは末尾まで消費する =
       //   このセグメントにコマンドは無い。後続の `b) rm …` は先頭が clean 名でないので
@@ -1700,13 +1723,64 @@ export function skipCommandPrefixWords(tokens: string[]): number {
       if (i < tokens.length) i += 1; // `PATTERN)`
       continue;
     }
-    if (ASSIGNMENT_TOKEN_RE.test(t) || COMMAND_POSITION_RESERVED_WORDS.has(t)) {
+    if (ASSIGNMENT_TOKEN_RE.test(t) || (reservedWords && COMMAND_POSITION_RESERVED_WORDS.has(t))) {
       i++;
       continue;
     }
     break;
   }
   return i;
+}
+
+/**
+ * セグメントの raw トークン列から「実際に起動されるプログラム」のトークン列を導出する **正準の
+ * 導出鎖** (TDA-CQ11-4・R11 監査 M): 前置語 (env 代入 + コマンド位置の予約語) を読み飛ばし →
+ * runner ラッパを剥がす。以前は同じ鎖が `segmentProgramName` / 分類本体 / egress 判定 /
+ * check-classifier に**別々に手組み**されており、R9 の H (`launchesShellWithProcessSubstitution`
+ * だけが 1 段を飛ばした) はまさにこの class だった。段の集合を 1 箇所に閉じ、消費者は皆ここを通す。
+ * `capExhausted` はラッパ多重で実コマンドを隠した疑い (分類本体だけが床に使う)。
+ * `isPersistDeniedCommand` は意図的にここを通さない — 永続 allowlist は前置語やラッパが**ある時点で**
+ * deny する構造ゲートであり、実プログラムへ「届く」ことが目的ではない。
+ */
+export function programTokens(
+  rawTokens: string[],
+  options: CommandPrefixOptions = {},
+): { tokens: string[]; capExhausted: boolean } {
+  return stripRunnerWrappers(rawTokens.slice(skipCommandPrefixWords(rawTokens, options)));
+}
+
+/**
+ * コマンド語 (プログラム位置の語) が置換 (`$(…)` / backtick) を含むか (SEC-CQ11-1・R11 監査 M)。
+ * `readWord` は置換スパンを 1 語に積むので、`` `echo rm` -rf /srv `` のプログラム名は静的に決まらない。
+ */
+function hasCommandWordSubstitution(word: string | undefined): boolean {
+  return word !== undefined && (word.includes("$(") || word.includes("`"));
+}
+
+/**
+ * セグメント内の command 置換を**平坦化**する (`$(inner)` / `` `inner` `` → ` inner `)。
+ *
+ * **SEC-CQ11-1 (R11 監査 M)**: 旧 `tokenize` は引用/置換文字を空白に潰す近似だったため
+ * `` `echo rm` -rf /srv `` を `echo rm -rf /srv` と読み、偶然 `recursive-rm` を拾っていた。語を正しく
+ * 読む v0.8 では置換が 1 語になり named category が落ちる (DEFAULT_GATED は inline-code で保持するが
+ * `demo` preset では de-gate = base 比回帰・egress も 53 形で片側喪失)。置換の結果がプログラム名になる
+ * 形は静的に決められないので、旧近似と同じ over-approximation を**加算のみ**で再現する: 平坦化した
+ * テキストの分類結果は verdict/category を上げることしかできない。置換の切り出しは正準収集器
+ * (`collectSubstitutionInners`) を共有し、第二の検出器を作らない。
+ */
+function flattenCommandSubstitutions(segment: string): string {
+  const { inners, starts, aborted } = collectSubstitutionInners(segment, "command");
+  if (aborted || starts.length === 0) return segment;
+  let out = "";
+  let cursor = 0;
+  for (let k = 0; k < starts.length; k += 1) {
+    const start = starts[k] as number;
+    const inner = inners[k] as string;
+    const opener = segment[start] === "`" ? 1 : 2;
+    out += `${segment.slice(cursor, start)} ${inner} `;
+    cursor = start + opener + inner.length + 1;
+  }
+  return out + segment.slice(cursor);
 }
 
 /**
@@ -2018,9 +2092,7 @@ function isProcessSubstitutionExecutor(name: string): boolean {
  * 残っていた。以後どのゲートも 1 段を飛ばせないよう導出を 1 関数に閉じる。
  */
 function segmentProgramName(segment: string): string {
-  const raw = tokenize(segment);
-  const { tokens } = stripRunnerWrappers(raw.slice(skipCommandPrefixWords(raw)));
-  return commandName(tokens);
+  return commandName(programTokens(tokenize(segment)).tokens);
 }
 
 /**
@@ -2250,12 +2322,23 @@ export function isNetworkEgressCommand(command: string): boolean {
   // SEC-CQ-1: quote-aware と旧分割の**両方**を走査する (union・over-detect 方向が安全側)。
   // phantom quote parity で新分割が egress program を segment 先頭から失っても、旧分割側が拾い、
   // secret-egress composite (egress ∧ inline secret) の片側が silent に消えない。
+  // **長さガード (SEC-CQ11-3・R11 監査 M)**: risk 経路は `MAX_ANALYZABLE_COMMAND_LEN` 超で high へ
+  //   bail するが、こちらにはガードが無く、>16 KiB の redirect 連打で `splitSegments` が超線形
+  //   (1 MiB で 25 秒) のまま同期 hook パスに露出していた。解析不能に巨大な入力は egress と見なす
+  //   (composite secret-egress の片側を閉じない = 安全側)。
+  if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return true;
+  const isEgressProgram = (tokens: string[]): boolean =>
+    tokens.length > 0 && NETWORK_EGRESS_PROGRAMS.has(normalizeCommandName(commandName(tokens)));
   const scan = (segments: string[]): boolean => {
     for (const seg of segments) {
-      const raw = tokenize(seg);
-      const { tokens } = stripRunnerWrappers(raw.slice(skipCommandPrefixWords(raw)));
-      if (tokens.length === 0) continue;
-      if (NETWORK_EGRESS_PROGRAMS.has(normalizeCommandName(commandName(tokens)))) return true;
+      const { tokens } = programTokens(tokenize(seg));
+      if (isEgressProgram(tokens)) return true;
+      // コマンド語が置換なら平坦化した形も見る (SEC-CQ11-1・加算のみ)。
+      if (
+        hasCommandWordSubstitution(tokens[0]) &&
+        isEgressProgram(programTokens(tokenize(flattenCommandSubstitutions(seg))).tokens)
+      )
+        return true;
     }
     return false;
   };
@@ -2313,6 +2396,10 @@ const PERSIST_DENY_PROGRAMS: ReadonlySet<string> = new Set([
   "nice",
   "ionice",
   "timeout",
+  // TDA-CQ11-6 (R11 監査 M): `RUNNER_WRAPPERS` の全要素は永続 deny でもある (`time chown -R …` /
+  //   `builtin …` がラッパ剥がしで分類器には届くのに永続ゲートを素通りしていた)。包含は INV で固定。
+  "time",
+  "builtin",
   "watch",
   "setsid",
   "stdbuf",
@@ -2567,10 +2654,16 @@ function classifyCommandRiskInternal(
     // SEC-1 (round D 再監査): bare な先頭 env 代入 (`FOO=bar rm -rf /`) は RUNNER_WRAPPERS に無く
     //   commandName が `FOO=bar` を返すため、全構造述語が実コマンドを取りこぼし承認ゲートを素通り
     //   させていた。構造判定の前に先頭代入を skip し、ラッパ剥がしと同列に正規化する (skip 後に剥がす)。
-    const deassigned = rawTokens.slice(skipCommandPrefixWords(rawTokens));
     // 再#3 QA-1/QA-3: env / timeout / sudo 等の runner ラッパを再帰的に剥がし、配下の実コマンドを判定対象に。
-    const { tokens, capExhausted } = stripRunnerWrappers(deassigned);
+    //   導出鎖は正準 `programTokens` (前置語 skip → ラッパ剥がし) を共有する (TDA-CQ11-4)。
+    const { tokens, capExhausted } = programTokens(rawTokens);
     if (tokens.length === 0) continue;
+    // コマンド語が置換 (`` `echo rm` -rf /srv ``) なら、平坦化した形の分類を**加算**する (SEC-CQ11-1)。
+    if (hasCommandWordSubstitution(tokens[0]) && depth < MAX_INLINE_DEPTH) {
+      bump(
+        classifyCommandRiskInternal(flattenCommandSubstitutions(seg), depth + 1, categories, split),
+      );
+    }
     // 多重ラッパで実コマンドを剥がし上限の奥に隠した疑い → 分類不能として gated (medium) に倒す。
     if (capExhausted) {
       bump("medium");

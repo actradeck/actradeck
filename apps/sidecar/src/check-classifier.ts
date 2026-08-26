@@ -29,7 +29,7 @@ import type { CheckKind, CheckMatch } from "@actradeck/event-model";
 import {
   commandName,
   normalizeCommandName,
-  skipCommandPrefixWords,
+  programTokens,
   splitSegments,
   stripRunnerWrappers,
   tokenize,
@@ -329,8 +329,11 @@ function classifyStrippedTokens(
 function classifySegment(segment: string): CheckClassification | undefined {
   const rawTokens = tokenize(segment);
   if (rawTokens.length === 0) return undefined;
-  const deassigned = rawTokens.slice(skipCommandPrefixWords(rawTokens));
-  const { tokens } = stripRunnerWrappers(deassigned);
+  // **予約語は読み飛ばさない (QA-CQ11-2 ≡ SEC-CQ11-2・R11 監査 H)**: `if false; then pytest; fi` は
+  //   exit 0 で pytest を実行せず、`! pytest` は exit を反転する。予約語を飛ばして内側を認定すると
+  //   失敗したテストが passed バッジになる (ADR 0015 が禁じる fake-green)。env 代入だけを飛ばし、
+  //   複合文の内側は認定しない (under-credit = 安全方向)。導出鎖は分類器と同じ `programTokens`。
+  const { tokens } = programTokens(rawTokens, { reservedWords: false });
   return classifyStrippedTokens(tokens, 0);
 }
 

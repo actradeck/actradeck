@@ -79,8 +79,13 @@ export default tseslint.config(
       //   v0.8 統合 (part 1〜3) は 1916 へ**増えた** — 語の読み方を単一出所へ畳む代わりに
       //   literal の組み立て (quotedSpanLiteral / ANSI-C 表) と R10 の H/M 修正が乗ったため。
       //   統合の成果は「手書き複製の除去」であって行数削減ではない。天井は metatest の合計天井と
-      //   同じ 1920 に置き、以後は下げる方向にしか動かさない。
-      "max-lines": ["error", { max: 1920, skipComments: true, skipBlankLines: true }],
+      //   同じ 1920 に置いた (part 3)。
+      //   R11 unblock (decision 01a03b69) で 1916 → 1951: EOF 終端 heredoc (H1)・予約語 opt-out (H2)・
+      //   正準導出鎖 `programTokens` (M6)・置換平坦化 (M1)・egress 長さガード (M2) の実修正分。
+      //   この per-file 天井は `normalizeHook` (cyclo 112 / 434 行) に引きずられ分類器に対しては
+      //   inert (TDA-CQ11-2) — 分類器の合計は test 側 metatest (import 閉包の合計天井) が固定し、
+      //   `normalizeHook` の分離 + 分類器専用天井は v0.9 task。ここは実測直上に置き、以後は下げるだけ。
+      "max-lines": ["error", { max: 1955, skipComments: true, skipBlankLines: true }],
     },
   },
   {

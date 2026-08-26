@@ -171,8 +171,28 @@ syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a literal strin
   behaviour throughout was checked against what bash actually executes, using a stub `PATH` and
   marker files rather than destructive commands. Honest accounting: the file did not get smaller
   — the single reader builds word literals the old approximations skipped, and the audit fixes
-  landed alongside it — so the size tripwires now record 1916 executable lines and a summed
-  ceiling that a file split cannot dodge.
+  landed alongside it — so the size tripwires now record the measured executable lines, and a
+  summed ceiling covers the module set reachable from the classifier through its imports (an
+  earlier revision of this entry said a file split "cannot dodge" the ceiling; a file that neither
+  imports nor is imported could, so the set is now defined by the import closure).
+  The eleventh audit round found three more holes, closed here. A heredoc that never terminates
+  (`echo a ; <<EOF rm -rf /path`, or a body whose delimiter never matches) was handed to the
+  conservative splitter, which treats `<<` as a separator, so the delimiter word became the
+  program name and the real command classified as harmless with no card in any mode — bash reads
+  such a heredoc to end of input and runs the command; the splitter now does the same, removing the
+  operator and delimiter like any other redirect. A substitution standing where the program name
+  goes (` ` rm -rf /path ``, `$() rm -rf /path`) lost its named category once words were read
+  correctly, because the old tokenizer had turned backticks into spaces by accident; the flattened
+  form is now classified in addition, never instead, so the category returns without lowering any
+  verdict. And the check classifier that labels commands as tests or lint runs had started sharing
+  the reserved-word skipping introduced for compound statements, which credited `if false; then
+  pytest; fi`(exit 0, pytest never runs) and`! pytest`(exit inverted) as passed checks; it now
+  skips only environment assignments, so a check inside a compound statement is not credited at
+  all — under-crediting is the safe direction for a verification badge. The egress predicate gained
+  the same command-length guard the risk verdict already had,`time`and`builtin` joined the
+  persistent-allowlist deny set alongside every other runner wrapper, and the executor-gate matrices
+  pin every axis by literal. The benchmark corpus grew from 67 to 80 vectors with one shape from
+  each audit round since the sixth, and the published numbers were regenerated from it.
 
 ## [0.8.0] - 2026-08-25
 

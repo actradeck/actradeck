@@ -14,6 +14,9 @@
  * 各変種が plain 形と同一分類になることを assert することで、分類器が正準チェーンを消費している事実を固定する
  * (naive パーサなら少なくとも 1 変種で分類が崩れる)。
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import { classifyCheck } from "../src/check-classifier.js";
@@ -265,5 +268,50 @@ describe("quoted operators in check commands (splitSegments coupling)", () => {
   it("a check word inside a quoted string is data, not a credited check (false-credit removal)", () => {
     // 旧分割は "foo | pytest" の引用内 | で裂けて pytest を segment として誤 credit した。
     expect(classifyCheck('echo "foo | pytest"')).toBeUndefined();
+  });
+});
+
+describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a check (fake-green)", () => {
+  // 実 bash: `if false; then touch M; fi` は M を作らず rc=0。`! pytest` は exit を反転する。
+  //   予約語を読み飛ばして内側を認定すると、失敗したテストが passed バッジになる (ADR 0015 の禁止方向)。
+  it("reserved words are not skipped by the check classifier", () => {
+    let checked = 0;
+    for (const cmd of [
+      "if false; then pytest; fi",
+      "! pytest",
+      "if ! npm test; then echo failed; fi",
+      "while pytest; do :; done",
+      "until pytest -q; do sleep 1; done",
+      "! eslint .",
+      "! tsc --noEmit",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+      checked += 1;
+    }
+    expect(checked).toBe(7);
+    // `time` は予約語であると同時に runner ラッパで、exit は配下のものが素通しされる → 正当な credit。
+    expect(classifyCheck("time pytest")).toEqual({ check_kind: "test", check_match: "program" });
+  });
+
+  it("env assignments are still skipped, and the pre-existing && form is unchanged", () => {
+    expect(classifyCheck("CI=1 pytest")).toEqual({ check_kind: "test", check_match: "program" });
+    expect(classifyCheck("FOO=1 BAR=2 npm test")).toEqual({
+      check_kind: "test",
+      check_match: "script",
+    });
+    // `false && pytest` は exit 1 で自己限定する既知の形 (base から同じ・R11 で変えていない)。
+    expect(classifyCheck("false && pytest")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+  });
+
+  it("source coupling: the check classifier derives the program through the canonical chain with reserved words off", () => {
+    const src = readFileSync(
+      fileURLToPath(new URL("../src/check-classifier.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(src).toContain("programTokens(rawTokens, { reservedWords: false })");
+    expect(src).not.toMatch(/skipCommandPrefixWords\(/);
   });
 });

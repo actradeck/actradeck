@@ -24,6 +24,7 @@ import {
   classifyCommandWithCategories,
   hasEscapedProgramWord,
   isNetworkEgressCommand,
+  isPersistDeniedCommand,
   splitSegments,
   splitSegmentsQuoteUnaware,
   stripGroupingWrappers,
@@ -1600,9 +1601,11 @@ describe("INV-APPROVAL-FALLBACK-BACKGROUND-SEPARATOR: fallback paths still see a
     expect(splitSegmentsQuoteUnaware("a && b & c")).toEqual(["a", "b", "c"]);
   });
 
-  it("fallback paths return the &-aware legacy split (all four trigger sites)", () => {
+  it("fallback paths return the &-aware legacy split (three trigger sites; unterminated heredoc bodies are bash data)", () => {
+    // **SEC-CQ11-4 (R11)**: 未終端 heredoc 本文は fallback サイトではなくなった — bash は本文を EOF まで
+    //   データとして読み、コマンド (`cat`) だけを実行する。`& rm -rf` が本文にあっても実行されない。
+    expect(splitSegments("cat <<EOF\nno terminator & rm -rf /tmp/x")).toEqual(["cat"]);
     const vectors = [
-      "cat <<EOF\nno terminator & rm -rf /tmp/x", // 未終端 heredoc 本文
       "cat <<'EOF & rm -rf /tmp/x", // 未終端 quoted delimiter
       "cat << ; rm -rf /tmp/x & echo done", // 空 delimiter
       "echo 'abc & rm -rf /tmp/x", // 未終端 quote
@@ -2117,9 +2120,10 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     // 収集器の消費者を全数で固定する (第二の検出器を作らない)。定義 1 + 消費 5 =
     //   reclassifySubstitution / reclassifyProcessSubstitution /
     //   launchesShellWithProcessSubstitution (起動判定の束縛) /
-    //   suppressGroupingMedium (床抑止の実在判定) / hasLiveCommandSubstitution (ゲート前置)。
+    //   suppressGroupingMedium (床抑止の実在判定) / hasLiveCommandSubstitution (ゲート前置) /
+    //   flattenCommandSubstitutions (コマンド語位置の置換の平坦化・SEC-CQ11-1)。
     //   増減したらこの一覧ごと見直す — 置換の読み方を別実装で足していないかの検問。
-    expect(src.match(/collectSubstitutionInners\(/g)?.length).toBe(6);
+    expect(src.match(/collectSubstitutionInners\(/g)?.length).toBe(7);
     // 引用の読み方も単一出所であること (SEC-CQ9-1)。
     expect(src).toContain("function quoteSpanEnd(");
     // コメント語頭判定も splitSegments と収集器で共有していること (TDA-CQ9-2)。
@@ -2248,8 +2252,15 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     const launchers = ["bash", "sh", "zsh", "source", ".", "python3"] as const;
     const suffixes = ["", "; ls", " && echo done", "; echo a; echo b"] as const;
     // 構成 pin + 相異性 (QA-CQ9-7)。件数保存の差し替えで軸を空にできない。
+    // R10 H3 (QA-CQ10-2) → R11 QA-CQ11-10: `prefixes` / `launchers` にも二重リテラル pin を置く。
+    //   件数保存の要素差し替え (T01) + `skipLeadingAssignments` 除去 (M13) の複合が全 suite 緑で
+    //   生存していた = テスト 1 行 + 実装 1 行で R9 の H landing が無音解除できた。
+    expect([...prefixes]).toEqual(["", "ls; ", "FOO=1 ", "A=1 B=2 ", "LC_ALL=C ", "ls; FOO=1 "]);
+    expect([...launchers]).toEqual(["bash", "sh", "zsh", "source", ".", "python3"]);
     expect([...wrappers]).toEqual(["", "sudo ", "env FOO=1 ", "timeout 5 ", "nohup "]);
     expect([...suffixes]).toEqual(["", "; ls", " && echo done", "; echo a; echo b"]);
+    // 意味論ガード: 代入形の prefix が 3 つ以上あり (正規化軸が空虚でない)、launcher は全て executor。
+    expect(prefixes.filter((p) => p.includes("=")).length).toBeGreaterThanOrEqual(3);
     for (const axis of [prefixes, wrappers, launchers, suffixes])
       expect(new Set(axis).size, `axis ${axis.join("|")} must be distinct`).toBe(axis.length);
     const failures: string[] = [];
@@ -3015,12 +3026,15 @@ describe("INV-APPROVAL-WORD-READER: one word reader for quoting, escaping and co
       }
       return min;
     };
-    const small = best(`echo ${"$(".repeat(2000)}`);
+    // **比を捨てて絶対上限にする (QA-CQ11-7・R11 監査 M)**: 比は負荷不変ではない — 2.5× oversubscribe で
+    //   分母 0.6ms / 分子 20ms の比 32.7 が閾値 32 を跨いだ (3/6 偽 RED)。線形実装は 64 KiB 入力で
+    //   best-of-5 2〜20ms、予算を外した二次実装は 2,900ms なので、絶対上限 400ms は両側から
+    //   7 倍以上離れている (8× oversubscribe 30 試行で flake 0 を実測してから着地)。
     const large = best(`echo ${"$(".repeat(32000)}`);
     expect(
       large,
-      `16x input must not cost quadratically: small=${small.toFixed(2)}ms large=${large.toFixed(2)}ms`,
-    ).toBeLessThan(Math.max(small, 0.25) * 32);
+      `64 KiB of unterminated substitutions must scan linearly (${large.toFixed(1)}ms)`,
+    ).toBeLessThan(400);
     // 負荷に依らない構造 pin: 予算が語読取りで消費・計上されていること (比だけに頼らない)。
     const src = readFileSync(
       fileURLToPath(new URL("../src/normalize.ts", import.meta.url)),
@@ -3304,8 +3318,12 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
     readWord: 4,
     segmentWords: 3,
     substitutionEnd: 4,
-    collectSubstitutionInners: 6,
+    collectSubstitutionInners: 7,
     startsComment: 3,
+    // R11 (TDA-CQ11-4 / SEC-CQ11-1): プログラム導出鎖と置換平坦化も原語。
+    programTokens: 5,
+    hasCommandWordSubstitution: 3,
+    flattenCommandSubstitutions: 3,
   };
 
   it("metatest: the shell-reading primitives live only in normalize.ts (form-independent exclusivity)", () => {
@@ -3327,24 +3345,63 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
         new RegExp(`^(?:export )?function\\*? ${name}\\(`, "m"),
       );
     }
-    expect(observed).toEqual({ [SINGLE_SOURCE_FILE]: SHELL_READING_PRIMITIVES });
-    // 第二パーサの tripwire: 引用文字との直接比較・naive な置換切り出しは単一出所の外に存在しない。
-    const secondParserRe = /=== "'"|=== '"'|=== "`"|\.split\("`"\)|indexOf\("\)"\)/;
+    // `programTokens` の消費者 (check-classifier) は許可された唯一の外部出現。
+    const external = Object.fromEntries(
+      Object.entries(observed).filter(([file]) => file !== SINGLE_SOURCE_FILE),
+    );
+    expect(external).toEqual({ "check-classifier.ts": { programTokens: 2 } }); // import + 呼出
+    expect(observed[SINGLE_SOURCE_FILE]).toEqual(SHELL_READING_PRIMITIVES);
+    // 第二パーサの tripwire: 引用文字・括弧との直接比較や naive な置換切り出しは単一出所の外に存在しない。
+    //   **正直な限界 (QA-CQ11-5 ≡ TDA-CQ11-3)**: これは逐語コピー・改名・素朴な書き直しに対する
+    //   tripwire であって、任意に書き直された第二パーサを検出する証明ではない (`String.fromCharCode`
+    //   や `.includes` 経由の引用比較まで含めて網を広げたが、網羅ではない)。normalize.ts 自身は除外
+    //   している — `substitutionEnd` が独自の引用状態機械を持つため (TDA-CQ11-1・fail-safe 側・
+    //   `quoteSpanEnd` への統合は v0.9 task)。
+    const secondParserRe =
+      /=== "'"|=== '"'|=== "`"|\.split\("`"\)|indexOf\("\)"\)|fromCharCode\((?:34|39|40|41|96)\)|\.includes\("['"`()]"\)|"'\\""|"\\"'"|\[`'"\]|\['"`\]|\["'`\]/;
     for (const file of files) {
       if (file === SINGLE_SOURCE_FILE) continue;
       expect(codeOf(file), `${file} must not hand-read shell syntax`).not.toMatch(secondParserRe);
     }
   });
 
+  /**
+   * 実測 (R11 unblock・normalize.ts + import 閉包 4 ファイル): executable 2278 /
+   * branch tokens 770。天井は直上に置き、更新は ratchet down のみ。
+   */
+  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2282;
+  const MODULE_SET_BRANCH_TOKEN_CEILING = 773;
+
   it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {
     // eslint の天井は peak (最悪関数・単一ファイル) にしか効かない — 関数を 2 つに割る・ファイルを
     //   2 つに割るだけで抜けられる (R10 M)。原語の exclusivity 集合 = 分類器モジュール集合として、
     //   その**合計**に天井を置く。集合へファイルを足すには上の map を更新せねばならず、合計は残る。
-    const moduleSet = srcFiles().filter((file) => {
-      const code = codeOf(file);
-      return Object.keys(SHELL_READING_PRIMITIVES).some((name) => identifierRe(name).test(code));
-    });
+    // **集合の定義 (QA-CQ11-6・R11 監査 M)**: 「原語を参照するファイル」だけでは、原語を使わない
+    //   コードを新ファイルへ移すだけで合計から抜けられた。normalize.ts から相対 import で**到達可能**
+    //   な src ファイル (推移閉包) を必ず含める — 分類器の一部を別ファイルへ移せば normalize.ts が
+    //   それを import するので集合に入る。原語参照ファイルも従来どおり含める。
+    const files = srcFiles();
+    const relImports = (file: string): string[] =>
+      [...codeOf(file).matchAll(/from "\.\/([^"]+)\.js"/g)]
+        .map((m) => `${m[1]}.ts`)
+        .filter((f) => files.includes(f));
+    const reachable = new Set<string>([SINGLE_SOURCE_FILE]);
+    for (const queue = [SINGLE_SOURCE_FILE]; queue.length > 0; ) {
+      const file = queue.shift() as string;
+      for (const dep of relImports(file)) {
+        if (reachable.has(dep)) continue;
+        reachable.add(dep);
+        queue.push(dep);
+      }
+    }
+    const moduleSet = files.filter(
+      (file) =>
+        reachable.has(file) ||
+        Object.keys(SHELL_READING_PRIMITIVES).some((name) => identifierRe(name).test(codeOf(file))),
+    );
     expect(moduleSet).toContain(SINGLE_SOURCE_FILE);
+    expect(moduleSet).toContain("check-classifier.ts"); // 到達可能集合が非空虚であること。
+    expect(moduleSet.length, "module set is the import closure, not one file").toBeGreaterThan(2);
     let executableLines = 0;
     let branchTokens = 0;
     for (const file of moduleSet) {
@@ -3353,12 +3410,183 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
       branchTokens +=
         code.match(/\bif \(|\belse\b|\bfor \(|\bwhile \(|\bcase |\?\?|\?|&&|\|\|/g)?.length ?? 0;
     }
-    // 天井は実測の直上に置き、以後 ratchet down のみ (「今より育ったら赤」)。実測 (v0.8 part 3):
-    //   executable 1916 / branch tokens 667 (normalize.ts のみ)。
+    // 天井は実測の直上に置き、以後 ratchet down のみ (「今より育ったら赤」)。実測は下の定数の
+    //   コメントに記録する (R11 unblock で集合を import 閉包へ広げたため part 3 の 1916/667 から増えた)。
     expect(
       executableLines,
       "executable lines across the classifier module set",
-    ).toBeLessThanOrEqual(1_920);
-    expect(branchTokens, "branch tokens across the classifier module set").toBeLessThanOrEqual(670);
+    ).toBeLessThanOrEqual(MODULE_SET_EXECUTABLE_LINE_CEILING);
+    expect(branchTokens, "branch tokens across the classifier module set").toBeLessThanOrEqual(
+      MODULE_SET_BRANCH_TOKEN_CEILING,
+    );
+  });
+});
+
+/**
+ * CQ-R11 裁定 (decision 01a03b69) の unblock 契約。
+ *
+ * bash 側の期待値は実 bash で確認した (marker 方式・破壊的 argv は使わない):
+ *   `echo a ; <<EOF touch M`              → M を作る (heredoc は EOF で終端され、コマンドは実行される)
+ *   `touch <<EOF M` + 本文 `foo` (未終端) → M を作る
+ *   `cat <<EOF` + 本文 `$(touch M)` (未終端・unquoted) → M を作る (本文は展開される)
+ *   `cat <<'EOF'` + 本文 `$(touch M)`     → 作らない (quoted delimiter は本文を展開しない)
+ *   `if false; then touch M; fi`          → 作らない・rc=0 (check 認定に使ってはならない形)
+ */
+describe("INV-APPROVAL-R11: EOF-terminated heredocs, command-word substitutions, reserved-word fences", () => {
+  const RMRF = ["rm", "-rf", "/srv"].join(" ");
+  const FORCE_PUSH = ["git", "push", "--force"].join(" ");
+  const src = (): string =>
+    readFileSync(fileURLToPath(new URL("../src/normalize.ts", import.meta.url)), "utf8");
+
+  it("H1 (SEC-CQ11-4): a heredoc that never terminates is read the way bash reads it — to EOF, and the command runs", () => {
+    // delimiter の後に改行が無い / 本文が delimiter に一致しないまま入力末尾: bash は警告して実行する。
+    //   旧実装は legacy 分割へ倒し、legacy は `<<` を区切りにするので delimiter 語がプログラム名になり
+    //   `["echo a", "EOF rm -rf /srv"]` = low[] (12 形すべてで承認カード無し・bypass category も空)。
+    let checked = 0;
+    for (const [cmd, category] of [
+      [`echo a ; <<EOF ${RMRF}`, "recursive-rm"],
+      [`npm test ; <<EOF ${FORCE_PUSH}`, "history-rewrite"],
+      [`<<EOF ${RMRF}`, "recursive-rm"],
+      [`echo a && <<EOF ${RMRF}`, "recursive-rm"],
+      [`echo a | <<EOF ${RMRF}`, "recursive-rm"],
+      [`<<-EOF ${RMRF}`, "recursive-rm"],
+      [`<<'EOF' ${RMRF}`, "recursive-rm"],
+      [`3<<EOF ${RMRF}`, "recursive-rm"],
+      [`rm <<EOF -rf /srv\nfoo\n`, "recursive-rm"], // 本文あり・未終端
+      [`echo a ; ${RMRF} <<EOF\nfoo\nbar`, "recursive-rm"],
+    ] as const) {
+      const verdict = classifyCommandWithCategories(cmd);
+      expect(verdict.risk, cmd).toBe("high");
+      expect([...verdict.categories], cmd).toContain(category);
+      checked += 1;
+    }
+    expect(checked).toBe(10);
+    // split-level pin: 演算子と delimiter は除去され、実コマンドが自分のセグメントに残る。
+    expect(splitSegments(`echo a ; <<EOF ${RMRF}`)).toEqual(["echo a", RMRF]);
+    expect(
+      splitSegments(`rm <<EOF -rf /srv\nfoo\n`).map((seg) => seg.replace(/\s+/g, " ")),
+    ).toEqual([RMRF]);
+    // 未終端の unquoted 本文は展開される (置換が実行される) — quoted はデータ。
+    expect([...classifyCommandWithCategories(`cat <<EOF\n$(${RMRF})\n`).categories]).toContain(
+      "recursive-rm",
+    );
+    // quoted delimiter の本文はデータ (split は `cat` のみ)。verdict は legacy union backstop が本文の
+    //   字面に反応して high のまま = base 同値の受容 FP クラス (CHANGELOG 開示済み・runbook 執筆形)。
+    expect(splitSegments(`cat <<'EOF'\n$(${RMRF})\n`)).toEqual(["cat"]);
+    // FP 対照: 終端された無害な heredoc・未終端でも無害なものはカードを出さない。
+    expect(classifyCommandRisk("cat <<EOF\nhello\nEOF\n")).toBe("low");
+    expect(classifyCommandRisk("cat <<EOF\nhello\n")).toBe("low");
+    expect(classifyCommandRisk("cat <<EOF")).toBe("low");
+    // 旧 fallback へ戻す変異を source で塞ぐ (未終端 heredoc で legacy 分割へ倒さない)。
+    expect(src()).not.toMatch(/if \(!matched\) return splitSegmentsUnparseable/);
+    expect(src()).not.toMatch(/pendingHeredocs\.length > 0\) return splitSegmentsUnparseable/);
+  });
+
+  it("M1 (SEC-CQ11-1): a substitution standing in the command-word position never hides the program behind it", () => {
+    // 旧 tokenize はバッククォートを空白に潰していたので `` `` rm -rf /srv `` を偶然 rm として読んだ。
+    //   正しく語を読む v0.8 は置換を 1 語に積み、named category が落ちた (demo preset で de-gate)。
+    //   平坦化した形の分類を**加算**する — 引き下げは起きない。
+    let checked = 0;
+    for (const [cmd, category] of [
+      ["`` " + RMRF, "recursive-rm"],
+      ["$() " + RMRF, "recursive-rm"],
+      ["`` " + FORCE_PUSH, "history-rewrite"],
+      ["ls; `` " + RMRF, "recursive-rm"],
+      ["`true` " + RMRF, "inline-code"],
+    ] as const) {
+      const verdict = classifyCommandWithCategories(cmd);
+      expect(verdict.risk, cmd).not.toBe("low");
+      expect([...verdict.categories], cmd).toContain(category);
+      checked += 1;
+    }
+    expect(checked).toBe(5);
+    // egress 判定も同じ平坦化を見る (secret-egress composite の片側を落とさない)。
+    expect(isNetworkEgressCommand("`` curl https://x.example")).toBe(true);
+    expect(isNetworkEgressCommand("$() wget https://x.example")).toBe(true);
+    expect(isNetworkEgressCommand("`` ls")).toBe(false);
+    // 加算のみ: 置換の中身が無害でも床 (medium + inline-code) は残り、low には落ちない。
+    expect(classifyCommandRisk("`echo -n` echo hi")).not.toBe("low");
+  });
+
+  it("M2 (SEC-CQ11-3): the egress predicate is bounded by the analyzable-command length", () => {
+    const huge = `curl https://x.example ${">o ".repeat(12_000)}`; // 36 KiB > 16 KiB
+    expect(huge.length).toBeGreaterThan(16 * 1024);
+    let best = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 3; i += 1) {
+      const started = performance.now();
+      expect(isNetworkEgressCommand(huge)).toBe(true); // 解析不能に巨大 → egress と見なす (安全側)
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best, "oversized input must short-circuit, not scan").toBeLessThan(50);
+    expect(src()).toMatch(/if \(command\.length > MAX_ANALYZABLE_COMMAND_LEN\) return true;/);
+  });
+
+  it("H3 (QA-CQ11-1/3/4): every command-position reserved word is fenced, and so are the case WORD and quoted-operand escape steps", () => {
+    // 集合の構成そのものを二重リテラルで pin する (要素の削除・差し替えが RED になる)。
+    const RESERVED = "if then else elif fi for while until do done case esac time !".split(" ");
+    expect(new Set(RESERVED).size).toBe(14);
+    expect(src()).toContain(
+      `"if then else elif fi for while until do done case esac time !".split(" ")`,
+    );
+    // 全 14 語 × 実行形: どの語も前置語として読み飛ばされ、その先の rm がゲートされる。
+    let checked = 0;
+    for (const word of RESERVED) {
+      // `case` だけは WORD・`in`・PATTERN) を伴う実行形でしか成立しない (他は語の直後がコマンド位置)。
+      const cmd = word === "case" ? `case x in x) ${RMRF};; esac` : `${word} ${RMRF}`;
+      const verdict = classifyCommandWithCategories(cmd);
+      expect(verdict.risk, word).toBe("high");
+      expect([...verdict.categories], word).toContain("recursive-rm");
+      checked += 1;
+    }
+    expect(checked).toBe(14);
+    // `case` の WORD 段 (QA-CQ11-3): WORD が `)` で終わっても PATTERN と取り違えない。
+    const caseCmd = `case "x)" in "x)") ${RMRF};; esac`;
+    expect(classifyCommandRisk(caseCmd)).toBe("high");
+    expect([...classifyCommandWithCategories(caseCmd).categories]).toContain("recursive-rm");
+    // `quotedOperands` の backslash 段 (QA-CQ11-4): escape された引用は引用を開かない。
+    const sshCmd = `ssh host \\'x' ${RMRF}'`;
+    expect(classifyCommandRisk(sshCmd)).toBe("high");
+    expect([...classifyCommandWithCategories(sshCmd).categories]).toContain("recursive-rm");
+  });
+
+  it("M8 (TDA-CQ11-6): every runner wrapper is also a persist-deny program", () => {
+    // ラッパは配下を別コマンドとして実行する。分類器はラッパを剥がして届くのに、永続 allowlist の
+    //   構造ゲートがラッパ名を知らないと `time chown -R …` が永続候補に残る。
+    expect(isPersistDeniedCommand("time chown -R nobody /srv")).toBe(true);
+    expect(isPersistDeniedCommand("builtin chown -R nobody /srv")).toBe(true);
+    const literal = (name: string): string[] => {
+      const m = src().match(new RegExp(`const ${name}[^=]*= new Set\\(\\[([\\s\\S]*?)\\]\\)`));
+      expect(m, `${name} literal found`).not.toBeNull();
+      const body = ((m as RegExpMatchArray)[1] as string).replace(/^[ \t]*\/\/.*$/gm, "");
+      return [...body.matchAll(/"([^"]+)"/g)].map((x) => x[1] as string);
+    };
+    const wrappers = literal("RUNNER_WRAPPERS");
+    const denied = new Set(literal("PERSIST_DENY_PROGRAMS"));
+    expect(wrappers.length).toBeGreaterThan(10);
+    expect(
+      wrappers.filter((w) => !denied.has(w)),
+      "RUNNER_WRAPPERS ⊆ PERSIST_DENY_PROGRAMS",
+    ).toEqual([]);
+  });
+
+  it("M10 (QA-CQ11-10) metatest: every axis of the executor-gate matrices is pinned by a literal", () => {
+    // R8〜R10 で 3 ラウンド連続、行列テストの軸を件数保存で差し替える変異が生存した。軸ごとに
+    //   `expect([...axis]).toEqual([` の二重リテラル pin があることを、このファイル自身を読んで検問する。
+    const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const block = self.slice(
+      self.indexOf("SEC-CQ9-2: a leading VAR=val"),
+      self.indexOf("SEC-CQ9-3"),
+    );
+    expect(block.length).toBeGreaterThan(500);
+    for (const axis of ["prefixes", "wrappers", "launchers", "suffixes"]) {
+      expect(block, `${axis} axis is declared`).toMatch(new RegExp(`const ${axis} = \\[`));
+      expect(block, `${axis} axis is pinned by a literal`).toContain(
+        `expect([...${axis}]).toEqual([`,
+      );
+      expect(
+        block.includes("new Set(axis).size") || block.includes(`new Set(${axis}).size`),
+        `${axis} axis is distinct`,
+      ).toBe(true);
+    }
   });
 });
