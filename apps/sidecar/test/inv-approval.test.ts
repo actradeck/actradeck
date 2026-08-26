@@ -8,7 +8,7 @@
  * - shutdown 時の保留は deny で drain。
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
@@ -3377,15 +3377,26 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
     expect(isSingleSourceSide("apps/sidecar/src/normalize.ts")).toBe(true);
     expect(isSingleSourceSide("apps/sidecar/e2e/run-claude-e2e.mts")).toBe(false);
     expect(isSingleSourceSide("apps/webui/sidecar/x.ts")).toBe(false); // 名前一致へ戻す変異は RED
-    const outsideFiles = execFileSync(
-      "git",
-      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-      { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-    )
-      .split("\0")
-      .filter(
-        (f) => /\.(?:ts|tsx|mts|mjs)$/.test(f) && !f.endsWith(".d.ts") && !isSingleSourceSide(f),
-      );
+    const listOutsideFiles = (): string[] =>
+      execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      })
+        .split("\0")
+        .filter(
+          (f) => /\.(?:ts|tsx|mts|mjs)$/.test(f) && !f.endsWith(".d.ts") && !isSingleSourceSide(f),
+        );
+    const leakedIn = (files: readonly string[]): string[] => {
+      const found: string[] = [];
+      for (const file of files) {
+        const code = stripComments(readFileSync(`${repoRoot}${file}`, "utf8"));
+        for (const name of Object.keys(SHELL_READING_PRIMITIVES))
+          if (identifierRe(name).test(code)) found.push(`${file}:${name}`);
+      }
+      return found;
+    };
+    const outsideFiles = listOutsideFiles();
     // 非空虚: 走査集合が repo 全体であること (root 列挙へ戻す変異・拡張子を落とす変異は RED)。
     expect(outsideFiles.length).toBeGreaterThan(300);
     for (const must of [
@@ -3409,16 +3420,22 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
       ).toBeGreaterThan(0);
     }
     expect(outsideFiles.some((f) => f.startsWith("apps/sidecar/src/"))).toBe(false);
-    const leaked: string[] = [];
-    for (const file of outsideFiles) {
-      const code = stripComments(readFileSync(`${repoRoot}${file}`, "utf8"));
-      for (const name of Object.keys(SHELL_READING_PRIMITIVES))
-        if (identifierRe(name).test(code)) leaked.push(`${file}:${name}`);
-    }
+    const leaked = leakedIn(outsideFiles);
     expect(
       leaked,
       "shell-reading primitives must not appear in any tracked or untracked .ts/.tsx/.mts/.mjs outside apps/sidecar/src and apps/sidecar/test",
     ).toEqual([]);
+    // 未追跡ファイルも走査集合に入ることを**自分で植えて**確かめる: R15 の変異「`--others` を落とす」は
+    //   clean tree では空虚に生き残った (検出すべき未追跡ファイルが無い)。一時 probe を repo 内に置き、
+    //   走査に現れ・原語が検出されることを見てから必ず消す (finally)。
+    const probe = `scripts/zz-exclusivity-probe-${process.pid}.mjs`;
+    writeFileSync(`${repoRoot}${probe}`, "export function readWord(s) {\n  return s;\n}\n");
+    try {
+      expect(listOutsideFiles(), "an untracked file is in the scan set").toContain(probe);
+      expect(leakedIn([probe])).toEqual([`${probe}:readWord`]);
+    } finally {
+      rmSync(`${repoRoot}${probe}`, { force: true });
+    }
     expect(observed[SINGLE_SOURCE_FILE]).toEqual(SHELL_READING_PRIMITIVES);
     // 第二パーサの tripwire: 引用文字・括弧との直接比較や naive な置換切り出しは単一出所の外に存在しない。
     //   **正直な限界 (QA-CQ11-5 ≡ TDA-CQ11-3)**: これは逐語コピー・改名・素朴な書き直しに対する
