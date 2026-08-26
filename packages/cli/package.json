@@ -1,6 +1,6 @@
 {
   "name": "actradeck",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "license": "Apache-2.0",
   "description": "ActraDeck CLI — preview, install, and verify a local approval and audit cockpit for Claude Code and Codex.",
   "type": "module",
