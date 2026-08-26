@@ -193,14 +193,16 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   passed checks. It now skips only environment assignments, and a command that contains a
   compound statement — on one line, or across several lines where the newline had put the check
   in a segment of its own — or a shell function definition (bash defines the function, runs
-  nothing, and exits 0) is not credited. The function-definition check is structural rather
-  than a list of spellings: bash's grammar puts empty parentheses only in a function header, so
-  a leading name followed by `()` in any spacing (`run() {`, `run(){`, `run ( ) {`) and the
-  `function` keyword are refused, and the test suite derives its vectors by running each
-  generated spelling through bash itself and keeping the ones bash defines without executing.
-  Two earlier revisions of this entry claimed the case closed on the strength of hand-listed
-  spellings; the list was incomplete both times. Under-crediting is the safe direction for a
-  verification badge. Sequencing after a check (`pytest ; echo done`,
+  nothing, and exits 0) is not credited. The function-definition check is structural: bash's
+  grammar puts empty parentheses only in a function header, so a leading name followed by empty
+  parentheses (whitespace or a backslash-newline inside them included) or the `function`
+  keyword is refused, and a leading `time` is looked through rather than skipped, so
+  `time run() { … }` is refused while `time pytest` keeps its credit. The vectors for this are
+  not listed by hand: the test suite generates spellings along prefix, keyword, spacing,
+  parenthesis-interior and body axes, runs each through bash itself with a marker file, and
+  requires every spelling that bash defines without executing to be refused; the accepted
+  spelling set is therefore whatever bash accepts, verified on each test run. Under-crediting
+  is the safe direction for a verification badge. Sequencing after a check (`pytest ; echo done`,
   `npm test || true`) still credits it, as it always has, and is tracked rather than claimed
   closed. The check classifier also gained the command-length guard the risk verdict already had:
   it was the one consumer of the splitter without one, and a 4 MiB hook payload held the daemon

@@ -7,6 +7,7 @@
  *   ユーザー自身の permission 設定を上書きする anti-pattern (decision 019e8e4b)。
  * - shutdown 時の保留は deny で drain。
  */
+import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -33,6 +34,7 @@ import {
 } from "../src/normalize.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
+import { stripComments } from "./util/strip-comments.js";
 
 function preToolUse(toolName: string, toolInput: Record<string, unknown>): HookCommonInput {
   return {
@@ -3311,10 +3313,7 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
       .map(String)
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
       .sort();
-  /** 走査正規化 (単一出所・TDA-CQ14-4): コメントを落とし、識別子の出現をコメント文言から独立させる。 */
-  const stripComments = (code: string): string =>
-    code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
-  /** コメントを落としたコード本文。 */
+  /** コメントを落としたコード本文 (走査正規化は test/util/strip-comments.ts の単一出所)。 */
   const codeOf = (file: string): string => stripComments(readFileSync(`${srcDir}${file}`, "utf8"));
   const identifierRe = (name: string): RegExp => new RegExp(`\\b${name}\\b`, "g");
   /**
@@ -3361,44 +3360,55 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
     );
     expect(external).toEqual({ "check-classifier.ts": { programTokens: 2 } }); // import + 呼出
     // **sidecar の外も走査する (TDA-CQ12-2 → QA-CQ13-3 ≡ SEC-CQ13-4 → QA-CQ14-2 ≡ SEC-CQ14-3 ≡
-    //   TDA-CQ14-3)**: 「正準 helper は event-model へ」という慣行が、原語を `apps/sidecar/src` の外へ
-    //   移して走査を抜ける最短経路になる。R12 は `packages/<pkg>/src/` 平坦形のみ、R13 は `*/src/`
-    //   配下のみで、`apps/webui/app/*.tsx` / `apps/webui/server.ts` / `db/src` へ植えた原語が
-    //   SURVIVED した。R14 からは **`src/` 要件を撤廃**し、apps/* (sidecar 以外) + packages/* + db/
-    //   配下の全 `.ts` / `.tsx` / `.mts` を走査する (test / dist / node_modules / .next / coverage と
-    //   `.d.ts` は除外)。走査集合の限界 (TDA-CQ14-5): symlink された `.ts` は `isFile()` false で
-    //   落ちる (辿らない側の限界・正直に開示)。sidecar の外での出現は 0 でなければならない。
+    //   TDA-CQ14-3 → QA-CQ15-4 ≡ QA-CQ15-5 ≡ TDA-CQ15-3)**: 「正準 helper は event-model へ」という
+    //   慣行が、原語を `apps/sidecar/src` の外へ移して走査を抜ける最短経路になる。R12 は
+    //   `packages/<pkg>/src/` 平坦形のみ、R13 は `*/src/` のみ、R14 は root を `apps/packages/db` に
+    //   列挙した walker で、`scripts/` / `apps/sidecar/e2e/*.mts` / repo 直下が走査外だった。R15 からは
+    //   **走査集合を git に決めさせる**: `git ls-files --cached --others --exclude-standard` (tracked +
+    //   未追跡・非 ignore) の全 `.ts` / `.tsx` / `.mts` / `.mjs` から、単一出所 `apps/sidecar/src/` と
+    //   その test dir `apps/sidecar/test/` だけをパス一致で除く (`.d.ts` は除外)。root の列挙も dir 名
+    //   による除外も無いので、新しい top-level dir / 非 `src` 配置 / `.mjs` スクリプトへの移送も走査
+    //   に入る。symlink は ls-files がパスとして列挙し readFileSync が辿る (R14 walker の限界を解消)。
+    //   sidecar の外での出現は 0 でなければならない。
     const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
-    // 手書き walker: `readdirSync({ recursive: true })` は symlink を辿り webui の node_modules 自己
-    //   ループで ELOOP になる。symlink は辿らず、除外ディレクトリには入らない。
-    const SKIP_DIRS = new Set(["test", "node_modules", "dist", ".next", "coverage"]);
-    /** 単一出所側 (上で別走査) はパス一致で除外する — 名前一致 (`sidecar` という dir 名) ではない。 */
-    const isSingleSourceRoot = (rel: string): boolean => rel === "apps/sidecar";
-    expect(isSingleSourceRoot("apps/sidecar")).toBe(true);
-    expect(isSingleSourceRoot("apps/webui/sidecar")).toBe(false); // 名前一致へ戻す変異は RED (QA L)
-    const walk = (dir: string, rel: string, out: string[]): string[] => {
-      for (const d of readdirSync(dir, { withFileTypes: true })) {
-        const next = `${rel}${d.name}`;
-        if (isSingleSourceRoot(next)) continue;
-        if (d.isDirectory() && !SKIP_DIRS.has(d.name)) walk(`${dir}${d.name}/`, `${next}/`, out);
-        else if (d.isFile() && /\.(?:ts|tsx|mts)$/.test(d.name) && !d.name.endsWith(".d.ts"))
-          out.push(next);
-      }
-      return out;
-    };
-    const outsideFiles = ["apps", "packages", "db"].flatMap((top) =>
-      walk(`${repoRoot}${top}/`, `${top}/`, []),
-    );
-    for (const top of ["apps/backend/", "apps/webui/", "packages/event-model/", "db/"]) {
+    /** 単一出所側と、それを正当に参照する sidecar の test dir。パス prefix 一致 (名前一致ではない)。 */
+    const isSingleSourceSide = (rel: string): boolean =>
+      rel.startsWith("apps/sidecar/src/") || rel.startsWith("apps/sidecar/test/");
+    expect(isSingleSourceSide("apps/sidecar/src/normalize.ts")).toBe(true);
+    expect(isSingleSourceSide("apps/sidecar/e2e/run-claude-e2e.mts")).toBe(false);
+    expect(isSingleSourceSide("apps/webui/sidecar/x.ts")).toBe(false); // 名前一致へ戻す変異は RED
+    const outsideFiles = execFileSync(
+      "git",
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    )
+      .split("\0")
+      .filter(
+        (f) => /\.(?:ts|tsx|mts|mjs)$/.test(f) && !f.endsWith(".d.ts") && !isSingleSourceSide(f),
+      );
+    // 非空虚: 走査集合が repo 全体であること (root 列挙へ戻す変異・拡張子を落とす変異は RED)。
+    expect(outsideFiles.length).toBeGreaterThan(300);
+    for (const must of [
+      "apps/webui/server.ts",
+      "apps/sidecar/e2e/run-claude-e2e.mts",
+      "eslint.config.mjs",
+      "apps/sidecar/vitest.config.ts",
+    ]) {
+      expect(outsideFiles, `${must} is in the scan set`).toContain(must);
+    }
+    for (const top of [
+      "apps/backend/",
+      "apps/webui/app/",
+      "packages/event-model/",
+      "db/src/",
+      "scripts/",
+    ]) {
       expect(
         outsideFiles.filter((f) => f.startsWith(top)).length,
         `${top} scan set is non-vacuous`,
-      ).toBeGreaterThan(10);
+      ).toBeGreaterThan(0);
     }
-    // `src/` の外のプロダクトコードも集合に入っていること (QA-CQ14-2 の SURVIVED probe 位置)。
-    expect(outsideFiles).toContain("apps/webui/server.ts");
-    expect(outsideFiles.some((f) => f.startsWith("apps/webui/app/"))).toBe(true);
-    expect(outsideFiles.some((f) => f.startsWith("apps/sidecar/"))).toBe(false);
+    expect(outsideFiles.some((f) => f.startsWith("apps/sidecar/src/"))).toBe(false);
     const leaked: string[] = [];
     for (const file of outsideFiles) {
       const code = stripComments(readFileSync(`${repoRoot}${file}`, "utf8"));
@@ -3407,7 +3417,7 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
     }
     expect(
       leaked,
-      "shell-reading primitives must not appear in any .ts/.tsx/.mts under apps/* (except apps/sidecar), packages/* or db/ (test/dist/node_modules/.next/coverage excluded)",
+      "shell-reading primitives must not appear in any tracked or untracked .ts/.tsx/.mts/.mjs outside apps/sidecar/src and apps/sidecar/test",
     ).toEqual([]);
     expect(observed[SINGLE_SOURCE_FILE]).toEqual(SHELL_READING_PRIMITIVES);
     // 第二パーサの tripwire: 引用文字・括弧との直接比較や naive な置換切り出しは単一出所の外に存在しない。
@@ -3425,19 +3435,20 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   });
 
   /**
-   * 実測 (R14 unblock・normalize.ts + import 閉包 4 ファイル): executable 2298 /
-   * branch tokens 778。天井は実測 + 4 に置く。
+   * 実測 (R15 unblock・normalize.ts + import 閉包 4 ファイル): executable 2303 /
+   * branch tokens 779。天井は実測 + 4 に置く。
    *
    * **正直な記録 (TDA-CQ13-4)**: この天井は「今より育ったら赤」の tripwire であって予算ではない。
    * 導入 (part 3: 1916/667) 以来 R11 (2282/773) → R12 (2291/776) → R13 (2292/779) → R14 (2298/778)
-   * と、監査の H/M を閉じる実修正のたびに**上方へ**しか動いていない (R14: 関数定義ヘッダの構造判定
-   * `isFunctionDefinitionHeader` を check-classifier.ts に追加・+6 行・分岐は R13 の 3 腕を 1 regex に
-   * 畳んで −1)。以前ここに書いた「更新は ratchet down のみ」は一度も履行されていないので撤回する。
+   * → R15 (2303/779) と、監査の H/M を閉じる実修正のたびに executable は上方へしか動いて
+   * いない (branch tokens は R14 で 779→778 と 1 減っている — R13 の 3 腕を 1 regex に畳んだ分。
+   * TDA-CQ15-7: 「上方へしか」は executable についての記述)。以前ここに書いた「更新は ratchet down
+   * のみ」は一度も履行されていないので撤回する。
    * ratchet down は `normalizeHook` の分離と分類器専用天井 (task 01a03b76-b95e・v0.9) で行う。
    * 上げるときは実測値と理由をこのコメントに残す。
    */
-  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2302;
-  const MODULE_SET_BRANCH_TOKEN_CEILING = 782;
+  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2307;
+  const MODULE_SET_BRANCH_TOKEN_CEILING = 783;
 
   it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {
     // eslint の天井は peak (最悪関数・単一ファイル) にしか効かない — 関数を 2 つに割る・ファイルを

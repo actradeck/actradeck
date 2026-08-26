@@ -22,6 +22,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { stripComments } from "./util/strip-comments.js";
+
 import { classifyCheck } from "../src/check-classifier.js";
 import {
   commandName,
@@ -401,9 +403,14 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       //   組み立て、**実 bash** に marker 方式で「定義のみ・本体未実行 (rc=0 かつ marker 不在)」を判定
       //   させ、そう判定された綴りだけを fake-green の vector として分類器へ掛ける。bash が構文エラー
       //   にする綴りは fake-green でないので対象外 (件数は開示)。破壊的 argv は使わない (marker は touch)。
+      // 生成軸 (R15 で 2 軸追加・SEC-CQ15-1/2 ≡ QA-CQ15-1/2 ≡ TDA-CQ15-1/2): 前置 (`time` は exit を
+      //   素通しする透明ラッパ・タブ) と括弧内 (行継続 `\<newline>` を含む)。R14 の軸にはどちらも無く、
+      //   「実インタプリタ由来」の規約が同クラスを止められなかった。
+      const PREFIXES = ["", "time ", "time -p ", "\t"];
       const KEYWORDS = ["", "function "];
-      const NAMES = ["run", "test_all"];
-      const WS = ["", " ", "\t"];
+      const NAME = "run";
+      const WS = ["", " ", "\t"]; // 名前と `(` の間
+      const INNER = ["", " ", "\t", "\\\n"]; // `(` と `)` の間 (最後は行継続)
       const BODIES: ReadonlyArray<(c: string) => string> = [
         (c) => `{\n  ${c}\n}`,
         (c) => ` {\n  ${c}\n}`,
@@ -412,13 +419,18 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
         (c) => `{ ${c}; }`,
       ];
       const templates: string[] = [];
-      for (const kw of KEYWORDS)
-        for (const name of NAMES)
-          for (const body of BODIES) {
-            if (kw !== "") templates.push(`${kw}${name}${body("__CMD__")}`);
+      for (const prefix of PREFIXES)
+        for (const body of BODIES) {
+          // ヘッダ無し = 本体が実行される形。harness の marker 連言 (`rc === 0 && !marker`) が inert で
+          //   ないことの証人 (QA-CQ15-3): これらは marker を作り `ran` に数えられなければならない。
+          templates.push(`${prefix}${body("__CMD__").trimStart()}`);
+          for (const kw of KEYWORDS) {
+            if (kw !== "") templates.push(`${prefix}${kw}${NAME}${body("__CMD__")}`);
             for (const ws1 of WS)
-              for (const ws2 of WS) templates.push(`${kw}${name}${ws1}(${ws2})${body("__CMD__")}`);
+              for (const inner of INNER)
+                templates.push(`${prefix}${kw}${NAME}${ws1}(${inner})${body("__CMD__")}`);
           }
+        }
       const dir = mkdtempSync(join(tmpdir(), "actradeck-fn-gt-"));
       const defineOnly: string[] = [];
       let ran = 0;
@@ -441,12 +453,14 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
-      // 非空虚: 生成軸が実際に fake-green 綴りを大量に含むこと (R13 が見た 9 形より桁で多い)。
-      expect(templates.length).toBe(190); // 2 kw × 2 name × 5 body × (9 括弧綴り + function のみ 1)
+      // 非空虚: 生成軸が実際に fake-green 綴りを大量に含むこと (R13 が見た 9 形より桁で多い)、かつ
+      //   本体が実行される形も含むこと (marker 連言が両側で実効)。
+      expect(templates.length).toBe(520); // 4 prefix × 5 body × (ヘッダ無し 1 + 括弧綴り 2 kw × 12 + `function` のみ 1)
       expect(
         defineOnly.length,
         `define-only spellings (ran=${ran}, rejected=${rejected})`,
-      ).toBeGreaterThan(100);
+      ).toBeGreaterThan(300);
+      expect(ran, "some generated spellings must actually run their body").toBeGreaterThan(10);
       const leaked = defineOnly.filter((cmd) => classifyCheck(cmd) !== undefined);
       expect(leaked, "define-only spellings credited as checks").toEqual([]);
       // 対照 (bash が本体を実行する形) は credit を保つ: marker GT を同じ harness で取る。
@@ -469,6 +483,29 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       }
     },
   );
+
+  it("R15 H1/H2 (SEC-CQ15-1/2 ≡ QA-CQ15-1/2 ≡ TDA-CQ15-1): `time` prefix and line-continued empty parentheses are refused", () => {
+    // 裁定者の実 bash GT: いずれも rc=0 かつ marker 不作成 (定義のみ)。R14 までは `time` の `continue` が
+    //   セグメントごと検査を飛ばし、`readWord` が `\<newline>` を語内の実改行に畳んで regex を外した。
+    for (const cmd of [
+      "time run() {\n  pytest\n}",
+      "time -p run() {\n  pytest\n}",
+      "time\trun() {\n  pytest\n}",
+      "time function run {\n  pytest\n}",
+      "pytest\ntime run() { :; }",
+      "run(\\\n) {\n  pytest\n}",
+      "run(\\\n) (\n  eslint .\n)",
+      "time run(\\\n) {\n  pytest\n}",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+    }
+    // 対照: `time` は透過であって拒否ではない — 配下が普通の check なら credit を保つ。
+    expect(classifyCheck("time pytest")).toEqual({ check_kind: "test", check_match: "program" });
+    expect(classifyCheck("time {\n  pytest\n}")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+  });
 
   it("QA-CQ13-2: the compound-statement guard scans every segment, not only the first", () => {
     // `segments[0]` だけを見る変異は R12 の vector (すべて予約語が先頭セグメント) では生き残った。
@@ -510,9 +547,9 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
   });
 
   it("source coupling: the check classifier derives the program through the canonical chain with reserved words off", () => {
-    const src = readFileSync(
-      fileURLToPath(new URL("../src/check-classifier.ts", import.meta.url)),
-      "utf8",
+    // コメントを落としてから pin する (TDA-CQ15-4): docstring に書いた文字列で pin が満たされないように。
+    const src = stripComments(
+      readFileSync(fileURLToPath(new URL("../src/check-classifier.ts", import.meta.url)), "utf8"),
     );
     expect(src).toContain("programTokens(rawTokens, { reservedWords: false })");
     expect(src).not.toMatch(/skipCommandPrefixWords\(/);
@@ -521,7 +558,10 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     // R13/R14: 関数定義ヘッダの判定は check 局所 (risk 側と共有する予約語集合へ `function` を足さない)
     //   かつ構造判定 (空括弧 regex + `function` 語)。綴りの列挙へ戻す変異はここで RED。
     expect(src).toContain("if (isFunctionDefinitionHeader(tokens)) return true;");
-    expect(src).toContain("const FUNCTION_HEADER_RE = /^[^()]+\\(\\)/;");
+    expect(src).toContain("const FUNCTION_HEADER_RE = /^[^()]+\\(\\s*\\)/;");
+    // R15: `time` は skip でなく透過 — `continue` へ戻す変異はここで RED。
+    expect(src).toContain("const tokens = stripTimePrefix(tokenize(segment));");
+    expect(src).not.toMatch(/head === "time"\) continue/);
     expect(src).toContain('if (tokens[0] === "function") return true;');
     expect(src).toContain('FUNCTION_HEADER_RE.test(tokens.slice(0, 4).join(""))');
     expect(src).not.toMatch(/COMMAND_POSITION_RESERVED_WORDS\.add\(/);

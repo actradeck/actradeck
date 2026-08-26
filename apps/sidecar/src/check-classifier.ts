@@ -369,7 +369,8 @@ function classifySegment(segment: string): CheckClassification | undefined {
  * bash は body を実行せず rc=0 で終わるので、そのまま credit すると failed test が passed バッジになる
  * (ADR 0015 が禁じる fake-green)。いずれかのセグメントの先頭語がコマンド位置の予約語なら
  * 「このコマンドは複合文を含む」とみなし、認定側は全体を undefined に倒す (under-credit = 安全方向)。
- * `time` は除く: runner ラッパで exit が配下のものになるので `time pytest` は正当な credit。
+ * `time` は透過する (`stripTimePrefix`): runner ラッパで exit が配下のものになるので `time pytest` は
+ * 正当な credit だが、配下の構造 (予約語・関数定義ヘッダ) は見る (R15 H)。
  * 予約語集合は normalize.ts の `COMMAND_POSITION_RESERVED_WORDS` (単一出所) を共有する。消費者は本ファイルのみ。
  *
  * **関数定義ヘッダも同じ扱い** (R13 H → R14 H): `isFunctionDefinitionHeader` を参照。
@@ -377,20 +378,33 @@ function classifySegment(segment: string): CheckClassification | undefined {
  */
 function hasCompoundStatement(segments: readonly string[]): boolean {
   for (const segment of segments) {
-    const tokens = tokenize(segment);
+    // `time` [-p] は**透過**する (skip ではない・R15 H・SEC-CQ15-2 ≡ QA-CQ15-1 ≡ TDA-CQ15-1): exit は
+    //   配下のものになるので `time pytest` は正当な credit だが、配下が予約語や関数定義ヘッダなら
+    //   `time run() {…}` も定義のみで rc=0 になる。R12〜R14 の `continue` はセグメントごと検査を飛ばし、
+    //   この形を素通ししていた。
+    const tokens = stripTimePrefix(tokenize(segment));
     const head = tokens[0];
-    if (head === undefined || head === "time") continue;
+    if (head === undefined) continue;
     if (COMMAND_POSITION_RESERVED_WORDS.has(head)) return true;
     if (isFunctionDefinitionHeader(tokens)) return true;
   }
   return false;
 }
 
+/** 先頭の `time` (と直後の `-p`) を剥がした語列。`time` は exit を配下へ素通しする透明なラッパ。 */
+function stripTimePrefix(tokens: readonly string[]): readonly string[] {
+  let rest = tokens;
+  while (rest[0] === "time") rest = rest.slice(rest[1] === "-p" ? 2 : 1);
+  return rest;
+}
+
 /**
  * 先頭語列 (連結) が「名前 + 空括弧」なら関数定義ヘッダ。`^` から括弧を含まない名前、直後に `()`。
  * 連結は空白を落とすので `run()` / `run ()` / `run ( )` / `run( )` / `run(){` / `run()(` を同一視する。
+ * 括弧の中は `\s*`: `readWord` は行継続 `\<newline>` を語内の実改行に畳むので `run(\<newline>)` は
+ * 1 語 `run(\n)` になる (R15 H・SEC-CQ15-1 ≡ QA-CQ15-2)。bash はこれも空括弧として関数定義にする。
  */
-const FUNCTION_HEADER_RE = /^[^()]+\(\)/;
+const FUNCTION_HEADER_RE = /^[^()]+\(\s*\)/;
 
 /**
  * セグメントの語列が bash の関数定義ヘッダか (R14 H・SEC-CQ14-1 ≡ QA-CQ14-1 ≡ TDA-CQ14-1)。
