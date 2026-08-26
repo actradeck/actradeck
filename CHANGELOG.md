@@ -234,8 +234,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   position, so `env --unset FOO rm -rf …` was rated low; v0.8.0 happened to rate the same command
   medium only when a `!`, `2>&1` or `(` prefix tripped an accidental "unanalyzable" floor in the
   old tokenizer. Known valued options are skipped with their value, and an unknown separated long
-  option now stops the stripping and raises that floor deliberately (medium, `high-risk-other`)
-  instead of guessing. `--` ends the options but positional arguments (`flock -- FILE cmd`) are
+  option now raises that floor deliberately (medium, `high-risk-other`) on top of the guess
+  v0.8.0 already made, so the verdict is never below v0.8.0's and never silently low. `--` ends the options but positional arguments (`flock -- FILE cmd`) are
   still read, `--command=CMD`, `watch 'CMD'` and `su -c 'CMD'` go through the inline-shell path,
   and `su` joined the wrapper set. The wrapper table remains an allowlist: a wrapper not in it
   still hides the command it runs, and an unknown short option that takes a separate value is the

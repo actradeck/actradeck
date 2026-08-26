@@ -3507,7 +3507,8 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   //   exit-masking 判定。天井は実測 + 4。
   //   R18 unblock (decision 01a03e39): 2414/812 → 2507/798 — ラッパ文法を単一表 `WRAPPER_GRAMMAR` へ畳み
   //   (if 連鎖の除去で分岐トークンは減った)、未知 long option の床・`--`・文字列形・su を追加。天井は実測 + 4。
-  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2511;
+  //   R19 (SEC-CQ19-1 加算床 + watch/su): 2515/798。天井は実測 + 4。
+  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2519;
   const MODULE_SET_BRANCH_TOKEN_CEILING = 802;
 
   it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {
@@ -4054,6 +4055,28 @@ describe("INV-APPROVAL-R18: wrapper option grammar keeps the approval gate (SEC-
     }
   });
 
+  it("SEC-CQ19-1: the floor is additive — a real option missing from the table keeps the precise verdict", () => {
+    // 表に無い (が実在する) 分離 long option でも、base と同じ 1 語 skip の推定を続けるので category と egress は
+    //   保たれ、床が上乗せされる (head ⊇ base)。R18 は剥がすのを止めて床だけにし、`env --ignore-signal rm -rf …`
+    //   が base の high[recursive-rm] から medium[high-risk-other] へ落ちていた。
+    for (const prefix of [
+      "env --frobnicate ",
+      "nice --10 ",
+      "xargs --eof ",
+      "env --ignore-signal ",
+      "timeout --no-such 5 ",
+    ]) {
+      const v = classifyCommandWithCategories(`${prefix}${RM}`);
+      expect(v.risk, `${prefix}${RM}`).toBe("high");
+      expect([...v.categories], `${prefix}${RM}`).toContain("recursive-rm");
+      expect(isNetworkEgressCommand(`${prefix}${CURL}`), `${prefix}${CURL}`).toBe(true);
+    }
+    const unknown = classifyCommandWithCategories(`env --frobnicate ${RM}`);
+    expect([...unknown.categories]).toContain("high-risk-other"); // 床は加算で残る
+    expect(programTokens(tokenize(`env --frobnicate ${RM}`), {}).unknownOption).toBe(true);
+    expect(programTokens(tokenize(`env --ignore-signal ${RM}`), {}).unknownOption).toBe(false); // 表に載せた
+  });
+
   it("an unknown separated long option is unanalyzable: the floor is raised, never low", () => {
     for (const prefix of [
       "env --frobnicate x ",
@@ -4129,6 +4152,20 @@ describe("INV-APPROVAL-R18: wrapper option grammar keeps the approval gate (SEC-
       expect(isPersistDeniedCommand(cmd), cmd).toBe(true);
     }
     // 多語形の watch は書き換えず実コマンドの語列へ直接届く (egress / category を失わない)。
+    // 空白を含む引用語があれば残り全部が文字列 (SEC-CQ19-2: `watch 'CMD' extra` は連結して実行される)。
+    for (const cmd of [
+      `watch '${RM}' extra`,
+      `watch -n 1 '${RM}' '; id'`,
+      `su -w FOO -c '${RM}'`,
+      // `-w` が値を取らないと `root` が program に見え low へ落ちる (変異 X3 を殺す形)。
+      `su -w FOO root -c '${RM}'`,
+      `su -w FOO - root -c '${RM}'`,
+    ]) {
+      const v = classifyCommandWithCategories(cmd);
+      expect(v.risk, cmd).toBe("high");
+      expect([...v.categories], cmd).toContain("recursive-rm");
+      expect(stripRunnerWrappers(tokenize(cmd)).tokens[0], cmd).toBe("sh");
+    }
     for (const cmd of [`watch --interval=1 ${RM}`, `watch -x ${RM}`, `watch ${RM}`]) {
       const v = classifyCommandWithCategories(cmd);
       expect(v.risk, cmd).toBe("high");
@@ -4163,10 +4200,10 @@ describe("INV-APPROVAL-R18: wrapper option grammar keeps the approval gate (SEC-
       readFileSync(fileURLToPath(new URL("../src/normalize.ts", import.meta.url)), "utf8"),
     );
     expect(src).toContain("const WRAPPER_GRAMMAR: ReadonlyMap<string, WrapperGrammar>");
-    expect(src).toContain("return stop(true);");
+    expect(src).toContain("unknownOption = true;\n          i++;\n          continue;"); // 床は加算 (剥がし続ける)
     expect(src).toContain("if (capExhausted || unknownOption) {");
     expect(src).toContain('if (longName === "--command" || longName === "--session-command") {');
-    expect(src).toContain('rewritten = ["sh", "-c", cur[i] as string];');
+    expect(src).toContain('rewritten = ["sh", "-c", ...cur.slice(i)];');
     expect(src).not.toMatch(/name === "sudo" &&/); // R17 までの per-wrapper if 連鎖は表へ畳んだ。
     expect(src).not.toMatch(/name === "timeout"\)/);
     expect(src).toContain('name === "env" && ASSIGNMENT_TOKEN_RE.test(t)'); // 代入 regex の複製なし (TDA-CQ18-5)

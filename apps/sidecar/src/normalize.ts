@@ -1215,7 +1215,9 @@ const WRAPPER_GRAMMAR: ReadonlyMap<string, WrapperGrammar> = new Map([
     "env",
     grammar({
       valued: words("-u --unset -C --chdir -S --split-string"),
-      flags: words("-i --ignore-environment -0 --null -v --debug"),
+      flags: words(
+        "-i --ignore-environment -0 --null -v --debug --block-signal --default-signal --ignore-signal --list-signal-handling",
+      ),
     }),
   ],
   [
@@ -1223,7 +1225,7 @@ const WRAPPER_GRAMMAR: ReadonlyMap<string, WrapperGrammar> = new Map([
     grammar({
       valued: new Set([...XARGS_VALUE_OPTIONS, "--process-slot-var"]),
       flags: words(
-        "-0 --null -r --no-run-if-empty -t --verbose -p --interactive -x --exit -o --open-tty --show-limits -i --replace",
+        "-0 --null -r --no-run-if-empty -t --verbose -p --interactive -x --exit -o --open-tty --show-limits -i --replace -e --eof",
       ),
     }),
   ],
@@ -1314,7 +1316,7 @@ const WRAPPER_GRAMMAR: ReadonlyMap<string, WrapperGrammar> = new Map([
   [
     "su",
     grammar({
-      valued: words("-s --shell -g --group -G --supp-group"),
+      valued: words("-s --shell -g --group -G --supp-group -w --whitelist-environment"),
       flags: words("-l --login -m -p --preserve-environment -P --pty -f --fast"),
       positional: 1,
       shellString: true,
@@ -1341,16 +1343,17 @@ const MAX_WRAPPER_STRIP = 8;
 export function stripRunnerWrappers(tokens: string[]): StrippedProgram {
   let cur = tokens;
   const wrappers: string[] = [];
-  const stop = (unknownOption: boolean): StrippedProgram => ({
+  let unknownOption = false;
+  const stop = (): StrippedProgram => ({
     tokens: cur,
     capExhausted: false,
     unknownOption,
     wrappers,
   });
   for (let iter = 0; iter < MAX_WRAPPER_STRIP; iter++) {
-    if (cur.length === 0) return stop(false);
+    if (cur.length === 0) return stop();
     const name = commandName(cur);
-    if (!RUNNER_WRAPPERS.has(name)) return stop(false);
+    if (!RUNNER_WRAPPERS.has(name)) return stop();
     const g = WRAPPER_GRAMMAR.get(name) ?? EMPTY_GRAMMAR;
 
     let i = 1; // ラッパ自身の次から実コマンドを探す。
@@ -1397,7 +1400,14 @@ export function stripRunnerWrappers(tokens: string[]): StrippedProgram {
             i++;
             continue;
           }
-          return stop(true); // 表に無い分離 long option = 解析不能 → 分類本体が床を立てる。
+          // 表に無い分離 long option = 解析不能。剥がすのは**続ける** (base と同じ 1 語 skip の推定で
+          //   category / egress を取りに行く) が、分類本体には床を立てさせる — 床は**加算**であって
+          //   代替でない (R19 M・SEC-CQ19-1: 実在するが表に無い `env --ignore-signal` / `nice --10` /
+          //   `xargs --eof` で base の high[recursive-rm] が medium[high-risk-other] へ落ち egress も消えた)。
+          //   推定が実コマンドを食っても床が残るので verdict は base 以上 (head ⊇ base)。
+          unknownOption = true;
+          i++;
+          continue;
         }
         i++; // 短 option (既知の値つき以外) は 1 語。
         continue;
@@ -1409,20 +1419,24 @@ export function stripRunnerWrappers(tokens: string[]): StrippedProgram {
       }
       break; // ここが実コマンド (または `watch` の文字列)。
     }
-    // `watch 'rm -rf x'` (引用 1 語・空白を含む) だけを `sh -c` へ書き換える。多語形 (`watch rm -rf x` /
+    // `watch 'rm -rf x'` / `watch 'rm -rf x' extra` (空白を含む引用語がある = watch は全引数を連結して sh -c
+    //   へ渡す) は残り全部を `sh -c` へ書き換える (SEC-CQ19-2)。空白を含む語が無い多語形 (`watch rm -rf x` /
     //   `watch -x cmd`) はそのまま剥がし、category / egress 判定を実コマンドの語列に直接届かせる。
     if (
       rewritten === undefined &&
       g.restIsShellString &&
-      i === cur.length - 1 &&
-      /\s/.test(cur[i] as string)
+      i < cur.length &&
+      cur.slice(i).some((w) => /\s/.test(w))
     )
-      rewritten = ["sh", "-c", cur[i] as string];
+      rewritten = ["sh", "-c", ...cur.slice(i)];
     const next = rewritten ?? cur.slice(i);
-    if (next.length === 0) return stop(false); // ラッパ単体 → 剥がさない。
-    if (rewritten === undefined && next.length === cur.length) return stop(false); // 進捗なし → 停止。
+    if (next.length === 0) return stop(); // ラッパ単体 → 剥がさない。
+    if (rewritten === undefined && next.length === cur.length) return stop(); // 進捗なし → 停止。
     // `--` の後で option に見える語が実コマンド位置に来た (`flock -- FILE -c 'cmd'`): 解析不能として床。
-    if (rewritten === undefined && (next[0] as string).startsWith("-")) return stop(true);
+    if (rewritten === undefined && (next[0] as string).startsWith("-")) {
+      unknownOption = true;
+      return stop();
+    }
     wrappers.push(name);
     cur = next;
   }
@@ -1430,7 +1444,7 @@ export function stripRunnerWrappers(tokens: string[]): StrippedProgram {
   return {
     tokens: cur,
     capExhausted: RUNNER_WRAPPERS.has(commandName(cur)),
-    unknownOption: false,
+    unknownOption,
     wrappers,
   };
 }

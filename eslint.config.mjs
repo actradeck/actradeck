@@ -98,7 +98,8 @@ export default tseslint.config(
       //   R18 unblock (decision 01a03e39) で 2041 → 2134: ラッパ option 文法の単一表 `WRAPPER_GRAMMAR` (15 ラッパ分の
       //   値つき/flag 表・データ行が大半) + 未知 long option の床 + `--`/文字列形/`su` (SEC-CQ18-1 H の承認ゲート修正)。
       //   天井は実測 + 4。
-      "max-lines": ["error", { max: 2138, skipComments: true, skipBlankLines: true }],
+      //   R19 (SEC-CQ19-1: 未知 option の床を加算に・watch 連結・su -w) で 2134 → 2142。天井は実測 + 4。
+      "max-lines": ["error", { max: 2146, skipComments: true, skipBlankLines: true }],
     },
   },
   {
