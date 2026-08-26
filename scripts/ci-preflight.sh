@@ -40,6 +40,11 @@ export ACTRADECK_SKIP_REAL_BIN_E2E=1
 # SEC-R3-4: telemetry kill-switch をシェルレベルで一様固定 (ci.yml のワークフロー env と対)。
 # vitest 内は setup-env が注入するが、vitest を経ないゲートも実 consent/collector に触れさせない。
 export ACTRADECK_TELEMETRY_DISABLED=1
+# GitHub-hosted runners have no TERM. A local shell always exports one, which hid a real CI
+# failure: the bash-derived wrapper metatest runs `watch`, which initialises ncurses and dies with
+# "Error opening terminal" without TERM, so the form passed here and failed only on the runner
+# (PR #35). Drop it so the terminal posture matches the runner too.
+unset TERM
 
 # ---------------------------------------------------------------------------
 # Drift tripwire: mirrored jobs' step names must match this list exactly.
