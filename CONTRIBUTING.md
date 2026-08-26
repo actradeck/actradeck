@@ -116,7 +116,15 @@ pull requests are **merged normally**, your commits (author identity and SHAs) b
 part of this repository's history, and GitHub shows your PR as **Merged**. Branch
 protection requires the CI gate to pass before merge, and security-sensitive changes
 additionally go through the independent audit described in
-[`GOVERNANCE.md`](./GOVERNANCE.md) §3.
+[`GOVERNANCE.md`](./GOVERNANCE.md) §3. One rule of that audit is worth stating here
+because it shapes how fixes are reviewed: **a test that lands an audit finding must pin the
+finding's evidence verbatim.** Matching the finding's count with a different vector, or
+listing the shapes the implementation happens to catch, is not a landing — where the input
+space is a grammar (shell spellings, escape forms), derive the vectors from the real
+interpreter instead of by hand, keep the generated axes symmetric (the same variants at every
+position the grammar allows them), and when a later audit finds a spelling the generator
+missed, add it as an axis rather than as one more vector. Never remove an axis or a variant while
+adding another: the coverage you drop is exactly what the next round finds.
 
 **Credit.** Your merged commits are the primary, durable record.
 [`CONTRIBUTORS.md`](./CONTRIBUTORS.md) additionally credits contributors.

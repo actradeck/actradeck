@@ -289,7 +289,9 @@ describe("INV-REDACTION: secret-as-object-key (4#SEC-1)", () => {
       console.log(
         `[INV-REDACTION-PERF] redactValue N=${N} collide-keys best-of-${REDOS_BUDGET_REPEAT}: ${elapsed.toFixed(1)}ms`,
       );
-      expect(elapsed).toBeLessThan(800);
+      // 予算 2000ms: 共有 CI runner では best-of-N でも 899–922ms を観測 (2026-08-26・2 回) し 800ms は
+      //   加法ノイズの外に無い。旧 O(N^2) は同 N で数十秒なので 2000ms でも歯は残る。
+      expect(elapsed).toBeLessThan(2000);
     },
     REDOS_TEST_TIMEOUT_MS,
   );

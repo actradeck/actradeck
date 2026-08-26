@@ -5,7 +5,7 @@
  *  - `pnpm test` → (test, script) / `vitest run` → (test, program) を正しく分類する。
  *  - mutating 変種 (`eslint --fix` / `prettier --write`) を **非認定**する。
  *  - **正準トークナイザチェーン** (normalize.ts の tokenize/stripRunnerWrappers/commandName/
- *    normalizeCommandName/skipLeadingAssignments) を消費する — 第二パーサでないことを behavioral に固定する。
+ *    normalizeCommandName/skipCommandPrefixWords) を消費する — 第二パーサでないことを behavioral に固定する。
  *
  * ## meta-test の原理 (第二パーサ禁止の falsifiable な担保)
  * path 剥がし (`/usr/local/bin/vitest`)・quote 処理 (`"vitest"`)・runner 剥がし (`sudo pnpm test`)・
@@ -14,13 +14,21 @@
  * 各変種が plain 形と同一分類になることを assert することで、分類器が正準チェーンを消費している事実を固定する
  * (naive パーサなら少なくとも 1 変種で分類が崩れる)。
  */
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
+
+import { stripComments } from "./util/strip-comments.js";
 
 import { classifyCheck } from "../src/check-classifier.js";
 import {
   commandName,
   normalizeCommandName,
-  skipLeadingAssignments,
+  skipCommandPrefixWords,
   stripRunnerWrappers,
   tokenize,
 } from "../src/normalize.js";
@@ -226,7 +234,7 @@ describe("meta-test (受入 11): 正準トークナイザチェーンを消費�
     const cmd = "env FOO=1 /opt/bin/vitest run";
     // 正準チェーンを test 側でも同じ手順で回して basename を導く。
     const raw = tokenize(cmd);
-    const deassigned = raw.slice(skipLeadingAssignments(raw));
+    const deassigned = raw.slice(skipCommandPrefixWords(raw));
     const { tokens } = stripRunnerWrappers(deassigned);
     const base = normalizeCommandName(commandName(tokens));
     expect(base).toBe("vitest"); // canonical chain の帰結。
@@ -244,5 +252,574 @@ describe("meta-test (受入 11): 正準トークナイザチェーンを消費�
     expect(classifyCheck("/usr/local/bin/vitest run")?.check_kind).toBe("test");
     expect(classifyCheck("sudo pnpm test")?.check_kind).toBe("test");
     expect(classifyCheck("TZ=utc vitest run")?.check_kind).toBe("test");
+  });
+});
+
+// TDA-CQ-1 (2026-08-14): check-classifier は分類器と同じ splitSegments を消費するため、
+// quote-aware 化 (fix/classifier-quoted-operators) の走査範囲変更がここにも波及する。
+// 両方向を pin する: 引用内演算子は crediting を壊さず、引用内の偽 check 語は credit しない。
+describe("quoted operators in check commands (splitSegments coupling)", () => {
+  it("quoted args with pipes do not break check crediting", () => {
+    expect(classifyCheck("vitest run -t 'a|b'")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("pnpm test # rerun after fix")).toEqual({
+      check_kind: "test",
+      check_match: "script",
+    });
+  });
+
+  it("a check word inside a quoted string is data, not a credited check (false-credit removal)", () => {
+    // 旧分割は "foo | pytest" の引用内 | で裂けて pytest を segment として誤 credit した。
+    expect(classifyCheck('echo "foo | pytest"')).toBeUndefined();
+  });
+});
+
+describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a check (fake-green)", () => {
+  // 実 bash: `if false; then touch M; fi` は M を作らず rc=0。`! pytest` は exit を反転する。
+  //   予約語を読み飛ばして内側を認定すると、失敗したテストが passed バッジになる (ADR 0015 の禁止方向)。
+  it("reserved words are not skipped by the check classifier", () => {
+    let checked = 0;
+    for (const cmd of [
+      "if false; then pytest; fi",
+      "! pytest",
+      "if ! npm test; then echo failed; fi",
+      "while pytest; do :; done",
+      "until pytest -q; do sleep 1; done",
+      "! eslint .",
+      "! tsc --noEmit",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+      checked += 1;
+    }
+    expect(checked).toBe(7);
+    // `time` は予約語であると同時に runner ラッパで、exit は配下のものが素通しされる → 正当な credit。
+    expect(classifyCheck("time pytest")).toEqual({ check_kind: "test", check_match: "program" });
+  });
+
+  it("env assignments are still skipped, and the pre-existing && form is unchanged", () => {
+    expect(classifyCheck("CI=1 pytest")).toEqual({ check_kind: "test", check_match: "program" });
+    expect(classifyCheck("FOO=1 BAR=2 npm test")).toEqual({
+      check_kind: "test",
+      check_match: "script",
+    });
+    // `false && pytest` は exit 1 で自己限定する既知の形 (base から同じ・R11 で変えていない)。
+    expect(classifyCheck("false && pytest")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+  });
+
+  it("R12 H1 (QA-CQ12-1): multi-line compound statements are not credited either", () => {
+    // `\n` はセグメント区切りなので予約語が自分のセグメントに落ち、セグメント単位のフェンスは届かない。
+    //   実 bash: `if false; then\n  touch M\nfi` は M を作らず rc=0 = passed バッジになる形。
+    let checked = 0;
+    for (const cmd of [
+      "if false; then\n  pytest\nfi",
+      "while false; do\n  npm test\ndone",
+      "until true; do\n  eslint .\ndone",
+      "if false\nthen\n  tsc --noEmit\nfi",
+      "case y in\n  x) pytest;;\nesac",
+      "for f in; do\n  pytest\ndone",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+      checked += 1;
+    }
+    expect(checked).toBe(6);
+    // 複合文を含まない複数行は普通に credit される (ガードが過剰でないこと)。
+    expect(classifyCheck("cd app\npytest")).toEqual({ check_kind: "test", check_match: "program" });
+  });
+
+  it("R13 H1 (SEC-CQ13-1 ≡ QA-CQ13-1): shell function definitions are not credited", () => {
+    // QA-CQ12-1 の recommendation が名指しした「関数定義ヘッダ (`name() {`)」は、上の R12 H1 が
+    //   件数 6 を合わせる裏で 1 形だけ落としていた (SEC-CQ13-2: 件数一致は landing でない)。ここでは
+    //   所見の evidence を逐語で pin する。実 bash (marker 方式・裁定者が再現):
+    //     `run() {\n  touch M\n}`       → M を作らず rc=0  (定義だけ・本体は走らない)
+    //     `function run {\n  touch M\n}` → M を作らず rc=0
+    //     `{\n  touch M\n}`             → M を作る        (グループは本体を実行する・対照)
+    //   `function` / `name()` は COMMAND_POSITION_RESERVED_WORDS に無い (risk 側の前置語 skip と
+    //   共有しない) ので、check 局所のカーブアウトで拾う。
+    const FUNCTION_DEFINITIONS = [
+      "run() {\n  pytest\n}",
+      "function run {\n  pytest\n}",
+      "function run() {\n  pytest\n}",
+      "run()\n{\n  pytest\n}",
+      "check () {\n  npm test\n}",
+      "test_all() { pytest; }",
+      "_ci() {\n  eslint .\n}",
+      "t() {\n  tsc --noEmit\n}",
+      "pytest; run() { :; }", // 定義が後ろでも全体の exit は定義の 0 になる
+    ];
+    let refused = 0;
+    for (const cmd of FUNCTION_DEFINITIONS) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+      refused += 1;
+    }
+    expect(refused).toBe(FUNCTION_DEFINITIONS.length);
+    // 対照: 本体を実行する grouping / subshell は credit される (ガードが過剰でないこと)。
+    expect(classifyCheck("{\n  pytest\n}")).toEqual({ check_kind: "test", check_match: "program" });
+    expect(classifyCheck("(\n  pytest\n)")).toEqual({ check_kind: "test", check_match: "program" });
+    // 単一行の `{ pytest; }` は base から undefined (grouping 語がセグメント先頭に残る under-credit・
+    //   安全方向・本ラウンドで変えない)。
+    expect(classifyCheck("{ pytest; }")).toBeUndefined();
+  });
+
+  it("R14 H1 (SEC-CQ14-1 ≡ QA-CQ14-1 ≡ TDA-CQ14-1): the spellings R13 missed are refused structurally", () => {
+    // `tokenize` は空白でしか切らないので `(` `)` は周辺空白次第で名前や `{` と融合する。R13 の 3 形
+    //   列挙 (`function` / `()` で終わる語 / `()` 単独語) はこれらを素通しした。裁定者の実 bash GT:
+    //   いずれも rc=0 かつ marker 不作成 (定義のみ)。
+    for (const cmd of [
+      "run(){\n  pytest\n}",
+      "run ( ) {\n  pytest\n}",
+      "run (  ) {\n  pytest\n}",
+      "run (\t) {\n  pytest\n}",
+      "run ( )\n{\n  pytest\n}",
+      "run( ) {\n  pytest\n}",
+      "run()(\n  pytest\n)",
+      "run ( ) (\n  pytest\n)",
+      "function run ( ) {\n  pytest\n}",
+      "pytest\nrun ( ) { :; }",
+      "run\t(\t)\t{\n  pytest\n}",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+    }
+    // 対照: 空括弧を含まない括弧引数・置換は credit を失わない (構造判定が過剰でないこと)。
+    expect(classifyCheck("pytest $(git rev-parse HEAD)")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("pytest -k 'not (slow or gpu)'")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+  });
+
+  const BASH = "/bin/bash";
+  it.skipIf(!existsSync(BASH))(
+    "R14 H1: every function-definition spelling that bash defines without running is refused (bash-derived ground truth)",
+    () => {
+      // 手で列挙した vector は 3 ラウンド続けて綴りを取りこぼした (SEC-CQ14-2)。ここでは綴りを生成軸から
+      //   組み立て、**実 bash** に marker 方式で「定義のみ・本体未実行 (rc=0 かつ marker 不在)」を判定
+      //   させ、そう判定された綴りだけを fake-green の vector として分類器へ掛ける。bash が構文エラー
+      //   にする綴りは fake-green でないので対象外 (件数は開示)。破壊的 argv は使わない (marker は touch)。
+      // 生成軸 (R15 で 2 軸追加・SEC-CQ15-1/2 ≡ QA-CQ15-1/2 ≡ TDA-CQ15-1/2): 前置 (`time` は exit を
+      //   素通しする透明ラッパ・タブ) と括弧内 (行継続 `\<newline>` を含む)。R14 の軸にはどちらも無く、
+      //   「実インタプリタ由来」の規約が同クラスを止められなかった。
+      // **軸は左右対称に保つ (R16 H・QA-CQ16-2)**: R15 は行継続を `INNER` にだけ入れ、名前と `(` の間
+      //   (`WS`) に無かったため、`run \<nl> (\t\<nl>\t){` の H を構造的に検出できなかった。文法上
+      //   同じ変種が入りうる位置には同じ要素を置く。監査で見つかった綴りは vector でなく**軸**として
+      //   足す。R16 追加軸: 前置 `time -- ` / wrapper (subshell・group の中の定義・SEC-CQ16-2)。
+      // **軸は追加のみ・削除禁止 (R17・QA-CQ17-1 の unblock 条件)**: R16 は軸を足すと同時に WS / INNER /
+      //   BODIES から要素を落とし、その差分を拡張 sweep が再発見した (SEC-CQ17-4 ≡ TDA-CQ17-5)。
+      //   R17 追加軸: 前置 `FOO=1 ` (代入・SEC-CQ17-1 族 B) / `\<nl> ` と `\<nl>` (語頭の行継続・QA-CQ17-1) /
+      //   wrapper `({ … } )` `{( … ) }` (合成 opener・SEC-CQ17-1 族 A) / `$( … )` (置換)。
+      const PREFIXES = ["", "time ", "time -p ", "time -- ", "\t", "FOO=1 ", "\\\n ", "\\\n"];
+      const WRAPS: ReadonlyArray<(s: string) => string> = [
+        (s) => s,
+        (s) => `( ${s}\n)`,
+        (s) => `(${s}\n)`, // 語頭に融合した opener
+        (s) => `{ ${s}\n}`,
+        (s) => `({ ${s}\n} )`, // 合成 opener (subshell の中の group)
+        (s) => `{( ${s}\n) }`,
+        (s) => `$(${s}\n)`, // コマンド置換 (出力が空なら何も実行されない)
+      ];
+      const KEYWORDS = ["", "function "];
+      const NAME = "run";
+      // R18 (TDA-CQ18-2 ≡ QA-CQ18-1): R16 が無言で落とした変種 (WS `\t` / INNER ` ` / BODIES の空白・改行
+      //   付き `{`) を復元し、以後は軸配列そのものを逐語 pin する (同一濃度の swap で緑にならない)。
+      const WS = ["", " ", "\t", " \\\n "]; // 名前と `(` の間 (空白付き行継続を含む)
+      const INNER = ["", " ", "\t", "\\\n", "\t\\\n\t"]; // `(` と `)` の間 (行継続・空白付き行継続を含む)
+      const BODIES: ReadonlyArray<(c: string) => string> = [
+        (c) => `{\n  ${c}\n}`,
+        (c) => ` {\n  ${c}\n}`,
+        (c) => `\n{\n  ${c}\n}`,
+        (c) => `(\n  ${c}\n)`,
+        (c) => `{ ${c}; }`,
+      ];
+      expect(PREFIXES).toEqual([
+        "",
+        "time ",
+        "time -p ",
+        "time -- ",
+        "\t",
+        "FOO=1 ",
+        "\\\n ",
+        "\\\n",
+      ]);
+      expect(WRAPS.map((w) => w("S"))).toEqual([
+        "S",
+        "( S\n)",
+        "(S\n)",
+        "{ S\n}",
+        "({ S\n} )",
+        "{( S\n) }",
+        "$(S\n)",
+      ]);
+      expect(WS).toEqual(["", " ", "\t", " \\\n "]);
+      expect(INNER).toEqual(["", " ", "\t", "\\\n", "\t\\\n\t"]);
+      expect(BODIES.map((b) => b("C"))).toEqual([
+        "{\n  C\n}",
+        " {\n  C\n}",
+        "\n{\n  C\n}",
+        "(\n  C\n)",
+        "{ C; }",
+      ]);
+      const rawTemplates: string[] = [];
+      const templates = rawTemplates; // 生成後に distinct 化する (下)。
+      for (const prefix of PREFIXES)
+        for (const wrap of WRAPS)
+          for (const body of BODIES) {
+            // ヘッダ無し = 本体が実行される形。harness の marker 連言 (`rc === 0 && !marker`) が inert で
+            //   ないことの証人 (QA-CQ15-3): これらは marker を作り `ran` に数えられなければならない。
+            //   R18: `trimStart()` を外す — 復元した ` {…}` / `\n{…}` body は headerless でも別綴り (bash は
+            //   どれも本体を実行する)。畳むと distinct 件数が減り TDA-CQ16-7 の重複 pin 違反が再発する。
+            templates.push(`${prefix}${wrap(body("__CMD__"))}`);
+            for (const kw of KEYWORDS) {
+              if (kw !== "") templates.push(`${prefix}${wrap(`${kw}${NAME}${body("__CMD__")}`)}`);
+              for (const ws1 of WS)
+                for (const inner of INNER)
+                  templates.push(
+                    `${prefix}${wrap(`${kw}${NAME}${ws1}(${inner})${body("__CMD__")}`)}`,
+                  );
+            }
+          }
+      const dir = mkdtempSync(join(tmpdir(), "actradeck-fn-gt-"));
+      const defineOnly: string[] = [];
+      let ran = 0;
+      let rejected = 0;
+      try {
+        for (const t of templates) {
+          const script = t.replace("__CMD__", "touch m");
+          let rc = 0;
+          try {
+            execFileSync(BASH, ["-c", script], { cwd: dir, stdio: "ignore" });
+          } catch {
+            rc = 1;
+          }
+          const marker = existsSync(join(dir, "m"));
+          if (marker) rmSync(join(dir, "m"));
+          if (rc === 0 && !marker) defineOnly.push(t.replace("__CMD__", "pytest"));
+          else if (marker) ran += 1;
+          else rejected += 1;
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      // 非空虚: 生成軸が実際に fake-green 綴りを大量に含むこと (R13 が見た 9 形より桁で多い)、かつ
+      //   本体が実行される形も含むこと (marker 連言が両側で実効)。
+      // 8 prefix × 7 wrap × 5 body × (ヘッダ無し 1 + 括弧綴り 2 kw × (4 WS × 5 INNER) + `function` のみ 1) = 11760
+      //   のうち headerless 9 綴りが衝突する (wrap `( S` + body `{…}` と wrap `(S` + body ` {…}` は同じ文字列・
+      //   prefix 8 種 + `$(` wrap の 1 種)。distinct 11751 を走らせ、生成数と distinct 数の両方を pin する
+      //   (TDA-CQ16-7: 重複を含む件数だけの pin にしない)。
+      expect(rawTemplates.length).toBe(11760);
+      const distinct = [...new Set(rawTemplates)];
+      expect(distinct.length).toBe(11751);
+      templates.length = 0;
+      templates.push(...distinct);
+      expect(
+        defineOnly.length,
+        `define-only spellings (ran=${ran}, rejected=${rejected})`,
+      ).toBeGreaterThan(700);
+      expect(ran, "some generated spellings must actually run their body").toBeGreaterThan(10);
+      const leaked = defineOnly.filter((cmd) => classifyCheck(cmd) !== undefined);
+      expect(leaked, "define-only spellings credited as checks").toEqual([]);
+      // 対照 (bash が本体を実行する形) は credit を保つ: marker GT を同じ harness で取る。
+      const controlDir = mkdtempSync(join(tmpdir(), "actradeck-fn-ctl-"));
+      try {
+        for (const t of ["{\n  __CMD__\n}", "(\n  __CMD__\n)", "cd .\n__CMD__", "CI=1 __CMD__"]) {
+          execFileSync(BASH, ["-c", t.replace("__CMD__", "touch m")], {
+            cwd: controlDir,
+            stdio: "ignore",
+          });
+          expect(existsSync(join(controlDir, "m")), `control ran: ${t}`).toBe(true);
+          rmSync(join(controlDir, "m"));
+          expect(classifyCheck(t.replace("__CMD__", "pytest")), t).toEqual({
+            check_kind: "test",
+            check_match: "program",
+          });
+        }
+      } finally {
+        rmSync(controlDir, { recursive: true, force: true });
+      }
+    },
+    // 1,560 回の bash spawn は静穏時 ~5s、preflight の全 suite 並走下で 13s (vitest 既定 5s を超過して
+    //   RED になった実例・R16)。R17 で 4,368 回 (静穏 9.7s・3× oversubscribe 20.4s・QA 実測) → 240s。
+    //   R18 で変種復元により 11,751 回 (静穏 ~26s・3× で ~55s 見込み) → 300s。軸を足したら件数に合わせて
+    //   ここを見直す。時間でなく leak 0 が検証対象。
+    300_000,
+  );
+
+  it("R15 H1/H2 (SEC-CQ15-1/2 ≡ QA-CQ15-1/2 ≡ TDA-CQ15-1): `time` prefix and line-continued empty parentheses are refused", () => {
+    // 裁定者の実 bash GT: いずれも rc=0 かつ marker 不作成 (定義のみ)。R14 までは `time` の `continue` が
+    //   セグメントごと検査を飛ばし、`readWord` が `\<newline>` を語内の実改行に畳んで regex を外した。
+    for (const cmd of [
+      "time run() {\n  pytest\n}",
+      "time -p run() {\n  pytest\n}",
+      "time\trun() {\n  pytest\n}",
+      "time function run {\n  pytest\n}",
+      "pytest\ntime run() { :; }",
+      "run(\\\n) {\n  pytest\n}",
+      "run(\\\n) (\n  eslint .\n)",
+      "time run(\\\n) {\n  pytest\n}",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+    }
+    // 対照: `time` は透過であって拒否ではない — 配下が普通の check なら credit を保つ。
+    expect(classifyCheck("time pytest")).toEqual({ check_kind: "test", check_match: "program" });
+    expect(classifyCheck("time {\n  pytest\n}")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+  });
+
+  it("R16 H (SEC-CQ16-2/3 ≡ QA-CQ16-1/3): grouped definitions, `time --`, stacked `time`, and split headers are refused", () => {
+    // 裁定者の実 bash GT: いずれも rc=0 かつ marker 不作成 (定義のみ)。R15 までは (a) 先頭 `(`/`{` で
+    //   join が `(` 始まりになり regex が外れ、(b) `time --` を剥がさず、(c) 行継続で語が分割されると
+    //   `)` が 4 語窓の外へ落ちていた。
+    for (const cmd of [
+      "( run()\n{\n  pytest\n}\n)",
+      "{ run() {\n  pytest\n}\n}",
+      "(run() { pytest; })",
+      "(run() {\n  pytest\n}\n)", // 語頭に融合した `(`・後続セグメントが check (V5 fence)
+      "(function run {\n  pytest\n}\n)",
+      "( function run {\n  pytest\n}\n)",
+      "time -- function run {\n  pytest\n}",
+      "time -- run() {\n  pytest\n}",
+      "time -- time -- run ( ) {\n  pytest\n}",
+      "time -p time -p run () { pytest; }",
+      "time time run() {\n  pytest\n}",
+      "run \\\n (\t\\\n\t){\n  pytest\n}",
+      "run \\\n ( \\\n ) {\n  pytest\n}",
+      "time -- ( run \\\n ( ) {\n  pytest\n}\n)",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+    }
+    // 対照: grouping opener と `time` は透過であって拒否ではない。
+    expect(classifyCheck("(\n  pytest\n)")).toEqual({ check_kind: "test", check_match: "program" });
+    expect(classifyCheck("time (\n  pytest\n)")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("time -p pytest")).toEqual({ check_kind: "test", check_match: "program" });
+  });
+
+  it("QA-CQ13-2: the compound-statement guard scans every segment, not only the first", () => {
+    // `segments[0]` だけを見る変異は R12 の vector (すべて予約語が先頭セグメント) では生き残った。
+    for (const cmd of [
+      "echo a\nif false; then\n  pytest\nfi",
+      "cd app && true\nwhile false; do\n  npm test\ndone",
+      "pytest\nfunction run {\n  :\n}",
+      "npm test\nif false; then :; fi",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+    }
+    expect(classifyCheck("cd app\npytest")).toEqual({ check_kind: "test", check_match: "program" });
+  });
+
+  it("R12 M1 (SEC-CQ12-1): oversized commands yield no evidence, and fast", () => {
+    // `checkFields` は `splitSegments` の唯一のガード無し消費者で、4 MiB の入力で同期 hook パスが
+    //   3 分停止した。解析可能長を超えたら証拠なし (undefined) で即帰る。
+    const huge = `pytest ${">o ".repeat(12_000)}`; // 36 KiB > 16 KiB
+    expect(huge.length).toBeGreaterThan(16 * 1024);
+    let best = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 3; i += 1) {
+      const started = performance.now();
+      expect(classifyCheck(huge)).toBeUndefined();
+      best = Math.min(best, performance.now() - started);
+    }
+    expect(best, "oversized input must short-circuit").toBeLessThan(50);
+  });
+
+  it("known pre-existing gap (v0.9 task 01a03bb6): sequencing after the check still credits it", () => {
+    // exit がコマンド全体のものになる形 (SEC-CQ12-2・base 同値・32 combos)。R12 では意図的に触らない。
+    expect(classifyCheck("pytest ; echo done")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("npm test || true")).toEqual({
+      check_kind: "test",
+      check_match: "script",
+    });
+  });
+
+  it("source coupling: the check classifier derives the program through the canonical chain with reserved words off", () => {
+    // コメントを落としてから pin する (TDA-CQ15-4): docstring に書いた文字列で pin が満たされないように。
+    const src = stripComments(
+      readFileSync(fileURLToPath(new URL("../src/check-classifier.ts", import.meta.url)), "utf8"),
+    );
+    expect(src).toContain("programTokens(rawTokens, { reservedWords: false })");
+    expect(src).not.toMatch(/skipCommandPrefixWords\(/);
+    // R12: 複合文ガードと長さガードは classifyCheck の入口にあること。
+    expect(src).toContain("if (hasCompoundStatement(segments)) return undefined;");
+    // R13/R14: 関数定義ヘッダの判定は check 局所 (risk 側と共有する予約語集合へ `function` を足さない)
+    //   かつ構造判定 (空括弧 regex + `function` 語)。綴りの列挙へ戻す変異はここで RED。
+    expect(src).toContain("if (isFunctionDefinitionHeader(tokens)) return true;");
+    expect(src).toContain("const FUNCTION_HEADER_RE = /^[^()]+\\(\\s*\\)/;");
+    // R15/R16: 透明な前置は skip でなく透過 — `continue` へ戻す変異はここで RED。timespec 語集合は
+    //   normalize.ts の単一出所を使い (SEC-CQ16-1/3)、語窓の切り詰めは無い (QA-CQ16-1)。
+    expect(src).toContain("const tokens = stripTransparentPrefix(tokenize(segment));");
+    expect(src).not.toMatch(/head === "time"\) continue/);
+    expect(src).toContain("isTimespecWord(rest[0])");
+    expect(src).not.toMatch(/rest\[1\] === "-p"/);
+    // R17: 残渣 (空語・語頭空白) を落とし、代入は risk 側の regex を共有し、exit を隠すラッパは正準チェーンの
+    //   `wrappers` で見る。どれも check 側で再定義しない (単一出所)。
+    expect(src).toContain('if (head.trim() === "") {');
+    expect(src).toContain("ASSIGNMENT_TOKEN_RE.test(head)");
+    expect(src).toContain("EXIT_MASKING_WRAPPERS.has(w)");
+    expect(src).toContain("programTokens([...tokens], { reservedWords: false })");
+    expect(src).not.toMatch(
+      /const (?:ASSIGNMENT_TOKEN_RE|EXIT_MASKING_WRAPPERS|TIME_OPTION_WORDS)\b/,
+    );
+    expect(src).not.toMatch(/function isTimespecWord/);
+    expect(src).toContain('if (tokens[0] === "function") return true;');
+    expect(src).toContain('FUNCTION_HEADER_RE.test(tokens.join(""))');
+    expect(src).not.toMatch(/slice\(0, 4\)/);
+    expect(src).not.toMatch(/COMMAND_POSITION_RESERVED_WORDS\.add\(/);
+    expect(src).toContain("if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return undefined;");
+  });
+});
+
+/**
+ * CQ-R17 裁定 (decision 01a03cac) の unblock 契約 — **透過前置の残渣**と**exit を隠すラッパ**。
+ *
+ * SEC-CQ17-1 ≡ QA-CQ17-1 (H): `stripTransparentPrefix` が (a) 行継続 `\<newline>` の生む `"\n"` 語を透過せず
+ * (b) 融合 opener `({` を剥がした `""` で即 return し (c) 代入前置 `FOO=1` を知らなかったため (`$(` 自体は
+ * `tokenize` が `$` を落として `(` の融合 opener として届く)、
+ * その後ろの `function run {…}` が position-0 検査から外れ credit された。vector は裁定者が実 bash marker で
+ * 「定義のみ・本体未実行」を確認した綴りを逐語で pin する (finding-registry の landing 規約)。
+ */
+describe("INV-CHECK-R17: transparent-prefix residue and exit-masking wrappers are refused (SEC-CQ17-1 ≡ QA-CQ17-1)", () => {
+  const BASH = "/bin/bash";
+  const DEFINE_ONLY = [
+    "\\\n function run {\n  pytest\n}",
+    "({ function run {\n  pytest\n}\n}\n)",
+    "( \\\n function run {\n  pytest\n}\n)",
+    "\\\nfunction run {\n  pytest\n}",
+    "({ function run\n{\n  pytest\n}\n} )",
+    "{( function run\n{\n  pytest\n}\n) }",
+    "(({ function run\n{\n  pytest\n}\n} ) )",
+    "FOO=1 $(run() {\n  pytest\n}\n)",
+    "CI=1 $(function run {\n  pytest\n})",
+    "time -p FOO=1 $(run() {\n  pytest\n}\n)",
+    "$(run() {\n  pytest\n}\n)",
+  ];
+
+  it.skipIf(!existsSync(BASH))(
+    "every pinned vector is define-only in real bash (marker method)",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "actradeck-r17-"));
+      try {
+        for (const cmd of DEFINE_ONLY) {
+          execFileSync(BASH, ["-c", cmd.replace("pytest", "touch m")], {
+            cwd: dir,
+            stdio: "ignore",
+          });
+          expect(existsSync(join(dir, "m")), `body must not run: ${JSON.stringify(cmd)}`).toBe(
+            false,
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("refuses every pinned define-only spelling", () => {
+    for (const cmd of DEFINE_ONLY) expect(classifyCheck(cmd), JSON.stringify(cmd)).toBeUndefined();
+  });
+
+  it("controls that run their body keep the credit", () => {
+    for (const cmd of [
+      "(\n  pytest\n)",
+      "time -p pytest",
+      "CI=1 pytest",
+      "FOO=1 BAR=2 pytest",
+      "flock /tmp/l pytest",
+      "ionice -c3 pytest",
+      "taskset 1 pytest",
+      "unshare -r pytest",
+      "time -- flock -n /tmp/l pytest",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toEqual({ check_kind: "test", check_match: "program" });
+    }
+  });
+
+  it.skipIf(!existsSync(BASH))(
+    "exit-masking wrappers hide the child's status in real bash and are refused",
+    () => {
+      // `script` は `-e` 無しで子の exit を返さない (rc=0)。`flock` は伝播する。両方を同じ harness で採る。
+      const dir = mkdtempSync(join(tmpdir(), "actradeck-r17-mask-"));
+      const rcOf = (cmd: string): number => {
+        try {
+          execFileSync(BASH, ["-c", cmd], { cwd: dir, stdio: "ignore" });
+          return 0;
+        } catch (error) {
+          return (error as { status?: number }).status ?? -1;
+        }
+      };
+      try {
+        if (existsSync("/usr/bin/script")) {
+          expect(rcOf("script -qc 'exit 3' /dev/null")).toBe(0);
+          expect(rcOf("script -qec 'exit 3' /dev/null")).toBe(3);
+        }
+        if (existsSync("/usr/bin/flock")) expect(rcOf("flock ./l sh -c 'exit 3'")).toBe(3);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      for (const cmd of [
+        "script -qc 'pytest' /dev/null",
+        "script -c pytest log.txt",
+        "watch pytest",
+        "watch -n 1 pytest",
+        "nice script -c pytest log.txt",
+        "time -p watch pytest",
+        "FOO=1 script -qc 'pytest' /dev/null",
+        "cd . && script -qc 'pytest' /dev/null",
+      ]) {
+        expect(classifyCheck(cmd), cmd).toBeUndefined();
+      }
+    },
+  );
+});
+
+/**
+ * CQ-R18 裁定 (decision 01a03e39) の check 側契約: `setsid` の exit-masking (SEC-CQ18-2) と、既知の未対応形
+ * (パイプ末尾 / background・QA-CQ18-4) の**現挙動 pin** (閉じるときはここが RED になり、開示との整合を保つ)。
+ */
+describe("INV-CHECK-R18: setsid masks the exit; pipe-tail and background are disclosed gaps", () => {
+  const BASH = "/bin/bash";
+  const rcOf = (cmd: string): number => {
+    try {
+      execFileSync(BASH, ["-c", cmd], { stdio: "ignore" });
+      return 0;
+    } catch (error) {
+      return (error as { status?: number }).status ?? -1;
+    }
+  };
+
+  it.skipIf(!existsSync(BASH) || !existsSync("/usr/bin/setsid"))(
+    "setsid -f returns 0 while the child fails (real bash) and is refused",
+    () => {
+      expect(rcOf("setsid -f sh -c 'exit 3'")).toBe(0);
+      for (const cmd of [
+        "setsid -f pytest",
+        "setsid --fork pytest",
+        "setsid pytest",
+        "nice setsid -f pytest",
+      ]) {
+        expect(classifyCheck(cmd), cmd).toBeUndefined();
+      }
+    },
+  );
+
+  it("known gaps are pinned as current behaviour (task 01a03bb6): pipe tail and background", () => {
+    // `pytest | tee log` は pipefail 無しでは tee の exit、`pytest &` は即 rc=0。どちらも credit されるのが
+    //   **現状** (pre-existing・R18 QA-CQ18-4 で開示)。閉じる修正はこの 2 行を書き換えることになる。
+    expect(classifyCheck("pytest | tee log")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("pytest &")).toEqual({ check_kind: "test", check_match: "program" });
   });
 });

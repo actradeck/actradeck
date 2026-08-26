@@ -6,10 +6,40 @@
  * command を一切パースしない (§D6 layering + `security-gate-reuse-canonical-parser`)。
  *
  * ⚠️ **第二パーサ禁止**: 危険コマンド分類器 (normalize.ts) と **同一の正準チェーン**
- *   (`splitSegments` → `tokenize` → `skipLeadingAssignments` → `stripRunnerWrappers` →
+ *   (`splitSegments` → `tokenize` → `programTokens` (前置語 skip → `stripRunnerWrappers`) →
  *    `commandName` → `normalizeCommandName`) を import して使う。独自のトークナイズ/basename 抽出を
  *   書かない (path/quote/wrapper/version 接尾辞の扱いがドリフトする source を作らない・受入 11 の meta-test
- *   が正準チェーン消費を behavioral に固定する)。
+ *   が正準チェーン消費を behavioral に固定する)。`programTokens` へは `reservedWords:false` を渡す
+ *   (R11 H2) — 予約語を読み飛ばす段は check 認定では**使わない** (下記「複合文」参照)。
+ *
+ * ## 認定しない形 (安全方向 = under-credit)
+ * - **複合文を含むコマンド** (R12 H・QA-CQ12-1): `if false; then pytest; fi` は exit 0 で pytest を
+ *   実行せず、`! pytest` は exit を反転する。単一行はセグメント内の予約語で、複数行 (`if …; then` /
+ *   `pytest` / `fi` が別セグメント) は `hasCompoundStatement` で、いずれも undefined に倒す。
+ * - **関数定義を含むコマンド** (R13 H・SEC-CQ13-1 ≡ QA-CQ13-1 → R14 H・SEC/QA/TDA-CQ14-1):
+ *   `run() {` / `run(){` / `run ( ) {` / `function run` のヘッダは予約語集合に無く、bash は定義だけ
+ *   して本体を実行せず rc=0 で終わる (failed test が passed バッジになる)。R13 は綴りを列挙して閉じよう
+ *   として取りこぼした (`(` `)` が語に融合するか分離するかは周辺空白で変わる)。R14 からは**構造判定**:
+ *   bash の文法で空括弧は関数定義にしか現れない (空サブシェルは構文エラー) ので、先頭語列を連結した
+ *   「名前 + 空括弧」または `function` 語で refuse する (`isFunctionDefinitionHeader`)。テストの
+ *   vector は手で数え上げず、実 bash に「定義のみで本体を走らせない」綴りを判定させて導出する。
+ *   `function` を risk 側と共有する予約語集合へ足してはならない (前置語 skip 段の意味が変わる)。
+ *   対照の `{ … }` グループ / `( … )` サブシェルは本体を実行するので credit される。
+ *   透過前置の**残渣**が定義を隠していた (R17 H・SEC-CQ17-1 ≡ QA-CQ17-1): 行継続 `\<newline>` が語頭で
+ *   生む `"\n"` 語、融合 opener `({` を剥がした残り `""`、代入前置 `FOO=1` (`FOO=1 $(run() {…})` 族) の
+ *   どれもが `function run {…}` を position-0 検査の外へ押し出していた。`stripTransparentPrefix` は空語を落とし、
+ *   剥離後も return せず回り続け、代入は risk 側と同じ `ASSIGNMENT_TOKEN_RE` で読む。
+ * - **exit を隠すラッパの配下** (R17・実 bash GT): `script -qc 'pytest' log` は `-e` 無しで rc=0、
+ *   `watch pytest` は終わらない、`setsid -f pytest` は fork して rc=0 (R18・SEC-CQ18-2)。normalize.ts の `EXIT_MASKING_WRAPPERS` (単一出所) が正準チェーンの
+ *   剥がしたラッパ列に現れたら credit しない。`flock` / `ionice` / `taskset` / `unshare` / `chroot` は exit を
+ *   伝播するので透過する (`flock /tmp/l pytest` は credit)。
+ * - **解析可能長を超えるコマンド** (R12 M・SEC-CQ12-1): `splitSegments` の唯一のガード無し消費者
+ *   だったため 4 MiB の入力で同期 hook パスが 3 分停止した。`MAX_ANALYZABLE_COMMAND_LEN` 超は
+ *   証拠なし (undefined)。
+ * - 既知の未対応 (pre-existing・v0.9 task 01a03bb6): `pytest ; echo done` / `npm test || true` のように
+ *   check の後ろに sequencing が続き全体 exit が check の結果でなくなる形、パイプ末尾 (`pytest | tee log` は
+ *   `pipefail` 無しでは tee の exit)、background (`pytest &` は即 rc=0) は依然 credit される
+ *   (R18・QA-CQ18-4。inv-check-classifier R18 が現挙動を pin し、閉じるときはそこが RED になる)。
  *
  * ## 判定の性質 (§D6)
  * - false-negative は「証拠なし」= 正直な既定。`other_check` backstop は作らない (security gate でない)。
@@ -27,9 +57,14 @@
 import type { CheckKind, CheckMatch } from "@actradeck/event-model";
 
 import {
+  ASSIGNMENT_TOKEN_RE,
+  COMMAND_POSITION_RESERVED_WORDS,
   commandName,
+  EXIT_MASKING_WRAPPERS,
+  isTimespecWord,
+  MAX_ANALYZABLE_COMMAND_LEN,
   normalizeCommandName,
-  skipLeadingAssignments,
+  programTokens,
   splitSegments,
   stripRunnerWrappers,
   tokenize,
@@ -147,7 +182,7 @@ const SUBCOMMAND_KIND: ReadonlyMap<string, ReadonlyMap<string, CheckKind>> = new
 /**
  * script runner (pnpm/npm/yarn/make/…)。script/target 名をチェック語彙へ写す (match=script・弱い証拠)。
  *
- * QA-B1-2 (comment 整合): npx/pnpx 等の exec-runner は canonical chain (stripRunnerWrappers) が **剥がさない**
+ * QA-B1-2 (comment 整合): npx/pnpx 等の exec-runner は 正準チェーンのラッパ剥がし段 (`stripRunnerWrappers`) が **扱わない**
  *   (RUNNER_WRAPPERS 非収録)。以前の「canonical chain が扱う対象」というコメントは誤記で、実際は分類器が
  *   `npx vitest run` を undefined にしていた。exec-runner (`npx` / `pnpx` / `bunx` / `pnpm exec|dlx` 等) は
  *   下記 `unwrapExecRunner` で **check-classifier 局所に** 貫通させ、内側 program を program-match で再分類する
@@ -278,7 +313,8 @@ function classifyStrippedTokens(
     const inner = unwrapExecRunner(name, args);
     if (inner !== undefined) {
       if (inner.length === 0) return undefined;
-      // 内側にラッパが積まれている稀な形も正準チェーンで剥がしてから再分類する。
+      // 内側にラッパが積まれている稀な形は、正準チェーンの**ラッパ剥がし段のみ**を当ててから再分類する
+      //   (`inner` は argv であって shell の語ではないので、前置語 skip 段は当てない・TDA-CQ12-5)。
       const { tokens: stripped } = stripRunnerWrappers([...inner]);
       return classifyStrippedTokens(stripped, depth + 1);
     }
@@ -329,9 +365,113 @@ function classifyStrippedTokens(
 function classifySegment(segment: string): CheckClassification | undefined {
   const rawTokens = tokenize(segment);
   if (rawTokens.length === 0) return undefined;
-  const deassigned = rawTokens.slice(skipLeadingAssignments(rawTokens));
-  const { tokens } = stripRunnerWrappers(deassigned);
+  // **予約語は読み飛ばさない (QA-CQ11-2 ≡ SEC-CQ11-2・R11 監査 H)**: `if false; then pytest; fi` は
+  //   exit 0 で pytest を実行せず、`! pytest` は exit を反転する。予約語を飛ばして内側を認定すると
+  //   失敗したテストが passed バッジになる (ADR 0015 が禁じる fake-green)。env 代入だけを飛ばし、
+  //   複合文の内側は認定しない (under-credit = 安全方向)。導出鎖は分類器と同じ `programTokens`。
+  const { tokens } = programTokens(rawTokens, { reservedWords: false });
   return classifyStrippedTokens(tokens, 0);
+}
+
+/**
+ * 分割済みセグメント列に**複合文の構造**が含まれるか (QA-CQ12-1・R12 監査 H)。
+ *
+ * check-classifier 用。`\n` はセグメント区切りなので、`if false; then` / `  pytest` / `fi` のように
+ * 複数行に書かれた複合文は予約語が**自分のセグメント**に落ち、セグメント単位の
+ * `reservedWords:false` (R11 H2) では届かない — `pytest` セグメント単体は普通の check に見える。
+ * bash は body を実行せず rc=0 で終わるので、そのまま credit すると failed test が passed バッジになる
+ * (ADR 0015 が禁じる fake-green)。いずれかのセグメントの先頭語がコマンド位置の予約語なら
+ * 「このコマンドは複合文を含む」とみなし、認定側は全体を undefined に倒す (under-credit = 安全方向)。
+ * `time` は透過する (`stripTransparentPrefix`): runner ラッパで exit が配下のものになるので `time pytest` は
+ * 正当な credit だが、配下の構造 (予約語・関数定義ヘッダ) は見る (R15 H)。
+ * 予約語集合は normalize.ts の `COMMAND_POSITION_RESERVED_WORDS` (単一出所) を共有する。消費者は本ファイルのみ。
+ *
+ * **関数定義ヘッダも同じ扱い** (R13 H → R14 H): `isFunctionDefinitionHeader` を参照。
+ * 全セグメントを走査する (先頭だけでは `pytest\nrun() { :; }` の exit 0 を見落とす・QA-CQ13-2)。
+ */
+function hasCompoundStatement(segments: readonly string[]): boolean {
+  for (const segment of segments) {
+    // 透明な前置 (`time` + timespec・grouping opener) は**透過**する (skip ではない・R15 H → R16 H):
+    //   exit は配下のものになるので `time pytest` / `( pytest )` は正当な credit だが、配下が予約語や
+    //   関数定義ヘッダなら `time run() {…}` / `( run() {…} )` も定義のみで rc=0 になる。R12〜R14 の
+    //   `continue` はセグメントごと検査を飛ばし、この形を素通ししていた。
+    const tokens = stripTransparentPrefix(tokenize(segment));
+    const head = tokens[0];
+    if (head === undefined) continue;
+    if (COMMAND_POSITION_RESERVED_WORDS.has(head)) return true;
+    if (isFunctionDefinitionHeader(tokens)) return true;
+    // exit を隠すラッパが前置にあれば exit はチェックの結果でない (R17)。剥がしたラッパ列は正準チェーン
+    //   (`programTokens`) が返す — ここで語を数え直さない。
+    const { wrappers } = programTokens([...tokens], { reservedWords: false });
+    if (wrappers.some((w) => EXIT_MASKING_WRAPPERS.has(w))) return true;
+  }
+  return false;
+}
+
+/**
+ * 判定の前に透過する前置 (R15 H → R16 H → R17 H): `time` + timespec 語、grouping opener (`(` / `{` の
+ * 単独語と、語頭に融合した `(` / `{`)、代入前置 `VAR=val`、行継続 `\<newline>` が語頭で生む空白だけの語。
+ * コマンド置換 `$(…)` はここに来ない: `tokenize` が未終端置換の `$` を落とすので `$(run()` は `(run()` として
+ * 届き、融合 opener の分岐が受ける (R17 変異 V4 で `\$?` 分岐が等価と判明し除去)。いずれも exit を配下へ素通しし、配下が関数定義なら定義のみで rc=0 になる —
+ * `time -- function run {…}` (SEC-CQ16-3)・`( run()\n{…}\n)` (SEC-CQ16-2)・`({ function run {…}` /
+ * `FOO=1 $(run() {…})` / `\<newline> function run {…}` (SEC-CQ17-1 ≡ QA-CQ17-1)。timespec は normalize.ts の
+ * `isTimespecWord`、代入は `ASSIGNMENT_TOKEN_RE` (どちらも risk 側 `skipCommandPrefixWords` と共有・単一出所)。
+ * 多重前置 (`time -p time -p run () {…}`) も剥がし切る (QA-CQ16-3)。**剥離の残りが `""` でも return しない**:
+ * R16 は `({` を剥がした `""` が `/^[({]/` に外れて即 return し、次語の `function` を見なかった。
+ * ここは refuse 判定の入力を作るだけで credit の経路 (`classifySegment` → `programTokens`) には触れない
+ * ので、過剰に剥がしても under-credit 側にしか倒れない。
+ */
+function stripTransparentPrefix(tokens: readonly string[]): readonly string[] {
+  let rest = tokens;
+  for (;;) {
+    const head = rest[0];
+    if (head === undefined) return rest;
+    if (head.trim() === "") {
+      rest = rest.slice(1); // 行継続が語頭で生む `"\n"` / opener 剥離の残り `""`。
+    } else if (/^\s/.test(head)) {
+      rest = [head.replace(/^\s+/, ""), ...rest.slice(1)]; // `\<newline>function` は 1 語 `"\nfunction"`。
+    } else if (head === "time") {
+      rest = rest.slice(1);
+      while (rest[0] !== undefined && isTimespecWord(rest[0])) rest = rest.slice(1);
+    } else if (ASSIGNMENT_TOKEN_RE.test(head)) {
+      rest = rest.slice(1);
+    } else if (head === "(" || head === "{") {
+      rest = rest.slice(1);
+    } else if (/^[({]/.test(head)) {
+      rest = [head.replace(/^[({]+/, ""), ...rest.slice(1)];
+    } else return rest;
+  }
+}
+
+/**
+ * 先頭語列 (連結) が「名前 + 空括弧」なら関数定義ヘッダ。`^` から括弧を含まない名前、直後に `()`。
+ * 連結は空白を落とすので `run()` / `run ()` / `run ( )` / `run( )` / `run(){` / `run()(` を同一視する。
+ * 括弧の中は `\s*`: `readWord` は行継続 `\<newline>` を語内の実改行に畳むので `run(\<newline>)` は
+ * 1 語 `run(\n)` になる (R15 H・SEC-CQ15-1 ≡ QA-CQ15-2)。bash はこれも空括弧として関数定義にする。
+ */
+const FUNCTION_HEADER_RE = /^[^()]+\(\s*\)/;
+
+/**
+ * セグメントの語列が bash の関数定義ヘッダか (R14 H・SEC-CQ14-1 ≡ QA-CQ14-1 ≡ TDA-CQ14-1)。
+ *
+ * R13 は `function` 語・`()` で終わる語・`()` 単独語の 3 形を列挙したが、`tokenize` は空白でしか語を
+ * 切らないため `(` `)` が名前や `{` と融合する綴り (`run(){` / `run ( ) {` / `run( ) {` / `run()(`) を
+ * 取りこぼした (64 綴り中 52 が credit・SEC 実測)。綴りを足すのではなく**構造**で判定する:
+ *  - bash の文法で**空括弧**は関数定義にしか現れない (空サブシェル `( )` は構文エラー)。セグメントの
+ *    全語を空白なしで連結し「括弧を含まない名前 + `()`」に一致すれば関数定義ヘッダ。regex は `^` 起点で
+ *    **最初の**空括弧だけを見るので語数の上限は要らない — R15 の `slice(0, 4)` 窓は、行継続で語が
+ *    分割された `run \<nl> (\t\<nl>\t){` の `)` を窓外へ落とし credit していた (R16 H・QA-CQ16-1)。
+ *  - `function` 語が command 位置にあれば括弧の有無によらず関数定義。
+ * 判定は正準 `tokenize` の語に対する検査のみで文字レベルの読解 (第二パーサ) は持たない。
+ * under-credit 側に倒れる既知の形 (安全方向・開示): 引用された `'run()'`、語列内の空置換 `$()`、
+ * `pytest -k '[()]'` のような空括弧を含む引数。いずれも「証拠なし」に倒れるだけで fake-green ではない。
+ * 対照 (bash が本体を実行し credit が正しい形): `{\n pytest\n}` / `(\n pytest\n)` — 空括弧を含まない。
+ * テストは綴りを手で列挙せず、実 bash (marker 方式) に「定義のみ・本体未実行」と判定させた綴り集合を
+ * そのまま vector にする (inv-check-classifier.test.ts R14 H1)。
+ */
+function isFunctionDefinitionHeader(tokens: readonly string[]): boolean {
+  if (tokens[0] === "function") return true;
+  return FUNCTION_HEADER_RE.test(tokens.join(""));
 }
 
 /**
@@ -341,7 +481,12 @@ function classifySegment(segment: string): CheckClassification | undefined {
  */
 export function classifyCheck(command: string): CheckClassification | undefined {
   if (typeof command !== "string" || command.length === 0) return undefined;
-  for (const seg of splitSegments(command)) {
+  // 解析可能長を超える入力は証拠なし (SEC-CQ12-1): `splitSegments` は上限超で超線形になりうる。
+  if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return undefined;
+  const segments = splitSegments(command);
+  // 複合文を含むコマンドは全体を認定しない (QA-CQ12-1): exit が check の結果でない。
+  if (hasCompoundStatement(segments)) return undefined;
+  for (const seg of segments) {
     const c = classifySegment(seg);
     if (c !== undefined) return c;
   }

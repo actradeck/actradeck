@@ -57,41 +57,41 @@ const PUBLISHED = {
     kindFamilies: 29,
   },
   classifier: {
-    micro: { support: 35, precisionPct: "89.7", recallPct: "100.0" },
+    micro: { support: 62, precisionPct: "83.8", recallPct: "100.0" },
     // support / precision% / recall% per the "Results — risk classifier" table.
     byCategory: [
-      { category: "recursive-rm", support: 9, precisionPct: "100.0", recallPct: "100.0" },
+      { category: "recursive-rm", support: 25, precisionPct: "100.0", recallPct: "100.0" },
       { category: "disk-destroy", support: 4, precisionPct: "80.0", recallPct: "100.0" },
-      { category: "history-rewrite", support: 7, precisionPct: "100.0", recallPct: "100.0" },
+      { category: "history-rewrite", support: 8, precisionPct: "100.0", recallPct: "100.0" },
       { category: "db-drop", support: 3, precisionPct: "75.0", recallPct: "100.0" },
       { category: "fork-bomb", support: 1, precisionPct: "100.0", recallPct: "100.0" },
-      { category: "perm-change", support: 3, precisionPct: "100.0", recallPct: "100.0" },
-      { category: "inline-code", support: 5, precisionPct: "100.0", recallPct: "100.0" },
+      { category: "perm-change", support: 5, precisionPct: "100.0", recallPct: "100.0" },
+      { category: "inline-code", support: 13, precisionPct: "100.0", recallPct: "100.0" },
       { category: "migrate-prod", support: 2, precisionPct: "50.0", recallPct: "100.0" },
-      { category: "high-risk-other", support: 1, precisionPct: "100.0", recallPct: "100.0" },
+      { category: "high-risk-other", support: 1, precisionPct: "11.1", recallPct: "100.0" },
     ],
     gate: [
       {
         policyName: "default-gated",
-        precisionPct: "93.5",
+        precisionPct: "96.0",
         recallPct: "100.0",
-        tp: 29,
+        tp: 48,
         fp: 2,
         fn: 0,
-        tn: 22,
+        tn: 30,
       },
       {
         policyName: "strict-all",
-        precisionPct: "89.5",
+        precisionPct: "93.2",
         recallPct: "100.0",
-        tp: 34,
+        tp: 55,
         fp: 4,
         fn: 0,
-        tn: 15,
+        tn: 21,
       },
     ],
-    riskExactPct: "88.7",
-    dangerRecallPct: "97.1",
+    riskExactPct: "91.3",
+    dangerRecallPct: "98.2",
   },
 } as const;
 
@@ -180,5 +180,52 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
     }
     expect(doc, "risk exact").toContain(`**${c.riskExactPct}%**`);
     expect(doc, "danger recall").toContain(`**${c.dangerRecallPct}%**`);
+  });
+
+  it("the doc lists every risk-level divergence the live bench reports (QA-CQ13-4)", () => {
+    // R12 の doc は「seven risk-level divergences, listed in full」と書きながら 3 件しか挙げていなかった。
+    //   件数語と、各 divergence の command が calibration notes の節に逐語で現れることを pin する。
+    const riskMisses = cls.misses.filter((m) => m.kind === "risk");
+    const categoryMisses = cls.misses.filter((m) => m.kind === "category-fp");
+    expect(cls.misses.filter((m) => m.kind === "category-fn")).toEqual([]);
+    expect(riskMisses.length).toBe(7);
+    expect(categoryMisses.length).toBe(12);
+    expect(doc).toContain("twelve **category** divergences");
+    expect(doc).toContain("seven **risk-level** divergences");
+    const start = doc.indexOf("\nRisk-level calibration notes"); // 見出し行 (本文中の言及でなく)
+    const end = doc.indexOf("## External corpus cross-evaluation");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const notes = doc.slice(start, end);
+    for (const m of riskMisses) expect(notes, m.detail).toContain(`\`${m.command}\``);
+    // category 12 件も command を逐語 pin する (TDA-CQ14-2: 以前はここが空虚ループで、doc の 1 行が
+    //   corpus と乖離していた)。表のセルは `|` を `\|` にエスケープする。複数行 heredoc と空 backtick
+    //   の 2 件だけは markdown のセル 1 行に verbatim で置けないので、doc 側に載せる断片を明示 allowlist
+    //   で対応付ける (allowlist の断片自体が corpus と一致することも下で確認)。
+    const tableStart = doc.indexOf("| Command");
+    const tableEnd = doc.indexOf("\nRisk-level calibration notes");
+    expect(tableStart).toBeGreaterThan(0);
+    expect(tableEnd).toBeGreaterThan(tableStart);
+    const table = doc.slice(tableStart, tableEnd);
+    const DOC_CELL_FRAGMENT: Readonly<Record<string, string>> = {
+      "cat <<EOF\ndon't $(rm -rf /srv) isn't\nEOF": "`don't $(rm -rf /srv) isn't`",
+      "`` rm -rf /srv": "empty backtick substitution before `rm -rf /srv`",
+    };
+    for (const [command, fragment] of Object.entries(DOC_CELL_FRAGMENT)) {
+      expect(
+        categoryMisses.map((m) => m.command),
+        "allowlist entry is a live miss",
+      ).toContain(command);
+      const span = fragment.match(/`([^`]+)`(?!.*`)/)?.[1] ?? fragment;
+      expect(command, `fragment names its miss: ${fragment}`).toContain(span);
+    }
+    const rows = table
+      .split("\n")
+      .filter((line) => line.startsWith("| `") || line.startsWith("| empty"));
+    expect(rows.length).toBe(categoryMisses.length);
+    for (const m of categoryMisses) {
+      const cell = DOC_CELL_FRAGMENT[m.command] ?? m.command.replace(/\|/g, "\\|");
+      expect(table, m.detail).toContain(cell);
+    }
   });
 });

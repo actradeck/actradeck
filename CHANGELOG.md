@@ -11,6 +11,241 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Added
+
+- **Anonymous telemetry, off by default.** An explicitly opted-in, closed-schema daily counter
+  batch (random installation UUID, event enum, UTC day, version, coarse platform, count — no
+  prompts, commands, paths, repository names, or session/event identifiers can be represented).
+  Controlled from **Settings → Privacy** or `actradeck telemetry`; the exact outgoing batch is
+  previewable before enabling. The independently deployed Cloudflare Worker collector stores an
+  HMAC of the installation UUID and rejects out-of-window days. See
+  `docs/anonymous-telemetry.md`.
+- **`actradeck usage` — local-only aggregate usage report.** UTC-day buckets for demo runs, real
+  and governance-protected sessions, and approval activity, computed range-bounded on the local
+  store. Nothing leaves the machine.
+- **`governance_mode` on `session.started`** (closed enum `enforcement` / `observe_only` /
+  `unavailable`) recording whether the approval gate is in the execution path; never inferred
+  when missing.
+- **Daily public distribution snapshot workflow** (npm downloads and release-asset counters —
+  deliberately no repository traffic, which GitHub scopes to push-access holders).
+- `ACTRADECK_TELEMETRY_ENDPOINT` / `ACTRADECK_TELEMETRY_STATE` / `ACTRADECK_TELEMETRY_DISABLED`
+  operator settings (see `docs/configuration.md`).
+
+### Fixed
+
+- **Approvals from resumed sessions are actionable again.** Sessions that resumed without a
+  SessionStart hook folded into their previous terminated run, whose projection suppresses
+  pending approvals — approval cards never appeared in the Inbox or Live Wall and every request
+  timed out to deny. The sidecar now reopens a new run on any first hook after a terminal reap,
+  preserving lineage (`resumed_from`).
+- **Telemetry flush no longer follows redirects.** The endpoint gate (HTTPS-only, loopback-HTTP
+  only for development, no credentials) validated only the first hop; a 3xx from the configured
+  collector could forward the batch to a destination the gate would reject directly. The send
+  now uses `redirect: "error"` and a redirect fails closed as `send_failed`.
+- **`migrate:down` works again on databases that applied the interim `usage_daily` view.** The
+  view migration briefly existed on this branch and was deleted after the aggregation moved to
+  range-bounded queries; it is restored as an idempotent cleanup (`DROP VIEW IF EXISTS`), so
+  mid-branch databases regain a working migration chain, and running `migrate:down` there also
+  removes the stale view (fresh databases are unaffected).
+- **Approval cards can no longer be hidden by a terminated session projection.** Pending
+  approvals now follow the request's own lifecycle: reaching a terminal state still clears that
+  run's open approvals, but a request arriving _after_ the terminal state — a live daemon
+  holding a real round-trip — stays visible and actionable instead of silently timing out to
+  deny.
+- **Harmless search commands no longer flood the approval inbox, and redirects can no longer
+  hide a destructive command.** The command risk classifier split segments on `|` and `;` even
+  inside quotes, so a quoted regex alternation (`rg -n 'a|b.*[Cc]' src`) was torn apart and
+  floored to "needs approval" — with nobody watching the cockpit, every such card timed out to
+  deny and effectively blocked agents. The splitter is now shell-syntax-aware (quotes,
+  backslash escapes, `#` comments, heredoc bodies) and a single `&` (background terminator)
+  separates in both the primary splitter and the legacy fallback/backstop splitter.
+  Redirections are now lexed as whole tokens and removed from the segment together with their
+  target word, instead of being treated as separators: splitting there tore a program name away
+  from its flags, so `rm >out.log -rf /path` — which bash really does execute — classified as
+  harmless with no approval card in any mode. That affected redirect forms placed between a
+  program and its arguments (`>`, `>>`, `>|`, `<`, `<>`, `>&`, `<&`, `&>`, `&>>`, `<<<`, with or
+  without an fd prefix, and with escaped or quoted target words); a generated matrix of operator
+  forms by position pins those, and a second matrix covers redirect targets that execute code
+  (`>$(...)`, backticks, and process substitution), which is where two of the later regressions
+  hid. Dangerous paths stay gated: stdin shells and real pipes classify as before.
+  A previous revision of this entry promised, as a structural backstop, that any command the old
+  classifier rated high would still rate high. That promise was overstated and is withdrawn: the
+  backstop runs the _legacy_ splitter, and this branch rewrote that splitter too, so it is no
+  longer the old classifier in any strict sense. A counter-example is
+  `find /tmp -delete &> rm -rf /x`, which the old classifier rated high and this one rates medium.
+  Both still gate, and no case is known where the verdict falls to harmless, but "still high" is
+  not something the code enforces and it should not have been written as if it were.
+  An earlier revision of this entry claimed command substitution also classified as before. That
+  was wrong and is corrected here: eliding a redirect target removed the substitution in that
+  position from analysis entirely, so `cp a >$(find /tmp -delete)` — which bash really executes —
+  lost both its approval card and its policy category. The elided target is now carried into
+  classification, nested process substitutions are extracted by counting parentheses rather than
+  stopping at the first one, and a destructive body raises the verdict even when the launcher only
+  reads it.
+  Honest limits of that guarantee. Changing a splitter is **not monotone** with respect to
+  risk: the legacy splitter is also the fallback for unparseable input, so a finer split there
+  can lower a verdict as well as raise one — which is how the redirect hole was introduced in
+  the first place — and both directions are now pinned by tests rather than assumed. The
+  equivalence check between the two splitters cannot catch this class either, because both can
+  agree on the same wrong answer; correctness is carried by the operator matrix, not by that
+  agreement. A dangerous-looking string inside quotes (`echo 'a; rm -rf /'`) or inside a quoted
+  heredoc body (writing a runbook that documents `rm -rf`) still classifies high even though
+  the shell would not execute it — the false-negative guarantee is bought with those known
+  false positives. Removing redirects from the segment also stopped the primary splitter from
+  leaving the body of a process substitution behind as a fragment, which silently dropped the
+  policy category for a command whose launcher only reads it (`cat <(find /tmp -delete)`). Since
+  the bypass/YOLO gate is driven by categories rather than by the risk verdict, that turned
+  previously gated forms into ungated ones. The body of a process substitution is now classified
+  even when the launcher only reads it, and a destructive body raises the verdict as well — a
+  category alone leaves the ordinary (non-bypass) approval card missing, which is how
+  `tee >(chown -R nobody /srv)` ran an irreversible ownership change with no card in either mode.
+  A body that classifies as harmless still leaves the verdict alone, so `diff <(ls) <(ls)` and
+  friends produce no new cards.
+  One more hole in the same family closed here: a backslash-escaped separator followed by `#`
+  (`echo a\># ; rm -rf /path`) was read as the start of a comment, and the rest of the line was
+  discarded without even falling back to the conservative splitter. Bash starts no comment there
+  and runs the command. The word-head test now shares the scanner's escape state, which also
+  restores the rule that the splitter may only discard a region that is genuinely a shell comment.
+  A known gap remains and is tracked rather than claimed closed: the process-substitution
+  medium-floor suppression is decided per command rather than per segment, so a benign
+  `diff <(ls) ;` prefix relaxes it for the whole line. (A quoted assignment whose value contains a
+  space — `FOO='a b' rm -rf /path` — was listed here as a second gap; the single word reader
+  described below now reads it the way bash does, so that entry is removed.)
+  (`tee 2>(rm -rf /path)` was listed here as a gap in an earlier revision; it now gates, so the
+  entry is removed rather than left to imply an exposure that no longer exists.)
+  Analysis has limits, and past them the classifier gates rather than waves through: a process
+  substitution nested more than four deep, or one whose body runs past the size at which the
+  classifier stops parsing, is held for approval even when its body is harmless. That costs an
+  occasional card on shapes that are rare in practice, and it is deliberate — an unreadable
+  construct is not evidence of safety.
+  Neither where a shell appears in the command nor how it is written changes whether it is gated.
+  The check that recognises "this launcher executes what the process substitution produces" looked
+  only at the first segment, so `bash <(echo rm -rf /srv)` gated while
+  `ls; bash <(echo rm -rf /srv)` — the same execution, one harmless command earlier — classified
+  as harmless with no card
+  in either mode. It was also, alone among the five places that derive a program name, skipping the
+  leading-assignment step, so `FOO=1 bash <(...)` fell through the same hole. Both are closed, and
+  the check is now bound to the command that actually carries the substitution rather than to the
+  command string as a whole — an earlier attempt at position-independence scanned every segment,
+  which made `diff <(sort a) <(sort b) && node build.js` raise a card. A generated matrix over
+  prefixes, runner wrappers, launchers and trailing commands pins all of it.
+  Quoting is read the way bash reads it. `$'…'` processes backslash escapes, so `$'a\'b'` does not
+  end at that quote; treating it as an ordinary `$` followed by an ordinary `'` shifted the quote
+  phase for the rest of the command and made `;`, `>` and `<(` land on the wrong side of it —
+  destructive commands after such a string disappeared from classification entirely while bash ran
+  them. One scanner now reads quote spans for the splitter, the word reader and the substitution
+  collector. Text inside single quotes is data: `grep -rn '<(' .` and
+  `git commit -m 'use $( ) syntax'` no longer raise cards, and `echo 'a$(rm -rf /srv)b'` is a
+  literal string rather than a
+  gated command, while `echo "$(rm -rf /srv)"` — which bash does expand — still classifies high.
+  Comments are data too, so an apostrophe in a trailing `# don't` no longer manufactures a card.
+  Substitution scanning is bounded. Each unterminated substitution used to be rescanned to the end
+  of the command, so a 16 KiB command of repeated `$(` cost roughly 850 ms of synchronous work on
+  the hook path — enough for one command to stall approval relays and timeout timers. Repeated
+  failures now stop the scan, and stopping escalates the verdict rather than softening it: an
+  earlier revision of this entry claimed stopping was safe "because the first failure has already
+  forced the gate", which was true of the risk level but not of the named category, and an operator
+  gating on that category specifically would have lost it.
+  Two more holes of the same family closed here. The "could not analyse this segment" backstop was
+  suppressed whenever any earlier segment had produced a category, so a harmless-looking prefix
+  stripped the gate off an unanalyzable segment behind it; it is scoped to its own segment now. And
+  a quoted script handed to a remote or in-container shell (`ssh host '… | sh'`, `docker exec`,
+  `kubectl exec`) was only ever caught by accident, because the old quote-blind splitter tore the
+  operand apart at the pipe; the operand is classified as inner code now, and only gates when that
+  inner code is itself dangerous, so `ssh host 'ls -la'` stays silent.
+  Every shell word is now read by one reader. Nine audit rounds of this classifier produced the
+  same class of hole each time — quoting, escaping and word boundaries were hand-copied into four
+  places (the splitter, redirect targets, heredoc delimiters, the tokenizer) and one of them was
+  always a character out of step. Those copies are gone: a single word reader owns quote spans,
+  backslash escapes and concatenation; the redirect-target reader, the heredoc delimiter reader and
+  the tokenizer call it, and the splitter's own loop consumes quote spans and escapes through the
+  same quote-span reader rather than a copy. That also closed the quoted-assignment hole
+  (`FOO='a b' rm -rf /path` hid the program because the old tokenizer turned quotes into spaces),
+  the `ssh host $(rm -rf /srv)` hole (an early return in the remote-runner branch made the
+  command-substitution gate unreachable — every runner, both substitution forms), a heredoc-body
+  hole (shell quoting was applied to text that has none, so an even number of apostrophes in the
+  body swallowed a real `$(…)`), and shell compound statements (`if …; then rm -rf /; fi`,
+  `for`/`while`/`case`, whose keywords were taken for the program name). Two bash-parity edges
+  follow the same reader: `$$'…'` is the PID parameter followed by an ordinary quote, not ANSI-C
+  quoting, and a backslash inside single quotes is literal. The executor-binding check that stops
+  `diff <(sort a) <(sort b) && node build.js` from raising a card is now bounded by total scan work
+  rather than by a count of substitution sites, so `node build.js && paste <(a) … <(l)` with a
+  dozen sites stays silent instead of degrading to the earlier position-blind scan. Expected
+  behaviour throughout was checked against what bash actually executes, using a stub `PATH` and
+  marker files rather than destructive commands. Honest accounting: the file did not get smaller
+  — the single reader builds word literals the old approximations skipped, and the audit fixes
+  landed alongside it — so the size tripwires now record the measured executable lines, and a
+  summed ceiling covers the module set reachable from the classifier through its imports (an
+  earlier revision of this entry said a file split "cannot dodge" the ceiling; a file that neither
+  imports nor is imported could, so the set is now defined by the import closure).
+  The eleventh audit round found three more holes, closed here. A heredoc that never terminates
+  (`echo a ; <<EOF rm -rf /path`, or a body whose delimiter never matches) was handed to the
+  conservative splitter, which treats `<<` as a separator, so the delimiter word became the
+  program name and the real command classified as harmless with no card in any mode — bash reads
+  such a heredoc to end of input and runs the command; the splitter now does the same, removing the
+  operator and delimiter like any other redirect. A substitution standing where the program name
+  goes (an empty backtick substitution or `$()` followed by `rm -rf /path`) lost its named category once words were read
+  correctly, because the old tokenizer had turned backticks into spaces by accident; the flattened
+  form is now classified in addition, never instead, so the category returns without lowering any
+  verdict. And the check classifier that labels commands as tests or lint runs had started sharing
+  the reserved-word skipping introduced for compound statements, which credited
+  `if false; then pytest; fi` (exit 0, pytest never runs) and `! pytest` (exit inverted) as
+  passed checks. It now skips only environment assignments, and a command that contains a
+  compound statement — on one line, or across several lines where the newline had put the check
+  in a segment of its own — or a shell function definition (bash defines the function, runs
+  nothing, and exits 0) is not credited. The function-definition check is structural: bash's
+  grammar puts empty parentheses only in a function header, so a leading name followed by empty
+  parentheses (whitespace or a backslash-newline inside them included) or the `function`
+  keyword is refused, and a leading `time` (with its `-p` / `--` words), subshell or group
+  opener is looked through rather than skipped, so `time run() { … }` and `( run() { … } )` are
+  refused while `time pytest` and `( pytest )` keep their credit. The vectors for this are not
+  listed by hand: the test suite generates spellings along prefix, wrapper, keyword, spacing,
+  parenthesis-interior and body axes, runs each through bash itself with a marker file, and
+  requires every spelling that bash defines without executing to be refused. That guarantee is
+  bounded by the generated axes — spellings outside them are not covered, and an audit round
+  that finds one adds it as an axis, and axes are only ever added, never removed (one round dropped
+  variants while adding others; the dropped variants were restored and the axis arrays are now pinned
+  verbatim). On the same `time` prefix the risk verdict had regressed:
+  `time -p rm -rf …` was rated low with no category because the word after `time` was taken as
+  the program; every option word after `time` is now skipped through one shared predicate (a
+  closed `-p` / `--` set left `time -v rm …` unrated, and `/bin/sh` runs that form through the
+  external `time`), and the risk level, categories and egress result of a `time`-prefixed command
+  are pinned equal to the bare command's — the persistent-allowlist gate is a separate structural
+  check and is not part of that pin. The transparent-prefix strip on the check side also drops the
+  empty or whitespace-only word a leading backslash-newline produces, keeps going after a fused
+  opener such as `({` leaves nothing behind, and looks through assignment prefixes; each of those
+  had hidden a `function` definition from the check. Wrappers that can return a status that is
+  not the child's (`script`, which exits 0 without `-e`; `watch`; `setsid`, which forks with `-f`)
+  never credit a check under them — in every form, `-e` included — even though the risk verdict
+  looks through them. A check followed by a pipe (`pytest | tee log`) or put in the background
+  (`pytest &`) is still credited, as before; both are pinned as known gaps. Under-crediting
+  is the safe direction for a verification badge. Sequencing after a check (`pytest ; echo done`,
+  `npm test || true`) still credits it, as it always has, and is tracked rather than claimed
+  closed. The check classifier also gained the command-length guard the risk verdict already had:
+  it was the one consumer of the splitter without one, and a 4 MiB hook payload held the daemon
+  for three minutes. The risk verdict also learned the command-running wrappers `ionice`, `chroot`,
+  `unshare`, `taskset`, `flock`, `watch` and `script` — all unrecognised programs in v0.8.0, so
+  `ionice -c3 rm -rf …` was rated low with no category and raised no approval card; the `-c` string
+  form of `flock` and `script` is routed through the existing inline-shell path rather than parsed
+  again, and each listed wrapper form is checked against bash itself in the test suite. Wrapper
+  options are now read from one grammar table and only the options it understands are stripped:
+  a long option that takes its value as a separate word (`env --unset FOO`, `nice --adjustment 5`,
+  `timeout --signal KILL 5`, `chroot --userspec u:g /srv`) used to leave the value in the program
+  position, so `env --unset FOO rm -rf …` was rated low; v0.8.0 happened to rate the same command
+  medium only when a `!`, `2>&1` or `(` prefix tripped an accidental "unanalyzable" floor in the
+  old tokenizer. Known valued options are skipped with their value, and an unknown separated long
+  option now raises that floor deliberately (medium, `high-risk-other`) on top of the guess
+  v0.8.0 already made, so the verdict is never below v0.8.0's and never silently low. `--` ends the options but positional arguments (`flock -- FILE cmd`) are
+  still read, `--command=CMD`, `watch 'CMD'` and `su -c 'CMD'` go through the inline-shell path,
+  and `su` joined the wrapper set. The wrapper table remains an allowlist: a wrapper not in it
+  still hides the command it runs, and an unknown short option that takes a separate value is the
+  same class of gap in a narrower space. The egress
+  predicate gained the same guard, `time` and `builtin` joined the
+  persistent-allowlist deny set alongside every other runner wrapper, and the executor-gate
+  matrices pin every axis by literal. The benchmark corpus grew from 67 to 80 vectors with one
+  shape from each audit round since the sixth, and the published numbers were regenerated from
+  it.
+
 ## [0.8.0] - 2026-08-25
 
 ### Changed
