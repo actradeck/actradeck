@@ -203,8 +203,9 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   parenthesis-interior and body axes, runs each through bash itself with a marker file, and
   requires every spelling that bash defines without executing to be refused. That guarantee is
   bounded by the generated axes — spellings outside them are not covered, and an audit round
-  that finds one adds it as an axis. Axes are only ever added, never removed: one round dropped
-  variants while adding others, and the next found definitions hiding in exactly the dropped shapes. On the same `time` prefix the risk verdict had regressed:
+  that finds one adds it as an axis, and axes are only ever added, never removed (one round dropped
+  variants while adding others; the dropped variants were restored and the axis arrays are now pinned
+  verbatim). On the same `time` prefix the risk verdict had regressed:
   `time -p rm -rf …` was rated low with no category because the word after `time` was taken as
   the program; every option word after `time` is now skipped through one shared predicate (a
   closed `-p` / `--` set left `time -v rm …` unrated, and `/bin/sh` runs that form through the
@@ -213,9 +214,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   check and is not part of that pin. The transparent-prefix strip on the check side also drops the
   empty or whitespace-only word a leading backslash-newline produces, keeps going after a fused
   opener such as `({` leaves nothing behind, and looks through assignment prefixes; each of those
-  had hidden a `function` definition from the check. Wrappers that do not return their
-  child's exit status (`script` without `-e`, `watch`) never credit a check under them, even though
-  the risk verdict looks through them. Under-crediting
+  had hidden a `function` definition from the check. Wrappers that can return a status that is
+  not the child's (`script`, which exits 0 without `-e`; `watch`; `setsid`, which forks with `-f`)
+  never credit a check under them — in every form, `-e` included — even though the risk verdict
+  looks through them. A check followed by a pipe (`pytest | tee log`) or put in the background
+  (`pytest &`) is still credited, as before; both are pinned as known gaps. Under-crediting
   is the safe direction for a verification badge. Sequencing after a check (`pytest ; echo done`,
   `npm test || true`) still credits it, as it always has, and is tracked rather than claimed
   closed. The check classifier also gained the command-length guard the risk verdict already had:
@@ -224,8 +227,19 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   `unshare`, `taskset`, `flock`, `watch` and `script` — all unrecognised programs in v0.8.0, so
   `ionice -c3 rm -rf …` was rated low with no category and raised no approval card; the `-c` string
   form of `flock` and `script` is routed through the existing inline-shell path rather than parsed
-  again, and each listed wrapper form is checked against bash itself in the test suite. The wrapper
-  table remains an allowlist: a wrapper not in it still hides the command it runs. The egress
+  again, and each listed wrapper form is checked against bash itself in the test suite. Wrapper
+  options are now read from one grammar table and only the options it understands are stripped:
+  a long option that takes its value as a separate word (`env --unset FOO`, `nice --adjustment 5`,
+  `timeout --signal KILL 5`, `chroot --userspec u:g /srv`) used to leave the value in the program
+  position, so `env --unset FOO rm -rf …` was rated low; v0.8.0 happened to rate the same command
+  medium only when a `!`, `2>&1` or `(` prefix tripped an accidental "unanalyzable" floor in the
+  old tokenizer. Known valued options are skipped with their value, and an unknown separated long
+  option now stops the stripping and raises that floor deliberately (medium, `high-risk-other`)
+  instead of guessing. `--` ends the options but positional arguments (`flock -- FILE cmd`) are
+  still read, `--command=CMD`, `watch 'CMD'` and `su -c 'CMD'` go through the inline-shell path,
+  and `su` joined the wrapper set. The wrapper table remains an allowlist: a wrapper not in it
+  still hides the command it runs, and an unknown short option that takes a separate value is the
+  same class of gap in a narrower space. The egress
   predicate gained the same guard, `time` and `builtin` joined the
   persistent-allowlist deny set alongside every other runner wrapper, and the executor-gate
   matrices pin every axis by literal. The benchmark corpus grew from 67 to 80 vectors with one

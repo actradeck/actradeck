@@ -95,7 +95,10 @@ export default tseslint.config(
       //   その位置引数 / 値つき option 表・`flock -c` / `script -c` の文字列形を `sh -c` へ書き換える分岐・
       //   `isTimespecWord` (option 形すべて)・`EXIT_MASKING_WRAPPERS`・`StrippedProgram.wrappers`
       //   (TDA-CQ17-1 ≡ SEC-CQ17-3 / SEC-CQ17-2 の承認ゲート修正)。天井は実測 + 4。
-      "max-lines": ["error", { max: 2045, skipComments: true, skipBlankLines: true }],
+      //   R18 unblock (decision 01a03e39) で 2041 → 2134: ラッパ option 文法の単一表 `WRAPPER_GRAMMAR` (15 ラッパ分の
+      //   値つき/flag 表・データ行が大半) + 未知 long option の床 + `--`/文字列形/`su` (SEC-CQ18-1 H の承認ゲート修正)。
+      //   天井は実測 + 4。
+      "max-lines": ["error", { max: 2138, skipComments: true, skipBlankLines: true }],
     },
   },
   {

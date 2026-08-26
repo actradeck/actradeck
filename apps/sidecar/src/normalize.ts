@@ -1154,72 +1154,174 @@ const RUNNER_WRAPPERS = new Set([
   "flock",
   "watch",
   "script",
+  // R18 (TDA-CQ18-3): `su [-] [user] -c 'cmd'` / `--session-command`。PERSIST_DENY には以前から在った。
+  "su",
 ]);
 
 /**
  * 配下の exit code を**自分の exit として返さない**ラッパ (R17・実 bash GT): `script -qc 'exit 3' log` は
  * `-e` 無しで rc=0、`watch` は割り込まれるまで終わらず rc は watch 自身のもの。risk 側は配下を見るために
  * 剥がすが、check 側 (ADR 0015「exit がそのチェックの結果か」) は前置に含まれていれば credit しない。
+ * `setsid` は `-f`/`--fork` で fork して即 rc=0 を返し (R18 M・SEC-CQ18-2: `setsid -f sh -c 'exit 3'` rc=0)、
+ * `-f` 無しでも process-group leader なら fork する — 形で分けず常時 refuse (under-credit 側・開示)。
  * `⊆ RUNNER_WRAPPERS` を inv-approval R17 が pin する (剥がされないラッパはここにあっても check 側に届かない)。
  */
-export const EXIT_MASKING_WRAPPERS: ReadonlySet<string> = new Set(["script", "watch"]);
-
-/** ラッパの位置引数 (実コマンドの前に 1 つ置かれる duration / newroot / mask / lockfile)。 */
-const WRAPPER_POSITIONAL_ARGS: ReadonlyMap<string, number> = new Map([
-  ["timeout", 1],
-  ["chroot", 1],
-  ["taskset", 1],
-  ["flock", 1],
-]);
+export const EXIT_MASKING_WRAPPERS: ReadonlySet<string> = new Set(["script", "watch", "setsid"]);
 
 /**
- * ラッパごとの値つきオプション (値を別トークンで取る形だけ。任意値の形は載せない — 値の無いとき
- * 実コマンドを 1 つ食いゲートを弱める方向に倒れる・xargs と同じ規律)。
+ * ラッパ別の option 文法 (R18 H・SEC-CQ18-1 ≡ TDA-CQ18-1/-3): **理解できる option だけ剥がす**。
+ *
+ * GNU getopt_long は値つき long option を `--opt VALUE` (分離) でも `--opt=VALUE` (融合) でも受ける。表に
+ * 無い分離 long option を 1 語として飛ばすと値が実コマンドに見え、`env --unset FOO rm -rf …` /
+ * `nice --adjustment 5 rm -rf …` / `timeout --signal KILL 5 rm -rf …` / `chroot --userspec u:g /srv rm -rf …` が
+ * low/[] に落ちた (base main 2a9042a は `!` / `2>&1` / `(` 前置が旧 tokenizer の**偶然の**解析不能床で
+ * medium だったため、正しく読める本ブランチで穴が露出した・427 実ベクタ)。R17 までは wrapper ごとの
+ * if 連鎖 + 表 2 枚に散っていた規則を 1 表へ畳む (TDA-CQ18-3)。
+ *
+ *  - `valued`: 値を別トークンで取る option (short / long)。`i += 2`。
+ *  - `flags`: 値を取らない**既知の** long option。`=` 融合 long は文法によらず 1 語で完結。
+ *  - **表に無い分離 long option は解析不能** (`unknownOption`): 剥がすのを止めて返し、分類本体が
+ *    `capExhausted` と同じ medium + high-risk-other の床を立てる (base の偶然の床を意図した床として復元)。
+ *    短 option は既知の値つき以外は 1 語として飛ばす (従来どおり・残余として開示: `-x VALUE` 形の未知
+ *    短 option は同クラスの穴だが、GNU の短 option は値を融合するのが通例で分離 long ほど広くない)。
+ *  - `positional`: 実コマンドの前に置かれる位置引数の数 (timeout の duration / chroot の newroot /
+ *    taskset の mask / flock の lockfile / script の typescript / su の user)。`--` は option 終端で
+ *    **位置引数の消費は続ける** (`flock -- /tmp/l cmd` — TDA-CQ18-1)。位置引数の後も option を読む
+ *    (getopt は並べ替える: `flock FILE -c 'cmd'` / `script LOG -c 'cmd'`)。
+ *  - `shellString`: `-c CMD` / `-qc CMD` / `--command CMD` / `--command=CMD` (`su` は `--session-command`
+ *    も) で残りを `sh -c …` に書き換え既存の inline-shell 経路へ流す (SEC-CQ18-3・第二パーサを作らない)。
+ *  - `restIsShellString`: option 以外の残り全部を `sh -c` で実行する (`watch 'rm -rf x'`・TDA-CQ18-1)。
+ * 各形は inv-approval R17/R18 の bash 由来 metatest が「本当に実行する」ことを marker で検定する。
  */
-const WRAPPER_VALUE_OPTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-  ["ionice", new Set(["-c", "-n", "-p", "--class", "--classdata", "--pid"])],
+interface WrapperGrammar {
+  readonly valued: ReadonlySet<string>;
+  readonly flags: ReadonlySet<string>;
+  readonly positional: number;
+  readonly shellString: boolean;
+  readonly restIsShellString: boolean;
+}
+const words = (s: string): ReadonlySet<string> => new Set(s.split(" "));
+const EMPTY_WORDS: ReadonlySet<string> = new Set();
+const grammar = (g: Partial<WrapperGrammar>): WrapperGrammar => ({
+  valued: EMPTY_WORDS,
+  flags: EMPTY_WORDS,
+  positional: 0,
+  shellString: false,
+  restIsShellString: false,
+  ...g,
+});
+const WRAPPER_GRAMMAR: ReadonlyMap<string, WrapperGrammar> = new Map([
+  [
+    "env",
+    grammar({
+      valued: words("-u --unset -C --chdir -S --split-string"),
+      flags: words("-i --ignore-environment -0 --null -v --debug"),
+    }),
+  ],
+  [
+    "xargs",
+    grammar({
+      valued: new Set([...XARGS_VALUE_OPTIONS, "--process-slot-var"]),
+      flags: words(
+        "-0 --null -r --no-run-if-empty -t --verbose -p --interactive -x --exit -o --open-tty --show-limits -i --replace",
+      ),
+    }),
+  ],
+  [
+    "timeout",
+    grammar({
+      valued: words("-s --signal -k --kill-after"),
+      flags: words("--preserve-status --foreground -v --verbose"),
+      positional: 1,
+    }),
+  ],
+  ["nice", grammar({ valued: words("-n --adjustment") })],
+  [
+    "sudo",
+    grammar({
+      valued: words(
+        "-u --user -g --group -U --other-user -p --prompt -C --close-from -h --host -r --role -t --type -D --chdir -R --chroot -T --command-timeout",
+      ),
+      flags: words(
+        "-E --preserve-env -n --non-interactive -S --stdin -k --reset-timestamp -K --remove-timestamp -i --login -s --shell -H --set-home -b --background -A --askpass -B --bell -P --preserve-groups",
+      ),
+    }),
+  ],
+  ["doas", grammar({ valued: words("-u -C -a") })],
+  [
+    "pkexec",
+    grammar({ valued: words("-u --user"), flags: words("--disable-internal-agent --keep-cwd") }),
+  ],
+  ["run0", grammar({ valued: words("-u --user") })],
+  ["exec", grammar({ valued: words("-a") })],
+  ["stdbuf", grammar({ valued: words("-i -o -e --input --output --error") })],
+  ["setsid", grammar({ flags: words("-c --ctty -f --fork -w --wait") })],
+  [
+    "ionice",
+    grammar({
+      valued: words("-c --class -n --classdata -p --pid -P --pgid -u --uid"),
+      flags: words("-t --ignore"),
+    }),
+  ],
+  [
+    "chroot",
+    grammar({ valued: words("--userspec --groups"), flags: words("--skip-chdir"), positional: 1 }),
+  ],
   [
     "unshare",
-    new Set([
-      "-S",
-      "-G",
-      "-w",
-      "-R",
-      "--setuid",
-      "--setgid",
-      "--map-user",
-      "--map-group",
-      "--setgroups",
-      "--propagation",
-      "--wd",
-      "--root",
-    ]),
+    grammar({
+      valued: words(
+        "-S --setuid -G --setgid -w --wd -R --root --map-user --map-group --setgroups --propagation",
+      ),
+      flags: words(
+        "-m --mount -u --uts -i --ipc -n --net -p --pid -U --user -C --cgroup -T --time -f --fork -r --map-root-user -c --map-current-user --map-auto --mount-proc --kill-child --keep-caps",
+      ),
+    }),
   ],
-  ["flock", new Set(["-w", "-E", "--timeout", "--conflict-exit-code"])],
-  ["watch", new Set(["-n", "--interval"])],
+  ["taskset", grammar({ flags: words("-a --all-tasks -p --pid -c --cpu-list"), positional: 1 })],
+  [
+    "flock",
+    grammar({
+      valued: words("-w --wait --timeout -E --conflict-exit-code"),
+      flags: words(
+        "-s --shared -x --exclusive -u --unlock -n --nb --nonblock -o --close -F --no-fork --verbose",
+      ),
+      positional: 1,
+      shellString: true,
+    }),
+  ],
+  [
+    "watch",
+    grammar({
+      valued: words("-n --interval"),
+      flags: words(
+        "-b --beep -c --color -d --differences -e --errexit -g --chgexit -p --precise -t --no-title -x --exec -w --no-wrap",
+      ),
+      restIsShellString: true,
+    }),
+  ],
   [
     "script",
-    new Set([
-      "-o",
-      "-O",
-      "-I",
-      "-B",
-      "-T",
-      "-m",
-      "-E",
-      "--output-limit",
-      "--log-out",
-      "--log-in",
-      "--log-io",
-      "--log-timing",
-      "--logging-format",
-      "--echo",
-    ]),
+    grammar({
+      valued: words(
+        "-o --output-limit -O --log-out -I --log-in -B --log-io -T --log-timing -m --logging-format -E --echo",
+      ),
+      flags: words("-a --append -e --return -f --flush -q --quiet -t --force"),
+      positional: 1,
+      shellString: true,
+    }),
+  ],
+  [
+    "su",
+    grammar({
+      valued: words("-s --shell -g --group -G --supp-group"),
+      flags: words("-l --login -m -p --preserve-environment -P --pty -f --fast"),
+      positional: 1,
+      shellString: true,
+    }),
   ],
 ]);
-
-/** 引用文字列を `sh -c` 相当で実行するラッパ (`flock FILE -c CMD` / `script -c CMD LOG`)。 */
-const SHELL_STRING_WRAPPERS: ReadonlySet<string> = new Set(["flock", "script"]);
+const EMPTY_GRAMMAR = grammar({});
 
 /** ラッパ剥がしの最大反復 (二重・多重ラッパでも有界に止める。ReDoS/無限ループ防止)。 */
 const MAX_WRAPPER_STRIP = 8;
@@ -1227,111 +1329,110 @@ const MAX_WRAPPER_STRIP = 8;
 /**
  * tokens 先頭の runner ラッパを再帰的に剥がし、実コマンドのトークン列を返す。
  *
- * 純粋なトークン走査 (正規表現なし) で実装し、ReDoS 経路を増やさない。各ラッパ固有の引数
- * (env の VAR=val / timeout の duration / sudo の -u user / nice の -n N 等) を控えめに
- * スキップする。判定不能なときは「剥がさない」側に倒し、過剰スキップで実コマンドを失わない。
+ * 純粋なトークン走査で実装し、ReDoS 経路を増やさない (正規表現は正準 `ASSIGNMENT_TOKEN_RE` /
+ * `SHELL_INLINE_FLAG_RE` の 2 つだけ)。各ラッパ固有の引数は `WRAPPER_GRAMMAR` (単一表) で読む。
+ * 判定不能なときは「剥がさない + 床」側に倒し、過剰スキップで実コマンドを失わない。
  *
  * 戻り値の `capExhausted`: 反復上限に達してもなお先頭がラッパのとき true。ラッパを多重に
  * 積んで実コマンドを上限の奥へ隠す回避を fail-safe (gated) に倒すためのシグナル。
+ * 戻り値の `unknownOption`: 表に無い分離 long option (または `--` の後の option 様の実コマンド語) を見て
+ * 剥がすのを止めた (R18 H・SEC-CQ18-1)。分類本体は `capExhausted` と同じ床を立てる。
  */
 export function stripRunnerWrappers(tokens: string[]): StrippedProgram {
   let cur = tokens;
   const wrappers: string[] = [];
+  const stop = (unknownOption: boolean): StrippedProgram => ({
+    tokens: cur,
+    capExhausted: false,
+    unknownOption,
+    wrappers,
+  });
   for (let iter = 0; iter < MAX_WRAPPER_STRIP; iter++) {
-    if (cur.length === 0) return { tokens: cur, capExhausted: false, wrappers };
+    if (cur.length === 0) return stop(false);
     const name = commandName(cur);
-    if (!RUNNER_WRAPPERS.has(name)) return { tokens: cur, capExhausted: false, wrappers };
+    if (!RUNNER_WRAPPERS.has(name)) return stop(false);
+    const g = WRAPPER_GRAMMAR.get(name) ?? EMPTY_GRAMMAR;
 
     let i = 1; // ラッパ自身の次から実コマンドを探す。
-    let positional = WRAPPER_POSITIONAL_ARGS.get(name) ?? 0;
+    let positional = g.positional;
+    let optionsEnded = false;
     let rewritten: string[] | undefined;
     while (i < cur.length) {
       const t = cur[i];
       if (t === undefined) break; // 防御 (noUncheckedIndexedAccess)。到達しないが型安全。
-      if (t === "--") {
-        i++;
-        break;
-      } // 明示的な引数終端。
-      // env の VAR=val 代入はオプション位置にのみ現れる。
-      if (name === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
+      if (!optionsEnded && t === "--") {
+        optionsEnded = true; // 明示的な option 終端。位置引数はこの後にも来る (`flock -- FILE cmd`)。
         i++;
         continue;
       }
-      if (t.startsWith("-")) {
-        // 文字列形 (`flock FILE -c 'cmd'` / `script -qc 'cmd' log`): 残りを `sh -c …` に書き換えて既存の
-        //   inline-shell 経路 (`inlineCodeRisk`) へ流す。`-c` を単独 option と見ると引用文字列が lockfile /
-        //   実コマンドに見え、`flock /tmp/l -c 'rm -rf x'` が low に落ちる (R17 M)。
-        if (
-          SHELL_STRING_WRAPPERS.has(name) &&
-          (SHELL_INLINE_FLAG_RE.test(t) || t === "--command")
-        ) {
-          rewritten =
-            t === "--command" ? ["sh", "-c", ...cur.slice(i + 1)] : ["sh", ...cur.slice(i)];
-          break;
-        }
-        if (WRAPPER_VALUE_OPTIONS.get(name)?.has(t)) {
-          i += 2;
-          continue;
-        }
-        // オプション。値を別トークンで取るものをラッパ別にスキップする。
-        if (name === "env" && (t === "-u" || t === "-S")) {
-          i += 2;
-          continue;
-        } // env -u NAME / -S
-        if (name === "nice" && t === "-n") {
-          i += 2;
-          continue;
-        } // nice -n N
-        if (
-          (name === "sudo" &&
-            (t === "-u" || t === "-g" || t === "-U" || t === "-p" || t === "-C")) ||
-          // SEC-2 (round D 再監査): doas は値付きオプションの文法が sudo と別。`-u user` / `-C config` /
-          //   `-a style` を skip しないと `doas -u root <破壊ツール>` で配下コマンドを取りこぼす
-          //   (`-u` を単独オプション扱い→`root` を実コマンド誤認)。RUNNER_WRAPPERS 収録済みなのに
-          //   値 skip 表が sudo 専用だった非対称を解消する。
-          (name === "doas" && (t === "-u" || t === "-C" || t === "-a")) ||
-          // SEC-12: pkexec/run0 の対象ユーザ指定 (`pkexec --user root <破壊>` / `run0 -u root <破壊>`) を
-          //   skip しないと配下コマンドを取りこぼす。
-          ((name === "pkexec" || name === "run0") && (t === "-u" || t === "--user"))
-        ) {
-          i += 2;
-          continue;
-        } // sudo -u user / doas -u user / pkexec --user user 等 (値あり)
-        if (name === "timeout" && (t === "-s" || t === "-k")) {
-          i += 2;
-          continue;
-        } // timeout -s SIG / -k DUR
-        // **xargs の値つきオプション (v0.8 統合・R10 H5 と同一クラス)**: `xargs -I '{}' rm -rf /x`
-        //   は `-I` を単独オプション扱いしたため置換文字列 `{}` が実コマンドに見え、配下の rm を
-        //   取りこぼして low になっていた (実 bash は rm を起動する)。**引数が必須で分離して置ける
-        //   形だけ**を載せる — 任意引数の `-i` / `--replace` / `--max-lines` を含めると値の無いとき
-        //   実コマンドを 1 つ食い、ゲートを弱める方向に倒れる。
-        if (name === "xargs" && XARGS_VALUE_OPTIONS.has(t)) {
-          i += 2;
-          continue;
-        }
-        i++; // それ以外の単独オプション (-i / --signal=KILL 等)。
+      // env の VAR=val 代入はオプション位置にのみ現れる (risk 側前置語と同じ正準 regex)。
+      if (!optionsEnded && name === "env" && ASSIGNMENT_TOKEN_RE.test(t)) {
+        i++;
         continue;
       }
-      // 非オプション・非代入トークン = 実コマンド or ラッパ固有の位置引数 (timeout の duration /
-      //   chroot の newroot / taskset の mask / flock の lockfile・`WRAPPER_POSITIONAL_ARGS`)。位置引数の
-      //   後もオプションを読む (`flock FILE -c 'cmd'` の `-c` は位置引数の後ろに来る)。
+      if (!optionsEnded && t.startsWith("-")) {
+        if (g.shellString) {
+          // 文字列形: 残りを `sh -c …` に書き換えて既存の inline-shell 経路 (`inlineCodeRisk`) へ流す。
+          //   `--command=CMD` の融合 long 形も同じ (SEC-CQ18-3)。
+          const eq = t.indexOf("=");
+          const longName = eq >= 0 ? t.slice(0, eq) : t;
+          if (longName === "--command" || longName === "--session-command") {
+            rewritten =
+              eq >= 0
+                ? ["sh", "-c", t.slice(eq + 1), ...cur.slice(i + 1)]
+                : ["sh", "-c", ...cur.slice(i + 1)];
+            break;
+          }
+          if (SHELL_INLINE_FLAG_RE.test(t)) {
+            rewritten = ["sh", ...cur.slice(i)];
+            break;
+          }
+        }
+        if (g.valued.has(t)) {
+          i += 2;
+          continue;
+        }
+        if (t.startsWith("--")) {
+          if (t.includes("=") || g.flags.has(t)) {
+            i++;
+            continue;
+          }
+          return stop(true); // 表に無い分離 long option = 解析不能 → 分類本体が床を立てる。
+        }
+        i++; // 短 option (既知の値つき以外) は 1 語。
+        continue;
+      }
       if (positional > 0) {
         positional -= 1;
         i++;
         continue;
       }
-      break; // env/sudo/nice/xargs/... はここが実コマンド。
+      break; // ここが実コマンド (または `watch` の文字列)。
     }
+    // `watch 'rm -rf x'` (引用 1 語・空白を含む) だけを `sh -c` へ書き換える。多語形 (`watch rm -rf x` /
+    //   `watch -x cmd`) はそのまま剥がし、category / egress 判定を実コマンドの語列に直接届かせる。
+    if (
+      rewritten === undefined &&
+      g.restIsShellString &&
+      i === cur.length - 1 &&
+      /\s/.test(cur[i] as string)
+    )
+      rewritten = ["sh", "-c", cur[i] as string];
     const next = rewritten ?? cur.slice(i);
-    if (next.length === 0) return { tokens: cur, capExhausted: false, wrappers }; // ラッパ単体 → 剥がさない。
-    if (rewritten === undefined && next.length === cur.length)
-      return { tokens: cur, capExhausted: false, wrappers }; // 進捗なし → 停止。
+    if (next.length === 0) return stop(false); // ラッパ単体 → 剥がさない。
+    if (rewritten === undefined && next.length === cur.length) return stop(false); // 進捗なし → 停止。
+    // `--` の後で option に見える語が実コマンド位置に来た (`flock -- FILE -c 'cmd'`): 解析不能として床。
+    if (rewritten === undefined && (next[0] as string).startsWith("-")) return stop(true);
     wrappers.push(name);
     cur = next;
   }
   // 上限到達。なお先頭がラッパなら「実コマンドを上限の奥へ隠した」可能性 → fail-safe gated。
-  return { tokens: cur, capExhausted: RUNNER_WRAPPERS.has(commandName(cur)), wrappers };
+  return {
+    tokens: cur,
+    capExhausted: RUNNER_WRAPPERS.has(commandName(cur)),
+    unknownOption: false,
+    wrappers,
+  };
 }
 
 /**
@@ -1341,6 +1442,8 @@ export function stripRunnerWrappers(tokens: string[]): StrippedProgram {
 export interface StrippedProgram {
   tokens: string[];
   capExhausted: boolean;
+  /** 表に無い分離 long option を見た (R18 H): 剥がすのを止めた。分類本体は medium + high-risk-other の床。 */
+  unknownOption: boolean;
   wrappers: string[];
 }
 
@@ -2801,7 +2904,7 @@ function classifyCommandRiskInternal(
     //   させていた。構造判定の前に先頭代入を skip し、ラッパ剥がしと同列に正規化する (skip 後に剥がす)。
     // 再#3 QA-1/QA-3: env / timeout / sudo 等の runner ラッパを再帰的に剥がし、配下の実コマンドを判定対象に。
     //   導出鎖は正準 `programTokens` (前置語 skip → ラッパ剥がし) を共有する (TDA-CQ11-4)。
-    const { tokens, capExhausted } = programTokens(rawTokens);
+    const { tokens, capExhausted, unknownOption } = programTokens(rawTokens);
     if (tokens.length === 0) continue;
     // コマンド語が置換 (`` `echo rm` -rf /srv ``) なら、平坦化した形の分類を**加算**する (SEC-CQ11-1)。
     if (hasCommandWordSubstitution(tokens[0]) && depth < MAX_INLINE_DEPTH) {
@@ -2810,7 +2913,8 @@ function classifyCommandRiskInternal(
       );
     }
     // 多重ラッパで実コマンドを剥がし上限の奥に隠した疑い → 分類不能として gated (medium) に倒す。
-    if (capExhausted) {
+    if (capExhausted || unknownOption) {
+      // ラッパ多重 / 表に無い分離 long option (R18 H): 実コマンドが静的に決まらない → 床。
       bump("medium");
       categories?.add("high-risk-other");
     }

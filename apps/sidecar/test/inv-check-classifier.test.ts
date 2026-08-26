@@ -426,20 +426,55 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       ];
       const KEYWORDS = ["", "function "];
       const NAME = "run";
-      const WS = ["", " ", " \\\n "]; // 名前と `(` の間 (空白付き行継続を含む)
-      const INNER = ["", "\t", "\\\n", "\t\\\n\t"]; // `(` と `)` の間 (行継続・空白付き行継続を含む)
+      // R18 (TDA-CQ18-2 ≡ QA-CQ18-1): R16 が無言で落とした変種 (WS `\t` / INNER ` ` / BODIES の空白・改行
+      //   付き `{`) を復元し、以後は軸配列そのものを逐語 pin する (同一濃度の swap で緑にならない)。
+      const WS = ["", " ", "\t", " \\\n "]; // 名前と `(` の間 (空白付き行継続を含む)
+      const INNER = ["", " ", "\t", "\\\n", "\t\\\n\t"]; // `(` と `)` の間 (行継続・空白付き行継続を含む)
       const BODIES: ReadonlyArray<(c: string) => string> = [
         (c) => `{\n  ${c}\n}`,
+        (c) => ` {\n  ${c}\n}`,
+        (c) => `\n{\n  ${c}\n}`,
         (c) => `(\n  ${c}\n)`,
         (c) => `{ ${c}; }`,
       ];
-      const templates: string[] = [];
+      expect(PREFIXES).toEqual([
+        "",
+        "time ",
+        "time -p ",
+        "time -- ",
+        "\t",
+        "FOO=1 ",
+        "\\\n ",
+        "\\\n",
+      ]);
+      expect(WRAPS.map((w) => w("S"))).toEqual([
+        "S",
+        "( S\n)",
+        "(S\n)",
+        "{ S\n}",
+        "({ S\n} )",
+        "{( S\n) }",
+        "$(S\n)",
+      ]);
+      expect(WS).toEqual(["", " ", "\t", " \\\n "]);
+      expect(INNER).toEqual(["", " ", "\t", "\\\n", "\t\\\n\t"]);
+      expect(BODIES.map((b) => b("C"))).toEqual([
+        "{\n  C\n}",
+        " {\n  C\n}",
+        "\n{\n  C\n}",
+        "(\n  C\n)",
+        "{ C; }",
+      ]);
+      const rawTemplates: string[] = [];
+      const templates = rawTemplates; // 生成後に distinct 化する (下)。
       for (const prefix of PREFIXES)
         for (const wrap of WRAPS)
           for (const body of BODIES) {
             // ヘッダ無し = 本体が実行される形。harness の marker 連言 (`rc === 0 && !marker`) が inert で
             //   ないことの証人 (QA-CQ15-3): これらは marker を作り `ran` に数えられなければならない。
-            templates.push(`${prefix}${wrap(body("__CMD__").trimStart())}`);
+            //   R18: `trimStart()` を外す — 復元した ` {…}` / `\n{…}` body は headerless でも別綴り (bash は
+            //   どれも本体を実行する)。畳むと distinct 件数が減り TDA-CQ16-7 の重複 pin 違反が再発する。
+            templates.push(`${prefix}${wrap(body("__CMD__"))}`);
             for (const kw of KEYWORDS) {
               if (kw !== "") templates.push(`${prefix}${wrap(`${kw}${NAME}${body("__CMD__")}`)}`);
               for (const ws1 of WS)
@@ -473,9 +508,15 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       }
       // 非空虚: 生成軸が実際に fake-green 綴りを大量に含むこと (R13 が見た 9 形より桁で多い)、かつ
       //   本体が実行される形も含むこと (marker 連言が両側で実効)。
-      // 8 prefix × 7 wrap × 3 body × (ヘッダ無し 1 + 括弧綴り 2 kw × 12 + `function` のみ 1) = 4368
-      expect(templates.length).toBe(4368);
-      expect(new Set(templates).size).toBe(templates.length);
+      // 8 prefix × 7 wrap × 5 body × (ヘッダ無し 1 + 括弧綴り 2 kw × (4 WS × 5 INNER) + `function` のみ 1) = 11760
+      //   のうち headerless 9 綴りが衝突する (wrap `( S` + body `{…}` と wrap `(S` + body ` {…}` は同じ文字列・
+      //   prefix 8 種 + `$(` wrap の 1 種)。distinct 11751 を走らせ、生成数と distinct 数の両方を pin する
+      //   (TDA-CQ16-7: 重複を含む件数だけの pin にしない)。
+      expect(rawTemplates.length).toBe(11760);
+      const distinct = [...new Set(rawTemplates)];
+      expect(distinct.length).toBe(11751);
+      templates.length = 0;
+      templates.push(...distinct);
       expect(
         defineOnly.length,
         `define-only spellings (ran=${ran}, rejected=${rejected})`,
@@ -503,9 +544,10 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
       }
     },
     // 1,560 回の bash spawn は静穏時 ~5s、preflight の全 suite 並走下で 13s (vitest 既定 5s を超過して
-    //   RED になった実例・R16)。R17 で 4,368 回 (静穏 ~10s・3× oversubscribe で ~45s 見込み) → 240s。
-    //   軸を足したら件数に合わせてここを見直す。時間でなく leak 0 が検証対象。
-    240_000,
+    //   RED になった実例・R16)。R17 で 4,368 回 (静穏 9.7s・3× oversubscribe 20.4s・QA 実測) → 240s。
+    //   R18 で変種復元により 11,751 回 (静穏 ~26s・3× で ~55s 見込み) → 300s。軸を足したら件数に合わせて
+    //   ここを見直す。時間でなく leak 0 が検証対象。
+    300_000,
   );
 
   it("R15 H1/H2 (SEC-CQ15-1/2 ≡ QA-CQ15-1/2 ≡ TDA-CQ15-1): `time` prefix and line-continued empty parentheses are refused", () => {
@@ -739,4 +781,45 @@ describe("INV-CHECK-R17: transparent-prefix residue and exit-masking wrappers ar
       }
     },
   );
+});
+
+/**
+ * CQ-R18 裁定 (decision 01a03e39) の check 側契約: `setsid` の exit-masking (SEC-CQ18-2) と、既知の未対応形
+ * (パイプ末尾 / background・QA-CQ18-4) の**現挙動 pin** (閉じるときはここが RED になり、開示との整合を保つ)。
+ */
+describe("INV-CHECK-R18: setsid masks the exit; pipe-tail and background are disclosed gaps", () => {
+  const BASH = "/bin/bash";
+  const rcOf = (cmd: string): number => {
+    try {
+      execFileSync(BASH, ["-c", cmd], { stdio: "ignore" });
+      return 0;
+    } catch (error) {
+      return (error as { status?: number }).status ?? -1;
+    }
+  };
+
+  it.skipIf(!existsSync(BASH) || !existsSync("/usr/bin/setsid"))(
+    "setsid -f returns 0 while the child fails (real bash) and is refused",
+    () => {
+      expect(rcOf("setsid -f sh -c 'exit 3'")).toBe(0);
+      for (const cmd of [
+        "setsid -f pytest",
+        "setsid --fork pytest",
+        "setsid pytest",
+        "nice setsid -f pytest",
+      ]) {
+        expect(classifyCheck(cmd), cmd).toBeUndefined();
+      }
+    },
+  );
+
+  it("known gaps are pinned as current behaviour (task 01a03bb6): pipe tail and background", () => {
+    // `pytest | tee log` は pipefail 無しでは tee の exit、`pytest &` は即 rc=0。どちらも credit されるのが
+    //   **現状** (pre-existing・R18 QA-CQ18-4 で開示)。閉じる修正はこの 2 行を書き換えることになる。
+    expect(classifyCheck("pytest | tee log")).toEqual({
+      check_kind: "test",
+      check_match: "program",
+    });
+    expect(classifyCheck("pytest &")).toEqual({ check_kind: "test", check_match: "program" });
+  });
 });

@@ -30,14 +30,16 @@
  *   どれもが `function run {…}` を position-0 検査の外へ押し出していた。`stripTransparentPrefix` は空語を落とし、
  *   剥離後も return せず回り続け、代入は risk 側と同じ `ASSIGNMENT_TOKEN_RE` で読む。
  * - **exit を隠すラッパの配下** (R17・実 bash GT): `script -qc 'pytest' log` は `-e` 無しで rc=0、
- *   `watch pytest` は終わらない。normalize.ts の `EXIT_MASKING_WRAPPERS` (単一出所) が正準チェーンの
+ *   `watch pytest` は終わらない、`setsid -f pytest` は fork して rc=0 (R18・SEC-CQ18-2)。normalize.ts の `EXIT_MASKING_WRAPPERS` (単一出所) が正準チェーンの
  *   剥がしたラッパ列に現れたら credit しない。`flock` / `ionice` / `taskset` / `unshare` / `chroot` は exit を
  *   伝播するので透過する (`flock /tmp/l pytest` は credit)。
  * - **解析可能長を超えるコマンド** (R12 M・SEC-CQ12-1): `splitSegments` の唯一のガード無し消費者
  *   だったため 4 MiB の入力で同期 hook パスが 3 分停止した。`MAX_ANALYZABLE_COMMAND_LEN` 超は
  *   証拠なし (undefined)。
  * - 既知の未対応 (pre-existing・v0.9 task 01a03bb6): `pytest ; echo done` / `npm test || true` のように
- *   check の後ろに sequencing が続き全体 exit が check の結果でなくなる形は依然 credit される。
+ *   check の後ろに sequencing が続き全体 exit が check の結果でなくなる形、パイプ末尾 (`pytest | tee log` は
+ *   `pipefail` 無しでは tee の exit)、background (`pytest &` は即 rc=0) は依然 credit される
+ *   (R18・QA-CQ18-4。inv-check-classifier R18 が現挙動を pin し、閉じるときはそこが RED になる)。
  *
  * ## 判定の性質 (§D6)
  * - false-negative は「証拠なし」= 正直な既定。`other_check` backstop は作らない (security gate でない)。
