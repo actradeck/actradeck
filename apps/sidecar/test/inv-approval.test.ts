@@ -25,6 +25,7 @@ import {
   hasEscapedProgramWord,
   isNetworkEgressCommand,
   isPersistDeniedCommand,
+  MAX_ANALYZABLE_COMMAND_LEN,
   splitSegments,
   splitSegmentsQuoteUnaware,
   stripGroupingWrappers,
@@ -1728,7 +1729,9 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     //   O(N^2) になった (監査実測 16KiB で 6,882ms)。分類器は hook の同期パスにあるため、
     //   1 個の command で承認 relay・timeout タイマ・他セッションを止めうる。
     //
-    // 判定は**比**で行う (絶対時間の閾値は並列負荷で偽 RED を出す — QA-CQ6-7 の教訓)。
+    // 歴史的記録 (R6〜R11): 判定は**比**で行っていた (絶対時間の閾値は並列負荷で偽 RED を出す
+    //   という QA-CQ6-7 の教訓)。R12 で比も偽 RED を出すと分かり絶対上限へ替えた (下記)。以下の
+    //   比の校正メモは経緯として残すだけで、現行の判定ではない (QA-CQ13-7)。
     //
     // **基準は 4k に取る**: 最初 1k を基準にしたところ preflight の実負荷で 42.36 を記録し、
     //   静穏時の実測 (8.2〜11.6) を基に置いた閾値 40 を割った。原因は t(1k)≈1.4ms という
@@ -1753,7 +1756,10 @@ describe("INV-APPROVAL-REDIRECT-DUP-NOT-BACKGROUND: fd-dup redirects are not bac
     // **比を捨てて絶対上限にする (QA-CQ12-4・R12 監査 M)**: 比 9 は 8× oversubscribe で 6/16 偽 RED
     //   (分母 ~0.3ms がノイズ支配)。線形実装は 16K 入力で best-of-5 数 ms、R6 で測った二次実装は
     //   16,342 字で 6,882ms なので、絶対上限 300ms は両側から桁で離れている。
-    const large = best(16_000);
+    // 入力長は解析可能上限 (MAX_ANALYZABLE_COMMAND_LEN = 16,384) の直下に置く (QA-CQ13-6): 上限から
+    //   離れていると、上限を下げる変更でこのテストが短絡経路を測る空虚なものになりうる。
+    const large = best(16_300);
+    expect(16_300 + 2).toBeLessThanOrEqual(MAX_ANALYZABLE_COMMAND_LEN);
     expect(
       large,
       `16k grouping run must classify in linear time (${large.toFixed(1)}ms)`,
@@ -3177,6 +3183,8 @@ describe("INV-APPROVAL-R10-H: remote-runner substitutions, heredoc bodies, compo
  *   `echo 'a\' ; touch M`               → M を作る   (単一引用内の backslash は字義)
  *   `node build.js && paste <(ls) …×9`  → paste は置換の中身を実行しない (通常の入力)
  */
+// ⚠️ この describe はラウンド横断の構造 guardrail (exclusivity metatest / import 閉包の合計天井) を宿す。
+//   round 固有の掃除で削除しないこと。独立 describe への再配置は v0.9 繰延 (TDA-CQ12-8 / TDA-CQ13-7)。
 describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor binding, and fences", () => {
   const RMRF = ["rm", "-rf", "/srv"].join(" ");
   const RM_REDIRECT = ["rm", ">x", "-rf", "/srv"].join(" ");
@@ -3352,25 +3360,46 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
       Object.entries(observed).filter(([file]) => file !== SINGLE_SOURCE_FILE),
     );
     expect(external).toEqual({ "check-classifier.ts": { programTokens: 2 } }); // import + 呼出
-    // **packages/* も走査する (TDA-CQ12-2・R12 監査 M)**: 「正準 helper は event-model へ」という
-    //   本プロジェクトの慣行が、原語を `apps/sidecar/src` の外へ移して走査を抜ける最短経路になる。
-    //   sidecar の外での出現は 0 でなければならない。
-    const packagesRoot = fileURLToPath(new URL("../../../packages/", import.meta.url));
-    const packageFiles = readdirSync(packagesRoot, { recursive: true })
-      .map(String)
-      .filter(
-        (f) => /^[^/]+\/src\/.*\.ts$/.test(f) && !f.endsWith(".d.ts") && !f.includes("/test/"),
-      );
-    expect(packageFiles.length, "packages scan set is non-vacuous").toBeGreaterThan(10);
+    // **sidecar の外も走査する (TDA-CQ12-2・R12 監査 M → QA-CQ13-3 ≡ SEC-CQ13-4・R13 監査 M)**:
+    //   「正準 helper は event-model へ」という本プロジェクトの慣行が、原語を `apps/sidecar/src` の
+    //   外へ移して走査を抜ける最短経路になる。R12 は `packages/<pkg>/src/` の平坦形だけを見ており、
+    //   `apps/backend/src` / `apps/webui/src` / 入れ子 package は素通しだった。走査集合は
+    //   apps/* (sidecar 以外) + packages/* の任意深さの `src/` 配下 `.ts`/`.tsx` (test / dist /
+    //   node_modules / .next は除外)。sidecar の外での出現は 0 でなければならない。
+    const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    // 手書き walker: `readdirSync({ recursive: true })` は symlink を辿り webui の node_modules 自己
+    //   ループで ELOOP になる。symlink は辿らず、除外ディレクトリには入らない。
+    const SKIP_DIRS = new Set(["test", "node_modules", "dist", ".next"]);
+    const walk = (dir: string, rel: string, out: string[]): string[] => {
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        const next = `${rel}${d.name}`;
+        if (next === "apps/sidecar") continue; // 単一出所側 (上で別走査)・名前一致でなくパス一致で除外
+        if (d.isDirectory() && !SKIP_DIRS.has(d.name)) walk(`${dir}${d.name}/`, `${next}/`, out);
+        else if (d.isFile() && /\.tsx?$/.test(d.name) && !d.name.endsWith(".d.ts")) out.push(next);
+      }
+      return out;
+    };
+    const outsideFiles = ["apps", "packages"]
+      .flatMap((top) => walk(`${repoRoot}${top}/`, `${top}/`, []))
+      .filter((f) => /^(?:apps|packages)\/[^/]+\/(?:.*\/)?src\//.test(f));
+    for (const top of ["apps/backend/", "apps/webui/", "packages/event-model/"]) {
+      expect(
+        outsideFiles.filter((f) => f.startsWith(top)).length,
+        `${top} scan set is non-vacuous`,
+      ).toBeGreaterThan(10);
+    }
+    expect(outsideFiles.some((f) => f.startsWith("apps/sidecar/"))).toBe(false);
     const leaked: string[] = [];
-    for (const file of packageFiles) {
-      const code = readFileSync(`${packagesRoot}${file}`, "utf8")
+    for (const file of outsideFiles) {
+      const code = readFileSync(`${repoRoot}${file}`, "utf8")
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^[ \t]*\/\/.*$/gm, "");
       for (const name of Object.keys(SHELL_READING_PRIMITIVES))
         if (identifierRe(name).test(code)) leaked.push(`${file}:${name}`);
     }
-    expect(leaked, "shell-reading primitives must not migrate into packages/*").toEqual([]);
+    expect(leaked, "shell-reading primitives must not migrate outside apps/sidecar/src").toEqual(
+      [],
+    );
     expect(observed[SINGLE_SOURCE_FILE]).toEqual(SHELL_READING_PRIMITIVES);
     // 第二パーサの tripwire: 引用文字・括弧との直接比較や naive な置換切り出しは単一出所の外に存在しない。
     //   **正直な限界 (QA-CQ11-5 ≡ TDA-CQ11-3)**: これは逐語コピー・改名・素朴な書き直しに対する
@@ -3387,11 +3416,17 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   });
 
   /**
-   * 実測 (R12 unblock・normalize.ts + import 閉包 4 ファイル): executable 2291 /
-   * branch tokens 776。天井は直上に置き、更新は ratchet down のみ。
+   * 実測 (R13 unblock・normalize.ts + import 閉包 4 ファイル): executable 2292 /
+   * branch tokens 779。天井は実測 + 4 に置く。
+   *
+   * **正直な記録 (TDA-CQ13-4)**: この天井は「今より育ったら赤」の tripwire であって予算ではない。
+   * 導入 (part 3: 1916/667) 以来 R11 (2282/773) → R12 (2291/776) → R13 と、監査の H/M を閉じる
+   * 実修正のたびに**上方へ**しか動いていない。以前ここに書いた「更新は ratchet down のみ」は
+   * 一度も履行されていないので撤回する。ratchet down は `normalizeHook` の分離と分類器専用天井
+   * (task 01a03b76-b95e・v0.9) で行う。上げるときは実測値と理由をこのコメントに残す。
    */
-  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2295;
-  const MODULE_SET_BRANCH_TOKEN_CEILING = 779;
+  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2296;
+  const MODULE_SET_BRANCH_TOKEN_CEILING = 783;
 
   it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {
     // eslint の天井は peak (最悪関数・単一ファイル) にしか効かない — 関数を 2 つに割る・ファイルを
@@ -3431,7 +3466,7 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
       branchTokens +=
         code.match(/\bif \(|\belse\b|\bfor \(|\bwhile \(|\bcase |\?\?|\?|&&|\|\|/g)?.length ?? 0;
     }
-    // 天井は実測の直上に置き、以後 ratchet down のみ (「今より育ったら赤」)。実測は下の定数の
+    // 天井は実測の直上に置く tripwire (「今より育ったら赤」)。実測と上げた履歴は上の定数の
     //   コメントに記録する (R11 unblock で集合を import 閉包へ広げたため part 3 の 1916/667 から増えた)。
     expect(
       executableLines,

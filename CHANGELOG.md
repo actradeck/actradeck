@@ -191,9 +191,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   the reserved-word skipping introduced for compound statements, which credited
   `if false; then pytest; fi` (exit 0, pytest never runs) and `! pytest` (exit inverted) as
   passed checks. It now skips only environment assignments, and a command that contains a
-  compound statement anywhere — on one line, or across several lines where the newline had put
-  the check in a segment of its own — is not credited at all; under-crediting is the safe
-  direction for a verification badge. Sequencing after a check (`pytest ; echo done`,
+  compound statement — on one line, or across several lines where the newline had put the check
+  in a segment of its own — or a shell function definition (`run() { pytest; }`,
+  `function run { … }`: bash defines the function, runs nothing, and exits 0) is not credited.
+  The function-definition case took a third audit round: the previous two had claimed
+  "anywhere" while the header `run() {` still slipped through, because it is not a reserved
+  word. Under-crediting is the safe direction for a verification badge. Sequencing after a
+  check (`pytest ; echo done`,
   `npm test || true`) still credits it, as it always has, and is tracked rather than claimed
   closed. The check classifier also gained the command-length guard the risk verdict already had:
   it was the one consumer of the splitter without one, and a 4 MiB hook payload held the daemon

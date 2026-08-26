@@ -62,7 +62,10 @@ export default tseslint.config(
     files: ["apps/sidecar/src/**/*.ts"],
     rules: {
       // 閾値は**実測 worst の直上**に置く。「今より育ったら赤」であって「今すぐ直せ」ではない。
-      //   以後 ratchet down する。
+      //   **正直な記録 (TDA-CQ13-4)**: 「以後 ratchet down する」と書いてきたが、max-lines は
+      //   1900 → 1920 → 1955 と監査の実修正のたびに上方へしか動いていない。これは tripwire であって
+      //   予算ではない。ratchet down は `normalizeHook` 分離 + 分類器専用天井 (task 01a03b76-b95e・
+      //   v0.9) で行い、それまでは上げるときに実測値と理由を残す。
       //
       // 実測 (eslint 自身のルールを閾値 1 で走らせて採取・v0.8 part 3 時点・src/** 全体):
       //   complexity              worst 112 (normalizeHook)   次点 52 (normalizeResponseItem)
@@ -84,7 +87,8 @@ export default tseslint.config(
       //   正準導出鎖 `programTokens` (M6)・置換平坦化 (M1)・egress 長さガード (M2) の実修正分。
       //   この per-file 天井は `normalizeHook` (cyclo 112 / 434 行) に引きずられ分類器に対しては
       //   inert (TDA-CQ11-2) — 分類器の合計は test 側 metatest (import 閉包の合計天井) が固定し、
-      //   `normalizeHook` の分離 + 分類器専用天井は v0.9 task。ここは実測直上に置き、以後は下げるだけ。
+      //   `normalizeHook` の分離 + 分類器専用天井は v0.9 task。R13 unblock は check-classifier.ts 側に
+      //   置き normalize.ts は 1951 のまま (天井 1955 据え置き)。
       "max-lines": ["error", { max: 1955, skipComments: true, skipBlankLines: true }],
     },
   },

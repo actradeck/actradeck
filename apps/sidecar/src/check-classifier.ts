@@ -16,10 +16,16 @@
  * - **複合文を含むコマンド** (R12 H・QA-CQ12-1): `if false; then pytest; fi` は exit 0 で pytest を
  *   実行せず、`! pytest` は exit を反転する。単一行はセグメント内の予約語で、複数行 (`if …; then` /
  *   `pytest` / `fi` が別セグメント) は `hasCompoundStatement` で、いずれも undefined に倒す。
+ * - **関数定義を含むコマンド** (R13 H・SEC-CQ13-1 ≡ QA-CQ13-1): `run() {` / `run () {` /
+ *   `function run` のヘッダは予約語集合に無く、bash は定義だけして本体を実行せず rc=0 で終わる
+ *   (`run() {\n  pytest\n}` は failed test を passed バッジにする)。同じ `hasCompoundStatement` が
+ *   check 局所のカーブアウトで拾い undefined に倒す — `function` を risk 側と共有する予約語集合へ
+ *   足してはならない (前置語 skip 段の意味が変わる)。対照の `{ … }` グループ / `( … )` サブシェルは
+ *   本体を実行するので credit される。
  * - **解析可能長を超えるコマンド** (R12 M・SEC-CQ12-1): `splitSegments` の唯一のガード無し消費者
  *   だったため 4 MiB の入力で同期 hook パスが 3 分停止した。`MAX_ANALYZABLE_COMMAND_LEN` 超は
  *   証拠なし (undefined)。
- * - 既知の未対応 (pre-existing・v0.9 task 01a03bb7): `pytest ; echo done` / `npm test || true` のように
+ * - 既知の未対応 (pre-existing・v0.9 task 01a03bb6): `pytest ; echo done` / `npm test || true` のように
  *   check の後ろに sequencing が続き全体 exit が check の結果でなくなる形は依然 credit される。
  *
  * ## 判定の性質 (§D6)
@@ -362,12 +368,19 @@ function classifySegment(segment: string): CheckClassification | undefined {
  * 「このコマンドは複合文を含む」とみなし、認定側は全体を undefined に倒す (under-credit = 安全方向)。
  * `time` は除く: runner ラッパで exit が配下のものになるので `time pytest` は正当な credit。
  * 予約語集合は normalize.ts の `COMMAND_POSITION_RESERVED_WORDS` (単一出所) を共有する。消費者は本ファイルのみ。
+ *
+ * **関数定義ヘッダも同じ扱い** (R13 H・SEC-CQ13-1 ≡ QA-CQ13-1): `name() {` / `name () {` /
+ * `function name` は予約語でないが、bash は定義だけして rc=0 で終わる (本体は走らない)。判定は正準
+ * `tokenize` の語に対する形の検査のみ (`function` 語・`()` で終わる語・`()` 単独の第 2 語) で、文字
+ * レベルの読解 (第二パーサ) は持たない。引用された `'run()'` も拾うが under-credit 側 (安全方向)。
+ * 全セグメントを走査する (先頭だけでは `pytest\nrun() { :; }` の exit 0 を見落とす・QA-CQ13-2)。
  */
 function hasCompoundStatement(segments: readonly string[]): boolean {
   for (const segment of segments) {
-    const head = tokenize(segment)[0];
-    if (head !== undefined && head !== "time" && COMMAND_POSITION_RESERVED_WORDS.has(head))
-      return true;
+    const [head, second] = tokenize(segment);
+    if (head === undefined || head === "time") continue;
+    if (COMMAND_POSITION_RESERVED_WORDS.has(head)) return true;
+    if (head === "function" || head.endsWith("()") || second === "()") return true;
   }
   return false;
 }

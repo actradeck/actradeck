@@ -181,4 +181,23 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
     expect(doc, "risk exact").toContain(`**${c.riskExactPct}%**`);
     expect(doc, "danger recall").toContain(`**${c.dangerRecallPct}%**`);
   });
+
+  it("the doc lists every risk-level divergence the live bench reports (QA-CQ13-4)", () => {
+    // R12 の doc は「seven risk-level divergences, listed in full」と書きながら 3 件しか挙げていなかった。
+    //   件数語と、各 divergence の command が calibration notes の節に逐語で現れることを pin する。
+    const riskMisses = cls.misses.filter((m) => m.kind === "risk");
+    const categoryMisses = cls.misses.filter((m) => m.kind === "category-fp");
+    expect(cls.misses.filter((m) => m.kind === "category-fn")).toEqual([]);
+    expect(riskMisses.length).toBe(7);
+    expect(categoryMisses.length).toBe(12);
+    expect(doc).toContain("twelve **category** divergences");
+    expect(doc).toContain("seven **risk-level** divergences");
+    const start = doc.indexOf("Risk-level calibration notes");
+    const end = doc.indexOf("## External corpus cross-evaluation");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const notes = doc.slice(start, end);
+    for (const m of riskMisses) expect(notes, m.detail).toContain(`\`${m.command}\``);
+    for (const m of categoryMisses) expect(doc, m.detail).toContain("high-risk-other");
+  });
 });

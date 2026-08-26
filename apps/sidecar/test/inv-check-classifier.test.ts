@@ -326,6 +326,48 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     expect(classifyCheck("cd app\npytest")).toEqual({ check_kind: "test", check_match: "program" });
   });
 
+  it("R13 H1 (SEC-CQ13-1 ≡ QA-CQ13-1): shell function definitions are not credited", () => {
+    // QA-CQ12-1 の recommendation が名指しした「関数定義ヘッダ (`name() {`)」は、上の R12 H1 が
+    //   件数 6 を合わせる裏で 1 形だけ落としていた (SEC-CQ13-2: 件数一致は landing でない)。ここでは
+    //   所見の evidence を逐語で pin する。実 bash (marker 方式・裁定者が再現):
+    //     `run() {\n  touch M\n}`       → M を作らず rc=0  (定義だけ・本体は走らない)
+    //     `function run {\n  touch M\n}` → M を作らず rc=0
+    //     `{\n  touch M\n}`             → M を作る        (グループは本体を実行する・対照)
+    //   `function` / `name()` は COMMAND_POSITION_RESERVED_WORDS に無い (risk 側の前置語 skip と
+    //   共有しない) ので、check 局所のカーブアウトで拾う。
+    const FUNCTION_DEFINITIONS = [
+      "run() {\n  pytest\n}",
+      "function run {\n  pytest\n}",
+      "function run() {\n  pytest\n}",
+      "run()\n{\n  pytest\n}",
+      "check () {\n  npm test\n}",
+      "test_all() { pytest; }",
+      "_ci() {\n  eslint .\n}",
+      "t() {\n  tsc --noEmit\n}",
+      "pytest; run() { :; }", // 定義が後ろでも全体の exit は定義の 0 になる
+    ];
+    for (const cmd of FUNCTION_DEFINITIONS) expect(classifyCheck(cmd), cmd).toBeUndefined();
+    // 対照: 本体を実行する grouping / subshell は credit される (ガードが過剰でないこと)。
+    expect(classifyCheck("{\n  pytest\n}")).toEqual({ check_kind: "test", check_match: "program" });
+    expect(classifyCheck("(\n  pytest\n)")).toEqual({ check_kind: "test", check_match: "program" });
+    // 単一行の `{ pytest; }` は base から undefined (grouping 語がセグメント先頭に残る under-credit・
+    //   安全方向・本ラウンドで変えない)。
+    expect(classifyCheck("{ pytest; }")).toBeUndefined();
+  });
+
+  it("QA-CQ13-2: the compound-statement guard scans every segment, not only the first", () => {
+    // `segments[0]` だけを見る変異は R12 の vector (すべて予約語が先頭セグメント) では生き残った。
+    for (const cmd of [
+      "echo a\nif false; then\n  pytest\nfi",
+      "cd app && true\nwhile false; do\n  npm test\ndone",
+      "pytest\nfunction run {\n  :\n}",
+      "npm test\nif false; then :; fi",
+    ]) {
+      expect(classifyCheck(cmd), cmd).toBeUndefined();
+    }
+    expect(classifyCheck("cd app\npytest")).toEqual({ check_kind: "test", check_match: "program" });
+  });
+
   it("R12 M1 (SEC-CQ12-1): oversized commands yield no evidence, and fast", () => {
     // `checkFields` は `splitSegments` の唯一のガード無し消費者で、4 MiB の入力で同期 hook パスが
     //   3 分停止した。解析可能長を超えたら証拠なし (undefined) で即帰る。
@@ -361,6 +403,9 @@ describe("R11 H2 (QA-CQ11-2 ≡ SEC-CQ11-2): compound statements never credit a 
     expect(src).not.toMatch(/skipCommandPrefixWords\(/);
     // R12: 複合文ガードと長さガードは classifyCheck の入口にあること。
     expect(src).toContain("if (hasCompoundStatement(segments)) return undefined;");
+    // R13: 関数定義ヘッダの腕は check 局所 (risk 側と共有する予約語集合へ `function` を足さない)。
+    expect(src).toContain('head === "function" || head.endsWith("()") || second === "()"');
+    expect(src).not.toMatch(/COMMAND_POSITION_RESERVED_WORDS\.add\(/);
     expect(src).toContain("if (command.length > MAX_ANALYZABLE_COMMAND_LEN) return undefined;");
   });
 });
