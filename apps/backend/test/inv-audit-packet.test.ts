@@ -29,6 +29,7 @@ import {
   encodePacketManifestBase64,
   verifyPacketManifest,
   AUDIT_MANIFEST_MARKER,
+  AUDIT_CHAIN_ALGORITHM,
   AUDIT_PACKET_MANIFEST_VERSION,
   AUDIT_PACKET_MANIFEST_MARKER,
   PACKET_CHAIN_DOMAIN,
@@ -575,6 +576,36 @@ describe("INV-AUDIT-PACKET malformed 堅牢化", () => {
       const r = verifyPacketManifest(bad as unknown as PacketManifest);
       expect(r.ok).toBe(false);
       expect(r.reason).toBe("malformed-packet-manifest");
+    }
+  });
+
+  it("SEC-R9-1: 署名 + pin 済み packet でも algorithm 改変は malformed-packet-manifest (fail-closed)", () => {
+    const valid = samplePacket(true).manifest;
+    expect(verifyPinned(valid).ok).toBe(true); // positive control
+    for (const bad of ["sha1-chain", "SHA256-CHAIN", "", undefined, null, 1, {}]) {
+      const r = verifyPinned({ ...valid, algorithm: bad } as unknown as PacketManifest);
+      expect(r.ok, `algorithm=${JSON.stringify(bad)} が verify を通る`).toBe(false);
+      expect(r.reason).toBe("malformed-packet-manifest");
+      expect(r.signed).toBe(false);
+    }
+    expect(valid.algorithm).toBe(AUDIT_CHAIN_ALGORITHM);
+  });
+
+  it("SEC-R9-1: packet envelope 最上位 field は署名 + pin 済みでも改変で verify が落ちる (第 4 tier)", () => {
+    // session manifest の INV-AUDIT-BINDING-COMPLETENESS tier 4 と同型。sessions/governance は
+    // INV-AUDIT-PACKET-BODY が担い、signature は SEC-2 群が担う。
+    const signed = samplePacket(true).manifest;
+    const NESTED = new Set(["sessions", "governance", "signature"]);
+    const envelope = signed as unknown as Record<string, unknown>;
+    const keys = Object.keys(envelope).filter((k) => !NESTED.has(k));
+    expect(keys.sort()).toEqual(
+      ["algorithm", "generated_at", "root", "session_count", "version"].sort(),
+    );
+    for (const key of keys) {
+      const value = envelope[key];
+      const mutated = typeof value === "number" ? value + 1 : `${String(value)}-probe`;
+      const r = verifyPinned({ ...signed, [key]: mutated } as unknown as PacketManifest);
+      expect(r.ok, `packet envelope.${key} の改変が検知されない`).toBe(false);
     }
   });
 

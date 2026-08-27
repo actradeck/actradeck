@@ -535,6 +535,32 @@ hex>`. The hex token charset structurally excludes every vendor-prefix redaction
       limitation of the auto-extending loops (only unconditionally-present keys are swept;
       optional projection fields would escape — none exist today, and the normalize object
       literals compile-force non-optional props) is disclosed with it (SEC-R9-2).
+      **Landed (v0.9, task 019fd851, full audit):** `AUDIT_CHAIN_ALGORITHM` is the single
+      source for the declared value (build sites and both `isWellFormed*` gates consume it;
+      the chain-domain constants are derived from it); `verifyAuditManifest` /
+      `verifyPacketManifest` reject any other `algorithm` as `malformed-*` before the chain is
+      recomputed (`signed=false`, SEC-R4-6 semantics). `INV-AUDIT-BINDING-COMPLETENESS` now
+      sweeps four tiers through one shared `assertRootSensitive` helper (summary 23 / events 9 /
+      diff 6 / **envelope 7** — version, algorithm, session_id, generated_at, event_count,
+      events_truncated, root — on a signed + pinned manifest, and again unsigned for the six
+      keys the chain / well-formedness / `events.length` check bind; honest scope: an
+      **unsigned** manifest does not bind `generated_at`, which only the signature header
+      carries — enable signing for tamper-evidence, as the unsigned verify reason says), the events
+      template is the key-union across all events with a key-set uniformity assertion, and a
+      compile-time `Equal<Required<T>, T>` pin (run by `tsc -p tsconfig.test.json` in CI
+      type-check) forbids optional fields on the three projection interfaces. The packet
+      manifest gets the same algorithm gate and envelope sweep (5 keys).
+  - **Reconciler DB-side request-id gate landed (SEC-R5-2 → v0.9, task 019fd80f, full
+    audit).** `reconcileInner` now consumes the canonical `isRetirableApprovalRequestId`
+    (event-model: canonical `APPROVAL_REQUEST_ID_RE` OR the closed `LEGACY_APPROVAL_REQUEST_ID_RES`
+    enumeration of shipped shapes — `<session>:apr-<22 base64url>` v0.4.0–v0.6.0 and the
+    pre-tag `<session>:apr-<ms>-<seq>`, with the session prefix restricted to a plausible
+    session-id charset so a redaction-marker prefix cannot pass as legacy). Ids that match
+    neither are skipped (nothing synthesized) and counted in `nonRetirableSkipCount`
+    (non-negative integer, no id text). This closes the declaration/at-rest asymmetry: an id
+    that can never appear in a conforming declaration is not evidence of staleness. The
+    designed recovery for legacy pendings (0.7.0 CHANGELOG) is preserved. The sweep's QA-4
+    (`tu:` namespace never retired as an approval) is pinned in the same invariant.
   - **Present→forwarded direction pinned (QA-R8-1/R8-2, L).** The gate tests only emitted
     frames omitting `reason`/`persist`, so discarding the operator's rationale or forcing
     the persistent-allowlist flag permanently off survived the full suite (fail-safe

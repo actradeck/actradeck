@@ -123,6 +123,8 @@ export type { AgentVisibilityWire } from "./agent-visibility-wire.js";
 // 承認 request_id 採番の正準実装 (T1 single source: sidecar bridge / backend safety-demo が共有・Phase 4 R3)
 export {
   APPROVAL_REQUEST_ID_RE,
+  LEGACY_APPROVAL_REQUEST_ID_RES,
+  isRetirableApprovalRequestId,
   mintApprovalRequestId,
   deriveDemoApprovalRequestId,
 } from "./approval-request-id.js";

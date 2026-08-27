@@ -36,6 +36,14 @@
  *    単位) で二重合成を防ぐ。
  *  - 宣言の検証 (型 / 上限 / 所有 session 限定 / session 数上限) は
  *    SidecarRegistry.maybeEmitApprovalReconcile が担う (malformed は本 reconciler に届かない)。
+ *  - **DB 側 request_id ゲート (SEC-R5-2・task 019fd80f)**: 宣言側 (`parseActivePendingRequestIds`)
+ *    は正準 RE を宣言単位で強制するが、以前 DB 側は宣言 Set との突合のみで形を見なかった (非対称)。
+ *    適合宣言に**載り得ない** id (redaction で mangle された id / `tu:` namespace / 未知形) は
+ *    「宣言に無い」ことが staleness の証拠にならないため、**合成しない** (fail-safe: 消さない方向)。
+ *    判定は event-model の正準 `isRetirableApprovalRequestId` (正準 OR known-legacy の閉じた列挙・
+ *    security-gate-reuse-canonical-parser) — known-legacy を含めるのは CHANGELOG 0.7.0 の
+ *    「旧 daemon の pending は初回 hello で retire (designed recovery)」契約を壊さないため。
+ *    skip 件数は `nonRetirableSkipCount` (非負整数・原文非依存) で観測可能。
  *
  * 既知エッジ (正直開示・decision 019fd705): sidecar のローカル store に未送信の実 resolved が
  * queue されたまま再接続した場合、合成 cancel と実 resolved が同一 request_id に対して両方
@@ -44,7 +52,12 @@
  * Landed 節に開示・合成行は「backend reconciliation の観測」であり「元要求が未解決だった」ことの
  * 断定ではない、と読み手契約を固定する)。
  */
-import { EventPayload, newEventId, SYNTHETIC_RETIRE_ORIGIN } from "@actradeck/event-model";
+import {
+  EventPayload,
+  isRetirableApprovalRequestId,
+  newEventId,
+  SYNTHETIC_RETIRE_ORIGIN,
+} from "@actradeck/event-model";
 
 import type { ApprovalReconcileSignal } from "./sidecar-registry.js";
 
@@ -123,6 +136,8 @@ export class ApprovalReconciler {
   private readonly inFlight = new Set<string>();
   /** 同時実行中の reconcile 数 (SEC-3 R2 並行ガード)。 */
   private running = 0;
+  /** SEC-R5-2: 形ゲートで合成を skip した延べ数 (非負整数のみ・id 原文は保持しない)。 */
+  private nonRetirableSkips = 0;
 
   constructor(opts: ApprovalReconcilerOptions) {
     this.store = opts.store;
@@ -138,6 +153,15 @@ export class ApprovalReconciler {
   /** 同時実行中の reconcile 数 (テスト/監視: 並行ガードを pin する)。 */
   get runningCount(): number {
     return this.running;
+  }
+
+  /**
+   * SEC-R5-2: 正準にも known-legacy にも一致しない DB pending を合成 skip した延べ数
+   * (0 が正常。>0 は at-rest id が宣言と割れている = redaction ルールと採番形の衝突か別 namespace
+   * の混入を示す・要調査)。NO-RAW: 件数のみで id 原文は持たない。
+   */
+  get nonRetirableSkipCount(): number {
+    return this.nonRetirableSkips;
   }
 
   /**
@@ -166,6 +190,12 @@ export class ApprovalReconciler {
     for (const row of rows) {
       for (const { request_id: requestId, requested_at: requestedAt } of row.requests) {
         if (signal.activeRequestIds.has(requestId)) continue; // sidecar 側で生存 → 維持 (受入#6)。
+        // SEC-R5-2: 適合宣言に載り得ない形の id は「宣言に無い」が staleness の証拠にならない →
+        // 合成しない (fail-safe)。正準 OR known-legacy のみ retire 対象 (event-model 正準判定)。
+        if (!isRetirableApprovalRequestId(requestId)) {
+          this.nonRetirableSkips += 1;
+          continue;
+        }
         // QA-1/TDA-5 (R2): 宣言スナップショット後に生まれた pending は stale ではない。
         // requested_at が読めない場合も消さない (NaN 比較は false → skip・fail-safe)。
         const requestedMs = Date.parse(requestedAt);
