@@ -553,8 +553,10 @@ hex>`. The hex token charset structurally excludes every vendor-prefix redaction
   - **Reconciler DB-side request-id gate landed (SEC-R5-2 → v0.9, task 019fd80f, full
     audit).** `reconcileInner` now consumes the canonical `isRetirableApprovalRequestId`
     (event-model: canonical `APPROVAL_REQUEST_ID_RE` OR the closed `LEGACY_APPROVAL_REQUEST_ID_RES`
-    enumeration of shipped shapes — `<session>:apr-<22 base64url>` v0.4.0–v0.6.0 and the
-    pre-tag `<session>:apr-<ms>-<seq>`, with the session prefix restricted to a plausible
+    enumeration of shipped shapes — `<session>:apr-<22 base64url>` from the sidecar bridge
+    v0.1.0–v0.6.0, the safety demo's `<session>:apr-<n>` v0.4.0–v0.6.0 (SEC-V9-2: missed in
+    the first landing; base retired it), and the pre-tag `<session>:apr-<ms>-<seq>`, with the
+    session prefix restricted to a plausible
     session-id charset so a redaction-marker prefix cannot pass as legacy). Ids that match
     neither are skipped (nothing synthesized) and counted in `nonRetirableSkipCount`
     (non-negative integer, no id text). This closes the declaration/at-rest asymmetry: an id

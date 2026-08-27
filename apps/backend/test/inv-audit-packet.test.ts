@@ -392,6 +392,10 @@ describe("INV-AUDIT-PACKET unsigned chain", () => {
     // 参照テストが無く、version だけ bump して domain を据え置く半端な変更が 720 緑で通った
     // (mutation probe P16)。prefix 結合を pin して片側 bump を RED にする。
     expect(PACKET_CHAIN_DOMAIN.startsWith(AUDIT_PACKET_MANIFEST_VERSION + "/")).toBe(true);
+    // SEC-V9-4 / QA-V9-4: template 導出後の exact 値を pin する (suffix / algorithm 部の改変で RED)。
+    // この値を変える = 既存 packet の chain が全て不一致になる = version bump が必要。
+    expect(PACKET_CHAIN_DOMAIN).toBe("actradeck-audit-packet-manifest/v2/sha256-chain");
+    expect(PACKET_CHAIN_DOMAIN).toBe(`${AUDIT_PACKET_MANIFEST_VERSION}/${AUDIT_CHAIN_ALGORITHM}`);
   });
 
   it("無改竄 → chain_valid・ok (unsigned=内部整合)", () => {
@@ -589,6 +593,43 @@ describe("INV-AUDIT-PACKET malformed 堅牢化", () => {
       expect(r.signed).toBe(false);
     }
     expect(valid.algorithm).toBe(AUDIT_CHAIN_ALGORITHM);
+  });
+
+  it("TDA-V9-3: packet の sessions[i] (hash 除く) と governance は全 key が root-sensitive (auto-extending)", () => {
+    // session manifest 側の tier 2/3 と同型: interface に key を足しても canonicalizePacketSession /
+    // canonicalizePacketGovernance の位置列挙へ加え忘れれば「宣言したのに畳まれない」field が生まれる。
+    // key を列挙せず Object.keys で走査し、追加時に自動拡張・非空虚ガードで縮小を RED にする。
+    const signed = samplePacket(true).manifest;
+    const probe = (v: unknown): unknown =>
+      Array.isArray(v)
+        ? [...v, ["zz", "1", "2", "3", "4"]]
+        : typeof v === "number"
+          ? v + 1
+          : `${String(v)}-probe`;
+    const s0 = signed.sessions[0]! as unknown as Record<string, unknown>;
+    const sessionKeys = Object.keys(s0).filter((k) => k !== "hash");
+    expect(sessionKeys.length).toBeGreaterThanOrEqual(7); // 現行 7 field。
+    for (const key of sessionKeys) {
+      const sessions = [{ ...s0, [key]: probe(s0[key]) }, ...signed.sessions.slice(1)];
+      const r = verifyPinned({ ...signed, sessions } as unknown as PacketManifest);
+      expect(
+        r.ok,
+        `sessions[0].${key} の改変が検知されない (canonicalizePacketSession から漏れている)`,
+      ).toBe(false);
+    }
+    const g = signed.governance as unknown as Record<string, unknown>;
+    const govKeys = Object.keys(g);
+    expect(govKeys.length).toBeGreaterThanOrEqual(8); // 現行 8 field。
+    for (const key of govKeys) {
+      const r = verifyPinned({
+        ...signed,
+        governance: { ...g, [key]: probe(g[key]) },
+      } as unknown as PacketManifest);
+      expect(
+        r.ok,
+        `governance.${key} の改変が検知されない (canonicalizePacketGovernance から漏れている)`,
+      ).toBe(false);
+    }
   });
 
   it("SEC-R9-1: packet envelope 最上位 field は署名 + pin 済みでも改変で verify が落ちる (第 4 tier)", () => {

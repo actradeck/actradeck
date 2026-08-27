@@ -185,6 +185,17 @@ describe("INV-AUDIT-INTEGRITY canonicalize (単射・SEC-3)", () => {
   });
 });
 
+describe("INV-AUDIT-INTEGRITY canonical form golden pin (QA-V9-4)", () => {
+  it("SAMPLE の root は byte-equivalent に固定される (chain domain / canonical 形の変更 = version bump)", () => {
+    // CHAIN_DOMAIN は非公開 (`${AUDIT_MANIFEST_VERSION}/${AUDIT_CHAIN_ALGORITHM}` 導出)。導出を
+    // 旧 literal に戻しても値が同じなら緑で正しいが、domain / canonical 形のどんな変更も既存 manifest を
+    // 全て不一致にするため、root 値そのものを golden として pin する (変更は意図的な version bump を強制)。
+    expect(buildAuditManifest(SAMPLE).root).toBe(
+      "084addd3ad5c19d611b1458cae202f2587339f8e3094fb64673c8672abc07301",
+    );
+  });
+});
+
 describe("INV-AUDIT-INTEGRITY unsigned chain", () => {
   it("無改竄 → chain_valid・ok (unsigned=内部整合)", () => {
     const m = buildAuditManifest(SAMPLE);

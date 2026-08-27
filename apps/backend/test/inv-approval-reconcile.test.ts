@@ -18,7 +18,12 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { EventPayload, mintApprovalRequestId, parseEvent } from "@actradeck/event-model";
+import {
+  APPROVAL_REQUEST_ID_RE,
+  EventPayload,
+  mintApprovalRequestId,
+  parseEvent,
+} from "@actradeck/event-model";
 import { redactEventWithAuthoritativeCounts } from "@actradeck/redaction";
 import { Pool } from "pg";
 
@@ -340,18 +345,20 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
 
   it("SEC-R5-2: known-legacy 形 (v0.4.0〜v0.6.0 base64url / それ以前の Date-seq) は引き続き retire される (designed recovery)", async () => {
     const legacyB64 = "sess_0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-F9aSKs-LnHcbygXAZ16NLQ";
+    const legacyDemo = "0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-1"; // SEC-V9-2: safety-demo 旧採番
     const legacySeq = "0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-1754450000000-3";
     const { reconciler, ingested } = makeReconciler([
       {
         session_id: "s1",
         provider: "claude_code",
         state: "waiting.approval",
-        requests: [staleReq(legacyB64), staleReq(legacySeq)],
+        requests: [staleReq(legacyB64), staleReq(legacyDemo), staleReq(legacySeq)],
       },
     ]);
     await reconciler.reconcile(signal(["s1"], []));
     expect(ingested.map((e) => (e.payload as Record<string, unknown>).request_id)).toEqual([
       legacyB64,
+      legacyDemo,
       legacySeq,
     ]);
     expect(reconciler.nonRetirableSkipCount).toBe(0);
@@ -480,6 +487,13 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
 const DATABASE_URL = process.env.DATABASE_URL;
 const reachable = DATABASE_URL ? await dbReachable(DATABASE_URL) : false;
 
+/** 正準 fixture id (QA-V9-3: 手書き literal の桁数 drift を導出 + RE assert で構造的に防ぐ)。 */
+function canonicalFixtureId(hexSuffix: string): string {
+  const id = `s0123456789ab:apr-${hexSuffix.padStart(32, "0")}`;
+  if (!APPROVAL_REQUEST_ID_RE.test(id)) throw new Error(`non-canonical fixture id: ${id}`);
+  return id;
+}
+
 describe.skipIf(!reachable)("INV-APPROVAL-RECONCILE 受入#6/#7 (real Postgres)", () => {
   let pool: Pool;
   let store: IngestStore;
@@ -540,8 +554,8 @@ describe.skipIf(!reachable)("INV-APPROVAL-RECONCILE 受入#6/#7 (real Postgres)"
 
   it("受入#7: sidecar 再起動 (宣言に無い pending) → 合成 cancel が fold され pending が消える", async () => {
     const sid = newSession("sess_reconcile7");
-    // SEC-R5-2: 合成対象は正準形のみ (fixture も正準で書く)。
-    const requestId = "s0123456789ab:apr-00000000000000000000000000057a1e";
+    // SEC-R5-2: 合成対象は正準形のみ (fixture も正準で書く・QA-V9-3: 桁数 drift 防止に導出 + RE assert)。
+    const requestId = canonicalFixtureId("57a1e");
     await ingestRequested(sid, requestId);
 
     const before = await store.pendingApprovalsForSessions([sid]);
@@ -578,7 +592,7 @@ describe.skipIf(!reachable)("INV-APPROVAL-RECONCILE 受入#6/#7 (real Postgres)"
 
   it("受入#6: backend 再起動跨ぎ (宣言に在る pending) → 維持され、同一 request_id で一度だけ解決", async () => {
     const sid = newSession("sess_reconcile6");
-    const requestId = "s0123456789ab:apr-0000000000000000000000000000011fe";
+    const requestId = canonicalFixtureId("11fe"); // QA-V9-3: 以前の手書き literal は 33 hex で非正準だった
     await ingestRequested(sid, requestId);
 
     // 同一 sidecar プロセスの再接続 hello = pending が生きている宣言 → 合成しない。

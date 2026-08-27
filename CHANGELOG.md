@@ -30,7 +30,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   id that could never appear in a conforming declaration (one mangled by redaction at rest, or
   a `tu:` command-correlation key) was treated as stale and retired while the approval was
   still live. Pendings whose id is neither canonical nor one of the shipped legacy shapes
-  (`<session>:apr-<22 base64url>` from v0.4.0–v0.6.0, and the earlier `<session>:apr-<ms>-<seq>`)
+  (`<session>:apr-<22 base64url>` from the sidecar bridge in v0.1.0–v0.6.0, the safety demo's
+  `<session>:apr-<n>` in v0.4.0–v0.6.0, and the pre-release `<session>:apr-<ms>-<seq>`)
   are now skipped (fail-safe: nothing is destroyed) and counted in a NO-RAW
   `nonRetirableSkipCount`. Legacy-shaped pendings are still retired on the first hello after a
   coordinated upgrade, as documented in 0.7.0.

@@ -74,8 +74,11 @@ export function deriveDemoApprovalRequestId(sessionId: string): string {
  * relay_lost として retire される (designed recovery)」を契約している。正準のみのゲートは
  * この回収を壊すため、**過去に出荷した採番形を閉じた列挙で retire 対象に含める**。
  *
- *  - v0.4.0 〜 v0.6.0: `${sessionId}:apr-<base64url 22 文字>` (`randomBytes(16).toString("base64url")`)。
- *  - それ以前 (tag なし・コード履歴のみ): `${sessionId}:apr-<Date.now()>-<seq>`。
+ *  - v0.1.0 〜 v0.6.0 (sidecar bridge): `${sessionId}:apr-<base64url 22 文字>`
+ *    (`randomBytes(16).toString("base64url")`・v0.1.0 tag 時点で既にこの形)。
+ *  - v0.4.0 〜 v0.6.0 (backend safety-demo-driver): `${sessionId}:apr-<n>` (固定連番 `apr-1`・
+ *    SEC-V9-2: production src の第 2 採番点で、この形の demo pending は base では retire されていた)。
+ *  - tag 以前 (コード履歴のみ): `${sessionId}:apr-<Date.now()>-<seq>`。
  *
  * session prefix は plausible な session id 文字集合 (`[A-Za-z0-9_.-]`) に限る — redaction marker
  * (`[REDACTED:…]` 等・`[` `]` `:` を含む) に置換された prefix はここで**構造的に排除**される
@@ -87,6 +90,7 @@ export function deriveDemoApprovalRequestId(sessionId: string): string {
  */
 export const LEGACY_APPROVAL_REQUEST_ID_RES: readonly RegExp[] = Object.freeze([
   /^[A-Za-z0-9_.-]{1,128}:apr-[A-Za-z0-9_-]{22}$/,
+  /^[A-Za-z0-9_.-]{1,128}:apr-\d{1,9}$/,
   /^[A-Za-z0-9_.-]{1,128}:apr-\d{13}-\d{1,9}$/,
 ]);
 

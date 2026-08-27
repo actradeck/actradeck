@@ -40,8 +40,10 @@ describe("INV-APPROVAL-REQUEST-ID: 採番 shape/決定論 (event-model 契約)",
  */
 describe("INV-APPROVAL-REQUEST-ID-RETIRABLE: 正準 OR known-legacy のみ retire 対象", () => {
   const CANON = "s0123456789ab:apr-0123456789abcdef0123456789abcdef";
-  /** v0.4.0〜v0.6.0 出荷形: `${sessionId}:apr-<base64url 22>` (実 corpus 形・sess_<uuidv7> prefix)。 */
+  /** v0.1.0〜v0.6.0 出荷形 (sidecar bridge): `${sessionId}:apr-<base64url 22>` (実 corpus 形・sess_<uuidv7> prefix)。 */
   const LEGACY_B64 = "sess_0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-F9aSKs-LnHcbygXAZ16NLQ";
+  /** v0.4.0〜v0.6.0 出荷形 (backend safety-demo-driver): `${sessionId}:apr-1` (SEC-V9-2)。 */
+  const LEGACY_DEMO = "0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-1";
   /** それ以前のコード履歴形: `${sessionId}:apr-<Date.now()>-<seq>`。 */
   const LEGACY_SEQ = "0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-1754450000000-3";
 
@@ -51,11 +53,15 @@ describe("INV-APPROVAL-REQUEST-ID-RETIRABLE: 正準 OR known-legacy のみ retir
     expect(isRetirableApprovalRequestId(deriveDemoApprovalRequestId("sess-x"))).toBe(true);
   });
 
-  it("known-legacy 2 形は retirable (CHANGELOG 0.7.0 の designed recovery を壊さない)", () => {
+  it("known-legacy 3 形は retirable (CHANGELOG 0.7.0 の designed recovery を壊さない)", () => {
     expect(isRetirableApprovalRequestId(LEGACY_B64)).toBe(true);
+    expect(isRetirableApprovalRequestId(LEGACY_DEMO)).toBe(true);
+    expect(
+      isRetirableApprovalRequestId("sess_0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-999999999"),
+    ).toBe(true); // 連番は 9 桁まで (10 桁は下の非対象ベクタ)
     expect(isRetirableApprovalRequestId(LEGACY_SEQ)).toBe(true);
-    // 列挙は閉じている (追加のみ・削除禁止): 2 形が消えたら RED。
-    expect(LEGACY_APPROVAL_REQUEST_ID_RES).toHaveLength(2);
+    // 列挙は閉じている (追加のみ・削除禁止): 3 形のどれかが消えたら RED。
+    expect(LEGACY_APPROVAL_REQUEST_ID_RES).toHaveLength(3);
     expect(Object.isFrozen(LEGACY_APPROVAL_REQUEST_ID_RES)).toBe(true);
   });
 
@@ -77,6 +83,8 @@ describe("INV-APPROVAL-REQUEST-ID-RETIRABLE: 正準 OR known-legacy のみ retir
       "sess:x:apr-F9aSKs-LnHcbygXAZ16NLQ", // prefix に `:`
       "sess-x:apr-F9aSKs-LnHcbygXAZ16NL", // base64url 21
       "sess-x:apr-175445000000-3", // 12 桁 (Date.now は 13 桁)
+      "sess-x:apr-1234567890", // 連番 10 桁 (demo 形は 9 桁まで)
+      "[REDACTED:high-entropy]:apr-1", // demo 形でも mangled prefix は排除
     ]) {
       expect(isRetirableApprovalRequestId(id), `${JSON.stringify(id)} must NOT be retirable`).toBe(
         false,
