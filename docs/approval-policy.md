@@ -50,8 +50,11 @@ intersect your enabled set.
 > **`db-drop` is a literal list, not a semantic detector.** It currently recognises the SQL forms
 > `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE` and the PostgreSQL CLI `dropdb`. Other engines'
 > equivalents (`mysqladmin drop`, Mongo's `db.dropDatabase()`, `DROP SCHEMA … CASCADE`,
-> `DROP OWNED BY`, `redis-cli FLUSHALL`) are **not** recognised today and draw no card in either
-> mode; widening the list is tracked for v0.9. Treat the category as a floor, not a guarantee.
+> `DROP OWNED BY`, `redis-cli FLUSHALL`) are **not** recognised as `db-drop` today. Most of them
+> draw no card in either mode; the bare Mongo shell line `db.dropDatabase()` still rates `medium`
+> with the generic `high-risk-other` marker and so draws a card in both modes, but the same call
+> wrapped as `mongosh --eval '...'` does not. Widening the list is tracked for v0.9. Treat the
+> category as a floor, not a guarantee.
 
 The eight **ON** rows are the default preset (`DEFAULT_GATED_CATEGORIES`): irreversible,
 large-blast-radius operations plus arbitrary inline code execution. The four **off** rows lean toward false positives, so
