@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { scoreClassifier, scoreRedaction } from "../e2e/safety-bench/bench.js";
+import { COMMANDS } from "../e2e/safety-bench/classifier-corpus.js";
 
 const DOC_PATH = fileURLToPath(
   new URL("../../../docs/benchmarks/redaction-and-risk-classifier.md", import.meta.url),
@@ -57,13 +58,13 @@ const PUBLISHED = {
     kindFamilies: 29,
   },
   classifier: {
-    micro: { support: 63, precisionPct: "84.0", recallPct: "100.0" },
+    micro: { support: 63, precisionPct: "82.9", recallPct: "100.0" },
     // support / precision% / recall% per the "Results — risk classifier" table.
     byCategory: [
       { category: "recursive-rm", support: 25, precisionPct: "100.0", recallPct: "100.0" },
       { category: "disk-destroy", support: 4, precisionPct: "80.0", recallPct: "100.0" },
       { category: "history-rewrite", support: 8, precisionPct: "100.0", recallPct: "100.0" },
-      { category: "db-drop", support: 4, precisionPct: "80.0", recallPct: "100.0" },
+      { category: "db-drop", support: 4, precisionPct: "66.7", recallPct: "100.0" },
       { category: "fork-bomb", support: 1, precisionPct: "100.0", recallPct: "100.0" },
       { category: "perm-change", support: 5, precisionPct: "100.0", recallPct: "100.0" },
       { category: "inline-code", support: 13, precisionPct: "100.0", recallPct: "100.0" },
@@ -73,24 +74,24 @@ const PUBLISHED = {
     gate: [
       {
         policyName: "default-gated",
-        precisionPct: "96.1",
+        precisionPct: "94.2",
         recallPct: "100.0",
         tp: 49,
-        fp: 2,
+        fp: 3,
         fn: 0,
         tn: 30,
       },
       {
         policyName: "strict-all",
-        precisionPct: "93.3",
+        precisionPct: "91.8",
         recallPct: "100.0",
         tp: 56,
-        fp: 4,
+        fp: 5,
         fn: 0,
         tn: 21,
       },
     ],
-    riskExactPct: "92.6",
+    riskExactPct: "91.5",
     dangerRecallPct: "100.0",
   },
 } as const;
@@ -161,9 +162,13 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
 
   it("the published doc prints the classifier numbers", () => {
     const c = PUBLISHED.classifier;
-    // micro-average row
-    expect(doc, "micro precision").toContain(`**${c.micro.precisionPct}%**`);
-    expect(doc, "micro recall").toContain(`**${c.micro.recallPct}%**`);
+    // micro-average row (QA-DB-2: the whole row, not a bare percentage — `**100.0%**` alone
+    //   matches several places in the doc and would let this row be edited without failing).
+    expect(doc, "micro-average row").toMatch(
+      new RegExp(
+        `\\|\\s*\\*\\*micro-average\\*\\*\\s*\\|\\s*${c.micro.support}\\s*\\|\\s*\\*\\*${c.micro.precisionPct}%\\*\\*\\s*\\|\\s*\\*\\*${c.micro.recallPct}%\\*\\*\\s*\\|`,
+      ),
+    );
     // per-category rows: "| recursive-rm      | 6       | 100.0%    | 100.0%     |" (spacing-agnostic)
     for (const row of c.byCategory) {
       const re = new RegExp(
@@ -178,8 +183,17 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
       );
       expect(doc, `gate row ${g.policyName}`).toMatch(re);
     }
-    expect(doc, "risk exact").toContain(`**${c.riskExactPct}%**`);
-    expect(doc, "danger recall").toContain(`**${c.dangerRecallPct}%**`);
+    // QA-DB-1: bind each headline to its own sentence. With danger recall at 100.0% the bare
+    //   `**100.0%**` substring occurs three times in the doc, so a doc-only edit of the danger
+    //   recall line survived the lock (mutation M7d). The verbatim prefix makes the pin specific.
+    expect(doc, "risk exact").toContain(`Risk-level exact-match accuracy: **${c.riskExactPct}%**.`);
+    expect(doc, "danger recall").toContain(
+      `Danger recall (vectors labelled non-\`low\` that the classifier flags non-\`low\`): **${c.dangerRecallPct}%**.`,
+    );
+    // QA-DB-3 / TDA-DB-5: the corpus size the doc quotes is pinned to the live corpus.
+    expect(doc, "classifier corpus size").toContain(
+      `**${COMMANDS.length} classifier command vectors**`,
+    );
   });
 
   it("the doc lists every risk-level divergence the live bench reports (QA-CQ13-4)", () => {
@@ -188,10 +202,10 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
     const riskMisses = cls.misses.filter((m) => m.kind === "risk");
     const categoryMisses = cls.misses.filter((m) => m.kind === "category-fp");
     expect(cls.misses.filter((m) => m.kind === "category-fn")).toEqual([]);
-    expect(riskMisses.length).toBe(6);
-    expect(categoryMisses.length).toBe(12);
-    expect(doc).toContain("twelve **category** divergences");
-    expect(doc).toContain("six **risk-level** divergences");
+    expect(riskMisses.length).toBe(7);
+    expect(categoryMisses.length).toBe(13);
+    expect(doc).toContain("thirteen **category** divergences");
+    expect(doc).toContain("seven **risk-level** divergences");
     const start = doc.indexOf("\nRisk-level calibration notes"); // 見出し行 (本文中の言及でなく)
     const end = doc.indexOf("## External corpus cross-evaluation");
     expect(start).toBeGreaterThan(0);

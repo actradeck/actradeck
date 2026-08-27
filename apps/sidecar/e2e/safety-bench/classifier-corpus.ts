@@ -183,6 +183,12 @@ export const COMMANDS: readonly CommandVector[] = [
     expectCategories: ["db-drop"],
     note: "PostgreSQL CLI form of drop database (same class; literal added with task 01a03b76)",
   },
+  {
+    command: "man dropdb",
+    expectRisk: "low",
+    expectCategories: [],
+    note: "benign carrier of the bare-token `dropdb` literal: reading its manual page. Measures the keyword false-positive class the literal buys (SEC-DB-1 / TDA-DB-1); expected to over-gate (safe direction), and disclosed as such",
+  },
   // ============================ perm-change (default OFF) ======================================
   {
     command: "chmod -R 777 /var/www",

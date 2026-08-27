@@ -19,9 +19,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   alone — never carded it, even though `DROP TABLE` and `TRUNCATE` were carded. The literal now
   rates `high`, and the PostgreSQL CLI form `dropdb` is a new `high` / `db-drop` literal.
   `INV-DB-DROP-RISK-VERDICT` pins the verdict and the bridge-level card. The published classifier
-  benchmark was regenerated (danger recall 98.2% → 100.0%; the risk-level divergence count drops
-  from seven to six); the cost is the same keyword false positive already accepted for
-  `DROP TABLE`, e.g. `grep -rn 'DROP DATABASE' migrations/` now draws a card.
+  benchmark was regenerated (danger recall 98.2% → 100.0%). The cost is a keyword false positive
+  of the same kind already accepted for `DROP TABLE` — `grep -rn 'DROP DATABASE' migrations/` now
+  draws a card — and, for the new bare-token `dropdb` literal, a wider one: any command line that
+  merely mentions the word (`man dropdb`, `which dropdb`, a commit message naming a `dropdb`
+  wrapper) now draws a card too. Both are safe-direction over-gates; the benchmark corpus carries
+  a benign `man dropdb` vector so that this cost is measured rather than assumed.
 
 ### Changed
 

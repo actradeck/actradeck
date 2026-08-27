@@ -2616,8 +2616,9 @@ export function isNetworkEgressCommand(command: string): boolean {
 /**
  * 字面 high と同等の command-level カテゴリを付与する (ADR 019f0c3e / TDA-1)。
  * risk 判定 (`matchesHighRiskLiteral`) と **同一の LITERAL_RULES テーブル**を走査するため、片方だけ更新
- * する drift が構造的に不能 (字面 high⟹≥1 category を同テーブルで担保)。category-only エントリ
- * (`drop database`) も含む superset。categories 未指定時 (classifyCommandRisk 経路) は no-op (behavior 非退行)。
+ * する drift が構造的に不能 (字面 high⟹≥1 category を同テーブルで担保)。`high: false` (category-only)
+ * エントリがあれば superset になるが、現行テーブルは全エントリ high (task 01a03b76 以降・上の docstring
+ * 参照)。categories 未指定時 (classifyCommandRisk 経路) は no-op (behavior 非退行)。
  */
 function addCommandLevelCategories(command: string, categories?: Set<PolicyCategory>): void {
   if (categories === undefined) return;

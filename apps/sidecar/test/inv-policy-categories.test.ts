@@ -213,6 +213,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       const s = samples[i]!;
       // sample と LITERAL_RULES の index 対応を pin (sample がズレたら検知)。
       expect(rule.re.source, "sample.re が LITERAL_RULES[i] と一致").toBe(s.re.source);
+      expect(rule.re.flags, "sample.re の flags (case 軸) が LITERAL_RULES[i] と一致").toBe(
+        s.re.flags,
+      );
       expect(rule.re.test(s.cmd), "sample は当該ルールにマッチ").toBe(true);
       // category 側 (addCommandLevelCategories) が当該ルールを走査している。
       expect(classifyCommandCategories(s.cmd).has(rule.category), "category 付与").toBe(true);
@@ -232,6 +235,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       "psql -h db.internal -U app -c 'DROP DATABASE staging'",
       "dropdb staging",
       "dropdb --if-exists -h db.internal staging",
+      "DROPDB staging", // TDA-DB-3: `/i` は load-bearing — 大文字形を pin (flags 落としで RED)
     ]) {
       expect(classifyCommandRisk(cmd), `${cmd}: risk は high`).toBe("high");
       expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop category`).toBe(true);
