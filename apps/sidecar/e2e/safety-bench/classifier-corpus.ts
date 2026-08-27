@@ -175,7 +175,13 @@ export const COMMANDS: readonly CommandVector[] = [
     command: "psql -c 'DROP DATABASE prod'",
     expectRisk: "high",
     expectCategories: ["db-drop"],
-    note: "drop database (impl marks category-only: gate fires but risk stays low — calibration note)",
+    note: "drop database (rated high since task 01a03b76; previously category-only, so ordinary approval never carded it)",
+  },
+  {
+    command: "dropdb --if-exists staging",
+    expectRisk: "high",
+    expectCategories: ["db-drop"],
+    note: "PostgreSQL CLI form of drop database (same class; literal added with task 01a03b76)",
   },
   // ============================ perm-change (default OFF) ======================================
   {

@@ -72,6 +72,19 @@ describe("INV-APPROVAL: high-risk gating", () => {
     expect(Date.now() - start).toBeGreaterThanOrEqual(40);
   });
 
+  it("INV-DB-DROP-RISK-VERDICT: DROP DATABASE / dropdb は通常モードで承認カードが出る (task 01a03b76)", async () => {
+    // 通常モードの唯一の根拠 `requiresDestructiveApproval` (= risk !== "low") を bridge 経由で pin する。
+    //   category だけ付いて risk が low のままだと、bypass/YOLO では止まるのに通常モードで素通りする
+    //   逆転 (R7 QA-CQ7-5) が再発する — classifier 単体でなく実ゲートで固定する。
+    for (const command of ["psql -c 'DROP DATABASE staging'", "dropdb staging"]) {
+      const bridge = new ApprovalBridge({ timeoutMs: 30 });
+      const emit = vi.fn();
+      const r = await bridge.requestApproval(preToolUse("Bash", { command }), emit);
+      expect(emit, `${command}: 承認カード`).toHaveBeenCalledTimes(1);
+      expect(r.behavior, `${command}: 無応答は安全側 deny`).toBe("deny");
+    }
+  });
+
   it(".env / secret file edit requires approval", async () => {
     const bridge = new ApprovalBridge({ timeoutMs: 30 });
     const emit = vi.fn();

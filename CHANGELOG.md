@@ -11,6 +11,18 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DROP DATABASE` now draws an approval card under ordinary approval.** The risk classifier
+  rated `psql -c 'DROP DATABASE …'` as `low` while attaching the `db-drop` category, so the
+  category-driven bypass/YOLO gate held it but ordinary approval — which keys off the risk verdict
+  alone — never carded it, even though `DROP TABLE` and `TRUNCATE` were carded. The literal now
+  rates `high`, and the PostgreSQL CLI form `dropdb` is a new `high` / `db-drop` literal.
+  `INV-DB-DROP-RISK-VERDICT` pins the verdict and the bridge-level card. The published classifier
+  benchmark was regenerated (danger recall 98.2% → 100.0%; the risk-level divergence count drops
+  from seven to six); the cost is the same keyword false positive already accepted for
+  `DROP TABLE`, e.g. `grep -rn 'DROP DATABASE' migrations/` now draws a card.
+
 ### Changed
 
 - **You now have five minutes to answer an approval card, up from thirty seconds.** Thirty

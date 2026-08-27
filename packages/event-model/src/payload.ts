@@ -130,7 +130,7 @@ export type SecretKind = z.infer<typeof SecretKind>;
  * - recursive-rm:     rm -rf / find -delete・-exec 等の再帰強制削除・mass file 削除
  * - disk-destroy:     mkfs/dd/shred/wipefs/parted/cryptsetup/nvme format/zfs destroy/block-device 書込
  * - history-rewrite:  git push --force / git reset --hard / git clean -f
- * - db-drop:          DROP TABLE / DROP DATABASE / TRUNCATE TABLE
+ * - db-drop:          DROP TABLE / DROP DATABASE / TRUNCATE TABLE / dropdb
  * - fork-bomb:        `:(){ :|:& };:` 等の自己増殖
  * - secret-egress:    network-egress program (curl/wget/nc/scp…) に secret を同梱 (composite・approval-bridge)
  * - perm-change:      chmod -R / world-writable chmod / recursive chown

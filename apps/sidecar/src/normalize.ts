@@ -2455,8 +2455,17 @@ const REMOTE_EXEC_RUNNERS = new Set([
  * (consolidation-invariant-sweep / security-gate-reuse-canonical-parser の教訓)。
  *
  * - `high: true` … risk を high に押し上げ (旧 HIGH_RISK_LITERAL_RE 相当) かつ category を付与。
- * - `high: false` … **category-only** (gate を catastrophic へ届かせるが risk は不変)。`drop database` は
- *   分類器を high にしないが db-drop category は付ける (superset・risk 非退行)。
+ * - `high: false` … **category-only** (gate を catastrophic へ届かせるが risk は不変)。現行テーブルに
+ *   category-only エントリは無い (フラグは将来の opt-in 系 category 用に残す)。
+ *
+ * **DROP DATABASE / dropdb は high (task 01a03b76・R7 QA-CQ7-5 / R11 TDA-CQ11-7 の逆転修正)**:
+ *   以前は `drop database` を category-only にしていたが、通常モードの承認ゲート
+ *   (`requiresDestructiveApproval` = `risk !== "low"`) は category を見ないため、bypass/YOLO では
+ *   db-drop ゲートで止まるのに**通常モードではカードが出ない**という逆転が生じていた
+ *   (`DROP TABLE` / `TRUNCATE` は high でカード化・最も不可逆な `DROP DATABASE` だけが素通り)。
+ *   risk verdict を category に整合させ、PostgreSQL の CLI 形 `dropdb` も同 class として持つ。
+ *   検索引数 (`grep 'DROP DATABASE' …`) が high になる FP は `DROP TABLE` と同じ既知の safe-direction
+ *   over-gate (ベンチ doc の calibration table に開示)。
  *
  * ReDoS 安全: 各 re は固定 alternation + 単純 `\s+`/`[a-z]*` (入れ子量化なし・redaction-redos 教訓)。
  */
@@ -2472,7 +2481,8 @@ export const LITERAL_RULES: readonly LiteralRule[] = [
   { re: /:\(\)\s*\{/, category: "fork-bomb", high: true },
   { re: /\bdrop\s+table\b/i, category: "db-drop", high: true },
   { re: /\btruncate\s+table\b/i, category: "db-drop", high: true },
-  { re: /\bdrop\s+database\b/i, category: "db-drop", high: false }, // category-only (risk 不変)
+  { re: /\bdrop\s+database\b/i, category: "db-drop", high: true },
+  { re: /\bdropdb\b/i, category: "db-drop", high: true }, // PostgreSQL CLI 形 (同 class)
   { re: /\bmigrate\b/i, category: "migrate-prod", high: true },
   { re: /\bproduction\b/i, category: "migrate-prod", high: true },
   { re: /\bgit\s+reset\s+--hard\b/i, category: "history-rewrite", high: true },
@@ -2844,7 +2854,7 @@ function classifyCommandRiskInternal(
   };
 
   // 字面 high (LITERAL_RULES の high エントリ)。risk と category を**同一テーブル**から付与する (TDA-1)。
-  //   category 側は DROP DATABASE 等 risk 非 high も含む superset・risk は不変。
+  //   category 側は high:false エントリも含む superset (現行テーブルでは全エントリ high)。
   if (matchesHighRiskLiteral(command)) bump("high");
   addCommandLevelCategories(command, categories);
   if (BLOCK_DEVICE_RE.test(command) && /[<>]|dd\b/i.test(command)) {

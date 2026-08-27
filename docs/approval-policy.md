@@ -37,7 +37,7 @@ intersect your enabled set.
 | `recursive-rm`     | `rm -rf`, `find -delete`/`-exec`, mass file deletion                                                          | **ON**  |
 | `disk-destroy`     | `mkfs`, `dd`, `shred`, `wipefs`, `parted`, block-device writes                                                | **ON**  |
 | `history-rewrite`  | `git push --force`, `git reset --hard`, `git clean -f`                                                        | **ON**  |
-| `db-drop`          | `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE`                                                             | **ON**  |
+| `db-drop`          | `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE` / `dropdb`                                                  | **ON**  |
 | `fork-bomb`        | self-replicating shell patterns                                                                               | **ON**  |
 | `secret-egress`    | network-egress program (`curl`/`wget`/`nc`/`scp`…) with an **inline** secret in the command                   | **ON**  |
 | `high-risk-other`  | high-risk or structurally unparseable execution that no named category covers (backstop against silent holes) | **ON**  |

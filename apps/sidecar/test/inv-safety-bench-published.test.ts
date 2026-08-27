@@ -57,13 +57,13 @@ const PUBLISHED = {
     kindFamilies: 29,
   },
   classifier: {
-    micro: { support: 62, precisionPct: "83.8", recallPct: "100.0" },
+    micro: { support: 63, precisionPct: "84.0", recallPct: "100.0" },
     // support / precision% / recall% per the "Results — risk classifier" table.
     byCategory: [
       { category: "recursive-rm", support: 25, precisionPct: "100.0", recallPct: "100.0" },
       { category: "disk-destroy", support: 4, precisionPct: "80.0", recallPct: "100.0" },
       { category: "history-rewrite", support: 8, precisionPct: "100.0", recallPct: "100.0" },
-      { category: "db-drop", support: 3, precisionPct: "75.0", recallPct: "100.0" },
+      { category: "db-drop", support: 4, precisionPct: "80.0", recallPct: "100.0" },
       { category: "fork-bomb", support: 1, precisionPct: "100.0", recallPct: "100.0" },
       { category: "perm-change", support: 5, precisionPct: "100.0", recallPct: "100.0" },
       { category: "inline-code", support: 13, precisionPct: "100.0", recallPct: "100.0" },
@@ -73,25 +73,25 @@ const PUBLISHED = {
     gate: [
       {
         policyName: "default-gated",
-        precisionPct: "96.0",
+        precisionPct: "96.1",
         recallPct: "100.0",
-        tp: 48,
+        tp: 49,
         fp: 2,
         fn: 0,
         tn: 30,
       },
       {
         policyName: "strict-all",
-        precisionPct: "93.2",
+        precisionPct: "93.3",
         recallPct: "100.0",
-        tp: 55,
+        tp: 56,
         fp: 4,
         fn: 0,
         tn: 21,
       },
     ],
-    riskExactPct: "91.3",
-    dangerRecallPct: "98.2",
+    riskExactPct: "92.6",
+    dangerRecallPct: "100.0",
   },
 } as const;
 
@@ -188,10 +188,10 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
     const riskMisses = cls.misses.filter((m) => m.kind === "risk");
     const categoryMisses = cls.misses.filter((m) => m.kind === "category-fp");
     expect(cls.misses.filter((m) => m.kind === "category-fn")).toEqual([]);
-    expect(riskMisses.length).toBe(7);
+    expect(riskMisses.length).toBe(6);
     expect(categoryMisses.length).toBe(12);
     expect(doc).toContain("twelve **category** divergences");
-    expect(doc).toContain("seven **risk-level** divergences");
+    expect(doc).toContain("six **risk-level** divergences");
     const start = doc.indexOf("\nRisk-level calibration notes"); // 見出し行 (本文中の言及でなく)
     const end = doc.indexOf("## External corpus cross-evaluation");
     expect(start).toBeGreaterThan(0);
