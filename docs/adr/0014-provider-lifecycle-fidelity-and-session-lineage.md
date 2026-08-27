@@ -188,7 +188,12 @@ origin=relay_lost, delivery=not_sent`).
     keeps both.
   - The Claude Code hook path gains real `child_exit` detection: a hook client that
     disconnects before the response resolves its pending immediately
-    (`origin=child_exit, delivery=not_sent`) instead of hanging until the 30s timeout.
+    (`origin=child_exit, delivery=not_sent`) instead of hanging until the approval timeout
+    (30s when this ADR was written; the canonical default now lives in event-model's
+    `DEFAULT_APPROVAL_TIMEOUT_MS`; the hook timeout is derived from that default, and the
+    bridge caps its effective wait at the same default via `effectiveApprovalTimeoutMs` —
+    an operator-supplied `approvalTimeoutMs` can only shorten the wait — so the hook cannot
+    expire first for any requested value; see `INV-APPROVAL-TIMEOUT-ORDERING`).
   - `delivery_status` derives from the actual write result (CC: hook HTTP response write
     accepted by the socket layer; codex: `sendResponse` success, with `suppressed`/sync-throw
     mapping to `not_sent`). "sent" claims socket-layer acceptance only, never that the peer

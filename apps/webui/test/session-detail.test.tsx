@@ -11,6 +11,7 @@
  *  - pending 空 + waiting state → 従来の簡易バナーへフォールバック (D2: detail 内拡張)。
  *  - SEC: 生 tool_input を独自描画しない (DTO の redaction 済み値のみ render)。
  */
+import { DEFAULT_APPROVAL_TIMEOUT_MS } from "@actradeck/event-model";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
@@ -205,18 +206,36 @@ describe("SessionDetailView 段階③: 承認 timeout UX (推定値)", () => {
   const reqAt = "2026-06-05T00:00:00.000Z";
   const reqMs = Date.parse(reqAt);
 
-  it("十分な猶予があれば『自動拒否まで 約Ns（安全側）』を表示", () => {
+  // 残り時間の境界は event-model の正準既定から**導出**する (ハードコードしない)。
+  // sidecar 側の承認待ちを変えたら UI の推定表示も追従することを、この算出で固定する。
+  const SOON_MS = Math.min(30_000, Math.round(DEFAULT_APPROVAL_TIMEOUT_MS / 10));
+
+  it("十分な猶予があれば『自動拒否まで 約N分（安全側）』を表示", () => {
     const html = renderToStaticMarkup(
       createElement(SessionDetailView, {
         detail: detail([pending({ requested_at: reqAt })]),
         loading: false,
-        nowMs: reqMs + 10_000, // 残り ~20s
+        nowMs: reqMs + 10_000,
       }),
     );
     expect(html).toContain('data-testid="approval-timeout"');
     expect(html).toMatch(/data-tone="ok"/);
     expect(html).toContain("自動拒否まで");
-    expect(html).toContain("約20秒");
+    // 既定 300s では残り 290s → 「約5分」。60s 以上は分表記 (「約290秒」は読みにくい)。
+    const minutes = Math.ceil((DEFAULT_APPROVAL_TIMEOUT_MS - 10_000) / 60_000);
+    expect(html).toContain(`約${minutes}分`);
+  });
+
+  it("60 秒未満まで縮むと秒表記へ落ちる", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionDetailView, {
+        detail: detail([pending({ requested_at: reqAt })]),
+        loading: false,
+        nowMs: reqMs + DEFAULT_APPROVAL_TIMEOUT_MS - 45_000, // 残り 45s
+      }),
+    );
+    expect(html).toMatch(/data-tone="ok"/);
+    expect(html).toContain("約45秒");
   });
 
   it("閾値内は data-tone=soon で『まもなくタイムアウト』を強調", () => {
@@ -224,7 +243,8 @@ describe("SessionDetailView 段階③: 承認 timeout UX (推定値)", () => {
       createElement(SessionDetailView, {
         detail: detail([pending({ requested_at: reqAt })]),
         loading: false,
-        nowMs: reqMs + 27_000, // 残り 3s (< 5s 閾値)
+        // 閾値の直下 (残り = SOON_MS - 1s)。閾値自体が既定から導出されるため追従する。
+        nowMs: reqMs + DEFAULT_APPROVAL_TIMEOUT_MS - (SOON_MS - 1_000),
       }),
     );
     expect(html).toContain('data-tone="soon"');
@@ -236,7 +256,7 @@ describe("SessionDetailView 段階③: 承認 timeout UX (推定値)", () => {
       createElement(SessionDetailView, {
         detail: detail([pending({ requested_at: reqAt })]),
         loading: false,
-        nowMs: reqMs + 31_000,
+        nowMs: reqMs + DEFAULT_APPROVAL_TIMEOUT_MS + 1_000,
       }),
     );
     expect(html).toContain('data-tone="expired"');
