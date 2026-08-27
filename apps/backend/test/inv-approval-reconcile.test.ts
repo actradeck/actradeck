@@ -18,7 +18,12 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { EventPayload, mintApprovalRequestId, parseEvent } from "@actradeck/event-model";
+import {
+  APPROVAL_REQUEST_ID_RE,
+  EventPayload,
+  mintApprovalRequestId,
+  parseEvent,
+} from "@actradeck/event-model";
 import { redactEventWithAuthoritativeCounts } from "@actradeck/redaction";
 import { Pool } from "pg";
 
@@ -202,6 +207,17 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
     return { request_id: requestId, requested_at: STALE_AT };
   }
 
+  /**
+   * SEC-R5-2 (task 019fd80f): DB 側 request_id ゲート導入後、合成対象になれるのは正準 OR
+   * known-legacy 形のみ。stale fixture は正準形 (`s<12hex>:apr-<32hex>`) で書く。
+   */
+  const canon = (hexSuffix: string) => `s0123456789ab:apr-${hexSuffix.padStart(32, "0")}`;
+  const STALE_ID = canon("57a1e");
+  const FRESH_ID = canon("f8e5");
+  const OLD_ID = canon("01d");
+  const NOAT_ID = canon("0a7");
+  const DUP_ID = canon("d0b");
+
   function signal(
     sessionIds: string[],
     active: string[],
@@ -231,7 +247,7 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
         session_id: "s1",
         provider: "codex",
         state: "waiting.approval",
-        requests: [staleReq("s1:apr-stale")],
+        requests: [staleReq(STALE_ID)],
       },
     ]);
     await reconciler.reconcile(signal(["s1"], []));
@@ -245,7 +261,7 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
     expect(ev.state).toBe("waiting.approval"); // 現 state 保持 (合成で遷移させない)。
     expect(ev.payload).toEqual({
       kind: "tool.permission.resolved",
-      request_id: "s1:apr-stale",
+      request_id: STALE_ID,
       decision: "cancel",
       resolution_origin: "relay_lost",
       delivery_status: "not_sent",
@@ -274,13 +290,13 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
         session_id: "s1",
         provider: "claude_code",
         state: "waiting.approval",
-        requests: [{ request_id: "s1:apr-fresh", requested_at: freshAt }, staleReq("s1:apr-old")],
+        requests: [{ request_id: FRESH_ID, requested_at: freshAt }, staleReq(OLD_ID)],
       },
     ]);
     await reconciler.reconcile(signal(["s1"], []));
     // fresh は生存 (宣言スナップショットに載る機会が無かっただけ)、old のみ合成。
     expect(ingested).toHaveLength(1);
-    expect((ingested[0]!.payload as Record<string, unknown>).request_id).toBe("s1:apr-old");
+    expect((ingested[0]!.payload as Record<string, unknown>).request_id).toBe(OLD_ID);
   });
 
   it("watermark: requested_at が読めない pending は消さない (fail-safe)", async () => {
@@ -289,11 +305,95 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
         session_id: "s1",
         provider: "claude_code",
         state: undefined,
-        requests: [{ request_id: "s1:apr-noat", requested_at: "not-a-timestamp" }],
+        requests: [{ request_id: NOAT_ID, requested_at: "not-a-timestamp" }],
       },
     ]);
     await reconciler.reconcile(signal(["s1"], []));
     expect(ingested).toHaveLength(0);
+  });
+
+  /**
+   * INV-APPROVAL-RECONCILE-ID-GATE (SEC-R5-2 landing・task 019fd80f):
+   * 宣言側 (parseActivePendingRequestIds) は正準 RE を強制する。DB 側に同じゲートが無いと、
+   * 適合宣言に載り得ない id (mangled / 別 namespace) が「宣言に無い」だけで retire される
+   * (fail-unsafe 非対称)。ゲートは正準 OR known-legacy (CHANGELOG 0.7.0 の designed recovery)。
+   */
+  it("SEC-R5-2: 正準にも known-legacy にも一致しない DB pending は宣言に無くても合成しない (fail-safe)", async () => {
+    const nonRetirable = [
+      // redaction で prefix / token が marker 化された mangled id (宣言 raw ≠ at-rest の恒久割れ)。
+      "[REDACTED:high-entropy]:apr-F9aSKs-LnHcbygXAZ16NLQ",
+      "s0123456789ab:apr-[REDACTED:hex-token]",
+      // 旧テスト fixture 形 (どの出荷形でもない未知形)。
+      "s1:apr-stale",
+    ];
+    const { reconciler, ingested } = makeReconciler([
+      {
+        session_id: "s1",
+        provider: "claude_code",
+        state: "waiting.approval",
+        // 非対象 3 件 + 正準 stale 1 件を同居させ、ゲートが「当該 id だけ」を skip することを pin。
+        requests: [...nonRetirable.map(staleReq), staleReq(STALE_ID)],
+      },
+    ]);
+    await reconciler.reconcile(signal(["s1"], []));
+    expect(ingested).toHaveLength(1);
+    expect((ingested[0]!.payload as Record<string, unknown>).request_id).toBe(STALE_ID);
+    // 観測: skip 延べ数 (NO-RAW・件数のみ)。
+    expect(reconciler.nonRetirableSkipCount).toBe(nonRetirable.length);
+    expect(reconciler.inFlightCount).toBe(0);
+  });
+
+  it("SEC-R5-2: known-legacy 形 (v0.4.0〜v0.6.0 base64url / それ以前の Date-seq) は引き続き retire される (designed recovery)", async () => {
+    const legacyB64 = "sess_0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-F9aSKs-LnHcbygXAZ16NLQ";
+    const legacyDemo = "0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-1"; // SEC-V9-2: safety-demo 旧採番
+    const legacySeq = "0199f0a1-2b3c-7d4e-8f01-23456789abcd:apr-1754450000000-3";
+    const { reconciler, ingested } = makeReconciler([
+      {
+        session_id: "s1",
+        provider: "claude_code",
+        state: "waiting.approval",
+        requests: [staleReq(legacyB64), staleReq(legacyDemo), staleReq(legacySeq)],
+      },
+    ]);
+    await reconciler.reconcile(signal(["s1"], []));
+    expect(ingested.map((e) => (e.payload as Record<string, unknown>).request_id)).toEqual([
+      legacyB64,
+      legacyDemo,
+      legacySeq,
+    ]);
+    expect(reconciler.nonRetirableSkipCount).toBe(0);
+  });
+
+  it("QA-4: `tu:` namespace (command 相関・INV-REQUEST-ID-NAMESPACE) の id は承認として retire しない", async () => {
+    const { reconciler, ingested } = makeReconciler([
+      {
+        session_id: "s1",
+        provider: "claude_code",
+        state: "waiting.approval",
+        requests: [
+          staleReq("tu:toolu_01ABCDEFGHIJKLMNOPQRSTUV"),
+          staleReq("tu:s1:apr-F9aSKs-LnHcbygXAZ16NLQ"),
+        ],
+      },
+    ]);
+    await reconciler.reconcile(signal(["s1"], []));
+    expect(ingested).toHaveLength(0);
+    expect(reconciler.nonRetirableSkipCount).toBe(2);
+  });
+
+  it("SEC-R5-2: ゲートは宣言 Set 突合の後段 (宣言に在る非正準 id は skip 計上せず維持)", async () => {
+    // 宣言に在る id は形に関わらず「生存」— ゲート以前に continue するので計上もしない。
+    const { reconciler, ingested } = makeReconciler([
+      {
+        session_id: "s1",
+        provider: "claude_code",
+        state: "waiting.approval",
+        requests: [staleReq("s1:apr-stale")],
+      },
+    ]);
+    await reconciler.reconcile(signal(["s1"], ["s1:apr-stale"]));
+    expect(ingested).toHaveLength(0);
+    expect(reconciler.nonRetirableSkipCount).toBe(0);
   });
 
   it("fold 完了前の連続 hello でも同一 request_id を二重合成しない (in-flight dedup)", async () => {
@@ -302,7 +402,7 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
         session_id: "s1",
         provider: "claude_code",
         state: undefined,
-        requests: [staleReq("dup-1")],
+        requests: [staleReq(DUP_ID)],
       },
     ];
     let release: (() => void) | undefined;
@@ -387,6 +487,13 @@ describe("B. ApprovalReconciler 単体 (fake store)", () => {
 const DATABASE_URL = process.env.DATABASE_URL;
 const reachable = DATABASE_URL ? await dbReachable(DATABASE_URL) : false;
 
+/** 正準 fixture id (QA-V9-3: 手書き literal の桁数 drift を導出 + RE assert で構造的に防ぐ)。 */
+function canonicalFixtureId(hexSuffix: string): string {
+  const id = `s0123456789ab:apr-${hexSuffix.padStart(32, "0")}`;
+  if (!APPROVAL_REQUEST_ID_RE.test(id)) throw new Error(`non-canonical fixture id: ${id}`);
+  return id;
+}
+
 describe.skipIf(!reachable)("INV-APPROVAL-RECONCILE 受入#6/#7 (real Postgres)", () => {
   let pool: Pool;
   let store: IngestStore;
@@ -447,7 +554,8 @@ describe.skipIf(!reachable)("INV-APPROVAL-RECONCILE 受入#6/#7 (real Postgres)"
 
   it("受入#7: sidecar 再起動 (宣言に無い pending) → 合成 cancel が fold され pending が消える", async () => {
     const sid = newSession("sess_reconcile7");
-    const requestId = `${sid}:apr-stale`;
+    // SEC-R5-2: 合成対象は正準形のみ (fixture も正準で書く・QA-V9-3: 桁数 drift 防止に導出 + RE assert)。
+    const requestId = canonicalFixtureId("57a1e");
     await ingestRequested(sid, requestId);
 
     const before = await store.pendingApprovalsForSessions([sid]);
@@ -484,7 +592,7 @@ describe.skipIf(!reachable)("INV-APPROVAL-RECONCILE 受入#6/#7 (real Postgres)"
 
   it("受入#6: backend 再起動跨ぎ (宣言に在る pending) → 維持され、同一 request_id で一度だけ解決", async () => {
     const sid = newSession("sess_reconcile6");
-    const requestId = `${sid}:apr-live`;
+    const requestId = canonicalFixtureId("11fe"); // QA-V9-3: 以前の手書き literal は 33 hex で非正準だった
     await ingestRequested(sid, requestId);
 
     // 同一 sidecar プロセスの再接続 hello = pending が生きている宣言 → 合成しない。

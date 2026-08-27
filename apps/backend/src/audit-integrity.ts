@@ -63,8 +63,17 @@ import type { ReplayEventDTO } from "./replay-contract.js";
 
 /** manifest フォーマットのバージョン。 */
 export const AUDIT_MANIFEST_VERSION = "actradeck-audit-manifest/v3";
+/**
+ * ハッシュ連鎖アルゴリズムの宣言値 (単一出所・SEC-R9-1/TDA-R9-1)。
+ * envelope の `algorithm` は chain にも署名 header にも畳まれない (畳むと canonical 形が変わり
+ * version bump が要る) ため、**well-formedness で fail-closed に束ねる**: この値以外は
+ * `malformed-manifest` / `malformed-packet-manifest` として verify を通さない。将来第 2 アルゴリズムを
+ * 導入する場合は version bump + ここを closed enum 化し、`isWellFormed*` の照合を必ず更新すること
+ * (照合を欠くと algorithm-confusion / downgrade 面になる)。
+ */
+export const AUDIT_CHAIN_ALGORITHM = "sha256-chain";
 /** ハッシュ連鎖のドメイン分離定数。 */
-const CHAIN_DOMAIN = "actradeck-audit-manifest/v3/sha256-chain";
+const CHAIN_DOMAIN = `${AUDIT_MANIFEST_VERSION}/${AUDIT_CHAIN_ALGORITHM}`;
 
 // ---------------------------------------------------------------------------
 // Manifest 型 (表示投影の authoritative record・全て redaction 済み文字列)。
@@ -138,7 +147,8 @@ export interface AuditManifestSignature {
 
 export interface AuditManifest {
   readonly version: typeof AUDIT_MANIFEST_VERSION;
-  readonly algorithm: "sha256-chain";
+  /** 宣言のみ (chain/署名 header 非含)。verify は `isWellFormedManifest` で fail-closed に照合する。 */
+  readonly algorithm: typeof AUDIT_CHAIN_ALGORITHM;
   readonly session_id: string;
   readonly generated_at: string;
   readonly event_count: number;
@@ -406,7 +416,7 @@ export function buildAuditManifest(
 
   const base: AuditManifest = {
     version: AUDIT_MANIFEST_VERSION,
-    algorithm: "sha256-chain",
+    algorithm: AUDIT_CHAIN_ALGORITHM,
     session_id: sessionId,
     generated_at: report.generated_at,
     event_count: events.length,
@@ -508,6 +518,7 @@ function isWellFormedManifest(m: AuditManifest): boolean {
     m === null ||
     typeof m !== "object" ||
     m.version !== AUDIT_MANIFEST_VERSION ||
+    m.algorithm !== AUDIT_CHAIN_ALGORITHM || // SEC-R9-1: 宣言 algorithm を fail-closed に束ねる
     typeof m.session_id !== "string" ||
     typeof m.generated_at !== "string" ||
     typeof m.events_truncated !== "string" ||
@@ -673,7 +684,7 @@ export const AUDIT_PACKET_MANIFEST_VERSION = "actradeck-audit-packet-manifest/v2
  * QA-R5-2: export はテストの結合 assert 用 — 「version bump したのに chain domain を据え置く」
  * 半端な bump を CI で赤くする (`PACKET_CHAIN_DOMAIN.startsWith(VERSION + "/")` を pin)。
  */
-export const PACKET_CHAIN_DOMAIN = "actradeck-audit-packet-manifest/v2/sha256-chain";
+export const PACKET_CHAIN_DOMAIN = `${AUDIT_PACKET_MANIFEST_VERSION}/${AUDIT_CHAIN_ALGORITHM}`;
 /** HTML コメント / MD fence へ埋め込む packet manifest マーカー (単一 manifest と別)。 */
 export const AUDIT_PACKET_MANIFEST_MARKER = "actradeck-audit-packet-manifest";
 
@@ -707,7 +718,8 @@ export interface PacketManifestSession {
 
 export interface PacketManifest {
   readonly version: typeof AUDIT_PACKET_MANIFEST_VERSION;
-  readonly algorithm: "sha256-chain";
+  /** 宣言のみ (chain/署名 header 非含)。verify は `isWellFormedPacketManifest` で fail-closed に照合する。 */
+  readonly algorithm: typeof AUDIT_CHAIN_ALGORITHM;
   readonly generated_at: string;
   readonly session_count: number;
   readonly sessions: readonly PacketManifestSession[];
@@ -798,7 +810,7 @@ export function buildPacketManifest(
 
   const base: PacketManifest = {
     version: AUDIT_PACKET_MANIFEST_VERSION,
-    algorithm: "sha256-chain",
+    algorithm: AUDIT_CHAIN_ALGORITHM,
     generated_at: input.generated_at,
     session_count: sessionCount,
     sessions,
@@ -842,6 +854,7 @@ function isWellFormedPacketManifest(m: PacketManifest): boolean {
     m === null ||
     typeof m !== "object" ||
     m.version !== AUDIT_PACKET_MANIFEST_VERSION ||
+    m.algorithm !== AUDIT_CHAIN_ALGORITHM || // SEC-R9-1: 宣言 algorithm を fail-closed に束ねる
     typeof m.generated_at !== "string" ||
     typeof m.root !== "string" ||
     m.governance === null ||

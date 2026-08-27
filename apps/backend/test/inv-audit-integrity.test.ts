@@ -27,7 +27,11 @@ import {
   encodeManifestBase64,
   AUDIT_MANIFEST_VERSION,
   AUDIT_MANIFEST_MARKER,
+  AUDIT_CHAIN_ALGORITHM,
   type AuditManifest,
+  type AuditManifestDiff,
+  type AuditManifestEvent,
+  type AuditManifestSummary,
   type DecodedAuditManifest,
 } from "../src/audit-integrity.js";
 import { sessionReportToHtml, sessionReportToMarkdown } from "../src/audit-report.js";
@@ -178,6 +182,17 @@ describe("INV-AUDIT-INTEGRITY canonicalize (単射・SEC-3)", () => {
     );
     expect(normalizeEventForManifest(ev({ event_id: "a", subject: "S" })).command).toBe("S");
     expect(normalizeEventForManifest(ev({ event_id: "a" })).command).toBe("");
+  });
+});
+
+describe("INV-AUDIT-INTEGRITY canonical form golden pin (QA-V9-4)", () => {
+  it("SAMPLE の root は byte-equivalent に固定される (chain domain / canonical 形の変更 = version bump)", () => {
+    // CHAIN_DOMAIN は非公開 (`${AUDIT_MANIFEST_VERSION}/${AUDIT_CHAIN_ALGORITHM}` 導出)。導出を
+    // 旧 literal に戻しても値が同じなら緑で正しいが、domain / canonical 形のどんな変更も既存 manifest を
+    // 全て不一致にするため、root 値そのものを golden として pin する (変更は意図的な version bump を強制)。
+    expect(buildAuditManifest(SAMPLE).root).toBe(
+      "084addd3ad5c19d611b1458cae202f2587339f8e3094fb64673c8672abc07301",
+    );
   });
 });
 
@@ -415,6 +430,23 @@ describe("INV-AUDIT-INTEGRITY malformed 堅牢化 (SEC-4)", () => {
       expect(r.ok).toBe(false);
       expect(r.reason).toBe("malformed-manifest");
     }
+  });
+
+  it("SEC-R9-1: 署名 + fingerprint pin 済み manifest でも algorithm 改変は malformed-manifest (fail-closed)", () => {
+    // 以前は algorithm が chain / 署名 header / well-formedness のどれにも束ねられず、
+    // 署名+pin 済み manifest の algorithm を書き換えても ok=true だった (TDA-R9-1≡SEC-R9-1)。
+    // well-formedness で fail-closed に束ねる: 宣言値以外は verify を通さない。
+    const valid = buildAuditManifest(SAMPLE, signer);
+    expect(verifyPinned(valid).ok).toBe(true); // positive control
+    for (const bad of ["sha1-chain", "SHA256-CHAIN", "sha256-chain ", "", undefined, null, 1, {}]) {
+      const r = verifyPinned({ ...valid, algorithm: bad } as unknown as AuditManifest);
+      expect(r.ok, `algorithm=${JSON.stringify(bad)} が verify を通る`).toBe(false);
+      expect(r.reason).toBe("malformed-manifest");
+      expect(r.signed).toBe(false); // SEC-R4-6: 署名検証に到達しない = 「確立できなかった」
+    }
+    // 宣言値の単一出所: build が書く値 = gate が照合する値 (literal 2 度書きの drift を pin)。
+    expect(valid.algorithm).toBe(AUDIT_CHAIN_ALGORITHM);
+    expect(AUDIT_CHAIN_ALGORITHM).toBe("sha256-chain");
   });
 
   it("base64 decode: 破損/version 不正 → undefined", () => {
@@ -663,59 +695,120 @@ describe("INV-APPROVAL-DECISION-VOCAB: decision 語彙の単一出所 (SEC-R5-1/
 });
 
 /**
- * INV-AUDIT-BINDING-COMPLETENESS (SEC-R6-1・R6 監査):
- * 上の投影 pin は **normalize 段のみ**を固定する — interface + normalize へ field を足しても
+ * INV-AUDIT-BINDING-COMPLETENESS (SEC-R6-1・R6 監査 → R8-1 兄弟投影 → R9-1/R9-2 envelope + key-union):
+ * 投影 pin は **normalize 段のみ**を固定する — interface + normalize へ field を足しても
  * `canonicalizeSummary` の位置列挙に加え忘れれば「宣言したのに root に畳まれない」field が生まれ、
  * その値は verify ok=true のまま偽造可能になる (SEC-R5-1 の本体 hazard が tripwire 緑のまま再現)。
  * interface→normalize は object literal の欠落 property で compile 結合するが、
  * interface→canonicalize は無結合 — この空隙を **root-sensitivity の全数 assert** で閉じる:
- * manifest.summary の全 key について「その 1 field だけ改変すると verify が落ちる」を検査する
+ * 各 tier の全 key について「その 1 field だけ改変すると verify が落ちる」を検査する
  * (key 追加時に自動拡張し、canonicalize 漏れの当日に RED)。
+ *
+ * 走査 tier (TDA-R9-2: 共有ヘルパ `assertRootSensitive` に集約し、走査済み tier を構造的に可視化):
+ *   1. summary (23)  2. events[i] (9・hash 除く)  3. diff (6)  4. envelope 最上位 (7・R9-1 で追加)。
+ * 特例 (envelope): `summary`/`events`/`diff` は tier 1-3 が担う。`signature` は SEC-2 群
+ * (自鍵 forge / 未 pin / 改竄) が担う。`root` は chain の出力値だが envelope 走査に含める
+ * (改変は chain 照合で検知される = 「畳まれた値」であることの pin)。
+ *
+ * key テンプレート (SEC-R9-2): events は **全 events の key-set union** を走査し、併せて key-set の
+ * 一様性を assert する (optional projection field が 1 event にだけ現れる形を構造的に拒否)。
+ * 型レベル pin: 投影 interface に optional property が無いことを compile-time で固定する
+ * (`tsc -p tsconfig.test.json` が CI の type-check で実走・memory: 出力等価テストは型ミラー drift を
+ * 守れない → Equal<> を専用 tsconfig で)。
  */
-describe("INV-AUDIT-BINDING-COMPLETENESS: 全投影 field の root-sensitivity (SEC-R6-1/SEC-R8-1)", () => {
-  it("manifest.summary の全 field は改変で verify が落ちる (canonicalize 漏れで RED)", () => {
-    const base = buildAuditManifest(SAMPLE);
-    const entries = Object.entries(base.summary);
-    expect(entries.length).toBeGreaterThanOrEqual(23); // 非空虚ガード (現行 23 field)。
-    for (const [key, value] of entries) {
-      const mutated = Array.isArray(value)
-        ? [...value, ["zz-probe-kind", "1"]]
-        : `${String(value)}-probe`;
-      const tampered = {
-        ...base,
-        summary: { ...base.summary, [key]: mutated },
-      } as unknown as AuditManifest;
-      const r = verifyAuditManifest(tampered);
-      expect(r.ok, `summary.${key} の改変が検知されない (canonicalizeSummary から漏れている)`).toBe(
-        false,
-      );
-    }
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+/** 投影 interface に optional field が無い (SEC-R9-2: key-template が取りこぼす class を型で禁止)。 */
+const NO_OPTIONAL_EVENT: Equal<Required<AuditManifestEvent>, AuditManifestEvent> = true;
+const NO_OPTIONAL_SUMMARY: Equal<Required<AuditManifestSummary>, AuditManifestSummary> = true;
+const NO_OPTIONAL_DIFF: Equal<Required<AuditManifestDiff>, AuditManifestDiff> = true;
+
+/**
+ * 1 tier の root-sensitivity を全数 assert する共有ヘルパ (TDA-R9-2 rule-of-three)。
+ * `keys` の各 key について `tamper(key)` で得た manifest を `verify` に掛け ok=false を要求する。
+ * `minKeys` は非空虚ガード (key を消す退行で RED)。
+ */
+function assertRootSensitive(
+  tier: string,
+  keys: readonly string[],
+  minKeys: number,
+  tamper: (key: string) => AuditManifest,
+  verify: (m: AuditManifest) => { ok: boolean },
+  hint: string,
+): void {
+  expect(
+    keys.length,
+    `${tier}: 走査 key 数が非空虚ガード ${minKeys} を割った`,
+  ).toBeGreaterThanOrEqual(minKeys);
+  for (const key of keys) {
+    const r = verify(tamper(key));
+    expect(r.ok, `${tier}.${key} の改変が検知されない (${hint})`).toBe(false);
+  }
+}
+
+/** 値の型を保ったまま「別の値」へ改変する (配列は要素追加・それ以外は文字列 probe 付加)。 */
+function probeValue(value: unknown): unknown {
+  return Array.isArray(value) ? [...value, ["zz-probe-kind", "1"]] : `${String(value)}-probe`;
+}
+
+describe("INV-AUDIT-BINDING-COMPLETENESS: 全投影 field の root-sensitivity (SEC-R6-1/SEC-R8-1/SEC-R9-1)", () => {
+  it("型レベル pin: 投影 interface に optional field が無い (SEC-R9-2)", () => {
+    expect(NO_OPTIONAL_EVENT && NO_OPTIONAL_SUMMARY && NO_OPTIONAL_DIFF).toBe(true);
   });
 
-  it("manifest.events[i] の全 field (hash 除く) は改変で verify が落ちる (SEC-R8-1: 兄弟投影)", () => {
+  it("tier 1: manifest.summary の全 field は改変で verify が落ちる (canonicalize 漏れで RED)", () => {
+    const base = buildAuditManifest(SAMPLE);
+    const summary = base.summary as unknown as Record<string, unknown>;
+    assertRootSensitive(
+      "summary",
+      Object.keys(summary),
+      23, // 現行 23 field。
+      (key) =>
+        ({
+          ...base,
+          summary: { ...summary, [key]: probeValue(summary[key]) },
+        }) as unknown as AuditManifest,
+      verifyAuditManifest,
+      "canonicalizeSummary から漏れている",
+    );
+  });
+
+  it("tier 2: manifest.events[i] の全 field (hash 除く・全 events の key-union) は改変で verify が落ちる (SEC-R8-1/SEC-R9-2)", () => {
     // SEC-R8-1: summary だけ閉じても events/diff の位置列挙 (canonicalizeEventFields/Diff) に
     // 同一の「宣言したのに畳まれない」クラスが残る。events は command/decision を運ぶため
     // summary より価値の高い偽造標的 — 同型の全数 assert で閉じる。hash は連鎖の出力値ゆえ除外
     // (改変は連鎖照合そのもので検知される)。
+    // SEC-R9-2: key テンプレートを events[0] でなく **全 events の union** とし、さらに key-set の
+    // 一様性を assert する (optional projection field が一部 event にだけ現れる形を拒否)。
     const base = buildAuditManifest(SAMPLE);
-    const keys = Object.keys(base.events[0]!).filter((k) => k !== "hash");
-    expect(keys.length).toBeGreaterThanOrEqual(9); // 非空虚ガード (現行 9 field)。
-    for (const key of keys) {
-      const ev0 = base.events[0]! as unknown as Record<string, unknown>;
-      const tamperedEvents = [
-        { ...ev0, [key]: `${String(ev0[key])}-probe` },
-        ...base.events.slice(1),
-      ];
-      const tampered = { ...base, events: tamperedEvents } as unknown as AuditManifest;
-      const r = verifyAuditManifest(tampered);
-      expect(
-        r.ok,
-        `events[0].${key} の改変が検知されない (canonicalizeEventFields から漏れている)`,
-      ).toBe(false);
-    }
+    expect(base.events.length).toBeGreaterThanOrEqual(2); // union が events[0] 単独と区別できる規模。
+    const keySets = base.events.map((e) => Object.keys(e).sort().join(","));
+    expect(
+      new Set(keySets).size,
+      "events 間で key-set が一様でない (optional projection field?)",
+    ).toBe(1);
+    const union = [...new Set(base.events.flatMap((e) => Object.keys(e)))].filter(
+      (k) => k !== "hash",
+    );
+    assertRootSensitive(
+      "events[*]",
+      union,
+      9, // 現行 9 field。
+      (key) => {
+        // union の key を持つ最初の event を改変する (一様性 assert 済みゆえ events[0] で足りる)。
+        const idx = base.events.findIndex((e) => key in e);
+        const target = base.events[idx]! as unknown as Record<string, unknown>;
+        const tamperedEvents = base.events.map((e, i) =>
+          i === idx ? { ...target, [key]: probeValue(target[key]) } : e,
+        );
+        return { ...base, events: tamperedEvents } as unknown as AuditManifest;
+      },
+      verifyAuditManifest,
+      "canonicalizeEventFields から漏れている",
+    );
   });
 
-  it("manifest.diff の全 field は改変で verify が落ちる (SEC-R8-1: 兄弟投影)", () => {
+  it("tier 3: manifest.diff の全 field は改変で verify が落ちる (SEC-R8-1: 兄弟投影)", () => {
     const withDiff = buildAuditManifest(
       report([ev({ event_id: "e-bind-diff" })], {
         available: true,
@@ -725,17 +818,65 @@ describe("INV-AUDIT-BINDING-COMPLETENESS: 全投影 field の root-sensitivity (
         redaction_count: 0,
       }),
     );
-    const entries = Object.entries(withDiff.diff!);
-    expect(entries.length).toBeGreaterThanOrEqual(6); // 非空虚ガード (現行 6 field)。
-    for (const [key, value] of entries) {
-      const tampered = {
-        ...withDiff,
-        diff: { ...withDiff.diff!, [key]: `${String(value)}-probe` },
-      } as unknown as AuditManifest;
-      const r = verifyAuditManifest(tampered);
-      expect(r.ok, `diff.${key} の改変が検知されない (canonicalizeDiff から漏れている)`).toBe(
-        false,
-      );
-    }
+    const diff = withDiff.diff! as unknown as Record<string, unknown>;
+    assertRootSensitive(
+      "diff",
+      Object.keys(diff),
+      6, // 現行 6 field。
+      (key) =>
+        ({
+          ...withDiff,
+          diff: { ...diff, [key]: probeValue(diff[key]) },
+        }) as unknown as AuditManifest,
+      verifyAuditManifest,
+      "canonicalizeDiff から漏れている",
+    );
+  });
+
+  it("tier 4: envelope 最上位 field は署名 + pin 済みでも改変で verify が落ちる (SEC-R9-1)", () => {
+    // R9-1 の欠陥そのもの: envelope の `algorithm` が chain / 署名 header / well-formedness の
+    // どれにも束ねられず、署名+pin 済み manifest を改変しても ok=true だった。envelope を第 4 tier
+    // として走査し、各 field が (chain / 署名 header / well-formedness の) いずれかに束ねられて
+    // いることを pin する。tier 1-3 (summary/events/diff) と signature (SEC-2 群) は除外。
+    const signed = buildAuditManifest(SAMPLE, signer);
+    expect(verifyPinned(signed).ok).toBe(true); // positive control
+    const NESTED = new Set(["summary", "events", "diff", "signature"]);
+    const envelope = signed as unknown as Record<string, unknown>;
+    const keys = Object.keys(envelope).filter((k) => !NESTED.has(k));
+    expect(keys.sort()).toEqual(
+      [
+        "algorithm",
+        "event_count",
+        "events_truncated",
+        "generated_at",
+        "root",
+        "session_id",
+        "version",
+      ].sort(),
+    );
+    assertRootSensitive(
+      "envelope",
+      keys,
+      7, // 現行 7 field (version / algorithm / session_id / generated_at / event_count / events_truncated / root)。
+      (key) => ({ ...signed, [key]: probeValue(envelope[key]) }) as unknown as AuditManifest,
+      verifyPinned,
+      "chain / 署名 header / well-formedness のどれにも束ねられていない",
+    );
+    // 未署名 (内部整合のみ) の走査範囲は正直に狭い: `generated_at` は署名 header (canonicalizeHeader)
+    // だけが束ね、chain には畳まれない — unsigned では改変を検知**しない** (設計どおり・chain へ
+    // 足すと canonical 形が変わり version bump が要る)。tamper-evidence が要るなら署名を有効化する
+    // (verify の unsigned reason 文言がそれを明示)。残る 6 key は chain / well-formedness /
+    // events.length 照合 (event_count) が束ねる = unsigned でも検知される。
+    const UNSIGNED_UNBOUND = new Set(["generated_at"]);
+    const unsigned = buildAuditManifest(SAMPLE);
+    const u = unsigned as unknown as Record<string, unknown>;
+    assertRootSensitive(
+      "envelope(unsigned)",
+      Object.keys(u).filter((k) => !NESTED.has(k) && !UNSIGNED_UNBOUND.has(k)),
+      6,
+      (key) => ({ ...unsigned, [key]: probeValue(u[key]) }) as unknown as AuditManifest,
+      verifyAuditManifest,
+      "unsigned で束ねられていない",
+    );
   });
 });

@@ -37,6 +37,31 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   approvals as inbound JSON-RPC requests, so how long it waits for a response is not something
   ActraDeck configures, and Codex rollout tailing is observe-only and never blocks.
 
+### Fixed
+
+- **A tampered `algorithm` field no longer verifies.** The audit manifest and review-packet
+  manifest declare `algorithm: "sha256-chain"` and render it in the shipped integrity tables,
+  but the field was bound by neither the hash chain, the signature header, nor the
+  well-formedness gate — a signed, fingerprint-pinned manifest with a rewritten `algorithm`
+  still reported `verified`. `verifyAuditManifest` / `verifyPacketManifest` now reject any
+  value other than the declared one as `malformed-manifest` / `malformed-packet-manifest`
+  (fail-closed). No format bump: every manifest ever exported carries the declared value, so
+  existing v3 / v2 documents keep verifying. The binding-completeness invariant now sweeps the
+  top-level envelope as a fourth tier, uses the key-union of all events as its template, and
+  pins at the type level that no projection field is optional.
+- **The reconciler no longer retires pendings it could never have matched.** The restart
+  reconciliation synthesizes a `relay_lost` cancel for every persisted pending that is absent
+  from the daemon's hello declaration. The declaration side already enforces the canonical
+  request-id shape, but the database side compared ids against the declared set only — so an
+  id that could never appear in a conforming declaration (one mangled by redaction at rest, or
+  a `tu:` command-correlation key) was treated as stale and retired while the approval was
+  still live. Pendings whose id is neither canonical nor one of the shipped legacy shapes
+  (`<session>:apr-<22 base64url>` from the sidecar bridge in v0.1.0–v0.6.0, the safety demo's
+  `<session>:apr-<n>` in v0.4.0–v0.6.0, and the pre-release `<session>:apr-<ms>-<seq>`)
+  are now skipped (fail-safe: nothing is destroyed) and counted in a NO-RAW
+  `nonRetirableSkipCount`. Legacy-shaped pendings are still retired on the first hello after a
+  coordinated upgrade, as documented in 0.7.0.
+
 ## [0.8.1] - 2026-08-26
 
 ### Fixed

@@ -59,3 +59,52 @@ export function mintApprovalRequestId(sessionId: string): string {
 export function deriveDemoApprovalRequestId(sessionId: string): string {
   return approvalRequestId(sessionId, sha256Hex(`demo-approval:${sessionId}`).slice(0, 32));
 }
+
+/**
+ * **出荷済みの旧採番形 (known-legacy・閉じた列挙)** — reconciler の DB 側 request_id ゲート
+ * (SEC-R5-2) が「合成 retire してよい id」を決めるために消費する。
+ *
+ * 背景: backend reconciler は「hello 宣言に無い DB pending」を合成 cancel するが、宣言側は
+ * `parseActivePendingRequestIds` が正準 RE を宣言単位で強制する。at-rest 側に同じゲートが無いと、
+ * 適合宣言に**載り得ない** id (redaction で mangle された id / 別 namespace の id) が
+ * 「宣言に無い」だけで stale 扱いされ、生きている承認が retire される (fail-unsafe 非対称)。
+ * 「宣言に無い」が staleness の証拠になるのは、その id が適合宣言に載り得る形をしているときだけ。
+ *
+ * 一方 CHANGELOG (0.7.0) は「旧 daemon が永続した pending は coordinated upgrade 後の初回 hello で
+ * relay_lost として retire される (designed recovery)」を契約している。正準のみのゲートは
+ * この回収を壊すため、**過去に出荷した採番形を閉じた列挙で retire 対象に含める**。
+ *
+ *  - v0.1.0 〜 v0.6.0 (sidecar bridge): `${sessionId}:apr-<base64url 22 文字>`
+ *    (`randomBytes(16).toString("base64url")`・v0.1.0 tag 時点で既にこの形)。
+ *  - v0.4.0 〜 v0.6.0 (backend safety-demo-driver): `${sessionId}:apr-<n>` (固定連番 `apr-1`・
+ *    SEC-V9-2: production src の第 2 採番点で、この形の demo pending は base では retire されていた)。
+ *  - tag 以前 (コード履歴のみ): `${sessionId}:apr-<Date.now()>-<seq>`。
+ *
+ * session prefix は plausible な session id 文字集合 (`[A-Za-z0-9_.-]`) に限る — redaction marker
+ * (`[REDACTED:…]` 等・`[` `]` `:` を含む) に置換された prefix はここで**構造的に排除**される
+ * (mangled legacy id を「legacy 形」として誤って retire しない)。
+ *
+ * 規律: これは**過去の**列挙。新形式を足すことは無い (現行は `APPROVAL_REQUEST_ID_RE`)。
+ * 削除も禁止 — 削除した形の pending が旧 DB に残っていれば恒久 pending 化する (安全側だが
+ * designed recovery の契約違反)。
+ */
+export const LEGACY_APPROVAL_REQUEST_ID_RES: readonly RegExp[] = Object.freeze([
+  /^[A-Za-z0-9_.-]{1,128}:apr-[A-Za-z0-9_-]{22}$/,
+  /^[A-Za-z0-9_.-]{1,128}:apr-\d{1,9}$/,
+  /^[A-Za-z0-9_.-]{1,128}:apr-\d{13}-\d{1,9}$/,
+]);
+
+/**
+ * DB pending の request_id が **合成 retire の対象になりうる形** か (正準 OR known-legacy)。
+ *
+ * false = 「適合宣言に載り得ない id」— 宣言に無くても staleness の証拠にならないため、
+ * reconciler は合成 cancel せず skip する (fail-safe: 消さない方向)。該当例:
+ *  - redaction で mangle された id (`[REDACTED:…]:apr-…` / token 部が marker 化)。
+ *  - `tu:<tool_use_id>` (command 相関の別 namespace・INV-REQUEST-ID-NAMESPACE)。
+ *  - 任意の未知形。
+ */
+export function isRetirableApprovalRequestId(id: string): boolean {
+  if (APPROVAL_REQUEST_ID_RE.test(id)) return true;
+  for (const re of LEGACY_APPROVAL_REQUEST_ID_RES) if (re.test(id)) return true;
+  return false;
+}
