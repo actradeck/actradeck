@@ -29,7 +29,11 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, hookTimeoutSecondsFor } from "@actradeck/event-model";
 import { withFileLock, type FileLockOptions } from "./file-lock.js";
 import { writeJson0600 } from "./fs-atomic.js";
-import { HOOK_TOKEN_HEADER, MANAGED_HOOK_EVENTS } from "./settings-injection.js";
+import {
+  HOOK_TOKEN_HEADER,
+  MANAGED_HOOK_EVENTS,
+  OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS,
+} from "./settings-injection.js";
 
 export type { FileLockOptions };
 
@@ -95,9 +99,6 @@ export interface MergeResult {
   /** 書き込み後の settings (preview ではマージ後の予定形)。 */
   readonly settings: ClaudeSettingsFile;
 }
-
-/** 観測のみ (承認待ちが無い) event の hook timeout (秒)。応答は即返るので短くてよい。 */
-const OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS = 10;
 
 /**
  * PreToolUse / PermissionRequest は承認待ちがあるので timeout を長めに (managed と同方針)。

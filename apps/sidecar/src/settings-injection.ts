@@ -66,8 +66,8 @@ export interface ClaudeSettings {
   readonly hooks: Record<string, Array<{ hooks: HookHttpEntry[] }>>;
 }
 
-/** 観測のみ (承認待ちが無い) event の hook timeout (秒)。応答は即返るので短くてよい。 */
-const OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS = 10;
+/** 観測のみ (承認待ちが無い) event の hook timeout (秒)。応答は即返るので短くてよい (managed/attach 共有・TDA-V9-5)。 */
+export const OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS = 10;
 
 /**
  * sidecar endpoint を全 hook に配線した settings オブジェクトを生成。

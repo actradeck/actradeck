@@ -24,7 +24,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   if the hook timeout ever expired first, the approval would turn into a silent pass rather than
   a deny. Those two numbers previously lived as unrelated literals in separate files (a 30 and a
   35, plus a second copy of the 35 for managed sessions), where editing one alone would have
-  inverted the ordering without a single test failing. The approval wait is now the canonical
+  inverted the ordering without a single test failing. A bridge constructed with an explicit
+  `timeoutMs` (a programmatic option; no CLI flag or environment variable sets it) can only
+  _shorten_ the wait — the effective value is capped at the canonical default, because the
+  hook timeout is derived from that default and written into settings before the bridge
+  exists. The approval wait is now the canonical
   value in `@actradeck/event-model` and every hook timeout is **derived** from it with a margin,
   bounded so the derived value stays within Claude Code's documented default for HTTP hooks.
   `INV-APPROVAL-TIMEOUT-ORDERING` pins the ordering, the derivation, and — by reading the

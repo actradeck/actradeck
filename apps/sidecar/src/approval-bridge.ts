@@ -23,8 +23,8 @@ import type {
   ResolutionOrigin,
 } from "@actradeck/event-model";
 import {
-  DEFAULT_APPROVAL_TIMEOUT_MS,
   DEFAULT_GATED_CATEGORIES,
+  effectiveApprovalTimeoutMs,
   isKnownRedactionKind,
   isPathWithinScope,
   mintApprovalRequestId,
@@ -314,9 +314,11 @@ export interface ApprovalBridgeOptions {
    * UI 応答待ちタイムアウト (ms)。超過で安全側へ倒す。既定は event-model の
    * `DEFAULT_APPROVAL_TIMEOUT_MS` (正準単一出所)。
    *
-   * ⚠️ この値を変える場合、agent 側フック timeout は `hookTimeoutSecondsFor()` で**導出**すること。
-   * フック timeout が先に切れると、CC 契約により承認は deny でなく**素通り**になる
-   * (INV-APPROVAL-TIMEOUT-ORDERING が順序を回帰固定する)。
+   * ⚠️ 実効値は `effectiveApprovalTimeoutMs()` で **既定を上限に**丸められる (SEC-V9-1)。agent 側
+   * フック timeout は既定から静的に導出されて settings に書かれるため、ここで既定を超える値を
+   * 受け付けるとフック timeout が先に切れ、CC 契約により承認は deny でなく**素通り**になる。
+   * 伸ばすには単一出所 `DEFAULT_APPROVAL_TIMEOUT_MS` を変える (INV-APPROVAL-TIMEOUT-ORDERING が
+   * 任意の要求値に対する順序を回帰固定する)。
    */
   readonly timeoutMs?: number;
   /** タイムアウト時の既定動作 (security.md: ask/deny の安全側)。 */
@@ -397,7 +399,7 @@ export class ApprovalBridge {
   private readonly onPersistFailure: ((count: number) => void) | undefined;
 
   constructor(opts: ApprovalBridgeOptions = {}) {
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+    this.timeoutMs = effectiveApprovalTimeoutMs(opts.timeoutMs);
     this.persist = opts.persist;
     this.now = opts.persist?.now ?? (() => Date.now());
     this.policyEnvEnabled = opts.policyEnvEnabled ?? true;
@@ -509,6 +511,11 @@ export class ApprovalBridge {
 
   /** SEC-R3-2: redactor に mangle された採番の観測カウンタ (非負整数のみ・原文非依存)。 */
   private unstableRequestIdMints = 0;
+
+  /** 実効承認待ち (ms)。テスト/監視が順序不変条件 (< 導出フック timeout) を pin するために公開。 */
+  get approvalTimeoutMs(): number {
+    return this.timeoutMs;
+  }
 
   /**
    * 不安定採番の観測数 (0 が正常。>0 は redaction ルールと採番形式の衝突)。

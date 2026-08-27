@@ -136,6 +136,7 @@ export {
   MIN_APPROVAL_TIMEOUT_MS,
   hookTimeoutSecondsFor,
   clampApprovalTimeoutMs,
+  effectiveApprovalTimeoutMs,
 } from "./approval-timeout.js";
 
 // approval reconcile hello 宣言の wire 構築 + 受信検証 (T1 single source: sidecar 送信 / backend 検証・ADR 0014 Phase 4)

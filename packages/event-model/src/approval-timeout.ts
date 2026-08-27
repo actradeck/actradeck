@@ -46,7 +46,10 @@ export const APPROVAL_HOOK_MARGIN_MS = 30_000;
  */
 export const MAX_APPROVAL_TIMEOUT_MS = 570_000;
 
-/** 承認待ちの下限 (ms)。テストは自前で短い値を渡すため、下限は relay 一往復が成立する範囲。 */
+/**
+ * 承認待ちの下限 (ms)。1ms = 「正の有限値」の床であり運用値ではない (TDA-V9-6)。テストは自前で
+ * 数十 ms を渡す。非正・非有限は `clampApprovalTimeoutMs` が既定へ倒す。
+ */
 export const MIN_APPROVAL_TIMEOUT_MS = 1;
 
 /**
@@ -69,4 +72,21 @@ export function clampApprovalTimeoutMs(approvalTimeoutMs: number): number {
     return DEFAULT_APPROVAL_TIMEOUT_MS;
   }
   return Math.min(approvalTimeoutMs, MAX_APPROVAL_TIMEOUT_MS);
+}
+
+/**
+ * bridge が **実際に待つ**承認待ち (ms) を、要求値 (operator 供給・省略可) から決める
+ * (SEC-V9-1 ≡ TDA-V9-1 ≡ QA-V9-2)。
+ *
+ * agent 側フック timeout は `hookTimeoutSecondsFor(DEFAULT_APPROVAL_TIMEOUT_MS)` = 既定から
+ * **静的に**導出されて settings に書き込まれる (bridge の実効値を知らない)。したがって順序
+ * 不変条件を要求値によらず保つには、実効値が **既定を超えない**ことが必要十分:
+ *   effective ≤ DEFAULT < DEFAULT + MARGIN ≤ hook timeout。
+ * 要求値は「既定より短くする」方向にのみ効く。伸ばしたければ単一出所
+ * `DEFAULT_APPROVAL_TIMEOUT_MS` を変える (フック側が自動追従する唯一の経路)。
+ * 不正値 (非有限・非正) は既定へ (clamp と同じ fail-safe)。
+ */
+export function effectiveApprovalTimeoutMs(requestedMs: number | undefined): number {
+  if (requestedMs === undefined) return DEFAULT_APPROVAL_TIMEOUT_MS;
+  return Math.min(clampApprovalTimeoutMs(requestedMs), DEFAULT_APPROVAL_TIMEOUT_MS);
 }
