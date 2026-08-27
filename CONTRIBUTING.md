@@ -67,6 +67,11 @@ pnpm build          # production build of all tiers (incl. Next.js web UI)
 
 A change is not ready if any of these fail. CI runs the same checks on every PR.
 
+**Dependency changes.** If your change touches `pnpm-lock.yaml`, regenerate the
+third-party attribution inventory with `scripts/gen-thirdparty-licenses.sh` and commit the
+updated `THIRDPARTY_LICENSES.md`; `scripts/test-release-prep.sh` (part of `verify`) fails
+when the file drifts from the installed lockfile.
+
 **Real-PostgreSQL invariant tests.** Suites gated on a reachable database (backend
 real-PG `INV-*`, `db` integrity, sidecar e2e) skip when no database is configured, and
 CI always runs them against a throwaway container. To run them locally, start a

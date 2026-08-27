@@ -1,14 +1,18 @@
 # Third-Party Licenses
 
 ActraDeck depends on the open-source packages below. This file is generated
-by `scripts/prepare-oss.sh` from `pnpm licenses list`. Regenerate after any
-dependency change.
+by `scripts/gen-thirdparty-licenses.sh` from `pnpm licenses list --json` (the
+full workspace dependency inventory, development tooling included, as installed
+on linux-x64). Regenerate after any dependency change — `scripts/test-release-prep.sh`
+fails when it drifts from the lockfile. The production-only closure that ships is
+the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 
 | License | Package | Version |
 |---|---|---|
 | (BSD-2-Clause OR MIT OR Apache-2.0) | rc | 1.2.8 |
 | (MIT OR WTFPL) | expand-template | 2.0.3 |
 | 0BSD | tslib | 2.8.1 |
+| Apache-2.0 | @cloudflare/workerd-linux-64 | 1.20260811.1 |
 | Apache-2.0 | @electric-sql/pglite | 0.5.3 |
 | Apache-2.0 | @electric-sql/pglite-socket | 0.2.6 |
 | Apache-2.0 | @eslint/config-array | 0.21.2 |
@@ -21,15 +25,16 @@ dependency change.
 | Apache-2.0 | @humanfs/types | 0.15.0 |
 | Apache-2.0 | @humanwhocodes/module-importer | 1.0.1 |
 | Apache-2.0 | @humanwhocodes/retry | 0.4.3 |
-| Apache-2.0 | @img/sharp-linux-x64 | 0.34.5 |
+| Apache-2.0 | @img/sharp-linux-x64 | 0.35.2, 0.35.3 |
 | Apache-2.0 | @swc/helpers | 0.5.15 |
 | Apache-2.0 | baseline-browser-mapping | 2.10.33 |
 | Apache-2.0 | detect-libc | 2.1.2 |
 | Apache-2.0 | eslint-visitor-keys | 3.4.3, 4.2.1, 5.0.1 |
 | Apache-2.0 | expect-type | 1.3.0 |
-| Apache-2.0 | sharp | 0.34.5 |
+| Apache-2.0 | sharp | 0.35.2, 0.35.3 |
 | Apache-2.0 | tunnel-agent | 0.6.0 |
 | Apache-2.0 | typescript | 6.0.3 |
+| Apache-2.0 | workerd | 1.20260811.1 |
 | Apache-2.0 | xml-name-validator | 5.0.0 |
 | BSD-2-Clause | entities | 6.0.1, 8.0.0 |
 | BSD-2-Clause | eslint-scope | 8.4.0 |
@@ -40,7 +45,7 @@ dependency change.
 | BSD-2-Clause | uri-js | 4.4.1 |
 | BSD-2-Clause | webidl-conversions | 8.0.1 |
 | BSD-3-Clause | esquery | 1.7.0 |
-| BSD-3-Clause | fast-uri | 3.1.2 |
+| BSD-3-Clause | fast-uri | 3.1.5 |
 | BSD-3-Clause | ieee754 | 1.2.1 |
 | BSD-3-Clause | istanbul-lib-coverage | 3.2.2 |
 | BSD-3-Clause | istanbul-lib-report | 3.0.1 |
@@ -58,6 +63,7 @@ dependency change.
 | BlueOak-1.0.0 | package-json-from-dist | 1.0.1 |
 | BlueOak-1.0.0 | path-scurry | 2.0.2 |
 | CC-BY-4.0 | caniuse-lite | 1.0.30001793 |
+| CC0-1.0 | @speed-highlight/core | 1.2.24 |
 | CC0-1.0 | mdn-data | 2.27.1 |
 | ISC | chownr | 1.1.4 |
 | ISC | cliui | 8.0.1 |
@@ -74,7 +80,7 @@ dependency change.
 | ISC | pg-int8 | 1.0.1 |
 | ISC | picocolors | 1.1.1 |
 | ISC | saxes | 6.0.0 |
-| ISC | semver | 7.8.1 |
+| ISC | semver | 7.8.1, 7.8.5 |
 | ISC | siginfo | 2.0.0 |
 | ISC | signal-exit | 4.1.0 |
 | ISC | split2 | 4.2.0 |
@@ -82,7 +88,7 @@ dependency change.
 | ISC | wrappy | 1.0.2 |
 | ISC | y18n | 5.0.8 |
 | ISC | yargs-parser | 21.1.1 |
-| LGPL-3.0-or-later | @img/sharp-libvips-linux-x64 | 1.2.4 |
+| LGPL-3.0-or-later | @img/sharp-libvips-linux-x64 | 1.3.1, 1.3.2 |
 | MIT | @acemir/cssom | 0.9.31 |
 | MIT | @asamuzakjp/css-color | 4.1.2 |
 | MIT | @asamuzakjp/dom-selector | 6.8.1 |
@@ -92,6 +98,8 @@ dependency change.
 | MIT | @babel/parser | 7.29.7 |
 | MIT | @babel/types | 7.29.7 |
 | MIT | @bcoe/v8-coverage | 1.0.2 |
+| MIT | @cloudflare/vitest-pool-workers | 0.21.2 |
+| MIT | @cspotcode/source-map-support | 0.8.1 |
 | MIT | @csstools/css-calc | 3.2.1 |
 | MIT | @csstools/css-color-parser | 4.1.1 |
 | MIT | @csstools/css-parser-algorithms | 4.0.0 |
@@ -108,19 +116,25 @@ dependency change.
 | MIT | @fastify/forwarded | 3.0.1 |
 | MIT | @fastify/merge-json-schemas | 0.2.1 |
 | MIT | @fastify/proxy-addr | 5.1.0 |
+| MIT | @fastify/rate-limit | 11.2.0 |
 | MIT | @fastify/websocket | 11.2.0 |
 | MIT | @img/colour | 1.1.0 |
 | MIT | @jridgewell/resolve-uri | 3.1.2 |
 | MIT | @jridgewell/sourcemap-codec | 1.5.5 |
-| MIT | @jridgewell/trace-mapping | 0.3.31 |
-| MIT | @next/env | 16.2.7 |
-| MIT | @next/swc-linux-x64-gnu | 16.2.7 |
+| MIT | @jridgewell/trace-mapping | 0.3.9, 0.3.31 |
+| MIT | @lukeed/ms | 2.0.2 |
+| MIT | @next/env | 16.2.11 |
+| MIT | @next/swc-linux-x64-gnu | 16.2.11 |
 | MIT | @oxc-project/types | 0.133.0 |
 | MIT | @parcel/watcher | 2.5.6 |
 | MIT | @parcel/watcher-linux-x64-glibc | 2.5.6 |
 | MIT | @pinojs/redact | 0.4.0 |
+| MIT | @poppinss/colors | 4.1.6 |
+| MIT | @poppinss/dumper | 0.6.5 |
+| MIT | @poppinss/exception | 1.2.3 |
 | MIT | @rolldown/binding-linux-x64-gnu | 1.0.3 |
 | MIT | @rolldown/pluginutils | 1.0.1 |
+| MIT | @sindresorhus/is | 7.2.0 |
 | MIT | @standard-schema/spec | 1.1.0 |
 | MIT | @types/better-sqlite3 | 7.6.13 |
 | MIT | @types/chai | 5.2.3 |
@@ -165,22 +179,23 @@ dependency change.
 | MIT | ast-v8-to-istanbul | 1.0.3 |
 | MIT | atomic-sleep | 1.0.0 |
 | MIT | avvio | 9.2.0 |
-| MIT | balanced-match | 1.0.2, 4.0.4 |
+| MIT | balanced-match | 4.0.4 |
 | MIT | base64-js | 1.5.1 |
 | MIT | better-sqlite3 | 12.10.0 |
 | MIT | bidi-js | 1.0.3 |
 | MIT | bindings | 1.5.0 |
 | MIT | bl | 4.1.0 |
-| MIT | brace-expansion | 1.1.15, 5.0.6 |
+| MIT | blake3-wasm | 2.1.5 |
+| MIT | brace-expansion | 5.0.9 |
 | MIT | buffer | 5.7.1 |
 | MIT | callsites | 3.1.0 |
 | MIT | chai | 6.2.2 |
 | MIT | chalk | 4.1.2 |
 | MIT | chokidar | 5.0.0 |
+| MIT | cjs-module-lexer | 1.2.3 |
 | MIT | client-only | 0.0.1 |
 | MIT | color-convert | 2.0.1 |
 | MIT | color-name | 1.1.4 |
-| MIT | concat-map | 0.0.1 |
 | MIT | convert-source-map | 2.0.0 |
 | MIT | cookie | 1.1.1 |
 | MIT | cross-spawn | 7.0.6 |
@@ -197,8 +212,10 @@ dependency change.
 | MIT | duplexify | 4.1.3 |
 | MIT | emoji-regex | 8.0.0 |
 | MIT | end-of-stream | 1.4.5 |
+| MIT | error-stack-parser-es | 1.0.5 |
 | MIT | es-module-lexer | 2.1.0 |
 | MIT | esbuild | 0.28.1 |
+| MIT | esbuild-wasm | 0.28.1 |
 | MIT | escalade | 3.2.0 |
 | MIT | escape-string-regexp | 4.0.0 |
 | MIT | eslint | 9.39.4 |
@@ -211,11 +228,11 @@ dependency change.
 | MIT | fast-levenshtein | 2.0.6 |
 | MIT | fast-querystring | 1.1.2 |
 | MIT | fastify | 5.8.5 |
-| MIT | fastify-plugin | 5.1.0 |
+| MIT | fastify-plugin | 5.1.0, 6.0.0 |
 | MIT | fdir | 6.5.0 |
 | MIT | file-entry-cache | 8.0.0 |
 | MIT | file-uri-to-path | 1.0.0 |
-| MIT | find-my-way | 9.6.0 |
+| MIT | find-my-way | 9.7.0 |
 | MIT | find-up | 5.0.0 |
 | MIT | flat-cache | 4.0.1 |
 | MIT | fs-constants | 1.0.0 |
@@ -227,22 +244,24 @@ dependency change.
 | MIT | http-proxy-agent | 7.0.2 |
 | MIT | https-proxy-agent | 7.0.6 |
 | MIT | ignore | 5.3.2, 7.0.5 |
-| MIT | immutable | 5.1.6 |
+| MIT | immutable | 5.1.9 |
 | MIT | import-fresh | 3.3.1 |
 | MIT | imurmurhash | 0.1.4 |
+| MIT | ip-address | 10.5.0 |
 | MIT | ipaddr.js | 2.4.0 |
 | MIT | is-extglob | 2.1.1 |
 | MIT | is-fullwidth-code-point | 3.0.0 |
 | MIT | is-glob | 4.0.3 |
 | MIT | is-potential-custom-element-name | 1.0.1 |
 | MIT | js-tokens | 10.0.0 |
-| MIT | js-yaml | 4.2.0 |
+| MIT | js-yaml | 4.3.1 |
 | MIT | jsdom | 27.4.0 |
 | MIT | json-buffer | 3.0.1 |
 | MIT | json-schema-ref-resolver | 3.0.0 |
 | MIT | json-schema-traverse | 0.4.1, 1.0.0 |
 | MIT | json-stable-stringify-without-jsonify | 1.0.1 |
 | MIT | keyv | 4.5.4 |
+| MIT | kleur | 4.1.5 |
 | MIT | levn | 0.4.1 |
 | MIT | locate-path | 6.0.0 |
 | MIT | lodash.merge | 4.6.2 |
@@ -250,13 +269,14 @@ dependency change.
 | MIT | magicast | 0.5.3 |
 | MIT | make-dir | 4.0.0 |
 | MIT | mimic-response | 3.1.0 |
+| MIT | miniflare | 5.20260811.0-alpha |
 | MIT | minimist | 1.2.8 |
 | MIT | mkdirp-classic | 0.5.3 |
 | MIT | ms | 2.1.3 |
-| MIT | nanoid | 3.3.12 |
+| MIT | nanoid | 3.3.18 |
 | MIT | napi-build-utils | 2.0.0 |
 | MIT | natural-compare | 1.4.0 |
-| MIT | next | 16.2.7 |
+| MIT | next | 16.2.11 |
 | MIT | node-abi | 3.92.0 |
 | MIT | node-addon-api | 7.1.1 |
 | MIT | node-pg-migrate | 8.0.4 |
@@ -270,6 +290,7 @@ dependency change.
 | MIT | parse5 | 7.3.0, 8.0.1 |
 | MIT | path-exists | 4.0.0 |
 | MIT | path-key | 3.1.1 |
+| MIT | path-to-regexp | 6.3.0 |
 | MIT | pathe | 2.0.3 |
 | MIT | pg | 8.21.0 |
 | MIT | pg-cloudflare | 1.4.0 |
@@ -283,7 +304,7 @@ dependency change.
 | MIT | pino | 10.3.1 |
 | MIT | pino-abstract-transport | 3.0.0 |
 | MIT | pino-std-serializers | 7.1.0 |
-| MIT | postcss | 8.5.15 |
+| MIT | postcss | 8.5.24 |
 | MIT | postgres-array | 2.0.0 |
 | MIT | postgres-bytea | 1.0.1 |
 | MIT | postgres-date | 1.0.7 |
@@ -327,7 +348,7 @@ dependency change.
 | MIT | strip-ansi | 6.0.1 |
 | MIT | strip-json-comments | 2.0.1, 3.1.1 |
 | MIT | styled-jsx | 5.1.6 |
-| MIT | supports-color | 7.2.0 |
+| MIT | supports-color | 7.2.0, 10.2.2 |
 | MIT | symbol-tree | 3.2.4 |
 | MIT | tar-fs | 2.1.4 |
 | MIT | tar-stream | 2.2.0 |
@@ -344,7 +365,9 @@ dependency change.
 | MIT | tsx | 4.22.4 |
 | MIT | type-check | 0.4.0 |
 | MIT | typescript-eslint | 8.60.1 |
+| MIT | undici | 7.29.0 |
 | MIT | undici-types | 7.24.6 |
+| MIT | unenv | 2.0.0-rc.24 |
 | MIT | util-deprecate | 1.0.2 |
 | MIT | uuid | 11.1.1 |
 | MIT | vite | 8.0.16 |
@@ -360,7 +383,13 @@ dependency change.
 | MIT | xtend | 4.0.2 |
 | MIT | yargs | 17.7.2 |
 | MIT | yocto-queue | 0.1.0 |
+| MIT | youch | 4.1.0-beta.10 |
+| MIT | youch-core | 0.3.3 |
 | MIT | zod | 4.4.3 |
+| MIT OR Apache-2.0 | @cloudflare/kv-asset-handler | 0.5.0 |
+| MIT OR Apache-2.0 | @cloudflare/unenv-preset | 2.16.1 |
+| MIT OR Apache-2.0 | @cloudflare/workers-types | 5.20260813.1 |
+| MIT OR Apache-2.0 | wrangler | 4.122.0 |
 | MIT-0 | @csstools/color-helpers | 6.0.2 |
 | MIT-0 | @csstools/css-syntax-patches-for-csstree | 1.1.5 |
 | MPL-2.0 | lightningcss | 1.32.0 |
