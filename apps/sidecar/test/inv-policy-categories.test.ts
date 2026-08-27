@@ -60,10 +60,11 @@ describe("INV-POLICY-CATEGORIES: 述語→category 写像", () => {
     { command: "git -c core.pager=cat reset --hard HEAD~5", expect: "history-rewrite", high: true },
     { command: "git clean -fd", expect: "history-rewrite", high: true },
     { command: "git -C /repo clean --force -d", expect: "history-rewrite", high: true },
-    // db-drop (DROP DATABASE は分類器 high でなくても category は付く=superset)
+    // db-drop (task 01a03b76: DROP DATABASE / dropdb も high — 通常モードでカードが出る)
     { command: "psql -c 'DROP TABLE users'", expect: "db-drop", high: true },
     { command: "psql -c 'TRUNCATE TABLE sessions'", expect: "db-drop", high: true },
-    { command: "psql -c 'DROP DATABASE production'", expect: "db-drop" },
+    { command: "psql -c 'DROP DATABASE staging'", expect: "db-drop", high: true },
+    { command: "dropdb staging", expect: "db-drop", high: true },
     // fork-bomb
     { command: ":(){ :|:& };:", expect: "fork-bomb", high: true },
     // perm-change
@@ -196,6 +197,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     { re: /\bdrop\s+table\b/i, cmd: "psql -c 'drop table users'" },
     { re: /\btruncate\s+table\b/i, cmd: "psql -c 'truncate table sessions'" },
     { re: /\bdrop\s+database\b/i, cmd: "psql -c 'drop database staging'" },
+    { re: /\bdropdb\b/i, cmd: "dropdb staging" },
     { re: /\bmigrate\b/i, cmd: "npm run migrate" },
     { re: /\bproduction\b/i, cmd: "deploy --env production" },
     { re: /\bgit\s+reset\s+--hard\b/i, cmd: "git reset --hard HEAD~1" },
@@ -211,6 +213,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       const s = samples[i]!;
       // sample と LITERAL_RULES の index 対応を pin (sample がズレたら検知)。
       expect(rule.re.source, "sample.re が LITERAL_RULES[i] と一致").toBe(s.re.source);
+      expect(rule.re.flags, "sample.re の flags (case 軸) が LITERAL_RULES[i] と一致").toBe(
+        s.re.flags,
+      );
       expect(rule.re.test(s.cmd), "sample は当該ルールにマッチ").toBe(true);
       // category 側 (addCommandLevelCategories) が当該ルールを走査している。
       expect(classifyCommandCategories(s.cmd).has(rule.category), "category 付与").toBe(true);
@@ -221,11 +226,31 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     });
   });
 
-  it("category-only エントリ (drop database) は字面だけでは high にしない (risk 非退行・superset)", () => {
-    // 良性キャリアで drop database のみ (production/migrate/drop table を含めない)。
-    const cmd = "psql -c 'drop database staging'";
-    expect(classifyCommandRisk(cmd), "字面 drop database は high にしない").not.toBe("high");
-    expect(classifyCommandCategories(cmd).has("db-drop"), "db-drop category は付ける").toBe(true);
+  it("INV-DB-DROP-RISK-VERDICT (task 01a03b76): drop database / dropdb は risk=high かつ db-drop (逆転修正)", () => {
+    // R7 QA-CQ7-5 / R11 TDA-CQ11-7: 以前は category-only で、通常モード (risk 駆動) では最も不可逆な
+    //   DROP DATABASE だけがカード無しで通った。良性キャリア (production/migrate/drop table を含めない)
+    //   で risk と category の両方を pin する — どちらか片方に退行したら RED。
+    for (const cmd of [
+      "psql -c 'drop database staging'",
+      "psql -h db.internal -U app -c 'DROP DATABASE staging'",
+      "dropdb staging",
+      "dropdb --if-exists -h db.internal staging",
+      "DROPDB staging", // TDA-DB-3: `/i` は load-bearing — 大文字形を pin (flags 落としで RED)
+    ]) {
+      expect(classifyCommandRisk(cmd), `${cmd}: risk は high`).toBe("high");
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop category`).toBe(true);
+    }
+    // 非該当 (単語境界): `dropdbx` / `drop_database` / `database` 単独は字面ルールを踏まない。
+    for (const cmd of ["dropdbx staging", "echo drop_database", "createdb staging"]) {
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop 非付与`).toBe(false);
+    }
+    // テーブル契約: 現行 LITERAL_RULES に category-only エントリは無い (全エントリ high)。
+    //   category-only を再導入するときは、通常モード (risk 駆動) でカードが出ない class を
+    //   意図的に作ることになるので、ここを更新して理由を書く。
+    expect(
+      LITERAL_RULES.every((r) => r.high),
+      "LITERAL_RULES に category-only は無い",
+    ).toBe(true);
   });
 });
 
