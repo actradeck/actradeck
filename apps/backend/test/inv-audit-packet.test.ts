@@ -35,6 +35,8 @@ import {
   PACKET_CHAIN_DOMAIN,
   type DecodedPacketManifest,
   type PacketManifest,
+  type PacketManifestGovernance,
+  type PacketManifestSession,
 } from "../src/audit-integrity.js";
 import {
   buildReviewPacket,
@@ -385,6 +387,29 @@ function samplePacket(sign = false): ReviewPacket {
     ...(sign && signer !== undefined ? { signer } : {}),
   });
 }
+
+/**
+ * TDA-V9R2-1: packet 投影 interface に optional field が無いことを compile-time で固定する
+ * (session 側 INV-AUDIT-BINDING-COMPLETENESS と同型・`tsc -p tsconfig.test.json` が CI type-check で実走)。
+ * auto-extending 走査は「存在する key」しか見られないため、optional field は suite も tsc も
+ * すり抜ける (R2 で packet 側 38 passed + tsc rc=0 を実証) — この pin が唯一の歯。
+ */
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+const NO_OPTIONAL_PACKET_SESSION: Equal<
+  Required<PacketManifestSession>,
+  PacketManifestSession
+> = true;
+const NO_OPTIONAL_PACKET_GOVERNANCE: Equal<
+  Required<PacketManifestGovernance>,
+  PacketManifestGovernance
+> = true;
+
+describe("INV-AUDIT-PACKET 型レベル pin (TDA-V9R2-1)", () => {
+  it("packet 投影 interface に optional field が無い (optional 化は tsc で RED)", () => {
+    expect(NO_OPTIONAL_PACKET_SESSION && NO_OPTIONAL_PACKET_GOVERNANCE).toBe(true);
+  });
+});
 
 describe("INV-AUDIT-PACKET unsigned chain", () => {
   it("chain domain は version と結合して bump される (QA-R5-2)", () => {
