@@ -11,6 +11,28 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Changed
+
+- **You now have five minutes to answer an approval card, up from thirty seconds.** Thirty
+  seconds was rarely enough to read a command and decide, and an unanswered card falls to the
+  safe deny — so the old window mostly produced denials that nobody had actually judged. The
+  wait is now 300 seconds. Timing out still denies, so the change costs availability (an agent
+  can sit blocked for five minutes when nobody is watching), never safety.
+  The window cannot simply be lengthened on its own. The gate works by holding the agent's hook
+  response open, and Claude Code's contract is explicit that a hook which reaches its own
+  timeout **does not block the tool call** — it falls through to the normal permission flow. So
+  if the hook timeout ever expired first, the approval would turn into a silent pass rather than
+  a deny. Those two numbers previously lived as unrelated literals in separate files (a 30 and a
+  35, plus a second copy of the 35 for managed sessions), where editing one alone would have
+  inverted the ordering without a single test failing. The approval wait is now the canonical
+  value in `@actradeck/event-model` and every hook timeout is **derived** from it with a margin,
+  bounded so the derived value stays within Claude Code's documented default for HTTP hooks.
+  `INV-APPROVAL-TIMEOUT-ORDERING` pins the ordering, the derivation, and — by reading the
+  consuming sources — the fact that no call site has drifted back to a hand-written literal.
+  Honest scope: this ordering guarantee covers the Claude Code hook path. Managed Codex receives
+  approvals as inbound JSON-RPC requests, so how long it waits for a response is not something
+  ActraDeck configures, and Codex rollout tailing is observe-only and never blocks.
+
 ## [0.8.1] - 2026-08-26
 
 ### Fixed
@@ -256,28 +278,6 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   deliberately no repository traffic, which GitHub scopes to push-access holders).
 - `ACTRADECK_TELEMETRY_ENDPOINT` / `ACTRADECK_TELEMETRY_STATE` / `ACTRADECK_TELEMETRY_DISABLED`
   operator settings (see `docs/configuration.md`).
-
-### Changed
-
-- **You now have five minutes to answer an approval card, up from thirty seconds.** Thirty
-  seconds was rarely enough to read a command and decide, and an unanswered card falls to the
-  safe deny — so the old window mostly produced denials that nobody had actually judged. The
-  wait is now 300 seconds. Timing out still denies, so the change costs availability (an agent
-  can sit blocked for five minutes when nobody is watching), never safety.
-  The window cannot simply be lengthened on its own. The gate works by holding the agent's hook
-  response open, and Claude Code's contract is explicit that a hook which reaches its own
-  timeout **does not block the tool call** — it falls through to the normal permission flow. So
-  if the hook timeout ever expired first, the approval would turn into a silent pass rather than
-  a deny. Those two numbers previously lived as unrelated literals in separate files (a 30 and a
-  35, plus a second copy of the 35 for managed sessions), where editing one alone would have
-  inverted the ordering without a single test failing. The approval wait is now the canonical
-  value in `@actradeck/event-model` and every hook timeout is **derived** from it with a margin,
-  bounded so the derived value stays within Claude Code's documented default for HTTP hooks.
-  `INV-APPROVAL-TIMEOUT-ORDERING` pins the ordering, the derivation, and — by reading the
-  consuming sources — the fact that no call site has drifted back to a hand-written literal.
-  Honest scope: this ordering guarantee covers the Claude Code hook path. Managed Codex receives
-  approvals as inbound JSON-RPC requests, so how long it waits for a response is not something
-  ActraDeck configures, and Codex rollout tailing is observe-only and never blocks.
 
 ### Fixed
 
