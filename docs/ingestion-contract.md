@@ -340,11 +340,10 @@ node scripts/check-conformance.mjs < your-adapter-output.jsonl
 
 **From the published CLI** — `npx actradeck conformance` runs the same checker with **no clone**
 (the checker core is bundled into the CLI at build time; the CLI keeps zero runtime dependencies).
-This command **ships in the next tagged release** — the currently published `actradeck` predates it,
-so use the from-clone path above until that release lands:
+The command ships in `actradeck` 0.8.1 and later:
 
 ```bash
-npx actradeck conformance < your-adapter-output.jsonl        # once the next release ships
+npx actradeck conformance < your-adapter-output.jsonl
 # or:  npx actradeck conformance your-adapter-output.jsonl [--json]
 ```
 
