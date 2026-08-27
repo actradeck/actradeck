@@ -12,9 +12,11 @@ const SITE = "https://actradeck.io";
 const TOPICS = [
   {
     slug: "control-plane-for-coding-agents",
-    titleJa: "コーディングエージェントの統制レイヤー | ActraDeck",
+    titleJa: "コーディングエージェントの監査コックピット | ActraDeck",
     descJa:
-      "ActraDeck は Claude Code や Codex の前に立つ、ローカルファーストな統制レイヤーです。承認、秘匿マスク、監査証跡、再生をひとつのコックピットに集約します。",
+      "ActraDeck は Claude Code や Codex のためのローカルファーストな監査コックピットです。セッションを観測し、保存前に秘匿マスクし、再生可能な監査証跡をひとつに集約します。承認中継は対応環境で利用できます（Attach の Claude Code、Managed Mode の Codex）。OS で強制する統制レイヤーではなく、フックを通るものの安全網です。",
+    ogDescJa:
+      "ベンダーに依存しない、ローカルファーストなコーディングエージェントの監査コックピット。観測し、保存前に秘匿マスクし、再生します。承認中継は対応環境で。OS で強制する統制レイヤーではなく、安全網です。",
   },
   {
     slug: "claude-code-codex-approval-gate",
@@ -120,7 +122,7 @@ function generateJapanese(topic) {
   setAttr(doc, 'meta[name="description"]', "content", topic.descJa);
   setAttr(doc, 'link[rel="canonical"]', "href", `${SITE}/ja/${topic.slug}`);
   setAttr(doc, 'meta[property="og:title"]', "content", topic.titleJa);
-  setAttr(doc, 'meta[property="og:description"]', "content", topic.descJa);
+  setAttr(doc, 'meta[property="og:description"]', "content", topic.ogDescJa ?? topic.descJa);
   setAttr(doc, 'meta[property="og:url"]', "content", `${SITE}/ja/${topic.slug}`);
 
   doc.querySelectorAll('script[type="application/ld+json"]').forEach((script) => {
