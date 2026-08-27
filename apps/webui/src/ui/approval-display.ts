@@ -8,7 +8,11 @@
  * SEC: ここは PendingApproval (backend が redaction 済みで載せた DTO) の値をそのまま見せ方に
  * 落とすだけ。生 tool_input を独自取得しない・新規の秘匿情報を描かない (security.md)。
  */
-import { isTerminalStateValue, type ApprovalDecision } from "@actradeck/event-model";
+import {
+  DEFAULT_APPROVAL_TIMEOUT_MS,
+  isTerminalStateValue,
+  type ApprovalDecision,
+} from "@actradeck/event-model";
 
 import { t, type Locale, type MessageKey } from "./i18n/messages";
 import { isKnownKind, redactionKindLabelKey } from "./redaction-display";
@@ -315,9 +319,11 @@ export function buildApproveFrame(
  * 承認の **推定残り時間** (ms) を返す純関数 (ADR 019e9999 段階③ timeout UX)。
  *
  * ⚠️ 重要 (誤認防止): UI は sidecar の **実 timeout を知らない**。pending には要求時刻
- * (`requested_at`) しか載らないため、sidecar 既定 ~30s を **推定値** として引くだけである。
+ * (`requested_at`) しか載らないため、event-model の正準既定 `DEFAULT_APPROVAL_TIMEOUT_MS` を
+ * **推定値** として引くだけである (sidecar が別値で起動していれば当然ずれる)。
  * 実際の自動拒否は sidecar 側 (承認ブリッジ) が確定させ、その結果は delta.detail (pending 消滅)
  * として届く。本関数の戻り値は「安全側の目安」であって締め切りの保証ではない。
+ * 既定をハードコードせず正準出所を引くことで、sidecar 側の変更に追従する。
  *
  * - `requestedAtIso` が不正/空なら NaN を避け、推定不能として `timeoutMs` (満額) を返す
  *   (=「まだ猶予あり」と安全側に倒す。突然 0 表示でユーザを慌てさせない)。
@@ -326,7 +332,7 @@ export function buildApproveFrame(
 export function approvalTimeRemainingMs(
   requestedAtIso: string,
   nowMs: number,
-  timeoutMs = 30_000,
+  timeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS,
 ): number {
   const requestedMs = Date.parse(requestedAtIso);
   if (Number.isNaN(requestedMs)) return timeoutMs;

@@ -6,6 +6,7 @@
  * D4 (allow/deny 2 値): decision の往復が allow→allowed / deny→denied。
  * SEC: primary text は command(redacted) → path → tool_name の順で、生 tool_input を参照しない。
  */
+import { DEFAULT_APPROVAL_TIMEOUT_MS } from "@actradeck/event-model";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -201,17 +202,18 @@ describe("approvalTimeRemainingMs (段階③ timeout UX・推定値)", () => {
   const t0 = "2026-06-05T00:00:00.000Z";
   const t0ms = Date.parse(t0);
 
-  it("要求直後は満額 (既定 30s) 近辺を返す", () => {
-    expect(approvalTimeRemainingMs(t0, t0ms)).toBe(30_000);
+  it("要求直後は満額 (正準既定) を返す", () => {
+    // ハードコードでなく event-model の正準既定を引く (sidecar 側の変更に追従する)。
+    expect(approvalTimeRemainingMs(t0, t0ms)).toBe(DEFAULT_APPROVAL_TIMEOUT_MS);
   });
 
-  it("経過分を差し引く (10s 経過 → 残り 20s)", () => {
-    expect(approvalTimeRemainingMs(t0, t0ms + 10_000)).toBe(20_000);
+  it("経過分を差し引く (10s 経過 → 残りは既定 - 10s)", () => {
+    expect(approvalTimeRemainingMs(t0, t0ms + 10_000)).toBe(DEFAULT_APPROVAL_TIMEOUT_MS - 10_000);
   });
 
   it("timeout 到達/超過は 0 にクランプ (負値を返さない)", () => {
-    expect(approvalTimeRemainingMs(t0, t0ms + 30_000)).toBe(0);
-    expect(approvalTimeRemainingMs(t0, t0ms + 45_000)).toBe(0);
+    expect(approvalTimeRemainingMs(t0, t0ms + DEFAULT_APPROVAL_TIMEOUT_MS)).toBe(0);
+    expect(approvalTimeRemainingMs(t0, t0ms + DEFAULT_APPROVAL_TIMEOUT_MS + 15_000)).toBe(0);
   });
 
   it("timeoutMs を上書きできる (実 timeout 不明のため推定パラメータ)", () => {
@@ -220,7 +222,7 @@ describe("approvalTimeRemainingMs (段階③ timeout UX・推定値)", () => {
   });
 
   it("不正/空の requested_at は推定不能 → 満額を返す (突然 0 で慌てさせない・安全側)", () => {
-    expect(approvalTimeRemainingMs("", t0ms)).toBe(30_000);
+    expect(approvalTimeRemainingMs("", t0ms)).toBe(DEFAULT_APPROVAL_TIMEOUT_MS);
     expect(approvalTimeRemainingMs("not-a-date", t0ms, 10_000)).toBe(10_000);
   });
 });

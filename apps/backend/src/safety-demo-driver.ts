@@ -53,7 +53,14 @@ import {
   type DemoStep,
 } from "./safety-demo-script.js";
 
-/** hold (UI relay の Deny を待つ) の既定 timeout — 既存 sidecar driver の安全側 30s と同値。 */
+/**
+ * hold (UI relay の Deny を待つ) の既定 timeout。
+ *
+ * これは **デモ自身の pacing 値**であり、本番の承認待ち (`DEFAULT_APPROVAL_TIMEOUT_MS`) とは
+ * 独立に決める。以前は「sidecar の安全側 30s と同値」と書いていたが、本番既定を 300s へ広げた
+ * 現在その記述は成立しない (デモを 5 分待たせるのは意図に反するため追従させない)。
+ * デモは合成した承認要求を自前で hold するので、本番ゲートの順序不変条件とも無関係。
+ */
 export const DEFAULT_HOLD_TIMEOUT_MS = 30_000;
 /** auto-deny (CI/ヘッドレス) の既定 timeout — 短くして決定論的に安全側 deny へ倒す。 */
 export const DEFAULT_AUTO_DENY_TIMEOUT_MS = 1_500;
