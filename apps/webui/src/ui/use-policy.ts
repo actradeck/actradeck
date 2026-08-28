@@ -17,7 +17,11 @@
  */
 import { useCallback, useRef, useState } from "react";
 
-import { PolicyCategory, projectPolicyCategories } from "@actradeck/event-model";
+import {
+  DB_DROP_LITERAL_FORMS,
+  PolicyCategory,
+  projectPolicyCategories,
+} from "@actradeck/event-model";
 
 /** policy 応答 (get/set 共通)。enabled は file-level・envGateEnabled は env kill-switch の現状。 */
 export interface PolicyView {
@@ -28,6 +32,14 @@ export interface PolicyView {
 
 /** 全 policy カテゴリ (UI チェックボックスの母集合・T1 enum の単一ソース)。 */
 export const ALL_POLICY_CATEGORIES: readonly PolicyCategory[] = PolicyCategory.options;
+
+/**
+ * `policy.cat.*` ラベルの placeholder 引数。`db-drop` の列挙は event-model `DB_DROP_LITERAL_FORMS` から
+ * **生成**する (task 01a0480f-ffca: i18n にコピーを持たせない・他 category は placeholder を持たず無視される)。
+ */
+export const POLICY_CATEGORY_LABEL_PARAMS: Readonly<Record<string, string>> = {
+  forms: DB_DROP_LITERAL_FORMS.join(" / "),
+};
 
 /** 応答 JSON を closed-enum ビューへ畳む (未知 category は除外)。export はテスト用。 */
 export function parsePolicy(raw: unknown): PolicyView | undefined {

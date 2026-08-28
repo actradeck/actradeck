@@ -102,7 +102,9 @@ export default tseslint.config(
       //   task 01a0440b (TDA-DB-6: db-drop 他エンジン形) で 2143 → 2148 (PR #44 の dropdb 行で 2142→2143・記録漏れ):
       //   LITERAL_RULES のデータ行 5 本 +
       //   docstring (skipComments で非計上)。分岐なし。天井は実測 + 4。
-      "max-lines": ["error", { max: 2152, skipComments: true, skipBlankLines: true }],
+      //   task 01a0480f-ffca (db-drop 列挙 two-way lock) で 2148 → 2169: LITERAL_RULES の全 16 行に `labels`
+      //   (表示名) を付けたため prettier が行を折り返した (データのみ・分岐なし)。天井は実測 + 4。
+      "max-lines": ["error", { max: 2173, skipComments: true, skipBlankLines: true }],
     },
   },
   {

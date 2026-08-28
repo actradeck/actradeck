@@ -93,6 +93,14 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
+- **The `db-drop` literal list now has one display source.** The list of forms the category
+  recognises was copied by hand into the approval-policy docs (table row and note), the
+  event-model category docstring and the ja/en cockpit labels, and the copies had already drifted
+  (`dropdb` missing from one, only representative forms in another). `DB_DROP_LITERAL_FORMS` in
+  `@actradeck/event-model` is now the display source: each sidecar literal rule carries its display
+  labels, `INV-DB-DROP-ENUMERATION` pins the rule labels and both docs copies to that list in both
+  directions (a missing or extra form fails), and the cockpit label is generated from the list
+  instead of being copied. The classifier itself is unchanged.
 - **The classifier's linear-scaling metatest now derives a third adversarial seed from each
   pinned sample.** `INV-LITERAL-RULES-LINEAR` measured every high-risk literal with seeds taken
   from the regex text and from the sample's first word, which left a quadratic rule whose leading

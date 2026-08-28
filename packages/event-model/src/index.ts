@@ -83,6 +83,7 @@ export {
   SecretKind,
   PolicyCategory,
   DEFAULT_GATED_CATEGORIES,
+  DB_DROP_LITERAL_FORMS,
   projectPolicyCategories,
   orderPolicyCategories,
   POLICY_PRESETS,
@@ -90,7 +91,7 @@ export {
   presetCategories,
   matchPreset,
 } from "./payload.js";
-export type { PolicyPresetName } from "./payload.js";
+export type { DbDropLiteralForm, PolicyPresetName } from "./payload.js";
 
 // redaction kind vocabulary (T1 single source of truth for "種類" of redaction)
 export {

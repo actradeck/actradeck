@@ -130,8 +130,9 @@ export type SecretKind = z.infer<typeof SecretKind>;
  * - recursive-rm:     rm -rf / find -delete・-exec 等の再帰強制削除・mass file 削除
  * - disk-destroy:     mkfs/dd/shred/wipefs/parted/cryptsetup/nvme format/zfs destroy/block-device 書込
  * - history-rewrite:  git push --force / git reset --hard / git clean -f
- * - db-drop:          DROP TABLE / DROP DATABASE / DROP SCHEMA / DROP OWNED BY / TRUNCATE TABLE / dropdb /
- *                     mysqladmin … drop / dropDatabase( / FLUSHALL / FLUSHDB (literal list・sidecar LITERAL_RULES が正)
+ * - db-drop:          DROP TABLE / TRUNCATE TABLE / DROP DATABASE / dropdb / DROP SCHEMA / DROP OWNED BY /
+ *                     mysqladmin … drop / dropDatabase( / drop_database( / FLUSHALL / FLUSHDB
+ *                     (literal list・`DB_DROP_LITERAL_FORMS` が正・sidecar LITERAL_RULES の labels と two-way lock)
  * - fork-bomb:        `:(){ :|:& };:` 等の自己増殖
  * - secret-egress:    network-egress program (curl/wget/nc/scp…) に secret を同梱 (composite・approval-bridge)
  * - perm-change:      chmod -R / world-writable chmod / recursive chown
@@ -186,6 +187,31 @@ export const DEFAULT_GATED_CATEGORIES: readonly PolicyCategory[] = [
  * 本関数を共有し、順序規則の 3 箇所重複を排除する。`ReadonlySet<string>` を受け PolicyCategory ⊆ string で
  * typed-Set も present-set も渡せる (戻りは常に closed enum・order/membership は options に従う)。
  */
+/**
+ * `db-drop` が認識する literal 形の**表示名リスト** (task 01a0480f-ffca・TDA-DB2-3 ≡ QA-DB2-7 ≡ TDA-DB-4)。
+ *
+ * 分類器そのものは sidecar `LITERAL_RULES` (normalize.ts) が正だが、列挙の**表示コピー** (docs/approval-policy.md の
+ * 表行 + 注記 / 上の docstring / webui i18n ラベル) が 3 段階に分裂して drift した実例 (base の i18n が `dropdb` を
+ * 落とす等) があるため、表示名はここを単一出所にする: sidecar の各 db-drop 行は `labels` にこの要素を持ち、
+ * INV-DB-DROP-ENUMERATION (sidecar) が「rows の labels 和集合 == 本リスト」と docs 2 コピーを two-way に pin する。
+ * webui の `policy.cat.db-drop` ラベルは `{forms}` placeholder で本リストから**生成**する (コピーを持たない)。
+ * 順序は LITERAL_RULES のテーブル順 (表示順)。値は公開可能な表示名で secret / 生コマンドを含まない。
+ */
+export const DB_DROP_LITERAL_FORMS = [
+  "DROP TABLE",
+  "TRUNCATE TABLE",
+  "DROP DATABASE",
+  "dropdb",
+  "DROP SCHEMA",
+  "DROP OWNED BY",
+  "mysqladmin … drop",
+  "dropDatabase(",
+  "drop_database(",
+  "FLUSHALL",
+  "FLUSHDB",
+] as const;
+export type DbDropLiteralForm = (typeof DB_DROP_LITERAL_FORMS)[number];
+
 export function orderPolicyCategories(set: ReadonlySet<string>): PolicyCategory[] {
   return PolicyCategory.options.filter((c) => set.has(c));
 }

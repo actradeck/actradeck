@@ -13,6 +13,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DB_DROP_LITERAL_FORMS } from "@actradeck/event-model";
+
 import { ApprovalPolicyView } from "../src/ui/ApprovalPolicyView.js";
 import { FixedLocaleProvider } from "../src/ui/LocaleProvider.js";
 import { POLICY_ADMIN_CACHE_KEY, POLICY_CANDIDATES_KEY } from "../src/ui/policy-cache.js";
@@ -198,6 +200,29 @@ describe("ApprovalPolicyView 緩和警告 (QA-3・jsdom interaction)", () => {
     // Default 選択 → isRepo=false → 警告なし。
     await clickScope("default");
     expect(q("policyview-loosen")).toBeNull();
+  });
+
+  it("db-drop のラベルは DB_DROP_LITERAL_FORMS から生成され {forms} を露出しない (QA-FF-1)", async () => {
+    await act(async () => {
+      root.render(
+        <FixedLocaleProvider locale="ja">
+          <ApprovalPolicyView active relayTarget={{ kind: "session", id: "s1" }} nowMs={1000} />
+        </FixedLocaleProvider>,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await clickScope("bbbb0002");
+    // use-policy.test の PolicySettingsPanel 側 pin と同形: この view の呼び出し口 (t(..., POLICY_CATEGORY_LABEL_PARAMS))
+    //   を外すと `{forms}` が生表示される表示回帰になる (QA レーンの変異 m7 が SURVIVED した穴)。
+    const label =
+      q("policyview-cat-db-drop")?.querySelector(".ad-policy__cat-label")?.textContent ?? "";
+    for (const form of DB_DROP_LITERAL_FORMS) {
+      expect(label.includes(form), `db-drop label carries ${form}`).toBe(true);
+    }
+    expect(label.includes("{forms}")).toBe(false);
   });
 });
 
