@@ -3540,9 +3540,13 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   //   task 01a0480f-d29a (SEC-DB2-2 ≡ TDA-DB2-2・mysqladmin の手書き境界を正準 segment 単位へ): 2542/800 →
   //   2560/804 — `LiteralRule.segmentRe` (option field + mysqladmin 行の 1 本) と、risk/category の両経路が
   //   共有する `literalRuleMatches` (whole-command ∨ segment の単一出所)、legacy union パスへ segment スコープを
-  //   渡さないための `NO_SEGMENTS` / `split === splitSegments` 判定。branch は option field の `?` +
-  //   `!== undefined` + `===` 判定 + 三項で +4 (ロジック分岐は 3)。executable 天井は実測 + 4、branch 天井も実測 + 4
-  //   (旧 802 は headroom +2 で、本変更で実測 804 が超えた)。
+  //   渡さないための `NO_SEGMENTS` / `split === splitSegments` 判定。
+  //   **branch 内訳は計数規則に合わせる (TDA-MA-5・R1 監査 L の訂正)**: 計数 regex は
+  //   `if (` / `else` / `for (` / `while (` / `case ` / `??` / `?` / `&&` / `||` だけを数え、
+  //   **`===` / `!==` は数えない**。+4 の内訳は (a) option field `segmentRe?:` の `?` 1
+  //   (型構文であってロジック分岐ではない) (b) `literalRuleMatches` 冒頭の `if (` 1
+  //   (c) 同 return の `&&` 1 (d) `segmentScoped` の三項 `?` 1 = 計 4 (うちロジック分岐は 3)。
+  //   executable 天井は実測 + 4、branch 天井も実測 + 4 (旧 802 は headroom +2 で、本変更で実測 804 が超えた)。
   const MODULE_SET_EXECUTABLE_LINE_CEILING = 2564;
   const MODULE_SET_BRANCH_TOKEN_CEILING = 808;
 

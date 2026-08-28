@@ -332,7 +332,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     for (const cmd of [
       "mysqladmin status",
       "mysqladmin -u root processlist",
-      "mysqladmin status && echo drop", // `&&` を跨いだ drop は字面境界の外 (mysqladmin ルール非該当)
+      "mysqladmin status && echo drop", // `&&` は正準 splitter の区切り = 別 segment (両スコープとも非該当)
       "grep -rn dropDatabase docs/", // 括弧無し (メソッド呼び出しでない)
       "echo drop_database",
       "psql -c 'drop schemas'", // `schema` の単語境界
@@ -351,6 +351,15 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     //   `--password='…'` / `-p"…"`・MySQL は shell 特殊文字を含む password の引用を要求する) と escape 形、
     //   さらに base では `&` が字面境界だったため落ちていた redirect 形 (`&>` / `2>&1 >` の向こう側の実
     //   サブコマンド) を足す。segment スコープを外すとこの describe が全滅する。
+    //
+    //   **QA-MA-1 (R1 監査 M)**: 上記が全部「単一 segment」形だったため、`segments.some(...)` を
+    //   **先頭 segment だけ**見る変異が全 suite 緑で生き残った (`[0]` 化は先行 segment を持つコマンドでしか
+    //   落ちない)。先行 segment を持つ現実形 (`cd <repo> && …`) を**追加**する — これで走査が
+    //   「いずれかの segment」であることに歯が付く。
+    //   **QA-MA-2 (R1 監査 M)**: `segmentRe` の `i` flag も無 pin だった (samples 表の flags pin は
+    //   `rule.segmentRe.flags === s.segmentRe.flags` の相互一致しか見ないので、両方から `i` を落とす
+    //   coordinated 編集を素通しする)。サブコマンド側 (`DROP`) と program 名側 (`MYSQLADMIN`) の
+    //   大文字形を 1 本ずつ**追加**し、`i` の除去が挙動として RED になるようにする。
     for (const cmd of [
       "mysqladmin -u root -p'a;b' drop appdb",
       "mysqladmin -u root --password='x;y' drop appdb",
@@ -361,6 +370,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       "mysqladmin -u root \\\n  drop appdb",
       "mysqladmin -f &> out.log drop appdb",
       "mysqladmin -f 2>&1 > out.log drop appdb",
+      // QA-MA-1: 先行 segment のある multi-segment 形 (先頭 segment のみ走査する変異で RED)。
+      "cd /srv/app && mysqladmin -u root --password='x;y' --force drop appdb",
+      // QA-MA-2: `i` flag の歯 (segmentRe の大文字小文字非依存)。
+      "mysqladmin -u root -p'a;b' --force DROP appdb",
+      "MYSQLADMIN -u root -p'a;b' drop appdb",
     ]) {
       expect(classifyCommandRisk(cmd), `${cmd}: 正準 segment 単位で risk=high (反転済み)`).toBe(
         "high",
@@ -393,9 +407,28 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       ).toBe("low");
       expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop 非付与`).toBe(false);
     }
-    // SEC-DB2R2-2: `{0,512}` の束縛に歯を付ける。corpus の最大 gap は 20 で、`{0,28}` へ縮めても全 suite が
-    //   緑のまま現実的な長 option 列 (下の実形は gap 319・assert 値 318) の実呼び出しが low に落ちる。現実形 1 本と境界 (gap 512 可 /
-    //   513 不可) を pin する — 束縛を縮める変更はここで RED になり、意図的に変えるなら両方を更新する。
+    // **SEC-MA-1 (R1 監査 L・over-gate のみ / 弱化なし)**: 上の「正準分割にのみ適用」は splitter の
+    //   **identity** で決めており、`splitSegments` が構造解析不能 (未終端 quote / heredoc 等) と判断した
+    //   ときは `splitSegmentsUnparseable` = 旧粗分割 + **command 全体** を返す。つまり解析不能入力では
+    //   segment スコープが「区切りを含む command 全体」にも当たり、本来 `;` の向こう側だった `drop` が
+    //   gate される。これは分類器全体の fail-safe 方針 (解析不能は over-gate 方向) と同じ向きで、
+    //   弱化ではない。挙動として明示 pin しておく (黙って変わらないように)。
+    {
+      const unterminated = "mysqladmin status; echo 'unterminated drop";
+      expect(classifyCommandRisk(unterminated), "解析不能入力は fail-closed 側へ倒れる").toBe(
+        "high",
+      );
+      expect(
+        classifyCommandCategories(unterminated).has("db-drop"),
+        "解析不能入力は db-drop を付けて gate する",
+      ).toBe(true);
+    }
+    // SEC-DB2R2-2: `{0,512}` の束縛に歯を付ける。**TDA-MA-2 (R1 監査 L) の訂正**: かつてここには
+    //   「公開 corpus の最大 gap は 20 で `{0,28}` へ縮めても全 suite が緑」と書いていたが、task
+    //   01a0480f-d29a で **corpus に gap 319 の長 option 列陽性を入れた**ので現在は偽 — `{0,28}` へ縮めれば
+    //   公開 bench の当該ベクタが落ちる。現・公開 corpus の最大 gap は **319**、束縛の歯は下の **5 行**
+    //   (現実形 1 + whole-command の 512/513 + segment スコープの 512/513)。束縛を縮める変更はここで RED に
+    //   なり、意図的に変えるなら 5 行すべてを新値で更新する (件数合わせで vector を差し替えない)。
     const longOptions =
       "mysqladmin --host=db.internal --port=3306 --user=admin --ssl-mode=VERIFY_IDENTITY " +
       "--ssl-ca=/etc/mysql/certs/ca.pem --ssl-cert=/etc/mysql/certs/client-cert.pem " +
@@ -440,7 +473,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で追加ルールを自動網羅する。
   //   seed は 3 軸 (追加のみ・削除禁止):
   //     (1) regex source 由来の literal run の完全一致 + near-miss (SEC-DB2R2-1) — 先頭 literal が**平坦に綴られた**
-  //         ルールに届く (現行 14/16・#2 fork-bomb は literal run 空・#11 flush は alternation で断片化)。
+  //         ルールに届く (現行 **15/17**・#2 fork-bomb は literal run 空・**#12** flush は alternation で断片化。
+  //         分母も index も **SCAN_TARGETS 基準** = LITERAL_RULES の `re` + `segmentRe` の並び・QA-MA-4)。
   //     (2) sample 先頭語 (QA-DB2R3-1) — alternation 綴りの program 名 (`(?:mysql|mariadb)admin` / `mysql_?admin`)
   //         を埋める (S1/S3・R3 Y4 が RED へ反転する実測)。
   //     (3) sample 由来「マッチしなくなる最長 prefix」(task 01a0484c-ecbd・SEC-DB2R3-1(b)) — 規則の綴り (alternation /
@@ -728,6 +762,14 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /\.toBeLessThan\(RATIO_MAX\);/,
           /\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/,
           /expect\(totalCases\)\.toBe\(TOTAL_CASES_MEASURED\);/,
+          // QA-MA-6 (R1 監査 L): task 01a0480f-d29a で新設した **SCAN_TARGETS 配線 pin** も使用側として
+          //   pin する (これが無いと「LITERAL_RULES の全 re + 全 segmentRe を漏れなく計測に載せている」の
+          //   歯を 1 行削るだけで恒真化できる)。綴りは escape + 文字クラス + 実改行を含み assertion 行
+          //   自身には充足しない (SEC-LN3-1 の規律)。
+          /const SCAN_TARGET[S]: ReadonlyArray<\{ re: RegExp; cmd: string \}> = LITERAL_RULES\.flatMap\(/,
+          /expect\(SCAN_TARGETS\.length\)\.toBe\(\n\s+LITERAL_RULES\.length \+ LITERAL_RULES\.filter\(/,
+          /expect\(SCAN_TARGET[S]\.map\(\(t\) => t\.re\.source\)\)\.toEqual\(/,
+          /expect\(totalCases\)\.toBeGreaterThanOrEqual\(SCAN_TARGET[S]\.length \* 3\);/,
         ];
         for (const re of [...declarations, ...usages]) {
           expect(self, `tripwire ${String(re)}`).toMatch(re);
