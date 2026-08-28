@@ -45,7 +45,14 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   missing is treated as "just released" and retried without deleting anything. A lock whose content
   cannot be read at all is no longer taken over. `INV-FILELOCK-STALE-TAKEOVER-IDENTITY` reproduces
   both races with three real processes.
-
+- **The daily public-metrics snapshot lands on a dedicated `metrics` branch instead of `main`.**
+  The `main` ruleset requires a pull request and the `verify` check, so every scheduled run from
+  2026-08-26 to 2026-08-28 was rejected with GH013 and no snapshot was recorded. The workflow now
+  runs the collector from the `main` checkout and commits the JSON into `metrics/public/` on the
+  `metrics` branch (created from an empty tree on first use, so it carries only snapshots); the
+  three missed days were backfilled through the `date` input. `docs/usage-metrics.md` and
+  `metrics/public/README.md` point at the branch, and the collector test pins the branch and the
+  push shape so the workflow cannot silently drift back to `main`.
 - **`DROP DATABASE` now draws an approval card under ordinary approval.** The risk classifier
   rated `psql -c 'DROP DATABASE …'` as `low` while attaching the `db-drop` category, so the
   category-driven bypass/YOLO gate held it but ordinary approval — which keys off the risk verdict

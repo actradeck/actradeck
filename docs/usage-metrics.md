@@ -7,7 +7,12 @@ anonymous telemetry. The product remains local-first: central telemetry is off b
 ## Public distribution snapshots
 
 `.github/workflows/public-metrics.yml` runs daily and writes a dated JSON file under
-`metrics/public/`. It records:
+`metrics/public/` on the dedicated
+[`metrics` branch](https://github.com/actradeck/actradeck/tree/metrics/metrics/public), not on
+`main`: the `main` ruleset requires a pull request and the `verify` status check, so a direct
+push by the workflow is rejected (GH013), and the branch keeps snapshot commits out of the
+product history. The branch is created by the first run and holds nothing but
+`metrics/public/`. Each snapshot records:
 
 - npm downloads for the previous UTC day;
 - npm's rolling seven-day per-version breakdown;
@@ -23,6 +28,13 @@ history that the upstream APIs only expose for short windows. Run the collector 
 ```bash
 node scripts/collect-public-metrics.mjs --dry-run
 ```
+
+A missed day is backfilled by dispatching the workflow with its `date` input (or locally with
+`--date YYYY-MM-DD`). The npm daily figure is exact for the requested day because the npm API is
+queried by date; the seven-day per-version window and the release-asset counters are whatever
+the APIs report at collection time, and `collected_at` in the file says when that was. The
+2026-08-25 to 2026-08-27 snapshots were backfilled this way on 2026-08-28 (UTC) after the
+scheduled runs of 2026-08-26 to 2026-08-28 had failed on the `main` push.
 
 ## Local aggregate usage
 
