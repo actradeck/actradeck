@@ -521,9 +521,12 @@ export class ApprovalBridge {
    * 不安定採番の観測数 (0 が正常。>0 は redaction ルールと採番形式の衝突)。
    * 意味論 (TDA-R4-2): **不安定観測の延べ数** — re-roll 試行ごと + 使い切り時に加算されるため、
    * 「8 回の良性 re-roll」と「固定部衝突 1 件 (9 加算)」を値だけでは区別しない (>0 = 要調査)。
-   * 正直な開示 (SEC-R4-4): 現状 **runtime 側の consumer は未配線** (bridge API として query 可能な
-   * だけで hello/ログ/テレメトリに出ない)。runtime の縮退は無兆候であり、本命の防衛線は CI の
-   * 構造 metatest (INV-APPROVAL-REQUEST-ID-STABLE)。増分挙動は同 INV の re-roll 単体テストが pin。
+   * runtime 読取り路 (TDA-V9-7 landing・SEC-R4-4 の「未配線」開示を解消): 本カウンタは daemon の
+   * hello frame の `daemon_counters` (`daemonCountersFromBridge` 配線・NO-RAW 非負整数のみ) に載り、
+   * backend が全 open daemon を sum fold して `GET /realtime/readiness` の `counters` で公開する。
+   * よって稼働中の縮退も観測できる (0 が正常)。ただし **本命の防衛線は依然 CI の構造 metatest**
+   * (INV-APPROVAL-REQUEST-ID-STABLE): readiness は事後の観測であり、ルール追加そのものは検知しない。
+   * 増分挙動は同 INV の re-roll 単体テストが pin。
    */
   get unstableRequestIdCount(): number {
     return this.unstableRequestIdMints;

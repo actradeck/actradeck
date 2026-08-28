@@ -173,6 +173,48 @@ describe("INV-OBSERVABILITY-COUNTERS-WIRE: 集約 (sum fold)", () => {
     expect(aggregateDaemonCounters([])).toEqual({ unstableRequestIdCount: 0 });
   });
 
+  it("SEC-SC-1: 集約も出力 shape を閉じる (余剰 field を持つ report を spread で通さない)", () => {
+    // 監査変異 M-F: `aggregateDaemonCounters` を `{ ...reports[0], unstableRequestIdCount }` 等の
+    // spread 化に置換すると、report 側の余剰 field (パス / token / session_id 様) が **集約の戻り値**
+    // まで運ばれる。以前は集約の出力 keys に pin が無く当該変異が SURVIVED した。
+    const hostile = [
+      {
+        unstableRequestIdCount: 2,
+        leakedPath: "/home/victim/.claude/settings.json",
+      },
+      {
+        unstableRequestIdCount: 3,
+        token: "glpat-XXXXXXXXXXXXXXXXXXXX",
+        session_id: "sess_0199f0a1-2b3c-7d4e-8f01-23456789abcd",
+      },
+    ] as unknown as readonly import("../src/index.js").DaemonCountersWire[];
+    const agg = aggregateDaemonCounters(hostile);
+    expect(agg).toEqual({ unstableRequestIdCount: 5 });
+    expect(Object.keys(agg)).toEqual(["unstableRequestIdCount"]);
+    expect(JSON.stringify(agg)).not.toContain("victim");
+    expect(JSON.stringify(agg)).not.toContain("glpat-");
+    expect(JSON.stringify(agg)).not.toContain("sess_");
+  });
+
+  it("SEC-SC-1: 合流も出力 shape を閉じる (daemon 側の余剰 field を endpoint 応答へ運ばない)", () => {
+    // 監査変異 M-D2: `buildReadinessCounters` を `{ ...daemon, nonRetirableSkipCount }` へ置換すると、
+    // daemon 側 (受信 parse を素通りした場合) の余剰 field が **endpoint の最終出口**へ着地する。
+    const merged = buildReadinessCounters(
+      {
+        unstableRequestIdCount: 1,
+        leakedPath: "/home/victim/.env",
+        token: "glpat-XXXXXXXXXXXXXXXXXXXX",
+        session_id: "sess_0199f0a1-2b3c-7d4e-8f01-23456789abcd",
+      } as unknown as import("../src/index.js").DaemonCountersWire,
+      2,
+    );
+    expect(merged).toEqual({ unstableRequestIdCount: 1, nonRetirableSkipCount: 2 });
+    expect(Object.keys(merged).sort()).toEqual(["nonRetirableSkipCount", "unstableRequestIdCount"]);
+    expect(JSON.stringify(merged)).not.toContain("victim");
+    expect(JSON.stringify(merged)).not.toContain("glpat-");
+    expect(JSON.stringify(merged)).not.toContain("sess_");
+  });
+
   it("集約も入力を射影する (奇形の report が合計を汚さない)", () => {
     expect(
       aggregateDaemonCounters([

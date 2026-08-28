@@ -14,7 +14,47 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { SidecarRegistry, type SidecarLink } from "../src/sidecar-registry.js";
+
+const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+
+/** 行コメント / ブロックコメントを落とす (source-coupling pin をコメント文言で自己充足させない)。 */
+function stripComments(src: string): string {
+  return src
+    .split("\n")
+    .map((line) => {
+      let out = line;
+      if (/^\s*\/\*/.test(out)) {
+        const close = out.indexOf("*/");
+        out = close >= 0 ? out.slice(close + 2) : "";
+      }
+      if (/^\s*(\/\/|\*)/.test(out)) return "";
+      out = out.replace(/\/\*[^*]*(?:\*(?!\/)[^*]*)*\*\//g, "");
+      out = out.replace(/\s\/\/.*$/, "");
+      return out;
+    })
+    .join("\n");
+}
+
+/** 指定メソッドの本体を波括弧対応で切り出す (comment-strip 済 source 前提)。 */
+function methodBody(src: string, signature: string): string {
+  const start = src.indexOf(signature);
+  expect(start, `${signature} が見つからない (走査対象 rot)`).toBeGreaterThanOrEqual(0);
+  const i = src.indexOf("{", start);
+  let depth = 0;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") {
+      depth--;
+      if (depth === 0) return src.slice(i, j + 1);
+    }
+  }
+  throw new Error(`${signature} の本体を閉じられない`);
+}
 
 class FakeLink implements SidecarLink {
   open = true;
@@ -303,6 +343,57 @@ describe("TDA-V9-7 readiness counters", () => {
     expect(r.counters.unstableRequestIdCount).toBe(0); // 負数は透過しない。
     expect(JSON.stringify(r)).not.toContain("victim");
     expect(JSON.stringify(r)).not.toContain("glpat-");
+  });
+
+  it("SEC-SC-2: daemon_counters: null は TypeError でなく「未報告」として扱われる (前回値を保持)", () => {
+    // hostile ループの not.toThrow は「落ちない」だけを見ており、null が **未報告** として
+    // 扱われる意味論を pin していなかった (parseDaemonCountersWire の `raw === null` ガードを
+    // 外すと typeof null === "object" ゆえ TypeError になる)。ここは意味論を直接 assert する。
+    const reg = new SidecarRegistry();
+    const fresh = new FakeLink();
+    reg.add(fresh);
+    reg.handleHello(fresh, {
+      type: "hello",
+      control_token: "c",
+      session_ids: [],
+      daemon_counters: null,
+    });
+    // 未報告 → 集約から除外 → 0 (「報告された 0」と同値だが、経路は「除外」であること)。
+    expect(reg.agentReadiness().counters.unstableRequestIdCount).toBe(0);
+
+    // 既報告の conn に null が来ても前回値を潰さない (未報告 = 上書きしない)。
+    const known = new FakeLink();
+    reg.add(known);
+    reg.handleHello(known, {
+      type: "hello",
+      control_token: "c2",
+      session_ids: [],
+      daemon_counters: { unstableRequestIdCount: 4 },
+    });
+    expect(reg.agentReadiness().counters.unstableRequestIdCount).toBe(4);
+    reg.handleHello(known, {
+      type: "hello",
+      control_token: "c2",
+      session_ids: [],
+      daemon_counters: null,
+    });
+    expect(reg.agentReadiness().counters.unstableRequestIdCount).toBe(4);
+  });
+
+  it("SEC-SC-2: 受信境界は handleHello 内で正準パーサを呼ぶ (source-coupling pin・sidecar 側と対称)", () => {
+    // 呼び出し側 pin (sidecar inv-approval-reconcile-daemon-wiring の helper 配線 pin と対称)。
+    // handleHello から parseDaemonCountersWire の呼び出しが消える / 手書き検証へ置換されると RED。
+    // comment-strip 済 source を見るため、コメント文言では充足しない (自己充足の回避)。
+    const src = stripComments(readFileSync(join(SRC_DIR, "sidecar-registry.ts"), "utf8"));
+    const body = methodBody(src, "handleHello(link: SidecarLink, frame: HelloFrame): boolean");
+    expect(
+      body.includes("parseDaemonCountersWire("),
+      "handleHello が正準 parseDaemonCountersWire を呼んでいない (受信境界の手書き化 / 配線落ち)",
+    ).toBe(true);
+    // 読む先は wire field 名でなければならない (別 field からの誤読み取りを防ぐ)。
+    expect(body).toMatch(/parseDaemonCountersWire\(\s*frame\.daemon_counters\s*\)/);
+    // 正準パーサは import されている (ローカル同名関数の影武者を防ぐ)。
+    expect(src).toMatch(/parseDaemonCountersWire,?\n/);
   });
 
   it("reannounce: 有効 counters で上書き・省略では前回値を保持 (観測の silent 0 降格を防ぐ)", () => {
