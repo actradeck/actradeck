@@ -195,7 +195,15 @@ describe("INV-POLICY-CATEGORIES: isNetworkEgressCommand (secret-egress composite
 // 退行 (片方だけ更新) すると、下の per-rule assertion か category-only assertion が赤化する。
 describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一テーブルから導出", () => {
   // LITERAL_RULES の各エントリにマッチする代表サンプル (index 対応)。テーブル更新時に sample 追加を強制。
-  const samples: ReadonlyArray<{ re: RegExp; cmd: string }> = [
+  //   `segmentRe` を持つ行は **segment スコープでしか踏まない** sample (`segmentCmd`) も要求する
+  //   (task 01a0480f-d29a: 二重スコープの両側に歯を付ける。whole-command で踏める形を置くと segment
+  //   スコープを外す変異が無音で通る)。
+  const samples: ReadonlyArray<{
+    re: RegExp;
+    cmd: string;
+    segmentRe?: RegExp;
+    segmentCmd?: string;
+  }> = [
     { re: /\bmkfs\b/i, cmd: "mkfs.ext4 /dev/sdb1" },
     { re: /\bdd\s+if=/i, cmd: "dd if=/dev/zero of=/dev/sda" },
     { re: /:\(\)\s*\{/, cmd: ":(){ :|:& };:" },
@@ -208,6 +216,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     {
       re: /\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i,
       cmd: "mysqladmin -u root -p --force drop appdb",
+      segmentRe: /\bmysqladmin\b[\s\S]{0,512}\bdrop\b/i,
+      // 引用内 `;` は正準 splitter では区切りでない = 1 segment。whole-command スキャン (`[^|;&\n]`) では
+      //   踏めない形なので、segment スコープが load-bearing であることの歯になる。
+      segmentCmd: "mysqladmin -u root -p'a;b' drop appdb",
     },
     { re: /\bdrop_?database\s*\(/i, cmd: "mongosh app --eval 'db.dropDatabase()'" },
     { re: /\bflush(?:all|db)\b/i, cmd: "redis-cli flushall" },
@@ -235,6 +247,33 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       // risk 側 (matchesHighRiskLiteral) が同テーブルの high フラグを honor している。
       if (rule.high) {
         expect(classifyCommandRisk(s.cmd), "high ルールは risk=high").toBe("high");
+      }
+      // 二重スコープ (task 01a0480f-d29a): segmentRe も index 対応で pin し、**segment スコープでしか
+      //   踏めない** sample が risk / category の両経路に届くことを確認する。segment 走査を外す変異
+      //   (`literalRuleMatches` の segmentRe 枝 / `split(command)` の受け渡し) はここで RED になる。
+      expect(rule.segmentRe?.source, "sample.segmentRe が LITERAL_RULES[i] と一致").toBe(
+        s.segmentRe?.source,
+      );
+      expect(rule.segmentRe?.flags, "sample.segmentRe の flags が LITERAL_RULES[i] と一致").toBe(
+        s.segmentRe?.flags,
+      );
+      if (rule.segmentRe !== undefined) {
+        const segCmd = s.segmentCmd;
+        expect(segCmd, "segmentRe を持つ行は segment スコープの sample を持つ").toBeDefined();
+        expect(rule.segmentRe.test(segCmd!), "segmentCmd は segmentRe にマッチ").toBe(true);
+        expect(
+          rule.re.test(segCmd!),
+          "segmentCmd は whole-command スキャンでは非該当 (segment スコープが load-bearing)",
+        ).toBe(false);
+        expect(
+          classifyCommandCategories(segCmd!).has(rule.category),
+          "segment スコープ経由でも category 付与",
+        ).toBe(true);
+        if (rule.high) {
+          expect(classifyCommandRisk(segCmd!), "segment スコープ経由でも risk=high").toBe("high");
+        }
+      } else {
+        expect(s.segmentCmd, "segmentRe が無い行に segmentCmd は置かない").toBeUndefined();
       }
     });
   });
@@ -293,7 +332,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     for (const cmd of [
       "mysqladmin status",
       "mysqladmin -u root processlist",
-      "mysqladmin status && echo drop", // `&&` を跨いだ drop は字面境界の外 (mysqladmin ルール非該当)
+      "mysqladmin status && echo drop", // `&&` は正準 splitter の区切り = 別 segment (両スコープとも非該当)
       "grep -rn dropDatabase docs/", // 括弧無し (メソッド呼び出しでない)
       "echo drop_database",
       "psql -c 'drop schemas'", // `schema` の単語境界
@@ -306,21 +345,90 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     //   して pin する (ベンチ corpus の良性担体 `grep -rn flushall src/` と同じ事実)。
     expect(classifyCommandRisk("grep -rn flushall src/")).toBe("high");
     expect(classifyCommandCategories("grep -rn flushall src/").has("db-drop")).toBe(true);
-    // 既知の限界 (SEC-DB2-2 / TDA-DB2-2・task 01a0480f-d29a・v0.9): mysqladmin ルールの境界は quote 非認識の
-    //   字面判定で、引用内 metachar と行継続で分断され low になる (base も low = 弱化ではない)。正準 segment
-    //   単位適用が着地したらこの 2 件は **high 側へ反転** させる (削除でなく反転・documented-limitation tripwire)。
+    // **反転済み (task 01a0480f-d29a)**: かつては既知の限界 (SEC-DB2-2 / TDA-DB2-2) として `false` を pin して
+    //   いた 2 件 — 引用内 metachar と行継続で quote 非認識の字面境界が分断される形 — は、正準 segment 単位
+    //   (`segmentRe`) の適用で **high 側へ反転**した (削除でなく反転)。軸は追加のみ: 実在の書式 (`-p'…'` /
+    //   `--password='…'` / `-p"…"`・MySQL は shell 特殊文字を含む password の引用を要求する) と escape 形、
+    //   さらに base では `&` が字面境界だったため落ちていた redirect 形 (`&>` / `2>&1 >` の向こう側の実
+    //   サブコマンド) を足す。segment スコープを外すとこの describe が全滅する。
+    //
+    //   **QA-MA-1 (R1 監査 M)**: 上記が全部「単一 segment」形だったため、`segments.some(...)` を
+    //   **先頭 segment だけ**見る変異が全 suite 緑で生き残った (`[0]` 化は先行 segment を持つコマンドでしか
+    //   落ちない)。先行 segment を持つ現実形 (`cd <repo> && …`) を**追加**する — これで走査が
+    //   「いずれかの segment」であることに歯が付く。
+    //   **QA-MA-2 (R1 監査 M)**: `segmentRe` の `i` flag も無 pin だった (samples 表の flags pin は
+    //   `rule.segmentRe.flags === s.segmentRe.flags` の相互一致しか見ないので、両方から `i` を落とす
+    //   coordinated 編集を素通しする)。サブコマンド側 (`DROP`) と program 名側 (`MYSQLADMIN`) の
+    //   大文字形を 1 本ずつ**追加**し、`i` の除去が挙動として RED になるようにする。
     for (const cmd of [
       "mysqladmin -u root -p'a;b' drop appdb",
+      "mysqladmin -u root --password='x;y' drop appdb",
+      'mysqladmin -u root -p"p&q" drop appdb',
+      'mysqladmin -u root -p"a|b" drop appdb',
+      "mysqladmin -u root -p$'a;b' drop appdb",
+      "mysqladmin -u root -p\\; drop appdb",
       "mysqladmin -u root \\\n  drop appdb",
+      "mysqladmin -f &> out.log drop appdb",
+      "mysqladmin -f 2>&1 > out.log drop appdb",
+      // QA-MA-1: 先行 segment のある multi-segment 形 (先頭 segment のみ走査する変異で RED)。
+      "cd /srv/app && mysqladmin -u root --password='x;y' --force drop appdb",
+      // QA-MA-2: `i` flag の歯 (segmentRe の大文字小文字非依存)。
+      "mysqladmin -u root -p'a;b' --force DROP appdb",
+      "MYSQLADMIN -u root -p'a;b' drop appdb",
     ]) {
+      expect(classifyCommandRisk(cmd), `${cmd}: 正準 segment 単位で risk=high (反転済み)`).toBe(
+        "high",
+      );
       expect(
         classifyCommandCategories(cmd).has("db-drop"),
-        `${cmd}: 既知の限界 (quote 非認識境界)`,
-      ).toBe(false);
+        `${cmd}: 正準 segment 単位で db-drop (反転済み)`,
+      ).toBe(true);
     }
-    // SEC-DB2R2-2: `{0,512}` の束縛に歯を付ける。corpus の最大 gap は 20 で、`{0,28}` へ縮めても全 suite が
-    //   緑のまま現実的な長 option 列 (下の実形は gap 319・assert 値 318) の実呼び出しが low に落ちる。現実形 1 本と境界 (gap 512 可 /
-    //   513 不可) を pin する — 束縛を縮める変更はここで RED になり、意図的に変えるなら両方を更新する。
+    // 非弱化 backstop の歯 (task 01a0480f-d29a): `splitSegments` は redirect の演算子と**対象語**を segment から
+    //   除去するため、segment スコープ単独ではこれらが base の high から low へ落ちる。whole-command スコープ
+    //   (`re` = base 逐語) を残していることの歯 — `re` を消す / segment スコープだけにする変異で RED。
+    for (const cmd of ["mysqladmin status > drop.log", "mysqladmin status 2> drop.log"]) {
+      expect(classifyCommandRisk(cmd), `${cmd}: whole-command backstop が base 判定を保つ`).toBe(
+        "high",
+      );
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop`).toBe(true);
+    }
+    // segment スコープは **正準 (quote-aware) 分割にのみ**適用する (task 01a0480f-d29a)。旧 quote 非対応
+    //   分割は redirect 演算子を segment から除去しないため、legacy union パスにも segment スコープを
+    //   掛けると `&` を含む redirect の**対象語**まで走査に入り、意図した拡張 (引用内 metachar / 行継続) を
+    //   超えて base から乖離する (実測 107 件)。下の 2 行はその境界の歯:
+    //   `&> drop.log` は drop が**リダイレクト先ファイル名**ゆえ low (正準 splitter が対象語ごと除去)、
+    //   `&> out.log drop appdb` は drop が**実サブコマンド**ゆえ high (上の反転リスト)。両者を分けているのは
+    //   字面クラスではなく正準 splitter である、という主張そのものを pin する。
+    for (const cmd of ["mysqladmin status &> drop.log", "mysqladmin status &>> drop.log"]) {
+      expect(
+        classifyCommandRisk(cmd),
+        `${cmd}: redirect 先ファイル名は drop サブコマンドでない (legacy へ segment スコープを漏らさない)`,
+      ).toBe("low");
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop 非付与`).toBe(false);
+    }
+    // **SEC-MA-1 (R1 監査 L・over-gate のみ / 弱化なし)**: 上の「正準分割にのみ適用」は splitter の
+    //   **identity** で決めており、`splitSegments` が構造解析不能 (未終端 quote / heredoc 等) と判断した
+    //   ときは `splitSegmentsUnparseable` = 旧粗分割 + **command 全体** を返す。つまり解析不能入力では
+    //   segment スコープが「区切りを含む command 全体」にも当たり、本来 `;` の向こう側だった `drop` が
+    //   gate される。これは分類器全体の fail-safe 方針 (解析不能は over-gate 方向) と同じ向きで、
+    //   弱化ではない。挙動として明示 pin しておく (黙って変わらないように)。
+    {
+      const unterminated = "mysqladmin status; echo 'unterminated drop";
+      expect(classifyCommandRisk(unterminated), "解析不能入力は fail-closed 側へ倒れる").toBe(
+        "high",
+      );
+      expect(
+        classifyCommandCategories(unterminated).has("db-drop"),
+        "解析不能入力は db-drop を付けて gate する",
+      ).toBe(true);
+    }
+    // SEC-DB2R2-2: `{0,512}` の束縛に歯を付ける。**TDA-MA-2 (R1 監査 L) の訂正**: かつてここには
+    //   「公開 corpus の最大 gap は 20 で `{0,28}` へ縮めても全 suite が緑」と書いていたが、task
+    //   01a0480f-d29a で **corpus に gap 319 の長 option 列陽性を入れた**ので現在は偽 — `{0,28}` へ縮めれば
+    //   公開 bench の当該ベクタが落ちる。現・公開 corpus の最大 gap は **319**、束縛の歯は下の **5 行**
+    //   (現実形 1 + whole-command の 512/513 + segment スコープの 512/513)。束縛を縮める変更はここで RED に
+    //   なり、意図的に変えるなら 5 行すべてを新値で更新する (件数合わせで vector を差し替えない)。
     const longOptions =
       "mysqladmin --host=db.internal --port=3306 --user=admin --ssl-mode=VERIFY_IDENTITY " +
       "--ssl-ca=/etc/mysql/certs/ca.pem --ssl-cert=/etc/mysql/certs/client-cert.pem " +
@@ -332,6 +440,20 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     const withGap = (n: number): string => `mysqladmin ${"x".repeat(n - 2)} drop appdb`;
     expect(classifyCommandCategories(withGap(512)).has("db-drop"), "gap 512 は束縛内").toBe(true);
     expect(classifyCommandCategories(withGap(513)).has("db-drop"), "gap 513 は束縛外").toBe(false);
+    // 二重スコープ (task 01a0480f-d29a): **segment スコープ側にも同じ境界の歯**を置く。gap に引用済み `;` を
+    //   1 つ挟むと whole-command スキャンは踏めないので、この 2 行は segmentRe の `{0,512}` だけが決める
+    //   (両スコープの束縛値が揃っていること = INV-DB-DROP-BOUND-DOC が regex source から two-way に pin)。
+    const withQuotedGap = (n: number): string => `mysqladmin ';'${"x".repeat(n - 5)} drop appdb`;
+    expect(withQuotedGap(512).indexOf("drop") - "mysqladmin".length, "gap は厳密に 512").toBe(512);
+    expect(withQuotedGap(513).indexOf("drop") - "mysqladmin".length, "gap は厳密に 513").toBe(513);
+    expect(
+      classifyCommandCategories(withQuotedGap(512)).has("db-drop"),
+      "segment スコープ: gap 512 は束縛内",
+    ).toBe(true);
+    expect(
+      classifyCommandCategories(withQuotedGap(513)).has("db-drop"),
+      "segment スコープ: gap 513 は束縛外",
+    ).toBe(false);
     // QA-DB2-3: 境界軸を左右対称に pin する (`&&` だけでなく `|` `;` 改行の各区切りの向こう側の drop は非該当)。
     //   軸は追加のみ・削除禁止 (finding-registry)。
     for (const cmd of [
@@ -351,7 +473,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で追加ルールを自動網羅する。
   //   seed は 3 軸 (追加のみ・削除禁止):
   //     (1) regex source 由来の literal run の完全一致 + near-miss (SEC-DB2R2-1) — 先頭 literal が**平坦に綴られた**
-  //         ルールに届く (現行 14/16・#2 fork-bomb は literal run 空・#11 flush は alternation で断片化)。
+  //         ルールに届く (現行 **15/17**・#2 fork-bomb は literal run 空・**#12** flush は alternation で断片化。
+  //         分母も index も **SCAN_TARGETS 基準** = LITERAL_RULES の `re` + `segmentRe` の並び・QA-MA-4)。
   //     (2) sample 先頭語 (QA-DB2R3-1) — alternation 綴りの program 名 (`(?:mysql|mariadb)admin` / `mysql_?admin`)
   //         を埋める (S1/S3・R3 Y4 が RED へ反転する実測)。
   //     (3) sample 由来「マッチしなくなる最長 prefix」(task 01a0484c-ecbd・SEC-DB2R3-1(b)) — 規則の綴り (alternation /
@@ -360,10 +483,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         Z5 `sudo` 前置 / Z6 alternation サブコマンドが先頭 literal・SEC-DB2R4-2 / QA-DB2R3-2) がいずれも RED へ
   //         反転する (coordinated 再注入で実測・着地条件)。残る構造的死角は「末尾 literal が先頭 literal の反復で
   //         再構成される規則」(`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2): prefix の反復が規則を再びマッチさせ vacuous に
-  //         なる。現行 16 に該当形なし (sweep 019fd74b E で追跡)。また prefix 軸は「反復した seed が規則の gap
+  //         なる。現行 17 スキャン regex に該当形なし (sweep 019fd74b E で追跡)。また prefix 軸は「反復した seed が規則の gap
   //         クラス (`[^|;&\n]`) に触れない」前提に依存し、sample が先頭 literal より**前**に gap クラスの除外文字
   //         (`|` `;` `&` 改行・例 `cd /app && prog … word`) を含む形では反復が分断され 2 乗形が線形域に留まる
-  //         (SEC-LN-1・base 同値・現行 16 の sample に該当形なし・第 4 軸「最後の metachar 以降の後尾」は task 01a048cd-95ae・
+  //         (SEC-LN-1・base 同値・現行 17 スキャン regex の sample に該当形なし・第 4 軸「最後の metachar 以降の後尾」は task 01a048cd-95ae・
   //         v0.9・full)。
   //   vacuity guard は汎用 seed `a ` を**除いた派生 seed** の非 vacuous 数で判定する (SEC-DB2R4-3: `a ` は全ルールで
   //   非 vacuous なので含めると恒真)。保守手順: guard が RED になったら seed を削るのでなく **軸を足す** (追加のみ)。
@@ -412,8 +535,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     // 二次形は ratio 判定の前に既定 5s timeout で落ちて診断が出ないことがあるため it の timeout を明示する
     //   (QA-DB2R2-3)。
     const LINEAR_IT_TIMEOUT_MS = 30_000;
-    /** 実測ケース数 (2026-08-28・16 ルール・汎用 + 派生 3 軸)。ルール追加 / 変更時に実測で更新。 */
-    const TOTAL_CASES_MEASURED = 104;
+    /** 実測ケース数 (2026-08-29・16 ルール = 17 スキャン regex・汎用 + 派生 3 軸)。ルール / スコープ追加時に実測で更新。 */
+    const TOTAL_CASES_MEASURED = 110;
     const fill = (seed: string, n: number): string =>
       seed.repeat(Math.ceil(n / seed.length)).slice(0, n);
     /** 汎用 seed。計測には載せるが、全ルールで非 vacuous なので vacuity guard の計数からは**外す**。 */
@@ -462,9 +585,25 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      */
     const isLive = (re: RegExp, seed: string): boolean => !re.test(fill(seed, SMALL));
 
+    /**
+     * 計測対象 = 各ルールの **全スキャン正規表現** (whole-command の `re` + segment スコープの `segmentRe`)。
+     * task 01a0480f-d29a で 1 ルールが 2 本の正規表現を持ちうるようになったため、`LITERAL_RULES` を直接
+     * 走査すると新しい方 (`segmentRe`) が線形性の計測から漏れる (承認ゲートに載る regex が未計測 = 走査範囲の
+     * 穴)。sample は各スコープの代表形 (`cmd` / `segmentCmd`) を使う。**追加のみ**: 既存の per-`re` ケースは
+     * そのまま残り、`segmentRe` を持つ行の分だけケースが増える。
+     */
+    const SCAN_TARGETS: ReadonlyArray<{ re: RegExp; cmd: string }> = LITERAL_RULES.flatMap(
+      (r, i) => [
+        { re: r.re, cmd: samples[i]!.cmd },
+        ...(r.segmentRe === undefined
+          ? []
+          : [{ re: r.segmentRe, cmd: samples[i]!.segmentCmd ?? samples[i]!.cmd }]),
+      ],
+    );
+
     let totalCases = 0;
-    LITERAL_RULES.forEach((rule, i) => {
-      const cmd = samples[i]!.cmd;
+    SCAN_TARGETS.forEach((rule, i) => {
+      const cmd = rule.cmd;
       const derived = derivedSeedsFor(rule.re, cmd);
       const derivedLive = derived.filter((seed) => isLive(rule.re, seed));
       const live = [...(isLive(rule.re, GENERIC_SEED) ? [GENERIC_SEED] : []), ...derivedLive];
@@ -523,17 +662,28 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(K).toBe(20);
         expect(BEST_OF_REPEAT).toBe(9);
       });
-      it("計測ケース数は実測 104 と exact 一致 (軸の差し戻しで RED・構造下限 3/ルールも併記)", () => {
+      it("計測ケース数は実測 110 と exact 一致 (軸の差し戻しで RED・構造下限 3/ルールも併記)", () => {
         // 各ルール最低 3 (汎用 1 + prefix 1 + source / sample 由来の非 vacuous 1・guard が保証)。実測 per-rule live は
-        //   3〜10・計 104 (2026-08-28・16 ルール・汎用 16 + 派生 88・QA-LN-3)。ルールの追加 / 変更で件数が変わったら
+        //   3〜10・計 110 (2026-08-29・16 ルール = 17 スキャン regex・汎用 17 + 派生 93・QA-LN-3)。ルール / スコープの追加
+        //   変更で件数が変わったら
         //   実測値を更新する (下げる場合は理由を書く)。
-        // 構造下限 (exact pin に包含される dead assertion だが、ルール変更で 104 を更新する際にも守られる
-        //   guard 由来の下限として残す・TDA-LN3-4)。
-        expect(totalCases).toBeGreaterThanOrEqual(LITERAL_RULES.length * 3);
+        // 構造下限 (exact pin に包含される dead assertion だが、ルール変更で件数を更新する際にも守られる
+        //   guard 由来の下限として残す・TDA-LN3-4)。下限は **スキャン対象 regex の本数**で数える
+        //   (task 01a0480f-d29a: 1 ルールが 2 本持ちうる)。
+        expect(totalCases).toBeGreaterThanOrEqual(SCAN_TARGETS.length * 3);
+        // SCAN_TARGETS が LITERAL_RULES の全 re + 全 segmentRe を漏れなく載せている (配線 pin)。
+        expect(SCAN_TARGETS.length).toBe(
+          LITERAL_RULES.length + LITERAL_RULES.filter((r) => r.segmentRe !== undefined).length,
+        );
+        expect(SCAN_TARGETS.map((t) => t.re.source)).toEqual(
+          LITERAL_RULES.flatMap((r) =>
+            r.segmentRe === undefined ? [r.re.source] : [r.re.source, r.segmentRe.source],
+          ),
+        );
         // QA-LN2-2 (H): 実測値との **exact** 一致 + 実測定数の絶対値 pin。床を ×3 へ正した分、軸の差し戻しを
-        //   件数で捕まえる歯は「実測 104 との一致」が担う (ルール変更で件数が動いたら意識的に更新する)。
+        //   件数で捕まえる歯は「実測 110 との一致」が担う (ルール変更で件数が動いたら意識的に更新する)。
         expect(totalCases).toBe(TOTAL_CASES_MEASURED);
-        expect(TOTAL_CASES_MEASURED).toBe(104);
+        expect(TOTAL_CASES_MEASURED).toBe(110);
       });
       it("literalRuns: escape 剥がし・構文記号分割・1 字と数字 (束縛値) の除外", () => {
         expect(literalRuns(/\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i)).toEqual([
@@ -588,7 +738,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         const declarations: readonly RegExp[] = [
           /\n\s+const RATIO_MAX = 24;\n/,
           /\n\s+const LINEAR_IT_TIMEOUT_MS = 30_000;\n/,
-          /\n\s+const TOTAL_CASES_MEASURED = 104;\n/,
+          /\n\s+const TOTAL_CASES_MEASURED = 110;\n/,
           /\n\s+const SMALL = 4096;\n/,
           /\n\s+const SCALE = 8;\n/,
           /\n\s+const LARGE = SMALL \* SCALE;\n/,
@@ -612,6 +762,14 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /\.toBeLessThan\(RATIO_MAX\);/,
           /\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/,
           /expect\(totalCases\)\.toBe\(TOTAL_CASES_MEASURED\);/,
+          // QA-MA-6 (R1 監査 L): task 01a0480f-d29a で新設した **SCAN_TARGETS 配線 pin** も使用側として
+          //   pin する (これが無いと「LITERAL_RULES の全 re + 全 segmentRe を漏れなく計測に載せている」の
+          //   歯を 1 行削るだけで恒真化できる)。綴りは escape + 文字クラス + 実改行を含み assertion 行
+          //   自身には充足しない (SEC-LN3-1 の規律)。
+          /const SCAN_TARGET[S]: ReadonlyArray<\{ re: RegExp; cmd: string \}> = LITERAL_RULES\.flatMap\(/,
+          /expect\(SCAN_TARGETS\.length\)\.toBe\(\n\s+LITERAL_RULES\.length \+ LITERAL_RULES\.filter\(/,
+          /expect\(SCAN_TARGET[S]\.map\(\(t\) => t\.re\.source\)\)\.toEqual\(/,
+          /expect\(totalCases\)\.toBeGreaterThanOrEqual\(SCAN_TARGET[S]\.length \* 3\);/,
         ];
         for (const re of [...declarations, ...usages]) {
           expect(self, `tripwire ${String(re)}`).toMatch(re);

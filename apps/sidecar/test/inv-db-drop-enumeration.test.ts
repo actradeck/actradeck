@@ -101,6 +101,34 @@ describe("INV-DB-DROP-ENUMERATION: db-drop の列挙コピーは DB_DROP_LITERAL
     expect(tokens).toEqual([...DB_DROP_LITERAL_FORMS]);
   });
 
+  // INV-DB-DROP-BOUND-DOC (task 01a0480f-d29a): mysqladmin 行の**束縛値**を語る散文はコード定数と非結合で、
+  //   境界を動かすと docs が黙って嘘になる (旧: 「512 characters」を 3 箇所が手書き)。regex source から
+  //   `{0,N}` を抽出し、両スコープの一致と docs の逐語一致を two-way に pin する。束縛値を変える変更は
+  //   ここで RED になり、docs を同時に更新させる (境界ゲートの走査範囲変更ゆえ full 監査も要る)。
+  it("(6) mysqladmin ルールの束縛値は両スコープで一致し docs の散文と two-way に一致", () => {
+    const row = LITERAL_RULES.find((r) => r.re.source.includes("mysqladmin"));
+    expect(row, "mysqladmin row").toBeDefined();
+    const boundOf = (re: RegExp): string => {
+      const m = /\{0,(\d+)\}/.exec(re.source);
+      expect(m, `bound in ${String(re)}`).not.toBeNull();
+      return m![1]!;
+    };
+    const bound = boundOf(row!.re);
+    expect(row!.segmentRe, "mysqladmin row は segment スコープを持つ").toBeDefined();
+    expect(boundOf(row!.segmentRe!), "両スコープの束縛値は同一").toBe(bound);
+    // docs の散文 (approval-policy 注記 / bench doc 2 箇所) が同じ数値を語っている。
+    //   docs は prettier が折り返すので、空白を畳んだ view で照合する (改行位置に依存させない)。
+    const flat = (rel: string): string => read(rel).replace(/\s+/g, " ");
+    const policyDoc = flat("../../../docs/approval-policy.md");
+    const benchDoc = flat("../../../docs/benchmarks/redaction-and-risk-classifier.md");
+    expect(policyDoc).toContain(`within ${bound} characters of \`mysqladmin\``);
+    expect(benchDoc).toContain(`within ${bound} characters of \`mysqladmin\``);
+    expect(benchDoc).toContain(`the ${bound} bound's two-sided boundary`);
+    // 「片方のスコープだけ数値を変える」編集も RED にする (source 逐語の相互 pin)。
+    expect(row!.re.source).toContain(`{0,${bound}}`);
+    expect(row!.segmentRe!.source).toContain(`{0,${bound}}`);
+  });
+
   it("(5) webui i18n の policy.cat.db-drop は ja/en とも {forms} で生成し、列挙コピーを持たない", () => {
     const src = read("../../webui/src/ui/i18n/messages.ts");
     const values = [...src.matchAll(/"policy\.cat\.db-drop":\s*"([^"]*)"/g)].map((m) => m[1]!);

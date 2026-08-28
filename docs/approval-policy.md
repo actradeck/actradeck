@@ -49,11 +49,20 @@ intersect your enabled set.
 
 > **`db-drop` is a literal list, not a semantic detector.** It recognises the SQL forms `DROP TABLE` /
 > `DROP DATABASE` / `DROP SCHEMA` / `DROP OWNED BY` / `TRUNCATE TABLE`, the PostgreSQL CLI `dropdb`, the MySQL
-> CLI `mysqladmin … drop` (a `drop` word within 512 characters of `mysqladmin` with no `|`, `;`, `&` or
-> newline between them — a quote-unaware boundary, so a quoted metacharacter such as `-p'a;b'` or a
-> backslash line continuation hides the subcommand; tracked for v0.9), the Mongo shell
+> CLI `mysqladmin … drop` (a `drop` word within 512 characters of `mysqladmin` inside the same shell
+> command; how that run is scanned is spelled out after this list), the Mongo shell
 > `db.dropDatabase()` together with the snake_case `drop_database(` of pymongo / sqlalchemy-utils, and
-> redis `FLUSHALL` / `FLUSHDB`. Bare-token forms (`dropdb`, `flushall`, `flushdb`) fire on any command line
+> redis `FLUSHALL` / `FLUSHDB`. How the MySQL admin run is scanned: the run is cut by the same
+> quote-aware splitter the rest of the classifier uses, so a quoted or escaped metacharacter such as
+> `-p'a;b'` no longer hides the subcommand, while a real separator (`|`, `;`, `&`, a newline) still
+> ends the run. Two qualifications, so that the rule above predicts the verdicts you will actually
+> see. First, the original whole-command pattern is kept alongside the segment scan as a backstop,
+> so a redirect target such as `mysqladmin status > drop.log` still rates `high` exactly as it did
+> before — the splitter drops a redirect's target word, and keeping the old pattern means no verdict
+> got weaker. Second, when the command cannot be parsed at all — an unterminated quote or heredoc —
+> the splitter falls back to the coarse split plus the whole command, so a quoted separator in an
+> unterminated quote still ends up gated (fail-closed), which is the same safe direction the rest of
+> the classifier takes on unparseable input. Bare-token forms (`dropdb`, `flushall`, `flushdb`) fire on any command line
 > that mentions the word — a safe-direction over-gate that the benchmark measures. **Still not
 > recognised**: Mongo's `db.collection.drop()` (a `.drop(` literal would collide with pandas and
 > friends), `DROP TABLESPACE` / `DROP USER` / `DROP ROLE`, and engine-specific admin tools not listed

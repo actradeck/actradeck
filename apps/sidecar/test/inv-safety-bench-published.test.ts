@@ -58,13 +58,13 @@ const PUBLISHED = {
     kindFamilies: 29,
   },
   classifier: {
-    micro: { support: 68, precisionPct: "82.9", recallPct: "100.0" },
+    micro: { support: 70, precisionPct: "83.3", recallPct: "100.0" },
     // support / precision% / recall% per the "Results — risk classifier" table.
     byCategory: [
       { category: "recursive-rm", support: 25, precisionPct: "100.0", recallPct: "100.0" },
       { category: "disk-destroy", support: 4, precisionPct: "80.0", recallPct: "100.0" },
       { category: "history-rewrite", support: 8, precisionPct: "100.0", recallPct: "100.0" },
-      { category: "db-drop", support: 9, precisionPct: "75.0", recallPct: "100.0" },
+      { category: "db-drop", support: 11, precisionPct: "78.6", recallPct: "100.0" },
       { category: "fork-bomb", support: 1, precisionPct: "100.0", recallPct: "100.0" },
       { category: "perm-change", support: 5, precisionPct: "100.0", recallPct: "100.0" },
       { category: "inline-code", support: 13, precisionPct: "100.0", recallPct: "100.0" },
@@ -74,24 +74,24 @@ const PUBLISHED = {
     gate: [
       {
         policyName: "default-gated",
-        precisionPct: "93.1",
+        precisionPct: "93.3",
         recallPct: "100.0",
-        tp: 54,
+        tp: 56,
         fp: 4,
         fn: 0,
         tn: 31,
       },
       {
         policyName: "strict-all",
-        precisionPct: "91.0",
+        precisionPct: "91.3",
         recallPct: "100.0",
-        tp: 61,
+        tp: 63,
         fp: 6,
         fn: 0,
         tn: 22,
       },
     ],
-    riskExactPct: "91.0",
+    riskExactPct: "91.2",
     dangerRecallPct: "100.0",
   },
 } as const;

