@@ -284,11 +284,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       expect(classifyCommandRisk(cmd), `${cmd}: risk は high`).toBe("high");
       expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop category`).toBe(true);
     }
-    // 非該当近傍: サブコマンド無し / 別 segment / 括弧無し / 単語境界。
+    // 非該当近傍: サブコマンド無し / 区切り文字 (`|` `;` `&` 改行) の向こう側 / 括弧無し / 単語境界。
     for (const cmd of [
       "mysqladmin status",
       "mysqladmin -u root processlist",
-      "mysqladmin status && echo drop", // `&&` を跨いだ drop は別 segment (mysqladmin ルール非該当)
+      "mysqladmin status && echo drop", // `&&` を跨いだ drop は字面境界の外 (mysqladmin ルール非該当)
       "grep -rn dropDatabase docs/", // 括弧無し (メソッド呼び出しでない)
       "echo drop_database",
       "psql -c 'drop schemas'", // `schema` の単語境界
@@ -313,6 +313,20 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         `${cmd}: 既知の限界 (quote 非認識境界)`,
       ).toBe(false);
     }
+    // SEC-DB2R2-2: `{0,512}` の束縛に歯を付ける。corpus の最大 gap は 20 で、`{0,28}` へ縮めても全 suite が
+    //   緑のまま現実的な長 option 列 (gap ≈ 270) の実呼び出しが low に落ちる。現実形 1 本と境界 (gap 512 可 /
+    //   513 不可) を pin する — 束縛を縮める変更はここで RED になり、意図的に変えるなら両方を更新する。
+    const longOptions =
+      "mysqladmin --host=db.internal --port=3306 --user=admin --ssl-mode=VERIFY_IDENTITY " +
+      "--ssl-ca=/etc/mysql/certs/ca.pem --ssl-cert=/etc/mysql/certs/client-cert.pem " +
+      "--ssl-key=/etc/mysql/certs/client-key.pem --connect-timeout=30 --default-character-set=utf8mb4 " +
+      "--protocol=TCP --compress --verbose --wait=3 --shutdown-timeout=60 --force drop appdb";
+    expect(longOptions.indexOf(" drop ") - "mysqladmin".length).toBeGreaterThan(250);
+    expect(classifyCommandRisk(longOptions)).toBe("high");
+    expect(classifyCommandCategories(longOptions).has("db-drop")).toBe(true);
+    const withGap = (n: number): string => `mysqladmin ${"x".repeat(n - 2)} drop appdb`;
+    expect(classifyCommandCategories(withGap(512)).has("db-drop"), "gap 512 は束縛内").toBe(true);
+    expect(classifyCommandCategories(withGap(513)).has("db-drop"), "gap 513 は束縛外").toBe(false);
     // QA-DB2-3: 境界軸を左右対称に pin する (`&&` だけでなく `|` `;` 改行の各区切りで別 segment の drop は非該当)。
     //   軸は追加のみ・削除禁止 (finding-registry)。
     for (const cmd of [
@@ -346,14 +360,42 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     };
     const SMALL = 4096;
     const LARGE = SMALL * 8;
-    // 線形なら ratio ≈ 8。2 乗なら ≈ 64。閾値 24 は線形に 3 倍の余裕・2 乗を確実に落とす。
+    // 線形なら ratio ≈ 8 (観測 96 点: 中央 ≈ 7.7・最大 12.9 = 余裕 ≈ 1.9×)。2 乗なら ≈ 64〜69 (旧 `*` 形の実測
+    //   65〜69)。閾値 24 は幾何中点 √(8.6 × 68.2) ≈ 24.2 で両側 ≈ 2.8× (線形側は worst 基準で 1.9×)。best-of-9 の
+    //   min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)。二次形は ratio 判定の前に既定 5s timeout で落ちて診断が
+    //   出ないことがあるため it の timeout を明示する (QA-DB2R2-3)。
     const RATIO_MAX = 24;
     const fill = (seed: string, n: number): string =>
       seed.repeat(Math.ceil(n / seed.length)).slice(0, n);
+    // SEC-DB2R2-1: 敵対 seed は **rule.re.source から導出**する。sample 文字列の先頭語だと規則の先頭 literal に
+    //   届くのが 16 ルール中 6 本・うち 3 本は seed が規則にマッチして O(1) short-circuit (vacuous) となり、実効
+    //   4 本しか高コスト経路を測れなかった (sample を `sh -c '…'` 形に書き換えた 2 乗 regex が SURVIVED した実測)。
+    //   regex の literal run (escape を剥がし構文記号で分割した英数字列) ごとに「完全一致の反復」と「末尾 1 字を
+    //   潰した near-miss の反復」を seed にし、**規則がマッチする seed は vacuous として計測から外す**。各ルールに
+    //   非 vacuous seed が最低 1 本あることを要求する (vacuity guard)。
+    const literalRuns = (re: RegExp): string[] =>
+      re.source
+        .replace(/\\[bBsSwWdDn]/g, " ")
+        .replace(/\\(.)/g, "$1")
+        .split(/[^A-Za-z0-9_]+/)
+        .filter((s) => s.length >= 2 && !/^\d+$/.test(s));
+    const seedsFor = (rule: { re: RegExp }, i: number): string[] => {
+      const runs = literalRuns(rule.re);
+      const base = runs.length > 0 ? runs : [samples[i]!.cmd.split(/\s+/)[0]!];
+      const out = new Set<string>(["a "]);
+      for (const r of base) {
+        out.add(`${r} `);
+        out.add(`${r.slice(0, -1)}_ `);
+      }
+      return [...out];
+    };
     LITERAL_RULES.forEach((rule, i) => {
-      // 敵対 seed: sample の先頭語 (program 名) の反復 = 「開始位置が多く末尾語が無い」最悪形。
-      const head = samples[i]!.cmd.split(/\s+/)[0]!;
-      for (const seed of [`${head} `, "a "]) {
+      const seeds = seedsFor(rule, i);
+      const live = seeds.filter((seed) => !rule.re.test(fill(seed, SMALL)));
+      it(`#${i} ${String(rule.re)} has a non-vacuous adversarial seed`, () => {
+        expect(live.length, `seeds=${JSON.stringify(seeds)}`).toBeGreaterThan(0);
+      });
+      for (const seed of live) {
         it(`#${i} ${String(rule.re)} seed=${JSON.stringify(seed)}`, () => {
           const small = fill(seed, SMALL);
           const large = fill(seed, LARGE);
@@ -366,7 +408,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           });
           const ratio = tLarge / Math.max(tSmall, 0.005);
           expect(ratio, `scaling ratio (8× input): ${ratio.toFixed(1)}`).toBeLessThan(RATIO_MAX);
-        });
+        }, 30_000);
       }
     });
   });

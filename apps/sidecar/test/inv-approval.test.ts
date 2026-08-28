@@ -3532,7 +3532,8 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   //   R19 (SEC-CQ19-1 加算床 + watch/su): 2515/798。天井は実測 + 4。
   //   task 01a0440b (TDA-DB-6・db-drop 他エンジン形): 2516/798 → 2521/800 — LITERAL_RULES にデータ行 5 本。
   //   起点は PR #44 の dropdb 行 1 本で 2515→2516 に動いていた (余裕内で通り記録漏れ・TDA-DB2-1)。branch は
-  //   **regex 中の `?` (`_?` / `(?:`) も計数される**ため +2 (ロジック分岐は 0)。天井は実測 + 4。
+  //   **regex 中の `?` (`_?` / `(?:`) も計数される**ため +2 (ロジック分岐は 0)。executable 天井は実測 + 4、
+  //   branch 天井 802 は据え置き (headroom +2・QA-DB2R2-2)。
   const MODULE_SET_EXECUTABLE_LINE_CEILING = 2525;
   const MODULE_SET_BRANCH_TOKEN_CEILING = 802;
 

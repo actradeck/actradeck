@@ -229,7 +229,7 @@ export const COMMANDS: readonly CommandVector[] = [
     command: "mysqladmin status",
     expectRisk: "low",
     expectCategories: [],
-    note: "true negative for the mysqladmin rule: no drop subcommand in the segment",
+    note: "true negative for the mysqladmin rule: no drop word within the 512-character, delimiter-free run after mysqladmin",
   },
   // ============================ perm-change (default OFF) ======================================
   {

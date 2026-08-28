@@ -2482,8 +2482,12 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *
  * ReDoS 安全の基準は**入力長に対する線形スケーリング**であって量化子の本数ではない (SEC-DB2-1):
  *   `\b<program>\b[^…]*\b<word>\b` は開始位置 O(n) × 走査 O(n) で O(n²) になる (実測 exponent 2.00・
- *   16 KiB で 63 ms)。`{0,512}` で束縛して線形化 (判定は gap ≤ 512 で同値)。全ルールの線形性は
- *   INV-LITERAL-RULES-LINEAR (inv-policy-categories) が best-of-N で回帰固定する (追加ルールを自動網羅)。
+ *   16 KiB で 63 ms)。`{0,512}` で束縛して線形化 (判定は gap ≤ 512 で同値・境界 512/513 と現実的な長 option
+ *   列 gap ≈ 270 を INV-DB-DROP-RISK-VERDICT が pin)。全ルールの線形性は INV-LITERAL-RULES-LINEAR
+ *   (inv-policy-categories) が **regex source 由来の敵対 seed** で best-of-N 回帰固定する (追加ルールを自動網羅・
+ *   sample 文字列由来の seed では届かないルールがあった SEC-DB2R2-1 の是正)。束縛後の残余コスト (16 KiB 敵対入力・
+ *   base 比): risk 経路 ≈ 3.8× / categories 経路 ≈ 7.0× / 承認 hook 経路 ≈ 1.7× (TDA-DB2R2-7 / SEC R2 実測・
+ *   良性入力は 1.0×)。
  */
 interface LiteralRule {
   readonly re: RegExp;
