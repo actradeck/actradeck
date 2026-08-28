@@ -91,6 +91,19 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   `nonRetirableSkipCount`. Legacy-shaped pendings are still retired on the first hello after a
   coordinated upgrade, as documented in 0.7.0.
 
+### Changed
+
+- **The classifier's linear-scaling metatest now derives a third adversarial seed from each
+  pinned sample.** `INV-LITERAL-RULES-LINEAR` measured every high-risk literal with seeds taken
+  from the regex text and from the sample's first word, which left a quadratic rule whose leading
+  literal is spelled across an alternation, a character class, or a two-word chain unmeasured
+  whenever the sample's first word was not that literal. Every rule now also gets the longest
+  prefix of its pinned sample that does not match, which follows the engine as deep into the rule
+  as the sample does regardless of spelling; the vacuity guard now counts derived seeds only (the
+  generic seed had made it a tautology); and the metatest pins its own threshold, timeout, seed
+  axes and case count so that weakening it fails on its own. Test-only: the classifier and the
+  approval gate are unchanged.
+
 ## [0.8.1] - 2026-08-26
 
 ### Fixed
