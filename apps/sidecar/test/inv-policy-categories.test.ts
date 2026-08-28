@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { stripComments } from "./util/strip-comments.js";
+
 import { DEFAULT_GATED_CATEGORIES, type PolicyCategory } from "@actradeck/event-model";
 
 import {
@@ -358,16 +360,25 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         Z5 `sudo` 前置 / Z6 alternation サブコマンドが先頭 literal・SEC-DB2R4-2 / QA-DB2R3-2) がいずれも RED へ
   //         反転する (coordinated 再注入で実測・着地条件)。残る構造的死角は「末尾 literal が先頭 literal の反復で
   //         再構成される規則」(`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2): prefix の反復が規則を再びマッチさせ vacuous に
-  //         なる。現行 16 に該当形なし (sweep 019fd74b E で追跡)。
+  //         なる。現行 16 に該当形なし (sweep 019fd74b E で追跡)。また prefix 軸は「反復した seed が規則の gap
+  //         クラス (`[^|;&\n]`) に触れない」前提に依存し、sample が先頭 literal より**前**に gap クラスの除外文字
+  //         (`|` `;` `&` 改行・例 `cd /app && prog … word`) を含む形では反復が分断され 2 乗形が線形域に留まる
+  //         (SEC-LN-1・base 同値・現行 16 の sample に該当形なし・第 4 軸「最後の metachar 以降の後尾」は task 01a048cd-95ae・
+  //         v0.9・full)。
   //   vacuity guard は汎用 seed `a ` を**除いた派生 seed** の非 vacuous 数で判定する (SEC-DB2R4-3: `a ` は全ルールで
   //   非 vacuous なので含めると恒真)。保守手順: guard が RED になったら seed を削るのでなく **軸を足す** (追加のみ)。
   //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。metatest 自身の縮退 (軸の
-  //   差し戻し / near-miss 除去 / 数字除外の除去 / RATIO_MAX 緩和 / guard 無効化 / timeout 短縮) は末尾の「自己弱化
-  //   pin」が RED にする (SEC-DB2R3-2 ≡ QA-DB2R3-5)。
+  //   差し戻し / near-miss 除去 / 数字除外の除去 / RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は
+  //   末尾の「自己弱化 pin」が **単独編集の範囲で** RED にする (SEC-DB2R3-2 ≡ QA-DB2R3-5)。定数・toBe pin・source
+  //   tripwire を同時に書き換える coordinated 編集は通る (pin はその編集を意識的にさせる装置・TDA-LN-1 / QA-LN-5)。
+  //   tripwire は正準 `stripComments` で comment を落とした自 source を走査する (行頭 `//` / ブロック comment の
+  //   逐語コピーで欺けない)。行末 `//` と文字列リテラル内の逐語コピーは依然素通し (sweep 019fd74b C-2 と同じ限界)。
   //   計測は best-of-N の min (redaction の redosBestOfMs と同じ basis・意図的複製 decision 019f2d4f と同旨)。
   describe("INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 各 LITERAL_RULES の実行時間が入力長に線形", () => {
     const minOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);
-    const bestOfMs = (run: () => void, repeat = 9): number => {
+    /** best-of-N の N (min を採る・redaction 側 helper と同 basis)。 */
+    const BEST_OF_REPEAT = 9;
+    const bestOfMs = (run: () => void, repeat = BEST_OF_REPEAT): number => {
       run();
       run();
       const out: number[] = [];
@@ -379,10 +390,16 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       return minOf(out);
     };
     const SMALL = 4096;
-    const LARGE = SMALL * 8;
+    /** 入力を何倍に伸ばして ratio を測るか (LARGE = SMALL × SCALE)。 */
+    const SCALE = 8;
+    const LARGE = SMALL * SCALE;
+    /** 1 計測あたりの regex 実行回数 (timer 分解能に対する余裕)。 */
+    const K = 20;
     // 線形なら ratio ≈ 8 (source + sample 由来 88 seed の実測: p95 ≈ 8.6・worst 14.5 無負荷 / **21.2 CPU 飽和
     //   (2×nproc・880 点)** = 飽和時の余裕 ≈ 1.13×・TDA/QA R3-R4。飽和下でも 2 乗形は ≥ 40 で分離)。prefix seed 軸
-    //   16 本の無負荷実測 (2026-08-28): 6.0〜11.0・worst は #12 `npm run migrat ` 11.0 (2 乗形は 42〜69 で分離)。
+    //   16 本の実測 (2026-08-28・実装者 1 回 + QA 無負荷 3 回 / 2×nproc 飽和 2 回): 4.8〜12.8 無負荷・6.0〜14.5
+    //   飽和 (worst は #11 `redis-cli flushal ` / #12 `npm run migrat `・run により入替わる)。飽和時の余裕 ≈ 1.65×。
+    //   2 乗形は 42〜69 で分離。
     //   2 乗なら ≈ 40〜70 (旧 `*` 形の実測 39.7〜69.5・seed により変動)。閾値 24 は線形 p95 8.6 と 2 乗下限 ≈ 40 の
     //   間 (幾何中点 √(8.6 × 68) ≈ 24)。best-of-9 の min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)・15 連続緑
     //   flake 0 (TDA R3)。
@@ -434,7 +451,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       if (prefix !== null) out.add(prefix);
       return [...out];
     };
-    /** 反復で埋めた入力が規則にマッチしない (= 高コスト経路を最後まで走る) seed か。 */
+    /**
+     * 反復で埋めた入力が規則にマッチしない seed か。マッチする seed は O(1) で short-circuit しうるため計測から外す
+     * (非マッチが高コスト経路を保証するわけではない・TDA-LN-2)。
+     */
     const isLive = (re: RegExp, seed: string): boolean => !re.test(fill(seed, SMALL));
 
     let totalCases = 0;
@@ -451,8 +471,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(derivedLive, "guard は派生 seed のみで計数する").not.toContain(GENERIC_SEED);
         expect(derived).not.toContain(GENERIC_SEED);
       });
-      it(`#${i} ${String(rule.re)} has a sample-derived prefix seed`, () => {
-        expect(prefixSeed(rule.re, cmd)).not.toBeNull();
+      it(`#${i} ${String(rule.re)} has a sample-derived prefix seed wired into the derived set`, () => {
+        const prefix = prefixSeed(rule.re, cmd);
+        expect(prefix).not.toBeNull();
+        // QA-LN-2: helper 単体でなく derivedSeedsFor への配線を pin する (index 単位の剥がしで RED)。
+        expect(derived).toContain(prefix);
       });
       for (const seed of live) {
         it(
@@ -460,7 +483,6 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           () => {
             const small = fill(seed, SMALL);
             const large = fill(seed, LARGE);
-            const K = 20;
             const tSmall = bestOfMs(() => {
               for (let k = 0; k < K; k++) rule.re.test(small);
             });
@@ -485,10 +507,19 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       it("it timeout は 30s (既定 5s では 2 乗形の診断が出ない・QA-DB2R2-3)", () => {
         expect(LINEAR_IT_TIMEOUT_MS).toBe(30_000);
       });
+      it("入力幾何 SMALL 4096 / SCALE 8 / K 20 / best-of 9 (QA-LN-1: SCALE を縮めると 2 乗形が閾値の下に入る)", () => {
+        // 2 乗形の ratio は SCALE² (8² = 64) で閾値 24 の上、SCALE 2 なら 4 で閾値の下に入り検出が消える。
+        expect(SMALL).toBe(4096);
+        expect(SCALE).toBe(8);
+        expect(LARGE).toBe(SMALL * SCALE);
+        expect(K).toBe(20);
+        expect(BEST_OF_REPEAT).toBe(9);
+      });
       it("計測ケース数は LITERAL_RULES 由来の下限以上 (軸の差し戻しで RED)", () => {
-        // 各ルール最低 4 (汎用 1 + prefix 1 + 完全一致 1 + near-miss 1)。実測 104 (2026-08-28・16 ルール・汎用 16 +
-        //   派生 88)。ルールの追加 / 変更で件数が変わったら実測値を更新する (下げる場合は理由を書く)。
-        expect(totalCases).toBeGreaterThanOrEqual(LITERAL_RULES.length * 4);
+        // 各ルール最低 3 (汎用 1 + prefix 1 + source / sample 由来の非 vacuous 1・guard が保証)。実測 per-rule live は
+        //   3〜10・計 104 (2026-08-28・16 ルール・汎用 16 + 派生 88・QA-LN-3)。ルールの追加 / 変更で件数が変わったら
+        //   実測値を更新する (下げる場合は理由を書く)。
+        expect(totalCases).toBeGreaterThanOrEqual(LITERAL_RULES.length * 3);
         expect(totalCases).toBeGreaterThanOrEqual(TOTAL_CASES_MEASURED);
       });
       it("literalRuns: escape 剥がし・構文記号分割・1 字と数字 (束縛値) の除外", () => {
@@ -531,14 +562,22 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(derivedSeedsFor(re, cmd).length).toBeGreaterThan(0);
         expect(derivedSeedsFor(re, cmd).filter((seed) => isLive(re, seed))).toEqual([]);
       });
-      it("literal tripwire: RATIO_MAX / timeout / guard の綴りが本ファイルに残っている (source 走査)", () => {
-        const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+      it("literal tripwire: RATIO_MAX / timeout / guard の綴りが本ファイルの code 行に残っている (comment 除去後の source 走査)", () => {
+        // TDA-LN-1: comment を落とさずに走査すると、pin 行を comment へ逐語コピーしてから code を弱める 2 箇所編集が
+        //   通る。正準 stripComments (inv-approval / inv-check-classifier と同じ helper) の view を走査する。
+        const self = stripComments(readFileSync(fileURLToPath(import.meta.url), "utf8"));
         expect(self).toMatch(/const RATIO_MAX = 24;/);
         expect(self).toMatch(/const LINEAR_IT_TIMEOUT_MS = 30_000;/);
         expect(self).toMatch(/expect\(derivedLive\.length, [^\n]*\)\.toBeGreaterThan\(0\);/);
         expect(self).toMatch(/\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/);
         expect(self).toMatch(/\.toBeLessThan\(RATIO_MAX\);/);
         expect(self).toMatch(/const derivedLive = derived\.filter\(/);
+        expect(self).toMatch(/const SMALL = 4096;/);
+        expect(self).toMatch(/const SCALE = 8;/);
+        expect(self).toMatch(/const LARGE = SMALL \* SCALE;/);
+        expect(self).toMatch(/const K = 20;/);
+        expect(self).toMatch(/const BEST_OF_REPEAT = 9;/);
+        expect(self).toMatch(/repeat = BEST_OF_REPEAT\)/);
       });
     });
   });
