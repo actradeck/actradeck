@@ -379,6 +379,20 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       );
       expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop`).toBe(true);
     }
+    // segment スコープは **正準 (quote-aware) 分割にのみ**適用する (task 01a0480f-d29a)。旧 quote 非対応
+    //   分割は redirect 演算子を segment から除去しないため、legacy union パスにも segment スコープを
+    //   掛けると `&` を含む redirect の**対象語**まで走査に入り、意図した拡張 (引用内 metachar / 行継続) を
+    //   超えて base から乖離する (実測 107 件)。下の 2 行はその境界の歯:
+    //   `&> drop.log` は drop が**リダイレクト先ファイル名**ゆえ low (正準 splitter が対象語ごと除去)、
+    //   `&> out.log drop appdb` は drop が**実サブコマンド**ゆえ high (上の反転リスト)。両者を分けているのは
+    //   字面クラスではなく正準 splitter である、という主張そのものを pin する。
+    for (const cmd of ["mysqladmin status &> drop.log", "mysqladmin status &>> drop.log"]) {
+      expect(
+        classifyCommandRisk(cmd),
+        `${cmd}: redirect 先ファイル名は drop サブコマンドでない (legacy へ segment スコープを漏らさない)`,
+      ).toBe("low");
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop 非付与`).toBe(false);
+    }
     // SEC-DB2R2-2: `{0,512}` の束縛に歯を付ける。corpus の最大 gap は 20 で、`{0,28}` へ縮めても全 suite が
     //   緑のまま現実的な長 option 列 (下の実形は gap 319・assert 値 318) の実呼び出しが low に落ちる。現実形 1 本と境界 (gap 512 可 /
     //   513 不可) を pin する — 束縛を縮める変更はここで RED になり、意図的に変えるなら両方を更新する。
