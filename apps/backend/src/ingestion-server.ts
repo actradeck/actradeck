@@ -356,6 +356,9 @@ export async function buildIngestionServer(opts: IngestionServerOptions): Promis
       auditStore,
       usageStore,
       sidecarRegistry,
+      // TDA-V9-7: reconciler の縮退カウンタ (nonRetirableSkipCount) を readiness 応答へ露出する
+      // 唯一の配線点。落とすと counters が恒久 0 になる (INV-OBSERVABILITY-COUNTERS-WIRING が RED)。
+      reconcilerObserver: approvalReconciler,
       demoLauncher,
       ...(opts.telemetry !== undefined ? { telemetry: opts.telemetry } : {}),
     });

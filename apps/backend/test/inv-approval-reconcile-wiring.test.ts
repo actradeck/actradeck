@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 
-import { newEventId } from "@actradeck/event-model";
+import { newEventId, parseReadinessCountersWire } from "@actradeck/event-model";
 import type { FastifyInstance } from "fastify";
 import { Pool } from "pg";
 
@@ -24,6 +24,8 @@ import { cleanupSessions, dbReachable } from "./helpers.js";
 const DATABASE_URL = process.env.DATABASE_URL;
 const reachable = DATABASE_URL ? await dbReachable(DATABASE_URL) : false;
 const TOKEN = "test-ingest-token-1234567890";
+/** TDA-V9-7: realtime routes (GET /realtime/readiness) を有効化するための token。 */
+const REALTIME_TOKEN = "test-realtime-token-1234567890";
 
 describe.skipIf(!reachable)(
   "INV-APPROVAL-RECONCILE-WIRING: hello 宣言 → 合成 cancel の本番配線 (real PG + real WS)",
@@ -35,7 +37,13 @@ describe.skipIf(!reachable)(
 
     beforeAll(async () => {
       pool = new Pool({ connectionString: DATABASE_URL, max: 5 });
-      app = await buildIngestionServer({ pool, ingestToken: TOKEN, maxPayloadBytes: 64 * 1024 });
+      // TDA-V9-7: realtimeToken を渡して realtime routes も登録する (readiness の本番配線を e2e で見る)。
+      app = await buildIngestionServer({
+        pool,
+        ingestToken: TOKEN,
+        realtimeToken: REALTIME_TOKEN,
+        maxPayloadBytes: 64 * 1024,
+      });
       await app.listen({ port: 0, host: "127.0.0.1" });
       const addr = app.server.address();
       if (addr === null || typeof addr === "string") throw new Error("no port");
@@ -141,5 +149,104 @@ describe.skipIf(!reachable)(
         ws.close();
       }
     });
+
+    /**
+     * INV-OBSERVABILITY-COUNTERS-WIRING (TDA-V9-7 landing・real PG + real WS):
+     * reconciler の `nonRetirableSkipCount` は SEC-R5-2 landing 以来 getter のみで、route / hello /
+     * ログ / telemetry のどこからも読めなかった (「観測可能」が運用上未達)。本テストは
+     * **非 retirable な DB pending を skip させた後**、`GET /realtime/readiness` の counters が
+     * 増えることを本番配線で固定する。
+     * falsifiability: ingestion-server の `reconcilerObserver: approvalReconciler` を削除すると
+     * counters.nonRetirableSkipCount が 0 のまま = RED (INV-WORKITEMS-WIRING と同型の配線ゲート)。
+     */
+    it("非 retirable pending の skip が GET /realtime/readiness の counters に現れる (配線ゲート)", async () => {
+      const sid = `sess_cnt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      sessions.push(sid);
+      // 正準にも known-legacy にも一致しない形 (適合宣言に載り得ない = 合成せず skip 計上のみ)。
+      const nonRetirableId = `${sid}:apr-stale`;
+
+      const before = await readCounters();
+
+      const ws = new WebSocket(`${wsBase}/ingest/ws`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          ws.on("open", () => resolve());
+          ws.on("error", reject);
+        });
+
+        const ackWait = new Promise<Record<string, unknown>>((resolve) => {
+          ws.once("message", (d: Buffer) =>
+            resolve(JSON.parse(d.toString("utf8")) as Record<string, unknown>),
+          );
+        });
+        ws.send(
+          JSON.stringify({
+            event_id: newEventId(),
+            provider: "claude_code",
+            source: "hooks",
+            session_id: sid,
+            event_type: "tool.permission.requested",
+            state: "waiting.approval",
+            timestamp: new Date(Date.now() - 60_000).toISOString(),
+            payload: {
+              kind: "tool.permission.requested",
+              request_id: nonRetirableId,
+              tool_name: "Bash",
+              command: "echo hi",
+              risk_level: "high",
+            },
+          }),
+        );
+        expect((await ackWait).ok).toBe(true);
+
+        // pending ゼロ宣言の hello → 宣言に無いが **形ゲートで retire 対象外** → skip 計上のみ。
+        ws.send(
+          JSON.stringify({
+            type: "hello",
+            control_token: "t",
+            session_ids: [sid],
+            active_pending_request_ids: [],
+          }),
+        );
+
+        // 配線が生きていれば readiness の counters が増える (fire-and-forget ゆえ poll)。
+        await waitFor(
+          async () => (await readCounters()).nonRetirableSkipCount > before.nonRetirableSkipCount,
+        );
+
+        const after = await readCounters();
+        // NO-RAW: 応答は非負整数のみで request_id 原文を含まない。
+        expect(Number.isSafeInteger(after.nonRetirableSkipCount)).toBe(true);
+        expect(after.nonRetirableSkipCount).toBeGreaterThan(before.nonRetirableSkipCount);
+        expect(after.unstableRequestIdCount).toBe(0); // hello は daemon_counters を載せていない = 未報告。
+
+        const res = await app.inject({
+          method: "GET",
+          url: "/realtime/readiness",
+          headers: { authorization: `Bearer ${REALTIME_TOKEN}` },
+        });
+        expect(res.body).not.toContain("apr-stale");
+        expect(res.body).not.toContain(sid);
+      } finally {
+        ws.close();
+      }
+    });
+
+    /** readiness の counters (非負整数のみ) を読む。 */
+    async function readCounters(): Promise<{
+      unstableRequestIdCount: number;
+      nonRetirableSkipCount: number;
+    }> {
+      const res = await app.inject({
+        method: "GET",
+        url: "/realtime/readiness",
+        headers: { authorization: `Bearer ${REALTIME_TOKEN}` },
+      });
+      expect(res.statusCode).toBe(200);
+      // read 境界は event-model の正準パーサで再射影する (endpoint 応答を盲信しない)。
+      return parseReadinessCountersWire((res.json() as { counters?: unknown }).counters);
+    }
   },
 );

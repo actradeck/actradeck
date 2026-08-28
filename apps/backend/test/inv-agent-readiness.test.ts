@@ -195,3 +195,139 @@ describe("ADR 019f1972 §2b agentReadiness", () => {
     expect(reg.agentReadiness().claude).toEqual({ binaryOnPath: true, anyHook: true });
   });
 });
+
+/**
+ * INV-OBSERVABILITY-COUNTERS-READINESS (TDA-V9-7 landing): 縮退カウンタ 2 種の readiness 集約。
+ *
+ * 背景: `unstableRequestIdCount` (sidecar・SEC-R4-4 で「runtime consumer 未配線」と開示) と
+ * `nonRetirableSkipCount` (backend reconciler・SEC-R5-2 landing) は getter として存在するだけで
+ * どこからも読めなかった (「観測可能」が運用上未達)。readiness 応答が唯一の読取り路になる。
+ *
+ * 焦点 (falsifiable):
+ *  - daemon 由来は open conn の **sum fold** (延べ数)・切断 conn は除外。
+ *  - backend 由来は呼び出し側 (route) 注入値をそのまま射影 (省略 → 0)。
+ *  - 受信検証は event-model 正準パーサ (負数 / 非整数 / 非 object / 余剰 field を落とす)。
+ *  - reannounce で counters が落ちない (省略 hello は前回値保持・INV egress-handshake 2d と同型:
+ *    片方の経路で field を落とすと観測が silent に 0 へ降格する)。
+ */
+describe("TDA-V9-7 readiness counters", () => {
+  it("counters 未報告 → 全 0 (closed shape・他 field を生やさない)", () => {
+    const reg = new SidecarRegistry();
+    const d1 = new FakeLink();
+    reg.add(d1);
+    reg.handleHello(d1, { type: "hello", control_token: "c1", session_ids: [] });
+
+    const r = reg.agentReadiness();
+    expect(r.counters).toEqual({ unstableRequestIdCount: 0, nonRetirableSkipCount: 0 });
+    expect(Object.keys(r.counters).sort()).toEqual([
+      "nonRetirableSkipCount",
+      "unstableRequestIdCount",
+    ]);
+  });
+
+  it("daemon 由来 unstableRequestIdCount は open conn の sum fold (切断 conn は除外)", () => {
+    const reg = new SidecarRegistry();
+    const d1 = new FakeLink();
+    const d2 = new FakeLink();
+    const gone = new FakeLink();
+    reg.add(d1);
+    reg.add(d2);
+    reg.add(gone);
+    reg.handleHello(d1, {
+      type: "hello",
+      control_token: "c1",
+      session_ids: [],
+      daemon_counters: { unstableRequestIdCount: 2 },
+    });
+    reg.handleHello(d2, {
+      type: "hello",
+      control_token: "c2",
+      session_ids: [],
+      daemon_counters: { unstableRequestIdCount: 9 },
+    });
+    reg.handleHello(gone, {
+      type: "hello",
+      control_token: "c3",
+      session_ids: [],
+      daemon_counters: { unstableRequestIdCount: 1000 },
+    });
+    gone.open = false;
+
+    // 2 + 9 (切断 conn の 1000 は入らない)。OR fold でなく加算であることも pin。
+    expect(reg.agentReadiness().counters.unstableRequestIdCount).toBe(11);
+  });
+
+  it("backend 由来 nonRetirableSkipCount は注入値を射影 (省略 → 0・負数/非整数は 0 へ縮退)", () => {
+    const reg = new SidecarRegistry();
+    const link = new FakeLink();
+    reg.add(link);
+    reg.handleHello(link, { type: "hello", control_token: "c", session_ids: [] });
+
+    expect(reg.agentReadiness(3).counters.nonRetirableSkipCount).toBe(3);
+    expect(reg.agentReadiness().counters.nonRetirableSkipCount).toBe(0);
+    expect(reg.agentReadiness(-5).counters.nonRetirableSkipCount).toBe(0);
+    expect(reg.agentReadiness(1.5).counters.nonRetirableSkipCount).toBe(0);
+    expect(reg.agentReadiness(Number.NaN).counters.nonRetirableSkipCount).toBe(0);
+  });
+
+  it("handleHello は不正 daemon_counters を弾く (非 object → 未報告・負数/非整数/余剰 field → 落とす)", () => {
+    const reg = new SidecarRegistry();
+    for (const bad of ["x", 7, null, [], true]) {
+      const link = new FakeLink();
+      reg.add(link);
+      expect(() =>
+        reg.handleHello(link, {
+          type: "hello",
+          control_token: "c",
+          session_ids: [],
+          daemon_counters: bad,
+        }),
+      ).not.toThrow();
+    }
+    expect(reg.agentReadiness().counters.unstableRequestIdCount).toBe(0);
+
+    // 敵対 daemon: 負数 + パス/secret 様の余剰 field。
+    const hostile = new FakeLink();
+    reg.add(hostile);
+    reg.handleHello(hostile, {
+      type: "hello",
+      control_token: "c",
+      session_ids: [],
+      daemon_counters: {
+        unstableRequestIdCount: -42,
+        leakedPath: "/home/victim/.claude/settings.json",
+        token: "glpat-XXXXXXXXXXXXXXXXXXXX",
+      },
+    });
+    const r = reg.agentReadiness();
+    expect(r.counters.unstableRequestIdCount).toBe(0); // 負数は透過しない。
+    expect(JSON.stringify(r)).not.toContain("victim");
+    expect(JSON.stringify(r)).not.toContain("glpat-");
+  });
+
+  it("reannounce: 有効 counters で上書き・省略では前回値を保持 (観測の silent 0 降格を防ぐ)", () => {
+    const reg = new SidecarRegistry();
+    const link = new FakeLink();
+    reg.add(link);
+    reg.handleHello(link, {
+      type: "hello",
+      control_token: "c",
+      session_ids: [],
+      daemon_counters: { unstableRequestIdCount: 4 },
+    });
+    expect(reg.agentReadiness().counters.unstableRequestIdCount).toBe(4);
+
+    // 増分が届く (延べ数は daemon 側が権威・hello ごとに最新化)。
+    reg.handleHello(link, {
+      type: "hello",
+      control_token: "c",
+      session_ids: [],
+      daemon_counters: { unstableRequestIdCount: 6 },
+    });
+    expect(reg.agentReadiness().counters.unstableRequestIdCount).toBe(6);
+
+    // field 省略の reannounce → 前回の有効値を保持 (0 へ落とさない)。
+    reg.handleHello(link, { type: "hello", control_token: "c", session_ids: [] });
+    expect(reg.agentReadiness().counters.unstableRequestIdCount).toBe(6);
+  });
+});

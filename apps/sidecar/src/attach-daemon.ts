@@ -39,7 +39,7 @@ import { HookReceiver } from "./hook-receiver.js";
 import { generateHookToken } from "./settings-injection.js";
 import { EventSink, type OutOfOrderObservation } from "./sink.js";
 import { EventStore } from "./store.js";
-import { pendingIdsFromBridge, WsClient } from "./ws-client.js";
+import { daemonCountersFromBridge, pendingIdsFromBridge, WsClient } from "./ws-client.js";
 
 export interface AttachDaemonOptions {
   readonly wsUrl: string;
@@ -137,6 +137,9 @@ export class AttachDaemon {
       // connect 後 = 構築完了後のみ)。未生成ガードは防御的 (構造上到達しない)。
       runtimeEpoch: this.runtimeEpoch,
       pendingApprovalIdsProvider: pendingIdsFromBridge(() => this.approvalBridge), // 正準配線 (QA-R2-4: undefined=省略・?? [] 禁止)
+      // TDA-V9-7: bridge の縮退カウンタ (unstableRequestIdCount・非負整数) を hello へ相乗りさせ
+      // backend の GET /realtime/readiness から観測可能にする (SEC-R4-4 の未配線解消)。同じ遅延参照。
+      daemonCountersProvider: daemonCountersFromBridge(() => this.approvalBridge), // 正準配線 (未生成=省略)
       ...(opts.ingestToken !== undefined && opts.ingestToken.length > 0
         ? { ingestToken: opts.ingestToken }
         : {}),

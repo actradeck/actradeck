@@ -94,6 +94,9 @@ describe("INV daemon-class active_pending_request_ids 配線 (real ws)", () => {
     expect(String(hello?.runtime_epoch)).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     );
+    // TDA-V9-7: 縮退カウンタも同じ hello 経路で運ばれる (daemonCountersProvider 未配線なら field 欠落 = RED)。
+    // 正常時は 0 報告 (「縮退なし」の宣言)。NO-RAW: 非負整数のみで request_id 原文を含まない。
+    expect(hello?.daemon_counters).toEqual({ unstableRequestIdCount: 0 });
   });
 
   it("CodexRolloutDaemon の hello は宣言を載せない (observe-only → reconcile 対象外の安全側)", async () => {
@@ -118,6 +121,8 @@ describe("INV daemon-class active_pending_request_ids 配線 (real ws)", () => {
     const hello = await firstHello(frames);
     expect(hello?.type).toBe("hello");
     expect("active_pending_request_ids" in (hello ?? {})).toBe(false);
+    // TDA-V9-7: observe-only は ApprovalBridge を持たないため counters も載せない (未報告扱い)。
+    expect("daemon_counters" in (hello ?? {})).toBe(false);
   });
 
   it("managed Sidecar / AttachDaemon とも provider は共有 helper 経由 (ソース結合 pin)", () => {
@@ -128,6 +133,12 @@ describe("INV daemon-class active_pending_request_ids 配線 (real ws)", () => {
       expect(
         /pendingApprovalIdsProvider:\s*pendingIdsFromBridge\(/.test(src),
         `${file} が pendingIdsFromBridge を配線していない`,
+      ).toBe(true);
+      // TDA-V9-7: 縮退カウンタも同じ正準 helper 経由で配線する (手書き `?? 0` / 直読みへ置換されると
+      // bridge 未生成窓で 0 を「報告された 0」として送ってしまい未報告と区別できなくなる)。
+      expect(
+        /daemonCountersProvider:\s*daemonCountersFromBridge\(/.test(src),
+        `${file} が daemonCountersFromBridge を配線していない`,
       ).toBe(true);
     }
   });
