@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: "Snapshot day (YYYY-MM-DD); defaults to yesterday UTC"
+        description: "Snapshot day (YYYY-MM-DD); defaults to yesterday UTC. Use it to backfill a missed day."
         required: false
         type: string
 
@@ -18,13 +18,19 @@ concurrency:
   group: public-metrics-snapshot
   cancel-in-progress: false
 
+env:
+  # Snapshots land on a dedicated branch, never on main: the main ruleset requires a pull
+  # request and the `verify` status check, so a direct push by this workflow is rejected with
+  # GH013 (every scheduled run failed that way from 2026-08-26 until this change). The branch
+  # is outside the ruleset, holds only metrics/public/, and is documented in
+  # docs/usage-metrics.md.
+  METRICS_BRANCH: metrics
+
 jobs:
   collect:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.16.0"
@@ -33,20 +39,36 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SNAPSHOT_DATE: ${{ inputs.date }}
         run: |
+          out="$RUNNER_TEMP/snapshot"
           if [ -n "$SNAPSHOT_DATE" ]; then
-            node scripts/collect-public-metrics.mjs --date "$SNAPSHOT_DATE"
+            node scripts/collect-public-metrics.mjs --date "$SNAPSHOT_DATE" --output-dir "$out"
           else
-            node scripts/collect-public-metrics.mjs
+            node scripts/collect-public-metrics.mjs --output-dir "$out"
           fi
-      - name: Commit snapshot when changed
+      - name: Commit snapshot to the metrics branch when changed
         run: |
-          git add metrics/public
-          if git diff --cached --quiet; then
-            exit 0
-          fi
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore(metrics): snapshot public distribution signals [skip ci]"
-          # TDA-18 (2026-08-13 audit): a human push since checkout must not red the daily run.
-          git pull --rebase origin "${GITHUB_REF_NAME:-main}"
-          git push
+          wt="$RUNNER_TEMP/metrics-branch"
+          if git ls-remote --exit-code --heads origin "$METRICS_BRANCH" >/dev/null; then
+            git fetch --depth=1 origin "$METRICS_BRANCH"
+            git worktree add -B "$METRICS_BRANCH" "$wt" "origin/$METRICS_BRANCH"
+          else
+            # First run: start the branch from an empty tree so it carries nothing but snapshots.
+            root=$(git commit-tree "$(git hash-object -t tree /dev/null)" -m "chore(metrics): start the metrics branch")
+            git worktree add -b "$METRICS_BRANCH" "$wt" "$root"
+          fi
+          mkdir -p "$wt/metrics/public"
+          cp metrics/public/README.md "$wt/metrics/public/README.md"
+          cp "$RUNNER_TEMP"/snapshot/*.json "$wt/metrics/public/"
+          git -C "$wt" add metrics/public
+          if git -C "$wt" diff --cached --quiet; then
+            exit 0
+          fi
+          git -C "$wt" commit -m "chore(metrics): snapshot public distribution signals [skip ci]"
+          # TDA-18 (2026-08-13 audit): a push to the branch since fetch must not red the daily run.
+          if git ls-remote --exit-code --heads origin "$METRICS_BRANCH" >/dev/null; then
+            git -C "$wt" pull --rebase origin "$METRICS_BRANCH"
+          fi
+          git -C "$wt" push -u origin "$METRICS_BRANCH"

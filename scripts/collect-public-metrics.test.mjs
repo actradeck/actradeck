@@ -84,3 +84,19 @@ test("traffic endpoints are never fetched (SEC-7)", async () => {
     assert.doesNotMatch(url, /\/traffic\//);
   }
 });
+
+// The main ruleset requires a pull request and the `verify` check, so the workflow must publish
+// snapshots on the dedicated `metrics` branch. Every scheduled run from 2026-08-26 to 2026-08-28
+// failed with GH013 while it still pushed to main; this pins the branch and the push shape.
+test("workflow publishes snapshots on the metrics branch, never on main", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const workflow = await readFile(
+    new URL("../.github/workflows/public-metrics.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /^\s*METRICS_BRANCH: metrics$/m);
+  assert.match(workflow, /git -C "\$wt" push -u origin "\$METRICS_BRANCH"$/m);
+  assert.match(workflow, /--output-dir "\$out"/);
+  assert.doesNotMatch(workflow, /GITHUB_REF_NAME/);
+  assert.doesNotMatch(workflow, /push(?: -u)? origin main|push --force|push -f\b/);
+});

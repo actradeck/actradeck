@@ -1,6 +1,11 @@
 # Public distribution snapshots
 
-The scheduled `public-metrics.yml` workflow writes one JSON snapshot per UTC day here.
+The scheduled `public-metrics.yml` workflow writes one JSON snapshot per UTC day into this
+directory on the dedicated `metrics` branch
+(<https://github.com/actradeck/actradeck/tree/metrics/metrics/public>). On `main` this directory
+holds only this README: the `main` ruleset requires a pull request and the `verify` check, so the
+workflow cannot push here, and snapshot commits stay out of the product history. See
+`docs/usage-metrics.md` for the fields and for how a missed day is backfilled.
 
 These values are distribution signals, not installations or users:
 
