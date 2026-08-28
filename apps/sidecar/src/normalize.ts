@@ -2467,7 +2467,36 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   検索引数 (`grep 'DROP DATABASE' …`) が high になる FP は `DROP TABLE` と同じ既知の safe-direction
  *   over-gate (ベンチ doc の calibration table に開示)。
  *
- * ReDoS 安全: 各 re は固定 alternation + 単純 `\s+`/`[a-z]*` (入れ子量化なし・redaction-redos 教訓)。
+ * **他エンジン / 他粒度の drop 形 (task 01a0440b・TDA-DB-6・PR #44 の pre-existing M)**:
+ *   db-drop は PostgreSQL 偏在で、`mysqladmin drop` / mongosh `db.dropDatabase()` / `DROP SCHEMA` /
+ *   `DROP OWNED BY` / redis `FLUSHALL`・`FLUSHDB` は risk=low・category 空 (両モードでカード無し) だった。
+ *   同 class として**追加のみ**で足す。`drop_?database\s*\(` は mongosh の JS 形と pymongo / sqlalchemy-utils の
+ *   snake_case 形を 1 本で持つ (`echo drop_database` のような括弧無しは踏まない)。`mysqladmin` は
+ *   `[^|;&\n]{0,512}` で **quote 非認識の字面境界** (`|` `;` `&` 改行を挟まない 512 字以内) の `drop`
+ *   サブコマンドだけ見る (`mysqladmin status && … drop` は踏まない)。既知の限界 (SEC-DB2-2 / TDA-DB2-2・
+ *   task 01a0480f-d29a・v0.9): 引用内の metachar (`-p'a;b'`) や行継続 (`\\` + 改行) で分断され low になる。正準
+ *   quote-aware 分割 (`splitSegments`) の segment 単位で適用する構造修正は同 task で行う (手書き境界の是正)。
+ *   bare-token の `flushall` / `flushdb` は `dropdb` と同じ FP class (`grep -rn flushall src/` が high) —
+ *   ベンチ corpus に良性担体を置いて測る。Mongo の `db.collection.drop()` は `.drop(` が pandas 等と衝突する
+ *   ため**意図的に非対象** (docs/approval-policy.md の注記に開示)。
+ *
+ * ReDoS 安全の基準は**入力長に対する線形スケーリング**であって量化子の本数ではない (SEC-DB2-1):
+ *   `\b<program>\b[^…]*\b<word>\b` は開始位置 O(n) × 走査 O(n) で O(n²) になる (実測 exponent 2.00・
+ *   16 KiB で 63 ms)。`{0,512}` で束縛して線形化 (判定は gap ≤ 512 で同値・境界 512/513 と現実的な長 option
+ *   列 gap 319 を INV-DB-DROP-RISK-VERDICT が pin。公開 corpus の最大 gap は 20 で束縛値の歯は unit test 3 行に
+ *   載る・SEC-DB2R3-4)。全ルールの線形性は INV-LITERAL-RULES-LINEAR (inv-policy-categories) が **regex source
+ *   由来の敵対 seed + sample 先頭語 seed** で best-of-N 回帰固定する。**網羅の範囲 (SEC-DB2R3-1 / QA-DB2R3-1)**:
+ *   source 由来 seed は先頭 literal が**平坦に綴られた**ルール (現行 16 本中 14 本・#2 fork-bomb は literal run 空、
+ *   #11 flush は alternation で断片化・どちらも gap 無し) に届く。alternation / 任意記号を跨ぐ綴り
+ *   (`(?:mysql|mariadb)admin` / `mysql_?admin`) では source seed が断片化するため、sample 先頭語を**追加軸**として
+ *   常に併用する (軸は追加のみ・R2 で置換していたのを是正・2 乗形 S1/S3・R3 Y4 が RED へ反転する実測)。残る死角の
+ *   正確な条件は **sample 先頭語 ≠ 規則の先頭 literal** (`sh -c '…'` / `sudo …` の sample・alternation 綴りの
+ *   サブコマンドが先頭 literal・先頭が 2 語連鎖 `A\s+B[^…]*C`・SEC-DB2R4-2 / QA-DB2R3-2)。また vacuity guard は
+ *   汎用 seed `a ` が常に非 vacuous なため現状は恒真 (SEC-DB2R4-3)。sample 由来「マッチしなくなる最長 prefix」軸・
+ *   guard の実効化・metatest 自己弱化 pin は task 01a0484c-ecbd (v0.9・full・SEC 検証済み)。**LINEAR metatest の seed 生成 / RATIO_MAX /
+ *   timeout の変更は境界ゲートの走査範囲変更 = full 監査既定** (finding-registry・SEC-DB2R3-3)。束縛後の残余コスト (16 KiB 敵対入力・
+ *   base 比): risk 経路 ≈ 3.8× / categories 経路 ≈ 7.0× / 承認 hook 経路 ≈ 1.7× (TDA-DB2R2-7 / SEC R2 実測・
+ *   良性入力は 1.0×)。
  */
 interface LiteralRule {
   readonly re: RegExp;
@@ -2483,6 +2512,12 @@ export const LITERAL_RULES: readonly LiteralRule[] = [
   { re: /\btruncate\s+table\b/i, category: "db-drop", high: true },
   { re: /\bdrop\s+database\b/i, category: "db-drop", high: true },
   { re: /\bdropdb\b/i, category: "db-drop", high: true }, // PostgreSQL CLI 形 (同 class)
+  // task 01a0440b (TDA-DB-6): 他エンジン / 他粒度の同 class。追加のみ (削除禁止規律)。
+  { re: /\bdrop\s+schema\b/i, category: "db-drop", high: true }, // PostgreSQL schema 粒度 / MySQL の DATABASE 同義
+  { re: /\bdrop\s+owned\s+by\b/i, category: "db-drop", high: true }, // PostgreSQL: role 所有物の一括 drop
+  { re: /\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i, category: "db-drop", high: true }, // MySQL CLI 形 (quote 非認識の字面境界・512 字で束縛 = 線形)
+  { re: /\bdrop_?database\s*\(/i, category: "db-drop", high: true }, // mongosh db.dropDatabase() / pymongo・sqlalchemy-utils drop_database(
+  { re: /\bflush(?:all|db)\b/i, category: "db-drop", high: true }, // redis FLUSHALL / FLUSHDB (bare-token・dropdb と同じ FP class)
   { re: /\bmigrate\b/i, category: "migrate-prod", high: true },
   { re: /\bproduction\b/i, category: "migrate-prod", high: true },
   { re: /\bgit\s+reset\s+--hard\b/i, category: "history-rewrite", high: true },

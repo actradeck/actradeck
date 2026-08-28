@@ -198,6 +198,14 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     { re: /\btruncate\s+table\b/i, cmd: "psql -c 'truncate table sessions'" },
     { re: /\bdrop\s+database\b/i, cmd: "psql -c 'drop database staging'" },
     { re: /\bdropdb\b/i, cmd: "dropdb staging" },
+    { re: /\bdrop\s+schema\b/i, cmd: "psql -c 'drop schema public cascade'" },
+    { re: /\bdrop\s+owned\s+by\b/i, cmd: "psql -c 'drop owned by app'" },
+    {
+      re: /\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i,
+      cmd: "mysqladmin -u root -p --force drop appdb",
+    },
+    { re: /\bdrop_?database\s*\(/i, cmd: "mongosh app --eval 'db.dropDatabase()'" },
+    { re: /\bflush(?:all|db)\b/i, cmd: "redis-cli flushall" },
     { re: /\bmigrate\b/i, cmd: "npm run migrate" },
     { re: /\bproduction\b/i, cmd: "deploy --env production" },
     { re: /\bgit\s+reset\s+--hard\b/i, cmd: "git reset --hard HEAD~1" },
@@ -251,6 +259,171 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       LITERAL_RULES.every((r) => r.high),
       "LITERAL_RULES に category-only は無い",
     ).toBe(true);
+  });
+
+  it("INV-DB-DROP-RISK-VERDICT (task 01a0440b): 他エンジン / 他粒度の drop 形も risk=high かつ db-drop", () => {
+    // TDA-DB-6 (PR #44 pre-existing M): db-drop literal が PostgreSQL 偏在で、以下は両モードともカード無しだった。
+    //   追加のみ (削除禁止規律)。各形は risk と category の両方を pin — 片方に退行したら RED。
+    for (const cmd of [
+      // MySQL CLI: `mysqladmin [options] drop db` (--force / -f で確認プロンプト無し)
+      "mysqladmin -u root -p --force drop appdb",
+      "mysqladmin -f drop appdb",
+      "MYSQLADMIN -h db.internal drop appdb", // `/i` load-bearing
+      // Mongo: mongosh の JS 形 / pymongo・sqlalchemy-utils の snake_case 形
+      "mongosh mongodb://localhost:27017/app --eval 'db.dropDatabase()'",
+      "mongosh app --eval 'db.dropDatabase( )'",
+      "python -c 'import pymongo; pymongo.MongoClient().drop_database(\"app\")'",
+      // PostgreSQL の schema / owner 粒度・MySQL の DATABASE 同義語
+      "psql -c 'DROP SCHEMA public CASCADE'",
+      "mysql -e 'drop schema app'",
+      "psql -h db.internal -c 'DROP OWNED BY app'",
+      // redis: 全 DB / 選択 DB のキー全消去
+      "redis-cli FLUSHALL",
+      "redis-cli -h cache.internal -n 3 flushdb async",
+    ]) {
+      expect(classifyCommandRisk(cmd), `${cmd}: risk は high`).toBe("high");
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop category`).toBe(true);
+    }
+    // 非該当近傍: サブコマンド無し / 区切り文字 (`|` `;` `&` 改行) の向こう側 / 括弧無し / 単語境界。
+    for (const cmd of [
+      "mysqladmin status",
+      "mysqladmin -u root processlist",
+      "mysqladmin status && echo drop", // `&&` を跨いだ drop は字面境界の外 (mysqladmin ルール非該当)
+      "grep -rn dropDatabase docs/", // 括弧無し (メソッド呼び出しでない)
+      "echo drop_database",
+      "psql -c 'drop schemas'", // `schema` の単語境界
+      "echo flushdbx",
+      "echo noflushdb",
+    ]) {
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop 非付与`).toBe(false);
+    }
+    // bare-token 形の既知 FP class (dropdb と同じ): 単語を含むだけで high。意図した safe-direction over-gate と
+    //   して pin する (ベンチ corpus の良性担体 `grep -rn flushall src/` と同じ事実)。
+    expect(classifyCommandRisk("grep -rn flushall src/")).toBe("high");
+    expect(classifyCommandCategories("grep -rn flushall src/").has("db-drop")).toBe(true);
+    // 既知の限界 (SEC-DB2-2 / TDA-DB2-2・task 01a0480f-d29a・v0.9): mysqladmin ルールの境界は quote 非認識の
+    //   字面判定で、引用内 metachar と行継続で分断され low になる (base も low = 弱化ではない)。正準 segment
+    //   単位適用が着地したらこの 2 件は **high 側へ反転** させる (削除でなく反転・documented-limitation tripwire)。
+    for (const cmd of [
+      "mysqladmin -u root -p'a;b' drop appdb",
+      "mysqladmin -u root \\\n  drop appdb",
+    ]) {
+      expect(
+        classifyCommandCategories(cmd).has("db-drop"),
+        `${cmd}: 既知の限界 (quote 非認識境界)`,
+      ).toBe(false);
+    }
+    // SEC-DB2R2-2: `{0,512}` の束縛に歯を付ける。corpus の最大 gap は 20 で、`{0,28}` へ縮めても全 suite が
+    //   緑のまま現実的な長 option 列 (下の実形は gap 319・assert 値 318) の実呼び出しが low に落ちる。現実形 1 本と境界 (gap 512 可 /
+    //   513 不可) を pin する — 束縛を縮める変更はここで RED になり、意図的に変えるなら両方を更新する。
+    const longOptions =
+      "mysqladmin --host=db.internal --port=3306 --user=admin --ssl-mode=VERIFY_IDENTITY " +
+      "--ssl-ca=/etc/mysql/certs/ca.pem --ssl-cert=/etc/mysql/certs/client-cert.pem " +
+      "--ssl-key=/etc/mysql/certs/client-key.pem --connect-timeout=30 --default-character-set=utf8mb4 " +
+      "--protocol=TCP --compress --verbose --wait=3 --shutdown-timeout=60 --force drop appdb";
+    expect(longOptions.indexOf(" drop ") - "mysqladmin".length).toBeGreaterThan(250);
+    expect(classifyCommandRisk(longOptions)).toBe("high");
+    expect(classifyCommandCategories(longOptions).has("db-drop")).toBe(true);
+    const withGap = (n: number): string => `mysqladmin ${"x".repeat(n - 2)} drop appdb`;
+    expect(classifyCommandCategories(withGap(512)).has("db-drop"), "gap 512 は束縛内").toBe(true);
+    expect(classifyCommandCategories(withGap(513)).has("db-drop"), "gap 513 は束縛外").toBe(false);
+    // QA-DB2-3: 境界軸を左右対称に pin する (`&&` だけでなく `|` `;` 改行の各区切りの向こう側の drop は非該当)。
+    //   軸は追加のみ・削除禁止 (finding-registry)。
+    for (const cmd of [
+      "mysqladmin status | grep drop",
+      "mysqladmin status; echo drop",
+      "mysqladmin status\necho drop",
+    ]) {
+      expect(
+        classifyCommandCategories(cmd).has("db-drop"),
+        `${cmd}: 区切りを跨いだ drop は非該当`,
+      ).toBe(false);
+    }
+  });
+
+  // INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 全 LITERAL_RULES が入力長に対して線形にスケールする。
+  //   `\b<program>\b[^…]*\b<word>\b` 形は開始位置 O(n) × 走査 O(n) で O(n²) (mysqladmin ルールの初版・
+  //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で、先頭 literal が**平坦に
+  //   綴られた**追加ルールを自動網羅する (現行 14/16・#2 は literal run 空・#11 は alternation で断片化。alternation /
+  //   文字クラスを跨ぐ綴りには source 由来 seed が届かず、sample 先頭語が規則の先頭 literal と一致するときだけ捕捉 —
+  //   SEC-DB2R3-1・sample 由来 prefix seed 軸は task 01a0484c-ecbd)。literal run が空のルール (#2 fork-bomb) は sample
+  //   先頭語を常に併用する (fallback でなく追加軸・QA-DB2R3-1)。保守手順: guard が RED になったら seed を削るの
+  //   でなく **軸を足す** (追加のみ)。
+  //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。
+  //   計測は best-of-N の min (redaction の redosBestOfMs と同じ basis・意図的複製 decision 019f2d4f と同旨)。
+  describe("INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 各 LITERAL_RULES の実行時間が入力長に線形", () => {
+    const minOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);
+    const bestOfMs = (run: () => void, repeat = 9): number => {
+      run();
+      run();
+      const out: number[] = [];
+      for (let i = 0; i < repeat; i++) {
+        const t = process.hrtime.bigint();
+        run();
+        out.push(Number(process.hrtime.bigint() - t) / 1e6);
+      }
+      return minOf(out);
+    };
+    const SMALL = 4096;
+    const LARGE = SMALL * 8;
+    // 線形なら ratio ≈ 8 (source + sample 由来 88 seed の実測: p95 ≈ 8.6・worst 14.5 無負荷 / **21.2 CPU 飽和
+    //   (2×nproc・880 点)** = 飽和時の余裕 ≈ 1.13×・TDA/QA R3-R4。飽和下でも 2 乗形は ≥ 40 で分離)。
+    //   2 乗なら ≈ 40〜70 (旧 `*` 形の実測 39.7〜69.5・seed により変動)。閾値 24 は線形 p95 8.6 と 2 乗下限 ≈ 40 の
+    //   間 (幾何中点 √(8.6 × 68) ≈ 24)。best-of-9 の min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)・15 連続緑
+    //   flake 0 (TDA R3)。二次形は ratio 判定の前に既定 5s timeout で落ちて診断が出ないことがあるため it の
+    //   timeout を明示する (QA-DB2R2-3)。
+    const RATIO_MAX = 24;
+    const fill = (seed: string, n: number): string =>
+      seed.repeat(Math.ceil(n / seed.length)).slice(0, n);
+    // SEC-DB2R2-1: 敵対 seed は **rule.re.source から導出**する。sample 文字列の先頭語だと規則の先頭 literal に
+    //   届くのが 16 ルール中 6 本・うち 3 本は seed が規則にマッチして O(1) short-circuit (vacuous) となり、実効
+    //   4 本しか高コスト経路を測れなかった (sample を `sh -c '…'` 形に書き換えた 2 乗 regex が SURVIVED した実測)。
+    //   regex の literal run (escape を剥がし構文記号で分割した英数字列) ごとに「完全一致の反復」と「末尾 1 字を
+    //   潰した near-miss の反復」を seed にし、**規則がマッチする seed は vacuous として計測から外す**。各ルールに
+    //   非 vacuous seed が最低 1 本あることを要求する (vacuity guard)。
+    const literalRuns = (re: RegExp): string[] =>
+      re.source
+        .replace(/\\[bBsSwWdDn]/g, " ")
+        .replace(/\\(.)/g, "$1")
+        .split(/[^A-Za-z0-9_]+/)
+        .filter((s) => s.length >= 2 && !/^\d+$/.test(s));
+    const seedsFor = (rule: { re: RegExp }, i: number): string[] => {
+      const runs = literalRuns(rule.re);
+      // QA-DB2R3-1: sample 先頭語の軸は **追加**であって置換ではない (軸は追加のみ・削除禁止)。source 由来の
+      //   literal run は `(?:mysql|mariadb)admin` / `mysql_?admin` のような綴りで断片化して規則先頭に届かず、
+      //   sample 先頭語がその穴を埋める (S1/S3 が RED へ反転する実測)。
+      const base = [...runs, samples[i]!.cmd.split(/\s+/)[0]!];
+      const out = new Set<string>(["a "]);
+      for (const r of base) {
+        out.add(`${r} `);
+        out.add(`${r.slice(0, -1)}_ `);
+      }
+      return [...out];
+    };
+    LITERAL_RULES.forEach((rule, i) => {
+      const seeds = seedsFor(rule, i);
+      const live = seeds.filter((seed) => !rule.re.test(fill(seed, SMALL)));
+      // SEC-DB2R4-3: 汎用 seed `a ` が常に非 vacuous なため本 guard は現状恒真 (tautology)。source / sample 由来に
+      //   限った計数への実効化は task 01a0484c-ecbd (走査範囲変更 = full)。
+      it(`#${i} ${String(rule.re)} has a non-vacuous adversarial seed`, () => {
+        expect(live.length, `seeds=${JSON.stringify(seeds)}`).toBeGreaterThan(0);
+      });
+      for (const seed of live) {
+        it(`#${i} ${String(rule.re)} seed=${JSON.stringify(seed)}`, () => {
+          const small = fill(seed, SMALL);
+          const large = fill(seed, LARGE);
+          const K = 20;
+          const tSmall = bestOfMs(() => {
+            for (let k = 0; k < K; k++) rule.re.test(small);
+          });
+          const tLarge = bestOfMs(() => {
+            for (let k = 0; k < K; k++) rule.re.test(large);
+          });
+          const ratio = tLarge / Math.max(tSmall, 0.005);
+          expect(ratio, `scaling ratio (8× input): ${ratio.toFixed(1)}`).toBeLessThan(RATIO_MAX);
+        }, 30_000);
+      }
+    });
   });
 });
 

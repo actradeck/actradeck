@@ -58,13 +58,13 @@ const PUBLISHED = {
     kindFamilies: 29,
   },
   classifier: {
-    micro: { support: 63, precisionPct: "82.9", recallPct: "100.0" },
+    micro: { support: 68, precisionPct: "82.9", recallPct: "100.0" },
     // support / precision% / recall% per the "Results — risk classifier" table.
     byCategory: [
       { category: "recursive-rm", support: 25, precisionPct: "100.0", recallPct: "100.0" },
       { category: "disk-destroy", support: 4, precisionPct: "80.0", recallPct: "100.0" },
       { category: "history-rewrite", support: 8, precisionPct: "100.0", recallPct: "100.0" },
-      { category: "db-drop", support: 4, precisionPct: "66.7", recallPct: "100.0" },
+      { category: "db-drop", support: 9, precisionPct: "75.0", recallPct: "100.0" },
       { category: "fork-bomb", support: 1, precisionPct: "100.0", recallPct: "100.0" },
       { category: "perm-change", support: 5, precisionPct: "100.0", recallPct: "100.0" },
       { category: "inline-code", support: 13, precisionPct: "100.0", recallPct: "100.0" },
@@ -74,24 +74,24 @@ const PUBLISHED = {
     gate: [
       {
         policyName: "default-gated",
-        precisionPct: "94.2",
+        precisionPct: "93.1",
         recallPct: "100.0",
-        tp: 49,
-        fp: 3,
+        tp: 54,
+        fp: 4,
         fn: 0,
-        tn: 30,
+        tn: 31,
       },
       {
         policyName: "strict-all",
-        precisionPct: "91.8",
+        precisionPct: "91.0",
         recallPct: "100.0",
-        tp: 56,
-        fp: 5,
+        tp: 61,
+        fp: 6,
         fn: 0,
-        tn: 21,
+        tn: 22,
       },
     ],
-    riskExactPct: "91.5",
+    riskExactPct: "91.0",
     dangerRecallPct: "100.0",
   },
 } as const;
@@ -202,10 +202,23 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
     const riskMisses = cls.misses.filter((m) => m.kind === "risk");
     const categoryMisses = cls.misses.filter((m) => m.kind === "category-fp");
     expect(cls.misses.filter((m) => m.kind === "category-fn")).toEqual([]);
-    expect(riskMisses.length).toBe(7);
-    expect(categoryMisses.length).toBe(13);
-    expect(doc).toContain("thirteen **category** divergences");
-    expect(doc).toContain("seven **risk-level** divergences");
+    expect(riskMisses.length).toBe(8);
+    expect(categoryMisses.length).toBe(14);
+    expect(doc).toContain("fourteen **category** divergences");
+    expect(doc).toContain("eight **risk-level** divergences");
+    // QA-DB2-5: 散文の内訳カウントも live bench から導出して pin する (二方向 lock の外に残さない)。
+    //   keyword-literal FP = category-fp のうち high-risk-other 以外 / risk 上振れ = "risk high != expected low"。
+    const literalFp = categoryMisses.filter((m) => !m.detail.includes("high-risk-other")).length;
+    const markerFp = categoryMisses.length - literalFp;
+    const highWhereLow = riskMisses.filter((m) => m.detail === "risk high != expected low").length;
+    expect(literalFp).toBe(6);
+    expect(markerFp).toBe(8);
+    expect(highWhereLow).toBe(6);
+    expect(doc).toContain(
+      "Six come from whole-command keyword\nliterals; eight are the `high-risk-other` marker",
+    );
+    expect(doc).toContain("Six vectors rate `high` where the human label says `low`");
+    expect(doc).toContain("**Closed (2026-08-28, task 01a0440b):**");
     const start = doc.indexOf("\nRisk-level calibration notes"); // 見出し行 (本文中の言及でなく)
     const end = doc.indexOf("## External corpus cross-evaluation");
     expect(start).toBeGreaterThan(0);

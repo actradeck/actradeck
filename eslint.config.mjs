@@ -99,7 +99,10 @@ export default tseslint.config(
       //   値つき/flag 表・データ行が大半) + 未知 long option の床 + `--`/文字列形/`su` (SEC-CQ18-1 H の承認ゲート修正)。
       //   天井は実測 + 4。
       //   R19 (SEC-CQ19-1: 未知 option の床を加算に・watch 連結・su -w) で 2134 → 2142。天井は実測 + 4。
-      "max-lines": ["error", { max: 2146, skipComments: true, skipBlankLines: true }],
+      //   task 01a0440b (TDA-DB-6: db-drop 他エンジン形) で 2143 → 2148 (PR #44 の dropdb 行で 2142→2143・記録漏れ):
+      //   LITERAL_RULES のデータ行 5 本 +
+      //   docstring (skipComments で非計上)。分岐なし。天井は実測 + 4。
+      "max-lines": ["error", { max: 2152, skipComments: true, skipBlankLines: true }],
     },
   },
   {
