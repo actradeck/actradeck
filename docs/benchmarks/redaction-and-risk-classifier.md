@@ -259,14 +259,20 @@ seven while calling itself complete):
   class is measured (it is the `db-drop` precision drop and the extra gate false positive in the
   tables above), not assumed. Safe-direction over-gate; no gate is weakened.
 - **Closed (2026-08-28, task 01a0440b):** the `db-drop` literal list was PostgreSQL-centric. The
-  MySQL CLI `mysqladmin … drop`, the Mongo shell `db.dropDatabase()` (and the snake_case
-  `drop_database(` of pymongo / sqlalchemy-utils), `DROP SCHEMA`, `DROP OWNED BY`, and redis
-  `FLUSHALL` / `FLUSHDB` all rated `low` with no category — no card in either mode. They are now
-  `high` / `db-drop` literals (add-only), pinned by `INV-DB-DROP-RISK-VERDICT` at the classifier and
-  at the bridge. The corpus carries one vector per form plus two negatives: `mysqladmin status` (a
-  true negative — the rule needs the `drop` subcommand in the same segment) and
-  `grep -rn flushall src/` (a benign carrier of the bare-token redis literal, the same keyword
-  false-positive class as `man dropdb`, measured on purpose). Not covered on purpose: Mongo's
+  MySQL CLI `mysqladmin … drop`, the Mongo shell `db.dropDatabase()` from the command line,
+  `DROP SCHEMA`, `DROP OWNED BY`, and redis `FLUSHALL` / `FLUSHDB` all rated `low` with no
+  category — no card in either mode. They are now `high` / `db-drop` literals (add-only), pinned by
+  `INV-DB-DROP-RISK-VERDICT` at the classifier and at the bridge; the snake_case `drop_database(`
+  of pymongo / sqlalchemy-utils joins the same literal for symmetry (its usual `python -c` carrier
+  was already `medium` / `inline-code`, so that form was carded before — it now also names the
+  category). The corpus carries one vector per form plus two negatives: `mysqladmin status` (a true
+  negative — the rule needs a `drop` word within 512 characters with no `|` `;` `&` or newline
+  between; that boundary is quote-unaware, so `-p'a;b'` or a backslash line continuation hides the
+  subcommand, tracked for v0.9) and `grep -rn flushall src/` (a benign carrier of the bare-token
+  redis literal, the same keyword false-positive class as `man dropdb`, measured on purpose). The
+  bare-token reach is wider than that search example: `node -e "cache.flushAll()"` (the
+  node-cache method name), a path such as `/var/lib/flushall`, or piping logs through
+  `grep flushdb` all rate `high` / `db-drop` now. Not covered on purpose: Mongo's
   `db.collection.drop()` — a `.drop(` literal collides with pandas and friends — and MySQL's
   `DROP DATABASE`, which the existing SQL literal already catches.
 - `find /var/tmp -type f -exec rm {} ;` classifies as `medium` rather than `high`; it is still

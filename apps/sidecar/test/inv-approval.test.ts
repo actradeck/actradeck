@@ -83,6 +83,7 @@ describe("INV-APPROVAL: high-risk gating", () => {
       "mysqladmin -u root --force drop appdb",
       "mongosh app --eval 'db.dropDatabase()'",
       "psql -c 'DROP SCHEMA public CASCADE'",
+      "psql -c 'DROP OWNED BY app'", // QA-DB2-4: 5 形すべてを bridge で pin
       "redis-cli FLUSHALL",
     ]) {
       const bridge = new ApprovalBridge({ timeoutMs: 30 });
@@ -3529,8 +3530,9 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   //   R18 unblock (decision 01a03e39): 2414/812 → 2507/798 — ラッパ文法を単一表 `WRAPPER_GRAMMAR` へ畳み
   //   (if 連鎖の除去で分岐トークンは減った)、未知 long option の床・`--`・文字列形・su を追加。天井は実測 + 4。
   //   R19 (SEC-CQ19-1 加算床 + watch/su): 2515/798。天井は実測 + 4。
-  //   task 01a0440b (TDA-DB-6・db-drop 他エンジン形): 2515/798 → 2521/798 — LITERAL_RULES にデータ行 5 本
-  //   (分岐なし・branch tokens 不変)。天井は実測 + 4。
+  //   task 01a0440b (TDA-DB-6・db-drop 他エンジン形): 2516/798 → 2521/800 — LITERAL_RULES にデータ行 5 本。
+  //   起点は PR #44 の dropdb 行 1 本で 2515→2516 に動いていた (余裕内で通り記録漏れ・TDA-DB2-1)。branch は
+  //   **regex 中の `?` (`_?` / `(?:`) も計数される**ため +2 (ロジック分岐は 0)。天井は実測 + 4。
   const MODULE_SET_EXECUTABLE_LINE_CEILING = 2525;
   const MODULE_SET_BRANCH_TOKEN_CEILING = 802;
 

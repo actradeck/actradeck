@@ -32,30 +32,35 @@ Categories are a closed, public enum — policies never contain raw commands. Th
 assigns categories to each operation; the gate fires when an operation's categories
 intersect your enabled set.
 
-| Category           | Matches                                                                                                       | Default |
-| ------------------ | ------------------------------------------------------------------------------------------------------------- | ------- |
-| `recursive-rm`     | `rm -rf`, `find -delete`/`-exec`, mass file deletion                                                          | **ON**  |
-| `disk-destroy`     | `mkfs`, `dd`, `shred`, `wipefs`, `parted`, block-device writes                                                | **ON**  |
-| `history-rewrite`  | `git push --force`, `git reset --hard`, `git clean -f`                                                        | **ON**  |
+| Category           | Matches                                                                                                                                                                                                         | Default |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `recursive-rm`     | `rm -rf`, `find -delete`/`-exec`, mass file deletion                                                                                                                                                            | **ON**  |
+| `disk-destroy`     | `mkfs`, `dd`, `shred`, `wipefs`, `parted`, block-device writes                                                                                                                                                  | **ON**  |
+| `history-rewrite`  | `git push --force`, `git reset --hard`, `git clean -f`                                                                                                                                                          | **ON**  |
 | `db-drop`          | `DROP TABLE` / `DROP DATABASE` / `DROP SCHEMA` / `DROP OWNED BY` / `TRUNCATE TABLE` / `dropdb` / `mysqladmin … drop` / `dropDatabase(` / `FLUSHALL` / `FLUSHDB` (literal list; not exhaustive — see note below) | **ON**  |
-| `fork-bomb`        | self-replicating shell patterns                                                                               | **ON**  |
-| `secret-egress`    | network-egress program (`curl`/`wget`/`nc`/`scp`…) with an **inline** secret in the command                   | **ON**  |
-| `high-risk-other`  | high-risk or structurally unparseable execution that no named category covers (backstop against silent holes) | **ON**  |
-| `perm-change`      | `chmod -R`, world-writable chmod, recursive chown                                                             | off     |
-| `inline-code`      | `sh -c`, `python -c`, `eval`, `curl \| sh`, command substitution, Git shell aliases                           | **ON**  |
-| `secret-file-edit` | edits to `.env`, `*.pem`, `id_rsa`, kubeconfig and similar                                                    | off     |
-| `external-tool`    | MCP calls / WebFetch                                                                                          | off     |
-| `migrate-prod`     | DB migrations / "production" mentions (ambiguous by nature)                                                   | off     |
+| `fork-bomb`        | self-replicating shell patterns                                                                                                                                                                                 | **ON**  |
+| `secret-egress`    | network-egress program (`curl`/`wget`/`nc`/`scp`…) with an **inline** secret in the command                                                                                                                     | **ON**  |
+| `high-risk-other`  | high-risk or structurally unparseable execution that no named category covers (backstop against silent holes)                                                                                                   | **ON**  |
+| `perm-change`      | `chmod -R`, world-writable chmod, recursive chown                                                                                                                                                               | off     |
+| `inline-code`      | `sh -c`, `python -c`, `eval`, `curl \| sh`, command substitution, Git shell aliases                                                                                                                             | **ON**  |
+| `secret-file-edit` | edits to `.env`, `*.pem`, `id_rsa`, kubeconfig and similar                                                                                                                                                      | off     |
+| `external-tool`    | MCP calls / WebFetch                                                                                                                                                                                            | off     |
+| `migrate-prod`     | DB migrations / "production" mentions (ambiguous by nature)                                                                                                                                                     | off     |
 
 > **`db-drop` is a literal list, not a semantic detector.** It recognises the SQL forms `DROP TABLE` /
 > `DROP DATABASE` / `DROP SCHEMA` / `DROP OWNED BY` / `TRUNCATE TABLE`, the PostgreSQL CLI `dropdb`, the MySQL
-> CLI `mysqladmin … drop` (the `drop` subcommand in the same shell segment), the Mongo shell
+> CLI `mysqladmin … drop` (a `drop` word within 512 characters of `mysqladmin` with no `|`, `;`, `&` or
+> newline between them — a quote-unaware boundary, so a quoted metacharacter such as `-p'a;b'` or a
+> backslash line continuation hides the subcommand; tracked for v0.9), the Mongo shell
 > `db.dropDatabase()` together with the snake_case `drop_database(` of pymongo / sqlalchemy-utils, and
 > redis `FLUSHALL` / `FLUSHDB`. Bare-token forms (`dropdb`, `flushall`, `flushdb`) fire on any command line
 > that mentions the word — a safe-direction over-gate that the benchmark measures. **Still not
 > recognised**: Mongo's `db.collection.drop()` (a `.drop(` literal would collide with pandas and
 > friends), `DROP TABLESPACE` / `DROP USER` / `DROP ROLE`, and engine-specific admin tools not listed
-> above; those rate `low` unless another rule fires. Treat the category as a floor, not a guarantee.
+> above; those rate `low` unless another rule fires — with one exception in the other direction: a
+> bare Mongo shell line such as `db.users.drop()` rates `medium` with the generic `high-risk-other`
+> marker and draws a card in both modes, while the same call wrapped as `mongosh --eval '...'` does
+> not. Treat the category as a floor, not a guarantee.
 
 The eight **ON** rows are the default preset (`DEFAULT_GATED_CATEGORIES`): irreversible,
 large-blast-radius operations plus arbitrary inline code execution. The four **off** rows lean toward false positives, so

@@ -200,7 +200,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     { re: /\bdropdb\b/i, cmd: "dropdb staging" },
     { re: /\bdrop\s+schema\b/i, cmd: "psql -c 'drop schema public cascade'" },
     { re: /\bdrop\s+owned\s+by\b/i, cmd: "psql -c 'drop owned by app'" },
-    { re: /\bmysqladmin\b[^|;&\n]*\bdrop\b/i, cmd: "mysqladmin -u root -p --force drop appdb" },
+    {
+      re: /\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i,
+      cmd: "mysqladmin -u root -p --force drop appdb",
+    },
     { re: /\bdrop_?database\s*\(/i, cmd: "mongosh app --eval 'db.dropDatabase()'" },
     { re: /\bflush(?:all|db)\b/i, cmd: "redis-cli flushall" },
     { re: /\bmigrate\b/i, cmd: "npm run migrate" },
@@ -298,6 +301,74 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     //   して pin する (ベンチ corpus の良性担体 `grep -rn flushall src/` と同じ事実)。
     expect(classifyCommandRisk("grep -rn flushall src/")).toBe("high");
     expect(classifyCommandCategories("grep -rn flushall src/").has("db-drop")).toBe(true);
+    // 既知の限界 (SEC-DB2-2 / TDA-DB2-2・task 01a0480f-d29a・v0.9): mysqladmin ルールの境界は quote 非認識の
+    //   字面判定で、引用内 metachar と行継続で分断され low になる (base も low = 弱化ではない)。正準 segment
+    //   単位適用が着地したらこの 2 件は **high 側へ反転** させる (削除でなく反転・documented-limitation tripwire)。
+    for (const cmd of [
+      "mysqladmin -u root -p'a;b' drop appdb",
+      "mysqladmin -u root \\\n  drop appdb",
+    ]) {
+      expect(
+        classifyCommandCategories(cmd).has("db-drop"),
+        `${cmd}: 既知の限界 (quote 非認識境界)`,
+      ).toBe(false);
+    }
+    // QA-DB2-3: 境界軸を左右対称に pin する (`&&` だけでなく `|` `;` 改行の各区切りで別 segment の drop は非該当)。
+    //   軸は追加のみ・削除禁止 (finding-registry)。
+    for (const cmd of [
+      "mysqladmin status | grep drop",
+      "mysqladmin status; echo drop",
+      "mysqladmin status\necho drop",
+    ]) {
+      expect(
+        classifyCommandCategories(cmd).has("db-drop"),
+        `${cmd}: 区切りを跨いだ drop は非該当`,
+      ).toBe(false);
+    }
+  });
+
+  // INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 全 LITERAL_RULES が入力長に対して線形にスケールする。
+  //   `\b<program>\b[^…]*\b<word>\b` 形は開始位置 O(n) × 走査 O(n) で O(n²) (mysqladmin ルールの初版・
+  //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で将来の追加ルールを自動網羅。
+  //   計測は best-of-N の min (redaction の redosBestOfMs と同じ basis・意図的複製 decision 019f2d4f と同旨)。
+  describe("INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 各 LITERAL_RULES の実行時間が入力長に線形", () => {
+    const minOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);
+    const bestOfMs = (run: () => void, repeat = 9): number => {
+      run();
+      run();
+      const out: number[] = [];
+      for (let i = 0; i < repeat; i++) {
+        const t = process.hrtime.bigint();
+        run();
+        out.push(Number(process.hrtime.bigint() - t) / 1e6);
+      }
+      return minOf(out);
+    };
+    const SMALL = 4096;
+    const LARGE = SMALL * 8;
+    // 線形なら ratio ≈ 8。2 乗なら ≈ 64。閾値 24 は線形に 3 倍の余裕・2 乗を確実に落とす。
+    const RATIO_MAX = 24;
+    const fill = (seed: string, n: number): string =>
+      seed.repeat(Math.ceil(n / seed.length)).slice(0, n);
+    LITERAL_RULES.forEach((rule, i) => {
+      // 敵対 seed: sample の先頭語 (program 名) の反復 = 「開始位置が多く末尾語が無い」最悪形。
+      const head = samples[i]!.cmd.split(/\s+/)[0]!;
+      for (const seed of [`${head} `, "a "]) {
+        it(`#${i} ${String(rule.re)} seed=${JSON.stringify(seed)}`, () => {
+          const small = fill(seed, SMALL);
+          const large = fill(seed, LARGE);
+          const K = 20;
+          const tSmall = bestOfMs(() => {
+            for (let k = 0; k < K; k++) rule.re.test(small);
+          });
+          const tLarge = bestOfMs(() => {
+            for (let k = 0; k < K; k++) rule.re.test(large);
+          });
+          const ratio = tLarge / Math.max(tSmall, 0.005);
+          expect(ratio, `scaling ratio (8× input): ${ratio.toFixed(1)}`).toBeLessThan(RATIO_MAX);
+        });
+      }
+    });
   });
 });
 

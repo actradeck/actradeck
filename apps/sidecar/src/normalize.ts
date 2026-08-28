@@ -2472,13 +2472,18 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   `DROP OWNED BY` / redis `FLUSHALL`・`FLUSHDB` は risk=low・category 空 (両モードでカード無し) だった。
  *   同 class として**追加のみ**で足す。`drop_?database\s*\(` は mongosh の JS 形と pymongo / sqlalchemy-utils の
  *   snake_case 形を 1 本で持つ (`echo drop_database` のような括弧無しは踏まない)。`mysqladmin` は
- *   `[^|;&\n]*` で **同一 segment 内**の `drop` サブコマンドだけ見る (`mysqladmin status && … drop` は踏まない)。
+ *   `[^|;&\n]{0,512}` で **quote 非認識の字面境界** (`|` `;` `&` 改行を挟まない 512 字以内) の `drop`
+ *   サブコマンドだけ見る (`mysqladmin status && … drop` は踏まない)。既知の限界 (SEC-DB2-2 / TDA-DB2-2・
+ *   task 01a0480f-d29a・v0.9): 引用内の metachar (`-p'a;b'`) や行継続 (`\\` + 改行) で分断され low になる。正準
+ *   quote-aware 分割 (`splitSegments`) の segment 単位で適用する構造修正は同 task で行う (手書き境界の是正)。
  *   bare-token の `flushall` / `flushdb` は `dropdb` と同じ FP class (`grep -rn flushall src/` が high) —
  *   ベンチ corpus に良性担体を置いて測る。Mongo の `db.collection.drop()` は `.drop(` が pandas 等と衝突する
  *   ため**意図的に非対象** (docs/approval-policy.md の注記に開示)。
  *
- * ReDoS 安全: 各 re は固定 alternation + 単純 `\s+`/`[a-z]*`/`[^|;&\n]*` (入れ子量化なし・無限量化は
- *   1 本まで・redaction-redos 教訓)。
+ * ReDoS 安全の基準は**入力長に対する線形スケーリング**であって量化子の本数ではない (SEC-DB2-1):
+ *   `\b<program>\b[^…]*\b<word>\b` は開始位置 O(n) × 走査 O(n) で O(n²) になる (実測 exponent 2.00・
+ *   16 KiB で 63 ms)。`{0,512}` で束縛して線形化 (判定は gap ≤ 512 で同値)。全ルールの線形性は
+ *   INV-LITERAL-RULES-LINEAR (inv-policy-categories) が best-of-N で回帰固定する (追加ルールを自動網羅)。
  */
 interface LiteralRule {
   readonly re: RegExp;
@@ -2497,7 +2502,7 @@ export const LITERAL_RULES: readonly LiteralRule[] = [
   // task 01a0440b (TDA-DB-6): 他エンジン / 他粒度の同 class。追加のみ (削除禁止規律)。
   { re: /\bdrop\s+schema\b/i, category: "db-drop", high: true }, // PostgreSQL schema 粒度 / MySQL の DATABASE 同義
   { re: /\bdrop\s+owned\s+by\b/i, category: "db-drop", high: true }, // PostgreSQL: role 所有物の一括 drop
-  { re: /\bmysqladmin\b[^|;&\n]*\bdrop\b/i, category: "db-drop", high: true }, // MySQL CLI 形 (同一 segment 内の drop サブコマンド)
+  { re: /\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i, category: "db-drop", high: true }, // MySQL CLI 形 (quote 非認識の字面境界・512 字で束縛 = 線形)
   { re: /\bdrop_?database\s*\(/i, category: "db-drop", high: true }, // mongosh db.dropDatabase() / pymongo・sqlalchemy-utils drop_database(
   { re: /\bflush(?:all|db)\b/i, category: "db-drop", high: true }, // redis FLUSHALL / FLUSHDB (bare-token・dropdb と同じ FP class)
   { re: /\bmigrate\b/i, category: "migrate-prod", high: true },

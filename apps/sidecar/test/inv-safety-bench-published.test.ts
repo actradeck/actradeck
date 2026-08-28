@@ -206,6 +206,19 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
     expect(categoryMisses.length).toBe(14);
     expect(doc).toContain("fourteen **category** divergences");
     expect(doc).toContain("eight **risk-level** divergences");
+    // QA-DB2-5: 散文の内訳カウントも live bench から導出して pin する (二方向 lock の外に残さない)。
+    //   keyword-literal FP = category-fp のうち high-risk-other 以外 / risk 上振れ = "risk high != expected low"。
+    const literalFp = categoryMisses.filter((m) => !m.detail.includes("high-risk-other")).length;
+    const markerFp = categoryMisses.length - literalFp;
+    const highWhereLow = riskMisses.filter((m) => m.detail === "risk high != expected low").length;
+    expect(literalFp).toBe(6);
+    expect(markerFp).toBe(8);
+    expect(highWhereLow).toBe(6);
+    expect(doc).toContain(
+      "Six come from whole-command keyword\nliterals; eight are the `high-risk-other` marker",
+    );
+    expect(doc).toContain("Six vectors rate `high` where the human label says `low`");
+    expect(doc).toContain("**Closed (2026-08-28, task 01a0440b):**");
     const start = doc.indexOf("\nRisk-level calibration notes"); // 見出し行 (本文中の言及でなく)
     const end = doc.indexOf("## External corpus cross-evaluation");
     expect(start).toBeGreaterThan(0);
