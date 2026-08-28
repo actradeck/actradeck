@@ -79,7 +79,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   falls back to the coarse split plus the whole command, so a quoted separator inside an unterminated
   quote still ends up gated (fail-closed), the same direction the classifier takes elsewhere on
   unparseable input. What the tests pin: no verdict in the benchmark corpus changed, the previously
-  documented limitations are now `high` / `db-drop`, and no vector narrows. (An audit sweep outside
+  documented limitations are now `high` / `db-drop`, and none of the vectors in those pinned lists
+  narrows. (An audit sweep outside
   the suite, recorded in decision 01a04955, moved 105 of 219 generated separator / quoting / escape /
   redirect vectors and narrowed none.) The published benchmark was regenerated (91 vectors;
   `db-drop` precision 75.0% → 78.6%; default-gated precision 93.1% → 93.3%, recall stays 100%), and

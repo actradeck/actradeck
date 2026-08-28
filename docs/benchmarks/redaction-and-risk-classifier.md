@@ -295,8 +295,11 @@ appdb`, `2>&1 > out.log drop appdb`) all rated `low` with no category in every m
   still ends up gated — fail-closed, the same direction the classifier takes everywhere else on
   unparseable input. What the test suite pins about the change: no verdict in this corpus changed;
   the previously documented limitations are now `high` / `db-drop` in `INV-DB-DROP-RISK-VERDICT`; and
-  no vector narrows. An audit sweep (not part of the suite; recorded in decision 01a04955) moved 105
-  of 219 generated separator / quoting / escape / redirect vectors and narrowed none. The corpus
+  none of the vectors in those pinned lists narrows. The general claim that nothing narrows rests on
+  the audit record, not on the suite: an audit sweep (not part of the suite; recorded in decision
+  01a04955) moved 105 of 219 generated separator / quoting / escape / redirect vectors and narrowed
+  none, and the security lane's independent sweep of 1,140 vectors (decision 01a04973) found no
+  verdict lower than on main. The corpus
   gains the quoted-password form and a long-option invocation.
 - `find /var/tmp -type f -exec rm {} ;` classifies as `medium` rather than `high`; it is still
   gated (`recursive-rm`).
