@@ -447,6 +447,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       // SEC-DB2R4-3: 汎用 seed を除いた派生 seed で計数する (含めると恒真)。
       it(`#${i} ${String(rule.re)} has a non-vacuous derived adversarial seed`, () => {
         expect(derivedLive.length, `derived=${JSON.stringify(derived)}`).toBeGreaterThan(0);
+        // 汎用 seed を派生集合へ戻すと guard が再び恒真になる (実装者 probe W8 が SURVIVED した形)。
+        expect(derivedLive, "guard は派生 seed のみで計数する").not.toContain(GENERIC_SEED);
+        expect(derived).not.toContain(GENERIC_SEED);
       });
       it(`#${i} ${String(rule.re)} has a sample-derived prefix seed`, () => {
         expect(prefixSeed(rule.re, cmd)).not.toBeNull();
@@ -535,6 +538,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(self).toMatch(/expect\(derivedLive\.length, [^\n]*\)\.toBeGreaterThan\(0\);/);
         expect(self).toMatch(/\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/);
         expect(self).toMatch(/\.toBeLessThan\(RATIO_MAX\);/);
+        expect(self).toMatch(/const derivedLive = derived\.filter\(/);
       });
     });
   });
