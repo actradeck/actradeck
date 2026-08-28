@@ -3537,8 +3537,14 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   //   task 01a0480f-ffca (db-drop 列挙 two-way lock): 2521/800 → 2542/800 — LITERAL_RULES の全 16 行に `labels`
   //   (表示名・データのみ) を付け prettier が行を折り返した。分岐なし。executable 天井は実測 + 4、branch 天井 802 は
   //   据え置き (headroom +2)。
-  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2546;
-  const MODULE_SET_BRANCH_TOKEN_CEILING = 802;
+  //   task 01a0480f-d29a (SEC-DB2-2 ≡ TDA-DB2-2・mysqladmin の手書き境界を正準 segment 単位へ): 2542/800 →
+  //   2560/804 — `LiteralRule.segmentRe` (option field + mysqladmin 行の 1 本) と、risk/category の両経路が
+  //   共有する `literalRuleMatches` (whole-command ∨ segment の単一出所)、legacy union パスへ segment スコープを
+  //   渡さないための `NO_SEGMENTS` / `split === splitSegments` 判定。branch は option field の `?` +
+  //   `!== undefined` + `===` 判定 + 三項で +4 (ロジック分岐は 3)。executable 天井は実測 + 4、branch 天井も実測 + 4
+  //   (旧 802 は headroom +2 で、本変更で実測 804 が超えた)。
+  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2564;
+  const MODULE_SET_BRANCH_TOKEN_CEILING = 808;
 
   it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {
     // eslint の天井は peak (最悪関数・単一ファイル) にしか効かない — 関数を 2 つに割る・ファイルを

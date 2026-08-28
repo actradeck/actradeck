@@ -104,7 +104,11 @@ export default tseslint.config(
       //   docstring (skipComments で非計上)。分岐なし。天井は実測 + 4。
       //   task 01a0480f-ffca (db-drop 列挙 two-way lock) で 2148 → 2169: LITERAL_RULES の全 16 行に `labels`
       //   (表示名) を付けたため prettier が行を折り返した (データのみ・分岐なし)。天井は実測 + 4。
-      "max-lines": ["error", { max: 2173, skipComments: true, skipBlankLines: true }],
+      //   task 01a0480f-d29a (SEC-DB2-2 ≡ TDA-DB2-2: mysqladmin の手書き境界を正準 segment 単位へ) で
+      //   2169 → 2187: `LiteralRule.segmentRe` (option field + mysqladmin 行 1 本) と、risk / category の
+      //   両経路が共有する `literalRuleMatches` (whole-command ∨ segment の単一出所)、legacy union パスへ
+      //   segment スコープを渡さないための `NO_SEGMENTS` / `split === splitSegments` 判定。天井は実測 + 4。
+      "max-lines": ["error", { max: 2191, skipComments: true, skipBlankLines: true }],
     },
   },
   {

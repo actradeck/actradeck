@@ -49,9 +49,10 @@ intersect your enabled set.
 
 > **`db-drop` is a literal list, not a semantic detector.** It recognises the SQL forms `DROP TABLE` /
 > `DROP DATABASE` / `DROP SCHEMA` / `DROP OWNED BY` / `TRUNCATE TABLE`, the PostgreSQL CLI `dropdb`, the MySQL
-> CLI `mysqladmin … drop` (a `drop` word within 512 characters of `mysqladmin` with no `|`, `;`, `&` or
-> newline between them — a quote-unaware boundary, so a quoted metacharacter such as `-p'a;b'` or a
-> backslash line continuation hides the subcommand; tracked for v0.9), the Mongo shell
+> CLI `mysqladmin … drop` (a `drop` word within 512 characters of `mysqladmin` inside the same shell
+> command — the run is cut by the same quote-aware splitter the rest of the classifier uses, so a
+> quoted or escaped metacharacter such as `-p'a;b'` no longer hides the subcommand, while a real
+> separator (`|`, `;`, `&`, a newline) still ends the run), the Mongo shell
 > `db.dropDatabase()` together with the snake_case `drop_database(` of pymongo / sqlalchemy-utils, and
 > redis `FLUSHALL` / `FLUSHDB`. Bare-token forms (`dropdb`, `flushall`, `flushdb`) fire on any command line
 > that mentions the word — a safe-direction over-gate that the benchmark measures. **Still not

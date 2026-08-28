@@ -2471,11 +2471,9 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   db-drop は PostgreSQL 偏在で、`mysqladmin drop` / mongosh `db.dropDatabase()` / `DROP SCHEMA` /
  *   `DROP OWNED BY` / redis `FLUSHALL`・`FLUSHDB` は risk=low・category 空 (両モードでカード無し) だった。
  *   同 class として**追加のみ**で足す。`drop_?database\s*\(` は mongosh の JS 形と pymongo / sqlalchemy-utils の
- *   snake_case 形を 1 本で持つ (`echo drop_database` のような括弧無しは踏まない)。`mysqladmin` は
- *   `[^|;&\n]{0,512}` で **quote 非認識の字面境界** (`|` `;` `&` 改行を挟まない 512 字以内) の `drop`
- *   サブコマンドだけ見る (`mysqladmin status && … drop` は踏まない)。既知の限界 (SEC-DB2-2 / TDA-DB2-2・
- *   task 01a0480f-d29a・v0.9): 引用内の metachar (`-p'a;b'`) や行継続 (`\\` + 改行) で分断され low になる。正準
- *   quote-aware 分割 (`splitSegments`) の segment 単位で適用する構造修正は同 task で行う (手書き境界の是正)。
+ *   snake_case 形を 1 本で持つ (`echo drop_database` のような括弧無しは踏まない)。`mysqladmin` は **二重スコープ**
+ *   (下の `segmentRe` 節・task 01a0480f-d29a): 正準 segment 単位の `[\s\S]{0,512}` が主判定で、
+ *   whole-command の `[^|;&\n]{0,512}` は base 逐語の非弱化 backstop として残す。
  *   bare-token の `flushall` / `flushdb` は `dropdb` と同じ FP class (`grep -rn flushall src/` が high) —
  *   ベンチ corpus に良性担体を置いて測る。Mongo の `db.collection.drop()` は `.drop(` が pandas 等と衝突する
  *   ため**意図的に非対象** (docs/approval-policy.md の注記に開示)。
@@ -2487,7 +2485,7 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   載る・SEC-DB2R3-4)。全ルールの線形性は INV-LITERAL-RULES-LINEAR (inv-policy-categories) が **regex source
  *   由来の敵対 seed + sample 先頭語 seed + sample 由来 prefix seed** で best-of-N 回帰固定する。**網羅の範囲
  *   (SEC-DB2R3-1 / QA-DB2R3-1 / task 01a0484c-ecbd)**:
- *   source 由来 seed は先頭 literal が**平坦に綴られた**ルール (現行 16 本中 14 本・#2 fork-bomb は literal run 空、
+ *   source 由来 seed は先頭 literal が**平坦に綴られた**ルール (現行 17 スキャン regex 中 15 本・#2 fork-bomb は literal run 空、
  *   #11 flush は alternation で断片化・どちらも gap 無し) に届く。alternation / 任意記号を跨ぐ綴り
  *   (`(?:mysql|mariadb)admin` / `mysql_?admin`) では source seed が断片化するため、sample 先頭語を**追加軸**として
  *   常に併用する (軸は追加のみ・R2 で置換していたのを是正・2 乗形 S1/S3・R3 Y4 が RED へ反転する実測)。第 3 軸の
@@ -2495,7 +2493,7 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   **sample 先頭語 ≠ 規則の先頭 literal** (`sh -c '…'` / `sudo …` の sample・alternation 綴りのサブコマンドが
  *   先頭 literal・先頭が 2 語連鎖 `A\s+B[^…]*C`・SEC-DB2R4-2 / QA-DB2R3-2) も RED へ反転させる (R4 の Z2/Z4/Z5/Z6 を
  *   coordinated 再注入して実測)。残る構造的死角は「末尾 literal が先頭 literal の反復で再構成される規則」
- *   (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 16 に該当形なし) と、sample が先頭 literal より**前**に gap クラスの
+ *   (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし) と、sample が先頭 literal より**前**に gap クラスの
  *   除外文字 (`|` `;` `&` 改行) を含む形で prefix の反復が分断される条件 (SEC-LN-1・base 同値・現行 sample に該当なし・
  *   第 4 軸は task 01a048cd-95ae・v0.9・full)。vacuity guard は汎用 seed `a ` を除いた派生 seed で
  *   計数し (SEC-DB2R4-3 の恒真を解消)、metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の除去 /
@@ -2508,7 +2506,28 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   良性入力は 1.0×)。
  */
 interface LiteralRule {
+  /** whole-command スキャン (コマンド文字列そのものに適用)。 */
   readonly re: RegExp;
+  /**
+   * **追加**スキャン: 正準 quote-aware 分割 (`splitSegments` — 分類器へ渡された `split`) の
+   * **segment 単位**で試す正規表現 (省略 = whole-command のみ・現行は mysqladmin 行のみが持つ)。
+   *
+   * **なぜ 2 本なのか (task 01a0480f-d29a・SEC-DB2-2 ≡ TDA-DB2-2)**: mysqladmin 行の
+   * `[^|;&\n]{0,512}` は「区切りを跨がない」を**手書きの字面クラス**で表現しており、正準 splitter を
+   * 共有しない第二のパーサだった (`security-gate-reuse-canonical-parser` が禁じる形)。quote 非認識ゆえ
+   * 実在の書式 (`-p'a;b'` / `--password='x;y'` / `-p"p&q"` — MySQL の `-p[password]` は shell 特殊文字を
+   * 含むとき引用が必須・2026-08-29 上流 doc 確認) と行継続 (`\` + 改行) で境界が分断され、実際には
+   * 1 コマンドの `drop` サブコマンドが low へ落ちていた。segment 単位なら区切り判定は正準 splitter が
+   * 行う (引用内 / escape 済みの `;` `|` `&` 改行は区切りでない) ので、gap クラスは `[\s\S]` でよい。
+   *
+   * **whole-command の `re` は base 逐語で残す (非弱化)**: `splitSegments` は redirect の演算子と対象語を
+   * segment から**除去**するため、segment 単位だけにすると `mysqladmin status > drop.log`
+   * (対象語が elide され `drop` が消える) が base の high から low へ落ちる = 本ブランチが base より
+   * 弱くなる。判定は 2 スコープの論理和にして単調な拡張にする (`classifyCommandRisk` の非対称 union と
+   * 同方針: 追加のみ・引き下げなし)。両スコープとも `{0,512}` の束縛値は同一 (INV-DB-DROP-BOUND-DOC が
+   * regex source から抽出して docs と two-way lock)。
+   */
+  readonly segmentRe?: RegExp;
   readonly category: PolicyCategory;
   /** risk を high へ押し上げるか (false=category-only)。 */
   readonly high: boolean;
@@ -2531,10 +2550,11 @@ export const LITERAL_RULES: readonly LiteralRule[] = [
   { re: /\bdrop\s+owned\s+by\b/i, category: "db-drop", high: true, labels: ["DROP OWNED BY"] }, // PostgreSQL: role 所有物の一括 drop
   {
     re: /\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i,
+    segmentRe: /\bmysqladmin\b[\s\S]{0,512}\bdrop\b/i,
     category: "db-drop",
     high: true,
     labels: ["mysqladmin … drop"],
-  }, // MySQL CLI 形 (quote 非認識の字面境界・512 字で束縛 = 線形)
+  }, // MySQL CLI 形 (正準 segment 単位が主・whole-command は非弱化 backstop・512 字で束縛 = 線形)
   {
     re: /\bdrop_?database\s*\(/i,
     category: "db-drop",
@@ -2558,9 +2578,29 @@ export const LITERAL_RULES: readonly LiteralRule[] = [
   },
 ];
 
+/** segment スコープを適用しない走査 (legacy union パス) 用の空集合。 */
+const NO_SEGMENTS: readonly string[] = [];
+
+/**
+ * 1 ルールのスキャンを実行する **単一出所** (risk 側 `matchesHighRiskLiteral` と category 側
+ * `addCommandLevelCategories` が共有する。片方だけがスコープを見る drift を構造的に不能にする)。
+ *
+ * whole-command (`re`) と正準 segment 単位 (`segmentRe`・省略可) の**論理和**。segments は分類器が
+ * 既に計算した `split(command)` をそのまま渡す (同一走査・二度割らない)。
+ */
+function literalRuleMatches(
+  rule: LiteralRule,
+  command: string,
+  segments: readonly string[],
+): boolean {
+  if (rule.re.test(command)) return true;
+  const segmentRe = rule.segmentRe;
+  return segmentRe !== undefined && segments.some((seg) => segmentRe.test(seg));
+}
+
 /** 字面 high リテラルにマッチするか (LITERAL_RULES の high エントリの論理和・旧 HIGH_RISK_LITERAL_RE と同値)。 */
-function matchesHighRiskLiteral(command: string): boolean {
-  return LITERAL_RULES.some((rule) => rule.high && rule.re.test(command));
+function matchesHighRiskLiteral(command: string, segments: readonly string[]): boolean {
+  return LITERAL_RULES.some((rule) => rule.high && literalRuleMatches(rule, command, segments));
 }
 
 /**
@@ -2689,10 +2729,14 @@ export function isNetworkEgressCommand(command: string): boolean {
  * エントリがあれば superset になるが、現行テーブルは全エントリ high (task 01a03b76 以降・上の docstring
  * 参照)。categories 未指定時 (classifyCommandRisk 経路) は no-op (behavior 非退行)。
  */
-function addCommandLevelCategories(command: string, categories?: Set<PolicyCategory>): void {
+function addCommandLevelCategories(
+  command: string,
+  segments: readonly string[],
+  categories?: Set<PolicyCategory>,
+): void {
   if (categories === undefined) return;
   for (const rule of LITERAL_RULES) {
-    if (rule.re.test(command)) categories.add(rule.category);
+    if (literalRuleMatches(rule, command, segments)) categories.add(rule.category);
   }
 }
 
@@ -2923,10 +2967,20 @@ function classifyCommandRiskInternal(
     else if (r === "medium" && risk !== "high") risk = "medium";
   };
 
+  // segment 分割は **1 回だけ**行い、字面ルールの segment スコープ (`segmentRe`) と下の segment ループで
+  //   同一の走査結果を共有する (二度割らない / 走査のズレを作らない)。
+  const segments = split(command);
+  // **segment スコープは正準 (quote-aware) 分割の結果にのみ適用する**: SEC-CQ-1 の非対称 union は
+  //   「quote-aware 側の**解析ミス**を旧分割で補う」ための backstop であって、境界を広げる役ではない。
+  //   旧分割は redirect 演算子を除去せず (`&>` は区切りでも語でもないまま segment に残る) 粗い segment を
+  //   作るため、legacy 側にも segmentRe を掛けると `mysqladmin status &> drop.log` のような
+  //   **redirect 先ファイル名**まで high になり、意図した拡張 (引用内 metachar / 行継続) を超えて
+  //   base から乖離する (実測 107→本条件で縮小)。legacy 側は base 逐語の whole-command スキャンのみ。
+  const segmentScoped = split === splitSegments ? segments : NO_SEGMENTS;
   // 字面 high (LITERAL_RULES の high エントリ)。risk と category を**同一テーブル**から付与する (TDA-1)。
   //   category 側は high:false エントリも含む superset (現行テーブルでは全エントリ high)。
-  if (matchesHighRiskLiteral(command)) bump("high");
-  addCommandLevelCategories(command, categories);
+  if (matchesHighRiskLiteral(command, segmentScoped)) bump("high");
+  addCommandLevelCategories(command, segmentScoped, categories);
   if (BLOCK_DEVICE_RE.test(command) && /[<>]|dd\b/i.test(command)) {
     bump("high");
     categories?.add("disk-destroy");
@@ -2979,7 +3033,7 @@ function classifyCommandRiskInternal(
   const suppressGroupingMedium =
     collectSubstitutionInners(command, "process").starts.length > 0 && !procSubExecutor;
 
-  for (const seg of split(command)) {
+  for (const seg of segments) {
     const rawTokens = tokenize(seg);
     if (rawTokens.length === 0) {
       // トークンが無くても置換 `$(...)`/backtick だけのセグメントは SEC-1 でゲートする。

@@ -196,6 +196,22 @@ export const COMMANDS: readonly CommandVector[] = [
     note: "MySQL CLI drop (task 01a0440b; previously low with no category in every mode)",
   },
   {
+    command:
+      "mysqladmin --host=db.internal --port=3306 --user=admin --ssl-mode=VERIFY_IDENTITY " +
+      "--ssl-ca=/etc/mysql/certs/ca.pem --ssl-cert=/etc/mysql/certs/client-cert.pem " +
+      "--ssl-key=/etc/mysql/certs/client-key.pem --connect-timeout=30 --default-character-set=utf8mb4 " +
+      "--protocol=TCP --compress --verbose --wait=3 --shutdown-timeout=60 --force drop appdb",
+    expectRisk: "high",
+    expectCategories: ["db-drop"],
+    note: "MySQL CLI drop behind a long option run (task 01a0480f-d29a): puts the bound value of the mysqladmin rule on the public bench — the gap between the program name and the drop subcommand is 319 characters here, so a bound narrower than that would silently drop this real invocation to low",
+  },
+  {
+    command: "mysqladmin -u root -p'a;b' --force drop appdb",
+    expectRisk: "high",
+    expectCategories: ["db-drop"],
+    note: "MySQL CLI drop with a quoted metacharacter in the password (task 01a0480f-d29a): MySQL requires quoting a password that contains shell metacharacters, and the old quote-unaware literal boundary treated the quoted `;` as a separator, so this real invocation rated low with no category in every mode. The rule now scans the canonical quote-aware segments",
+  },
+  {
     command: "mongosh mongodb://localhost:27017/app --eval 'db.dropDatabase()'",
     expectRisk: "high",
     expectCategories: ["db-drop"],
@@ -229,7 +245,7 @@ export const COMMANDS: readonly CommandVector[] = [
     command: "mysqladmin status",
     expectRisk: "low",
     expectCategories: [],
-    note: "true negative for the mysqladmin rule: no drop word within the 512-character, delimiter-free run after mysqladmin",
+    note: "true negative for the mysqladmin rule: no drop word within the 512-character run after mysqladmin (the run is cut at real shell separators by the canonical quote-aware splitter)",
   },
   // ============================ perm-change (default OFF) ======================================
   {

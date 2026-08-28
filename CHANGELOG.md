@@ -42,6 +42,27 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
+- **`mysqladmin … drop` is now recognised when the password is quoted, and the rule no longer
+  carries its own idea of where a command ends.** The literal expressed "no separator between the
+  program name and the `drop` subcommand" with a hand-written character class rather than the
+  quote-aware splitter the rest of the classifier shares. That class cannot see quoting, and MySQL
+  _requires_ quoting a password that contains shell metacharacters — so `-p'a;b'`,
+  `--password='x;y'`, `-p"p&q"`, a backslash line continuation, and forms whose redirect operator
+  contains `&` (`-f &> out.log drop appdb`, `2>&1 > out.log drop appdb`) were read as if the
+  subcommand lay past a separator, and a real database drop rated `low` with no category in every
+  mode. The rule now also scans the canonical segments, where a quoted or escaped metacharacter is
+  not a separator. Real separators still end the run, so `mysqladmin status | grep drop`,
+  `; echo drop`, `&& echo drop` and a newline stay `low` as before. The original whole-command scan
+  is kept next to the new one as a non-weakening backstop, because the splitter removes redirect
+  operators together with their target word and a segment-only rule would have let
+  `mysqladmin status > drop.log` fall from `high` to `low`. The change is monotone against the
+  previous implementation: over the benchmark corpus plus 219 generated separator / quoting /
+  escape / redirect vectors, 110 verdicts move `low` → `high` / `db-drop` and none move the other
+  way. The published benchmark was regenerated (91 vectors; `db-drop` precision 75.0% → 78.6%;
+  default-gated precision 93.1% → 93.3%, recall stays 100%), and the corpus gained the
+  quoted-password form and a long-option invocation so the 512-character bound is exercised in
+  public. `INV-DB-DROP-BOUND-DOC` now derives that number from the pattern itself and pins it
+  against the prose, so the documented bound cannot drift from the code.
 - **You now have five minutes to answer an approval card, up from thirty seconds.** Thirty
   seconds was rarely enough to read a command and decide, and an unanswered card falls to the
   safe deny — so the old window mostly produced denials that nobody had actually judged. The
