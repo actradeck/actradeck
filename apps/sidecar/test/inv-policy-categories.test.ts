@@ -344,7 +344,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   // INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 全 LITERAL_RULES が入力長に対して線形にスケールする。
   //   `\b<program>\b[^…]*\b<word>\b` 形は開始位置 O(n) × 走査 O(n) で O(n²) (mysqladmin ルールの初版・
   //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で、先頭 literal が**平坦に
-  //   綴られた**追加ルールを自動網羅する (alternation / 文字クラスを跨ぐ綴りには source 由来 seed が届かない —
+  //   綴られた**追加ルールを自動網羅する (現行 14/16・#2 は literal run 空・#11 は alternation で断片化。alternation /
+  //   文字クラスを跨ぐ綴りには source 由来 seed が届かず、sample 先頭語が規則の先頭 literal と一致するときだけ捕捉 —
   //   SEC-DB2R3-1・sample 由来 prefix seed 軸は task 01a0484c-ecbd)。literal run が空のルール (#2 fork-bomb) は sample
   //   先頭語を常に併用する (fallback でなく追加軸・QA-DB2R3-1)。保守手順: guard が RED になったら seed を削るの
   //   でなく **軸を足す** (追加のみ)。
@@ -365,8 +366,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     };
     const SMALL = 4096;
     const LARGE = SMALL * 8;
-    // 線形なら ratio ≈ 8 (source 由来 70 seed・15 round の実測: p95 ≈ 8.6・worst 14.5 無負荷 / 15.2 CPU 飽和
-    //   = 余裕 ≈ 1.6×・TDA/QA R3)。
+    // 線形なら ratio ≈ 8 (source + sample 由来 88 seed の実測: p95 ≈ 8.6・worst 14.5 無負荷 / **21.2 CPU 飽和
+    //   (2×nproc・880 点)** = 飽和時の余裕 ≈ 1.13×・TDA/QA R3-R4。飽和下でも 2 乗形は ≥ 40 で分離)。
     //   2 乗なら ≈ 40〜70 (旧 `*` 形の実測 39.7〜69.5・seed により変動)。閾値 24 は線形 p95 8.6 と 2 乗下限 ≈ 40 の
     //   間 (幾何中点 √(8.6 × 68) ≈ 24)。best-of-9 の min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)・15 連続緑
     //   flake 0 (TDA R3)。二次形は ratio 判定の前に既定 5s timeout で落ちて診断が出ないことがあるため it の
@@ -402,6 +403,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     LITERAL_RULES.forEach((rule, i) => {
       const seeds = seedsFor(rule, i);
       const live = seeds.filter((seed) => !rule.re.test(fill(seed, SMALL)));
+      // SEC-DB2R4-3: 汎用 seed `a ` が常に非 vacuous なため本 guard は現状恒真 (tautology)。source / sample 由来に
+      //   限った計数への実効化は task 01a0484c-ecbd (走査範囲変更 = full)。
       it(`#${i} ${String(rule.re)} has a non-vacuous adversarial seed`, () => {
         expect(live.length, `seeds=${JSON.stringify(seeds)}`).toBeGreaterThan(0);
       });
