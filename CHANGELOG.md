@@ -103,10 +103,10 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   generic seed had made it a tautology); and the metatest pins its own threshold, input geometry,
   timeout, seed axes and case count so that a single-site edit of any pinned construct (the
   constant declarations, their use sites, the declaration census) fails on its own. The pins do
-  not cover the measurement helpers themselves or the pin block, and an edit that rewrites the
-  pin block together with the constants still passes; the pins exist to make that edit
-  deliberate, not to prove the metatest cannot be weakened. Test-only: the classifier and the
-  approval gate are unchanged.
+  not cover the measurement helpers themselves, the seed loop header (`for (const seed of
+live)`) or the pin block, and an edit that rewrites the pin block together with the constants
+  still passes; the pins exist to make that edit deliberate, not to prove the metatest cannot be
+  weakened. Test-only: the classifier and the approval gate are unchanged.
 
 ## [0.8.1] - 2026-08-26
 

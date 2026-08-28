@@ -369,7 +369,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   非 vacuous なので含めると恒真)。保守手順: guard が RED になったら seed を削るのでなく **軸を足す** (追加のみ)。
   //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。metatest 自身の縮退 (軸の
   //   差し戻し / near-miss 除去 / 数字除外の除去 / RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は
-  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 8 本・使用側 11 本 (fill 引数・
+  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 8 本・使用側 12 pattern / 11 サイト (fill 引数・
   //   K ループ・ratio 式・配線 pin・件数 pin 等)・宣言個数 census — を触る単独編集」に限る** (SEC-DB2R3-2 ≡
   //   QA-DB2R3-5・SEC-LN2-1 / TDA-LN2-2)。**非被覆**: 計測 helper 本体 (`minOf` / `bestOfMs` / `fill` / `isLive`)・
   //   `for (const seed of live)` ループ header・pin describe 自身 (toBe 値・tripwire pattern) — これらの単独編集や
@@ -505,7 +505,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     // 自己弱化 pin (SEC-DB2R3-2 ≡ QA-DB2R3-5): metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の
     //   除去 / RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は単独では緑のままだった。定数の絶対値・
     //   seed 生成の挙動・ケース数の exact 一致・literal tripwire (宣言 / 使用側 / census) で RED にする。保証の範囲と
-    //   非被覆は describe 冒頭の header に単一出所で書く (ここには列挙を複製しない・TDA-LN3-3)。値を変えるときは
+    //   非被覆は describe 冒頭の header に単一出所で書く (保証範囲・非被覆の単一出所化・TDA-LN3-3。上の縮退リストは
+    //   header と同期する 2 コピー目・TDA-LN4-2)。値を変えるときは
     //   理由コメントの実測も更新し full 監査。
     describe("自己弱化 pin (SEC-DB2R3-2): metatest 自身の縮退を RED にする", () => {
       it("RATIO_MAX は 24 (線形 p95 8.6 と 2 乗下限 ≈ 40 の幾何中点・変更は実測更新 + full 監査)", () => {
@@ -597,7 +598,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         const usages: readonly RegExp[] = [
           // SEC-LN3-1 ≡ QA-LN3-1: escape も改行も含まない綴りは本行自身に充足する。文字クラスで綴りを割り、
           //   本行のテキスト (`REPEA[T]`) では充足しない形にする (使用側 pattern の規律: escape / 文字クラス /
-          //   実改行のいずれかを含める)。
+          //   実改行のいずれかを含める)。2 本目の `\)` 形は 1 本目の `\b` 形を包含する (単独では発火しない冗長
+          //   pattern) が、軸・変種は追加のみ・削除禁止の規律で残す (TDA-LN4-1)。
           /repeat = BEST_OF_REPEA[T]\b/,
           /repeat = BEST_OF_REPEA[T]\)/,
           /const derivedLive = derived\.filter\(/,
