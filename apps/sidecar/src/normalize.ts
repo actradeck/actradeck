@@ -2498,8 +2498,9 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 16 に該当形なし) と、sample が先頭 literal より**前**に gap クラスの
  *   除外文字 (`|` `;` `&` 改行) を含む形で prefix の反復が分断される条件 (SEC-LN-1・base 同値・現行 sample に該当なし・
  *   第 4 軸は task 01a048cd-95ae・v0.9・full)。vacuity guard は汎用 seed `a ` を除いた派生 seed で
- *   計数し (SEC-DB2R4-3 の恒真を解消)、metatest 自身の縮退 (軸の差し戻し / RATIO_MAX 緩和 / guard 無効化 / timeout
- *   短縮) は自己弱化 pin が RED にする (SEC-DB2R3-2)。**LINEAR metatest の seed 生成 / RATIO_MAX /
+ *   計数し (SEC-DB2R4-3 の恒真を解消)、metatest 自身の縮退 (軸の差し戻し / RATIO_MAX 緩和 / 入力幾何の縮小 / guard
+ *   無効化 / timeout 短縮) は自己弱化 pin が **pin describe の外側だけを触る単独編集の範囲で** RED にする
+ *   (SEC-DB2R3-2・pin 自身を同時に書き換える coordinated 編集は通る・TDA-LN2-3)。**LINEAR metatest の seed 生成 / RATIO_MAX /
  *   timeout の変更は境界ゲートの走査範囲変更 = full 監査既定** (finding-registry・SEC-DB2R3-3)。束縛後の残余コスト (16 KiB 敵対入力・
  *   base 比): risk 経路 ≈ 3.8× / categories 経路 ≈ 7.0× / 承認 hook 経路 ≈ 1.7× (TDA-DB2R2-7 / SEC R2 実測・
  *   良性入力は 1.0×)。

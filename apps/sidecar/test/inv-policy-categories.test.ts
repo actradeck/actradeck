@@ -369,10 +369,12 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   非 vacuous なので含めると恒真)。保守手順: guard が RED になったら seed を削るのでなく **軸を足す** (追加のみ)。
   //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。metatest 自身の縮退 (軸の
   //   差し戻し / near-miss 除去 / 数字除外の除去 / RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は
-  //   末尾の「自己弱化 pin」が **単独編集の範囲で** RED にする (SEC-DB2R3-2 ≡ QA-DB2R3-5)。定数・toBe pin・source
-  //   tripwire を同時に書き換える coordinated 編集は通る (pin はその編集を意識的にさせる装置・TDA-LN-1 / QA-LN-5)。
-  //   tripwire は正準 `stripComments` で comment を落とした自 source を走査する (行頭 `//` / ブロック comment の
-  //   逐語コピーで欺けない)。行末 `//` と文字列リテラル内の逐語コピーは依然素通し (sweep 019fd74b C-2 と同じ限界)。
+  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin describe の外側だけを触る単独編集」** (SEC-DB2R3-2 ≡
+  //   QA-DB2R3-5・SEC-LN2-1 / TDA-LN2-2: 宣言だけでなく使用側 (fill 引数・K ループ・ratio 式・配線 pin) と shadow
+  //   再宣言も pin)。pin describe 自身 (toBe 値・tripwire pattern) を同時に書き換える coordinated 編集は通る (pin は
+  //   その編集を意識的にさせる装置・TDA-LN-1 / QA-LN-5)。tripwire は正準 `stripComments` で comment を落とした自
+  //   source を走査し、宣言 pattern は行アンカーで assertion 行自身には充足しない (SEC-LN2-2 / TDA-LN2-1)。行末 `//`
+  //   と文字列リテラル内の逐語コピーは依然素通し (sweep 019fd74b C-2 と同じ限界)。
   //   計測は best-of-N の min (redaction の redosBestOfMs と同じ basis・意図的複製 decision 019f2d4f と同旨)。
   describe("INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 各 LITERAL_RULES の実行時間が入力長に線形", () => {
     const minOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);
@@ -397,7 +399,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     const K = 20;
     // 線形なら ratio ≈ 8 (source + sample 由来 88 seed の実測: p95 ≈ 8.6・worst 14.5 無負荷 / **21.2 CPU 飽和
     //   (2×nproc・880 点)** = 飽和時の余裕 ≈ 1.13×・TDA/QA R3-R4。飽和下でも 2 乗形は ≥ 40 で分離)。prefix seed 軸
-    //   16 本の実測 (2026-08-28・実装者 1 回 + QA 無負荷 3 回 / 2×nproc 飽和 2 回): 4.8〜12.8 無負荷・6.0〜14.5
+    //   16 本の実測 (2026-08-28・実装者 1 回 + QA/SEC/TDA 無負荷各 1〜3 回 / 2×nproc 飽和 3 回): 4.8〜12.8 無負荷・5.3〜14.5
     //   飽和 (worst は #11 `redis-cli flushal ` / #12 `npm run migrat `・run により入替わる)。飽和時の余裕 ≈ 1.65×。
     //   2 乗形は 42〜69 で分離。
     //   2 乗なら ≈ 40〜70 (旧 `*` 形の実測 39.7〜69.5・seed により変動)。閾値 24 は線形 p95 8.6 と 2 乗下限 ≈ 40 の
@@ -520,7 +522,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         //   3〜10・計 104 (2026-08-28・16 ルール・汎用 16 + 派生 88・QA-LN-3)。ルールの追加 / 変更で件数が変わったら
         //   実測値を更新する (下げる場合は理由を書く)。
         expect(totalCases).toBeGreaterThanOrEqual(LITERAL_RULES.length * 3);
-        expect(totalCases).toBeGreaterThanOrEqual(TOTAL_CASES_MEASURED);
+        // QA-LN2-2 (H): 実測値との **exact** 一致 + 実測定数の絶対値 pin。床を ×3 へ正した分、軸の差し戻しを
+        //   件数で捕まえる歯は「実測 104 との一致」が担う (ルール変更で件数が動いたら意識的に更新する)。
+        expect(totalCases).toBe(TOTAL_CASES_MEASURED);
+        expect(TOTAL_CASES_MEASURED).toBe(104);
       });
       it("literalRuns: escape 剥がし・構文記号分割・1 字と数字 (束縛値) の除外", () => {
         expect(literalRuns(/\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i)).toEqual([
@@ -562,22 +567,57 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(derivedSeedsFor(re, cmd).length).toBeGreaterThan(0);
         expect(derivedSeedsFor(re, cmd).filter((seed) => isLive(re, seed))).toEqual([]);
       });
-      it("literal tripwire: RATIO_MAX / timeout / guard の綴りが本ファイルの code 行に残っている (comment 除去後の source 走査)", () => {
+      it("literal tripwire: 定数宣言・使用側・guard・配線 pin の綴りが本ファイルの code 行に残っている (comment 除去後の source 走査)", () => {
         // TDA-LN-1: comment を落とさずに走査すると、pin 行を comment へ逐語コピーしてから code を弱める 2 箇所編集が
         //   通る。正準 stripComments (inv-approval / inv-check-classifier と同じ helper) の view を走査する。
+        // SEC-LN2-2 ≡ TDA-LN2-1: 平文 pattern (`/const SCALE = 8;/`) は本 assertion 行の regex リテラル自身にマッチして
+        //   恒真になる。宣言 pattern は **行アンカー** (`\n\s+…;\n` = 実改行 + インデント) にし、assertion 行の
+        //   `\n\s+` という綴りでは充足しない形にする (走査 view は不変)。
+        // SEC-LN2-1 ≡ TDA-LN2-2: 定数の**使用側** (fill の引数・K ループ・ratio 式・配線 pin) も pin する — 宣言を
+        //   残したまま使用側を書き換える 1 行編集で全 assertion が恒真化する経路。
+        // SEC-LN2-3: 同名 const の再宣言 (shadow) は宣言の**個数**で検出する (各 1 回)。
         const self = stripComments(readFileSync(fileURLToPath(import.meta.url), "utf8"));
-        expect(self).toMatch(/const RATIO_MAX = 24;/);
-        expect(self).toMatch(/const LINEAR_IT_TIMEOUT_MS = 30_000;/);
-        expect(self).toMatch(/expect\(derivedLive\.length, [^\n]*\)\.toBeGreaterThan\(0\);/);
-        expect(self).toMatch(/\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/);
-        expect(self).toMatch(/\.toBeLessThan\(RATIO_MAX\);/);
-        expect(self).toMatch(/const derivedLive = derived\.filter\(/);
-        expect(self).toMatch(/const SMALL = 4096;/);
-        expect(self).toMatch(/const SCALE = 8;/);
-        expect(self).toMatch(/const LARGE = SMALL \* SCALE;/);
-        expect(self).toMatch(/const K = 20;/);
-        expect(self).toMatch(/const BEST_OF_REPEAT = 9;/);
-        expect(self).toMatch(/repeat = BEST_OF_REPEAT\)/);
+        const declarations: readonly RegExp[] = [
+          /\n\s+const RATIO_MAX = 24;\n/,
+          /\n\s+const LINEAR_IT_TIMEOUT_MS = 30_000;\n/,
+          /\n\s+const TOTAL_CASES_MEASURED = 104;\n/,
+          /\n\s+const SMALL = 4096;\n/,
+          /\n\s+const SCALE = 8;\n/,
+          /\n\s+const LARGE = SMALL \* SCALE;\n/,
+          /\n\s+const K = 20;\n/,
+          /\n\s+const BEST_OF_REPEAT = 9;\n/,
+        ];
+        const usages: readonly RegExp[] = [
+          /repeat = BEST_OF_REPEAT\b/,
+          /const derivedLive = derived\.filter\(/,
+          /expect\(derivedLive\.length, [^\n]*\)\.toBeGreaterThan\(0\);/,
+          /expect\(derived\)\.toContain\(prefix\);/,
+          /const small = fill\(seed, SMALL\);\n\s+const large = fill\(seed, LARGE\);/,
+          /const tSmall = bestOfMs\(\(\) => \{\n\s+for \(let k = 0; k < K; k\+\+\) rule\.re\.test\(small\);/,
+          /const tLarge = bestOfMs\(\(\) => \{\n\s+for \(let k = 0; k < K; k\+\+\) rule\.re\.test\(large\);/,
+          /const ratio = tLarge \/ Math\.max\(tSmall, 0\.005\);/,
+          /\.toBeLessThan\(RATIO_MAX\);/,
+          /\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/,
+          /expect\(totalCases\)\.toBe\(TOTAL_CASES_MEASURED\);/,
+        ];
+        for (const re of [...declarations, ...usages]) {
+          expect(self, `tripwire ${String(re)}`).toMatch(re);
+        }
+        // 各定数の宣言はちょうど 1 回 (forEach 内での再宣言 = shadow を検出)。
+        const names = [
+          "RATIO_MAX",
+          "LINEAR_IT_TIMEOUT_MS",
+          "TOTAL_CASES_MEASURED",
+          "SMALL",
+          "SCALE",
+          "LARGE",
+          "K",
+          "BEST_OF_REPEAT",
+        ];
+        for (const name of names) {
+          const declared = self.match(new RegExp(`\\n\\s+(?:const|let|var) ${name}\\b`, "g")) ?? [];
+          expect(declared.length, `${name} is declared exactly once`).toBe(1);
+        }
       });
     });
   });
