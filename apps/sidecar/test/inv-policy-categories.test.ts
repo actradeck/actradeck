@@ -369,12 +369,15 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   非 vacuous なので含めると恒真)。保守手順: guard が RED になったら seed を削るのでなく **軸を足す** (追加のみ)。
   //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。metatest 自身の縮退 (軸の
   //   差し戻し / near-miss 除去 / 数字除外の除去 / RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は
-  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin describe の外側だけを触る単独編集」** (SEC-DB2R3-2 ≡
-  //   QA-DB2R3-5・SEC-LN2-1 / TDA-LN2-2: 宣言だけでなく使用側 (fill 引数・K ループ・ratio 式・配線 pin) と shadow
-  //   再宣言も pin)。pin describe 自身 (toBe 値・tripwire pattern) を同時に書き換える coordinated 編集は通る (pin は
-  //   その編集を意識的にさせる装置・TDA-LN-1 / QA-LN-5)。tripwire は正準 `stripComments` で comment を落とした自
-  //   source を走査し、宣言 pattern は行アンカーで assertion 行自身には充足しない (SEC-LN2-2 / TDA-LN2-1)。行末 `//`
-  //   と文字列リテラル内の逐語コピーは依然素通し (sweep 019fd74b C-2 と同じ限界)。
+  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 8 本・使用側 11 本 (fill 引数・
+  //   K ループ・ratio 式・配線 pin・件数 pin 等)・宣言個数 census — を触る単独編集」に限る** (SEC-DB2R3-2 ≡
+  //   QA-DB2R3-5・SEC-LN2-1 / TDA-LN2-2)。**非被覆**: 計測 helper 本体 (`minOf` / `bestOfMs` / `fill` / `isLive`)・
+  //   `for (const seed of live)` ループ header・pin describe 自身 (toBe 値・tripwire pattern) — これらの単独編集や
+  //   pin と定数の coordinated 編集は通る (SEC-LN3-2 / QA-LN3-2・base 同値・helper 本体 pin と非自己充足メタ pin は
+  //   task 01a048f6-67a5・v0.9・full)。pin はその編集を意識的にさせる装置であって証明ではない (TDA-LN-1 / QA-LN-5)。
+  //   tripwire は正準 `stripComments` で comment を落とした自 source を走査し、宣言 pattern は行アンカー・使用側
+  //   pattern は escape / 文字クラス / 実改行を含む綴りで assertion 行自身には充足しない (SEC-LN2-2 / TDA-LN2-1 /
+  //   SEC-LN3-1)。行末 `//` と文字列リテラル内の逐語コピーは依然素通し (sweep 019fd74b C-2 と同じ限界)。
   //   計測は best-of-N の min (redaction の redosBestOfMs と同じ basis・意図的複製 decision 019f2d4f と同旨)。
   describe("INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 各 LITERAL_RULES の実行時間が入力長に線形", () => {
     const minOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);
@@ -500,8 +503,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     });
 
     // 自己弱化 pin (SEC-DB2R3-2 ≡ QA-DB2R3-5): metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の
-    //   除去 / RATIO_MAX 緩和 / guard 無効化 / timeout 短縮) は単独では緑のままだった。定数の絶対値・seed 生成の
-    //   挙動・ケース数の下限・literal tripwire で RED にする。値を変えるときは理由コメントの実測も更新し full 監査。
+    //   除去 / RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は単独では緑のままだった。定数の絶対値・
+    //   seed 生成の挙動・ケース数の exact 一致・literal tripwire (宣言 / 使用側 / census) で RED にする。保証の範囲と
+    //   非被覆は describe 冒頭の header に単一出所で書く (ここには列挙を複製しない・TDA-LN3-3)。値を変えるときは
+    //   理由コメントの実測も更新し full 監査。
     describe("自己弱化 pin (SEC-DB2R3-2): metatest 自身の縮退を RED にする", () => {
       it("RATIO_MAX は 24 (線形 p95 8.6 と 2 乗下限 ≈ 40 の幾何中点・変更は実測更新 + full 監査)", () => {
         expect(RATIO_MAX).toBe(24);
@@ -517,10 +522,12 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(K).toBe(20);
         expect(BEST_OF_REPEAT).toBe(9);
       });
-      it("計測ケース数は LITERAL_RULES 由来の下限以上 (軸の差し戻しで RED)", () => {
+      it("計測ケース数は実測 104 と exact 一致 (軸の差し戻しで RED・構造下限 3/ルールも併記)", () => {
         // 各ルール最低 3 (汎用 1 + prefix 1 + source / sample 由来の非 vacuous 1・guard が保証)。実測 per-rule live は
         //   3〜10・計 104 (2026-08-28・16 ルール・汎用 16 + 派生 88・QA-LN-3)。ルールの追加 / 変更で件数が変わったら
         //   実測値を更新する (下げる場合は理由を書く)。
+        // 構造下限 (exact pin に包含される dead assertion だが、ルール変更で 104 を更新する際にも守られる
+        //   guard 由来の下限として残す・TDA-LN3-4)。
         expect(totalCases).toBeGreaterThanOrEqual(LITERAL_RULES.length * 3);
         // QA-LN2-2 (H): 実測値との **exact** 一致 + 実測定数の絶対値 pin。床を ×3 へ正した分、軸の差し戻しを
         //   件数で捕まえる歯は「実測 104 との一致」が担う (ルール変更で件数が動いたら意識的に更新する)。
@@ -588,7 +595,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /\n\s+const BEST_OF_REPEAT = 9;\n/,
         ];
         const usages: readonly RegExp[] = [
-          /repeat = BEST_OF_REPEAT\b/,
+          // SEC-LN3-1 ≡ QA-LN3-1: escape も改行も含まない綴りは本行自身に充足する。文字クラスで綴りを割り、
+          //   本行のテキスト (`REPEA[T]`) では充足しない形にする (使用側 pattern の規律: escape / 文字クラス /
+          //   実改行のいずれかを含める)。
+          /repeat = BEST_OF_REPEA[T]\b/,
+          /repeat = BEST_OF_REPEA[T]\)/,
           /const derivedLive = derived\.filter\(/,
           /expect\(derivedLive\.length, [^\n]*\)\.toBeGreaterThan\(0\);/,
           /expect\(derived\)\.toContain\(prefix\);/,
