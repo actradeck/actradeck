@@ -72,11 +72,19 @@ describe("INV-APPROVAL: high-risk gating", () => {
     expect(Date.now() - start).toBeGreaterThanOrEqual(40);
   });
 
-  it("INV-DB-DROP-RISK-VERDICT: DROP DATABASE / dropdb は通常モードで承認カードが出る (task 01a03b76)", async () => {
+  it("INV-DB-DROP-RISK-VERDICT: DROP DATABASE / dropdb / 他エンジン drop 形は通常モードで承認カードが出る (task 01a03b76 / 01a0440b)", async () => {
     // 通常モードの唯一の根拠 `requiresDestructiveApproval` (= risk !== "low") を bridge 経由で pin する。
     //   category だけ付いて risk が low のままだと、bypass/YOLO では止まるのに通常モードで素通りする
     //   逆転 (R7 QA-CQ7-5) が再発する — classifier 単体でなく実ゲートで固定する。
-    for (const command of ["psql -c 'DROP DATABASE staging'", "dropdb staging"]) {
+    for (const command of [
+      "psql -c 'DROP DATABASE staging'",
+      "dropdb staging",
+      // task 01a0440b: 他エンジン形も実ゲートで pin (classifier 単体テストと二重)。
+      "mysqladmin -u root --force drop appdb",
+      "mongosh app --eval 'db.dropDatabase()'",
+      "psql -c 'DROP SCHEMA public CASCADE'",
+      "redis-cli FLUSHALL",
+    ]) {
       const bridge = new ApprovalBridge({ timeoutMs: 30 });
       const emit = vi.fn();
       const r = await bridge.requestApproval(preToolUse("Bash", { command }), emit);
@@ -3521,7 +3529,9 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   //   R18 unblock (decision 01a03e39): 2414/812 → 2507/798 — ラッパ文法を単一表 `WRAPPER_GRAMMAR` へ畳み
   //   (if 連鎖の除去で分岐トークンは減った)、未知 long option の床・`--`・文字列形・su を追加。天井は実測 + 4。
   //   R19 (SEC-CQ19-1 加算床 + watch/su): 2515/798。天井は実測 + 4。
-  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2519;
+  //   task 01a0440b (TDA-DB-6・db-drop 他エンジン形): 2515/798 → 2521/798 — LITERAL_RULES にデータ行 5 本
+  //   (分岐なし・branch tokens 不変)。天井は実測 + 4。
+  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2525;
   const MODULE_SET_BRANCH_TOKEN_CEILING = 802;
 
   it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {

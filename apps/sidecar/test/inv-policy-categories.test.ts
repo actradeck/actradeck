@@ -198,6 +198,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     { re: /\btruncate\s+table\b/i, cmd: "psql -c 'truncate table sessions'" },
     { re: /\bdrop\s+database\b/i, cmd: "psql -c 'drop database staging'" },
     { re: /\bdropdb\b/i, cmd: "dropdb staging" },
+    { re: /\bdrop\s+schema\b/i, cmd: "psql -c 'drop schema public cascade'" },
+    { re: /\bdrop\s+owned\s+by\b/i, cmd: "psql -c 'drop owned by app'" },
+    { re: /\bmysqladmin\b[^|;&\n]*\bdrop\b/i, cmd: "mysqladmin -u root -p --force drop appdb" },
+    { re: /\bdrop_?database\s*\(/i, cmd: "mongosh app --eval 'db.dropDatabase()'" },
+    { re: /\bflush(?:all|db)\b/i, cmd: "redis-cli flushall" },
     { re: /\bmigrate\b/i, cmd: "npm run migrate" },
     { re: /\bproduction\b/i, cmd: "deploy --env production" },
     { re: /\bgit\s+reset\s+--hard\b/i, cmd: "git reset --hard HEAD~1" },
@@ -251,6 +256,48 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       LITERAL_RULES.every((r) => r.high),
       "LITERAL_RULES に category-only は無い",
     ).toBe(true);
+  });
+
+  it("INV-DB-DROP-RISK-VERDICT (task 01a0440b): 他エンジン / 他粒度の drop 形も risk=high かつ db-drop", () => {
+    // TDA-DB-6 (PR #44 pre-existing M): db-drop literal が PostgreSQL 偏在で、以下は両モードともカード無しだった。
+    //   追加のみ (削除禁止規律)。各形は risk と category の両方を pin — 片方に退行したら RED。
+    for (const cmd of [
+      // MySQL CLI: `mysqladmin [options] drop db` (--force / -f で確認プロンプト無し)
+      "mysqladmin -u root -p --force drop appdb",
+      "mysqladmin -f drop appdb",
+      "MYSQLADMIN -h db.internal drop appdb", // `/i` load-bearing
+      // Mongo: mongosh の JS 形 / pymongo・sqlalchemy-utils の snake_case 形
+      "mongosh mongodb://localhost:27017/app --eval 'db.dropDatabase()'",
+      "mongosh app --eval 'db.dropDatabase( )'",
+      "python -c 'import pymongo; pymongo.MongoClient().drop_database(\"app\")'",
+      // PostgreSQL の schema / owner 粒度・MySQL の DATABASE 同義語
+      "psql -c 'DROP SCHEMA public CASCADE'",
+      "mysql -e 'drop schema app'",
+      "psql -h db.internal -c 'DROP OWNED BY app'",
+      // redis: 全 DB / 選択 DB のキー全消去
+      "redis-cli FLUSHALL",
+      "redis-cli -h cache.internal -n 3 flushdb async",
+    ]) {
+      expect(classifyCommandRisk(cmd), `${cmd}: risk は high`).toBe("high");
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop category`).toBe(true);
+    }
+    // 非該当近傍: サブコマンド無し / 別 segment / 括弧無し / 単語境界。
+    for (const cmd of [
+      "mysqladmin status",
+      "mysqladmin -u root processlist",
+      "mysqladmin status && echo drop", // `&&` を跨いだ drop は別 segment (mysqladmin ルール非該当)
+      "grep -rn dropDatabase docs/", // 括弧無し (メソッド呼び出しでない)
+      "echo drop_database",
+      "psql -c 'drop schemas'", // `schema` の単語境界
+      "echo flushdbx",
+      "echo noflushdb",
+    ]) {
+      expect(classifyCommandCategories(cmd).has("db-drop"), `${cmd}: db-drop 非付与`).toBe(false);
+    }
+    // bare-token 形の既知 FP class (dropdb と同じ): 単語を含むだけで high。意図した safe-direction over-gate と
+    //   して pin する (ベンチ corpus の良性担体 `grep -rn flushall src/` と同じ事実)。
+    expect(classifyCommandRisk("grep -rn flushall src/")).toBe("high");
+    expect(classifyCommandCategories("grep -rn flushall src/").has("db-drop")).toBe(true);
   });
 });
 

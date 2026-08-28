@@ -37,7 +37,7 @@ intersect your enabled set.
 | `recursive-rm`     | `rm -rf`, `find -delete`/`-exec`, mass file deletion                                                          | **ON**  |
 | `disk-destroy`     | `mkfs`, `dd`, `shred`, `wipefs`, `parted`, block-device writes                                                | **ON**  |
 | `history-rewrite`  | `git push --force`, `git reset --hard`, `git clean -f`                                                        | **ON**  |
-| `db-drop`          | `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE` / `dropdb` (literal list; not exhaustive — see note below)  | **ON**  |
+| `db-drop`          | `DROP TABLE` / `DROP DATABASE` / `DROP SCHEMA` / `DROP OWNED BY` / `TRUNCATE TABLE` / `dropdb` / `mysqladmin … drop` / `dropDatabase(` / `FLUSHALL` / `FLUSHDB` (literal list; not exhaustive — see note below) | **ON**  |
 | `fork-bomb`        | self-replicating shell patterns                                                                               | **ON**  |
 | `secret-egress`    | network-egress program (`curl`/`wget`/`nc`/`scp`…) with an **inline** secret in the command                   | **ON**  |
 | `high-risk-other`  | high-risk or structurally unparseable execution that no named category covers (backstop against silent holes) | **ON**  |
@@ -47,14 +47,15 @@ intersect your enabled set.
 | `external-tool`    | MCP calls / WebFetch                                                                                          | off     |
 | `migrate-prod`     | DB migrations / "production" mentions (ambiguous by nature)                                                   | off     |
 
-> **`db-drop` is a literal list, not a semantic detector.** It currently recognises the SQL forms
-> `DROP TABLE` / `DROP DATABASE` / `TRUNCATE TABLE` and the PostgreSQL CLI `dropdb`. Other engines'
-> equivalents (`mysqladmin drop`, Mongo's `db.dropDatabase()`, `DROP SCHEMA … CASCADE`,
-> `DROP OWNED BY`, `redis-cli FLUSHALL`) are **not** recognised as `db-drop` today. Most of them
-> draw no card in either mode; the bare Mongo shell line `db.dropDatabase()` still rates `medium`
-> with the generic `high-risk-other` marker and so draws a card in both modes, but the same call
-> wrapped as `mongosh --eval '...'` does not. Widening the list is tracked for v0.9. Treat the
-> category as a floor, not a guarantee.
+> **`db-drop` is a literal list, not a semantic detector.** It recognises the SQL forms `DROP TABLE` /
+> `DROP DATABASE` / `DROP SCHEMA` / `DROP OWNED BY` / `TRUNCATE TABLE`, the PostgreSQL CLI `dropdb`, the MySQL
+> CLI `mysqladmin … drop` (the `drop` subcommand in the same shell segment), the Mongo shell
+> `db.dropDatabase()` together with the snake_case `drop_database(` of pymongo / sqlalchemy-utils, and
+> redis `FLUSHALL` / `FLUSHDB`. Bare-token forms (`dropdb`, `flushall`, `flushdb`) fire on any command line
+> that mentions the word — a safe-direction over-gate that the benchmark measures. **Still not
+> recognised**: Mongo's `db.collection.drop()` (a `.drop(` literal would collide with pandas and
+> friends), `DROP TABLESPACE` / `DROP USER` / `DROP ROLE`, and engine-specific admin tools not listed
+> above; those rate `low` unless another rule fires. Treat the category as a floor, not a guarantee.
 
 The eight **ON** rows are the default preset (`DEFAULT_GATED_CATEGORIES`): irreversible,
 large-blast-radius operations plus arbitrary inline code execution. The four **off** rows lean toward false positives, so

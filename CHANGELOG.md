@@ -25,6 +25,18 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   merely mentions the word (`man dropdb`, `which dropdb`, a commit message naming a `dropdb`
   wrapper) now draws a card too. Both are safe-direction over-gates; the benchmark corpus carries
   a benign `man dropdb` vector so that this cost is measured rather than assumed.
+- **The `db-drop` category now recognises other engines and granularities.** The literal list was
+  PostgreSQL-centric: `mysqladmin … drop`, the Mongo shell `db.dropDatabase()` (and the snake_case
+  `drop_database(` of pymongo / sqlalchemy-utils), `DROP SCHEMA`, `DROP OWNED BY`, and redis
+  `FLUSHALL` / `FLUSHDB` all rated `low` with no category, so they drew no approval card in either
+  mode. They are now `high` / `db-drop` literals (added, none removed); `INV-DB-DROP-RISK-VERDICT`
+  pins each form at the classifier and at the bridge, and the published classifier benchmark was
+  regenerated (89 vectors; `db-drop` precision 66.7% → 75.0%; default-gated precision 94.2% →
+  93.1%, recall stays 100%). The cost is the same keyword class as `dropdb`: a command line that
+  merely mentions `flushall` / `flushdb` (`grep -rn flushall src/`) now draws a card, and the
+  corpus carries that vector so the cost is measured. Mongo's `db.collection.drop()` is
+  deliberately not a literal (`.drop(` collides with pandas and friends); it remains disclosed in
+  `docs/approval-policy.md`.
 
 ### Changed
 

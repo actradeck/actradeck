@@ -189,6 +189,48 @@ export const COMMANDS: readonly CommandVector[] = [
     expectCategories: [],
     note: "benign carrier of the bare-token `dropdb` literal: reading its manual page. Measures the keyword false-positive class the literal buys (SEC-DB-1 / TDA-DB-1); expected to over-gate (safe direction), and disclosed as such",
   },
+  {
+    command: "mysqladmin -u root -p --force drop appdb",
+    expectRisk: "high",
+    expectCategories: ["db-drop"],
+    note: "MySQL CLI drop (task 01a0440b; previously low with no category in every mode)",
+  },
+  {
+    command: "mongosh mongodb://localhost:27017/app --eval 'db.dropDatabase()'",
+    expectRisk: "high",
+    expectCategories: ["db-drop"],
+    note: "mongosh drop database from the command line (task 01a0440b; the wrapped form was low with no category)",
+  },
+  {
+    command: "psql -c 'DROP SCHEMA public CASCADE'",
+    expectRisk: "high",
+    expectCategories: ["db-drop"],
+    note: "schema-granularity drop (task 01a0440b)",
+  },
+  {
+    command: "psql -c 'DROP OWNED BY app'",
+    expectRisk: "high",
+    expectCategories: ["db-drop"],
+    note: "drop everything a role owns (task 01a0440b)",
+  },
+  {
+    command: "redis-cli -n 3 FLUSHDB ASYNC",
+    expectRisk: "high",
+    expectCategories: ["db-drop"],
+    note: "redis flush of the selected database (task 01a0440b; FLUSHALL is the same literal class)",
+  },
+  {
+    command: "grep -rn flushall src/",
+    expectRisk: "low",
+    expectCategories: [],
+    note: "benign carrier of the bare-token `flushall` literal: a source search. Same false-positive class as `man dropdb`, measured here on purpose (task 01a0440b); expected to over-gate (safe direction)",
+  },
+  {
+    command: "mysqladmin status",
+    expectRisk: "low",
+    expectCategories: [],
+    note: "true negative for the mysqladmin rule: no drop subcommand in the segment",
+  },
   // ============================ perm-change (default OFF) ======================================
   {
     command: "chmod -R 777 /var/www",
