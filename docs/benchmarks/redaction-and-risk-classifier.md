@@ -268,7 +268,9 @@ seven while calling itself complete):
   category). The corpus carries one vector per form plus two negatives: `mysqladmin status` (a true
   negative — the rule needs a `drop` word within 512 characters with no `|` `;` `&` or newline
   between; that boundary is quote-unaware, so `-p'a;b'` or a backslash line continuation hides the
-  subcommand, tracked for v0.9) and `grep -rn flushall src/` (a benign carrier of the bare-token
+  subcommand, tracked for v0.9; the longest gap this corpus exercises is 20 characters, so the 512
+  bound itself is pinned by unit tests — a 319-character-gap real invocation and the 512/513 boundary —
+  rather than by these numbers) and `grep -rn flushall src/` (a benign carrier of the bare-token
   redis literal, the same keyword false-positive class as `man dropdb`, measured on purpose). The
   bare-token reach is wider than that search example: `node -e "cache.flushAll()"` (the
   node-cache method name), a path such as `/var/lib/flushall`, or piping logs through

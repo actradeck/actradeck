@@ -314,7 +314,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       ).toBe(false);
     }
     // SEC-DB2R2-2: `{0,512}` の束縛に歯を付ける。corpus の最大 gap は 20 で、`{0,28}` へ縮めても全 suite が
-    //   緑のまま現実的な長 option 列 (gap ≈ 270) の実呼び出しが low に落ちる。現実形 1 本と境界 (gap 512 可 /
+    //   緑のまま現実的な長 option 列 (下の実形は gap 319・assert 値 318) の実呼び出しが low に落ちる。現実形 1 本と境界 (gap 512 可 /
     //   513 不可) を pin する — 束縛を縮める変更はここで RED になり、意図的に変えるなら両方を更新する。
     const longOptions =
       "mysqladmin --host=db.internal --port=3306 --user=admin --ssl-mode=VERIFY_IDENTITY " +
@@ -327,7 +327,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     const withGap = (n: number): string => `mysqladmin ${"x".repeat(n - 2)} drop appdb`;
     expect(classifyCommandCategories(withGap(512)).has("db-drop"), "gap 512 は束縛内").toBe(true);
     expect(classifyCommandCategories(withGap(513)).has("db-drop"), "gap 513 は束縛外").toBe(false);
-    // QA-DB2-3: 境界軸を左右対称に pin する (`&&` だけでなく `|` `;` 改行の各区切りで別 segment の drop は非該当)。
+    // QA-DB2-3: 境界軸を左右対称に pin する (`&&` だけでなく `|` `;` 改行の各区切りの向こう側の drop は非該当)。
     //   軸は追加のみ・削除禁止 (finding-registry)。
     for (const cmd of [
       "mysqladmin status | grep drop",
@@ -343,7 +343,12 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
 
   // INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 全 LITERAL_RULES が入力長に対して線形にスケールする。
   //   `\b<program>\b[^…]*\b<word>\b` 形は開始位置 O(n) × 走査 O(n) で O(n²) (mysqladmin ルールの初版・
-  //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で将来の追加ルールを自動網羅。
+  //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で、先頭 literal が**平坦に
+  //   綴られた**追加ルールを自動網羅する (alternation / 文字クラスを跨ぐ綴りには source 由来 seed が届かない —
+  //   SEC-DB2R3-1・sample 由来 prefix seed 軸は task 01a0484c-ecbd)。literal run が空のルール (#2 fork-bomb) は sample
+  //   先頭語を常に併用する (fallback でなく追加軸・QA-DB2R3-1)。保守手順: guard が RED になったら seed を削るの
+  //   でなく **軸を足す** (追加のみ)。
+  //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。
   //   計測は best-of-N の min (redaction の redosBestOfMs と同じ basis・意図的複製 decision 019f2d4f と同旨)。
   describe("INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 各 LITERAL_RULES の実行時間が入力長に線形", () => {
     const minOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);
@@ -360,10 +365,12 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     };
     const SMALL = 4096;
     const LARGE = SMALL * 8;
-    // 線形なら ratio ≈ 8 (観測 96 点: 中央 ≈ 7.7・最大 12.9 = 余裕 ≈ 1.9×)。2 乗なら ≈ 64〜69 (旧 `*` 形の実測
-    //   65〜69)。閾値 24 は幾何中点 √(8.6 × 68.2) ≈ 24.2 で両側 ≈ 2.8× (線形側は worst 基準で 1.9×)。best-of-9 の
-    //   min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)。二次形は ratio 判定の前に既定 5s timeout で落ちて診断が
-    //   出ないことがあるため it の timeout を明示する (QA-DB2R2-3)。
+    // 線形なら ratio ≈ 8 (source 由来 70 seed・15 round の実測: p95 ≈ 8.6・worst 14.5 無負荷 / 15.2 CPU 飽和
+    //   = 余裕 ≈ 1.6×・TDA/QA R3)。
+    //   2 乗なら ≈ 40〜70 (旧 `*` 形の実測 39.7〜69.5・seed により変動)。閾値 24 は線形 p95 8.6 と 2 乗下限 ≈ 40 の
+    //   間 (幾何中点 √(8.6 × 68) ≈ 24)。best-of-9 の min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)・15 連続緑
+    //   flake 0 (TDA R3)。二次形は ratio 判定の前に既定 5s timeout で落ちて診断が出ないことがあるため it の
+    //   timeout を明示する (QA-DB2R2-3)。
     const RATIO_MAX = 24;
     const fill = (seed: string, n: number): string =>
       seed.repeat(Math.ceil(n / seed.length)).slice(0, n);
@@ -381,7 +388,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         .filter((s) => s.length >= 2 && !/^\d+$/.test(s));
     const seedsFor = (rule: { re: RegExp }, i: number): string[] => {
       const runs = literalRuns(rule.re);
-      const base = runs.length > 0 ? runs : [samples[i]!.cmd.split(/\s+/)[0]!];
+      // QA-DB2R3-1: sample 先頭語の軸は **追加**であって置換ではない (軸は追加のみ・削除禁止)。source 由来の
+      //   literal run は `(?:mysql|mariadb)admin` / `mysql_?admin` のような綴りで断片化して規則先頭に届かず、
+      //   sample 先頭語がその穴を埋める (S1/S3 が RED へ反転する実測)。
+      const base = [...runs, samples[i]!.cmd.split(/\s+/)[0]!];
       const out = new Set<string>(["a "]);
       for (const r of base) {
         out.add(`${r} `);

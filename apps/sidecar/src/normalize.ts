@@ -2483,9 +2483,16 @@ const REMOTE_EXEC_RUNNERS = new Set([
  * ReDoS 安全の基準は**入力長に対する線形スケーリング**であって量化子の本数ではない (SEC-DB2-1):
  *   `\b<program>\b[^…]*\b<word>\b` は開始位置 O(n) × 走査 O(n) で O(n²) になる (実測 exponent 2.00・
  *   16 KiB で 63 ms)。`{0,512}` で束縛して線形化 (判定は gap ≤ 512 で同値・境界 512/513 と現実的な長 option
- *   列 gap ≈ 270 を INV-DB-DROP-RISK-VERDICT が pin)。全ルールの線形性は INV-LITERAL-RULES-LINEAR
- *   (inv-policy-categories) が **regex source 由来の敵対 seed** で best-of-N 回帰固定する (追加ルールを自動網羅・
- *   sample 文字列由来の seed では届かないルールがあった SEC-DB2R2-1 の是正)。束縛後の残余コスト (16 KiB 敵対入力・
+ *   列 gap 319 を INV-DB-DROP-RISK-VERDICT が pin。公開 corpus の最大 gap は 20 で束縛値の歯は unit test 3 行に
+ *   載る・SEC-DB2R3-4)。全ルールの線形性は INV-LITERAL-RULES-LINEAR (inv-policy-categories) が **regex source
+ *   由来の敵対 seed + sample 先頭語 seed** で best-of-N 回帰固定する。**網羅の範囲 (SEC-DB2R3-1 / QA-DB2R3-1)**:
+ *   source 由来 seed は先頭 literal が**平坦に綴られた**ルール (現行 16 本すべて) に届く。alternation / 任意記号を
+ *   跨ぐ綴り (`(?:mysql|mariadb)admin` / `mysql_?admin`) では source seed が断片化するため、sample 先頭語を**追加軸**
+ *   として常に併用する (軸は追加のみ・R2 で置換していたのを是正・2 乗形 S1/S3 が RED へ反転する実測)。残る死角:
+ *   sample 先頭語が program 名でない書き方 (`sh -c '…'`) × 非平坦綴り、および先頭が 2 語連鎖 (`A\s+B[^…]*C`) の
+ *   2 乗形 (QA-DB2R3-2) — sample 由来「マッチしなくなる最長 prefix」軸と metatest 自己弱化 pin は task 01a0484c-ecbd
+ *   (v0.9・full・SEC 検証済み)。**LINEAR metatest の seed 生成 / RATIO_MAX /
+ *   timeout の変更は境界ゲートの走査範囲変更 = full 監査既定** (finding-registry・SEC-DB2R3-3)。束縛後の残余コスト (16 KiB 敵対入力・
  *   base 比): risk 経路 ≈ 3.8× / categories 経路 ≈ 7.0× / 承認 hook 経路 ≈ 1.7× (TDA-DB2R2-7 / SEC R2 実測・
  *   良性入力は 1.0×)。
  */
