@@ -9,7 +9,12 @@
  * 判定する根拠なので、写像の取りこぼし = ゲート素通り (leak)。本テストが mapping を pin する
  * (述語→category の無効化 mutation は当該 assertion を赤化する)。
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
+
+import { stripComments } from "./util/strip-comments.js";
 
 import { DEFAULT_GATED_CATEGORIES, type PolicyCategory } from "@actradeck/event-model";
 
@@ -343,17 +348,42 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
 
   // INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 全 LITERAL_RULES が入力長に対して線形にスケールする。
   //   `\b<program>\b[^…]*\b<word>\b` 形は開始位置 O(n) × 走査 O(n) で O(n²) (mysqladmin ルールの初版・
-  //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で、先頭 literal が**平坦に
-  //   綴られた**追加ルールを自動網羅する (現行 14/16・#2 は literal run 空・#11 は alternation で断片化。alternation /
-  //   文字クラスを跨ぐ綴りには source 由来 seed が届かず、sample 先頭語が規則の先頭 literal と一致するときだけ捕捉 —
-  //   SEC-DB2R3-1・sample 由来 prefix seed 軸は task 01a0484c-ecbd)。literal run が空のルール (#2 fork-bomb) は sample
-  //   先頭語を常に併用する (fallback でなく追加軸・QA-DB2R3-1)。保守手順: guard が RED になったら seed を削るの
-  //   でなく **軸を足す** (追加のみ)。
-  //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。
+  //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で追加ルールを自動網羅する。
+  //   seed は 3 軸 (追加のみ・削除禁止):
+  //     (1) regex source 由来の literal run の完全一致 + near-miss (SEC-DB2R2-1) — 先頭 literal が**平坦に綴られた**
+  //         ルールに届く (現行 14/16・#2 fork-bomb は literal run 空・#11 flush は alternation で断片化)。
+  //     (2) sample 先頭語 (QA-DB2R3-1) — alternation 綴りの program 名 (`(?:mysql|mariadb)admin` / `mysql_?admin`)
+  //         を埋める (S1/S3・R3 Y4 が RED へ反転する実測)。
+  //     (3) sample 由来「マッチしなくなる最長 prefix」(task 01a0484c-ecbd・SEC-DB2R3-1(b)) — 規則の綴り (alternation /
+  //         文字クラス / 2 語連鎖) に依存せず、sample がエンジンを規則の奥まで進めた位置まで**全開始位置から**追随
+  //         させる。(1)(2) の残余 = sample 先頭語 ≠ 規則の先頭 literal (R4 Z2 `sh -c '…'` sample / Z4 2 語連鎖 /
+  //         Z5 `sudo` 前置 / Z6 alternation サブコマンドが先頭 literal・SEC-DB2R4-2 / QA-DB2R3-2) がいずれも RED へ
+  //         反転する (coordinated 再注入で実測・着地条件)。残る構造的死角は「末尾 literal が先頭 literal の反復で
+  //         再構成される規則」(`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2): prefix の反復が規則を再びマッチさせ vacuous に
+  //         なる。現行 16 に該当形なし (sweep 019fd74b E で追跡)。また prefix 軸は「反復した seed が規則の gap
+  //         クラス (`[^|;&\n]`) に触れない」前提に依存し、sample が先頭 literal より**前**に gap クラスの除外文字
+  //         (`|` `;` `&` 改行・例 `cd /app && prog … word`) を含む形では反復が分断され 2 乗形が線形域に留まる
+  //         (SEC-LN-1・base 同値・現行 16 の sample に該当形なし・第 4 軸「最後の metachar 以降の後尾」は task 01a048cd-95ae・
+  //         v0.9・full)。
+  //   vacuity guard は汎用 seed `a ` を**除いた派生 seed** の非 vacuous 数で判定する (SEC-DB2R4-3: `a ` は全ルールで
+  //   非 vacuous なので含めると恒真)。保守手順: guard が RED になったら seed を削るのでなく **軸を足す** (追加のみ)。
+  //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。metatest 自身の縮退 (軸の
+  //   差し戻し / near-miss 除去 / 数字除外の除去 / RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は
+  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 8 本・使用側 12 pattern / 11 サイト (fill 引数・
+  //   K ループ・ratio 式・配線 pin・件数 pin 等)・宣言個数 census — を触る単独編集」に限る** (SEC-DB2R3-2 ≡
+  //   QA-DB2R3-5・SEC-LN2-1 / TDA-LN2-2)。**非被覆**: 計測 helper 本体 (`minOf` / `bestOfMs` / `fill` / `isLive`)・
+  //   `for (const seed of live)` ループ header・pin describe 自身 (toBe 値・tripwire pattern) — これらの単独編集や
+  //   pin と定数の coordinated 編集は通る (SEC-LN3-2 / QA-LN3-2・base 同値・helper 本体 pin と非自己充足メタ pin は
+  //   task 01a048f6-67a5・v0.9・full)。pin はその編集を意識的にさせる装置であって証明ではない (TDA-LN-1 / QA-LN-5)。
+  //   tripwire は正準 `stripComments` で comment を落とした自 source を走査し、宣言 pattern は行アンカー・使用側
+  //   pattern は escape / 文字クラス / 実改行を含む綴りで assertion 行自身には充足しない (SEC-LN2-2 / TDA-LN2-1 /
+  //   SEC-LN3-1)。行末 `//` と文字列リテラル内の逐語コピーは依然素通し (sweep 019fd74b C-2 と同じ限界)。
   //   計測は best-of-N の min (redaction の redosBestOfMs と同じ basis・意図的複製 decision 019f2d4f と同旨)。
   describe("INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 各 LITERAL_RULES の実行時間が入力長に線形", () => {
     const minOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);
-    const bestOfMs = (run: () => void, repeat = 9): number => {
+    /** best-of-N の N (min を採る・redaction 側 helper と同 basis)。 */
+    const BEST_OF_REPEAT = 9;
+    const bestOfMs = (run: () => void, repeat = BEST_OF_REPEAT): number => {
       run();
       run();
       const out: number[] = [];
@@ -365,64 +395,243 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       return minOf(out);
     };
     const SMALL = 4096;
-    const LARGE = SMALL * 8;
+    /** 入力を何倍に伸ばして ratio を測るか (LARGE = SMALL × SCALE)。 */
+    const SCALE = 8;
+    const LARGE = SMALL * SCALE;
+    /** 1 計測あたりの regex 実行回数 (timer 分解能に対する余裕)。 */
+    const K = 20;
     // 線形なら ratio ≈ 8 (source + sample 由来 88 seed の実測: p95 ≈ 8.6・worst 14.5 無負荷 / **21.2 CPU 飽和
-    //   (2×nproc・880 点)** = 飽和時の余裕 ≈ 1.13×・TDA/QA R3-R4。飽和下でも 2 乗形は ≥ 40 で分離)。
+    //   (2×nproc・880 点)** = 飽和時の余裕 ≈ 1.13×・TDA/QA R3-R4。飽和下でも 2 乗形は ≥ 40 で分離)。prefix seed 軸
+    //   16 本の実測 (2026-08-28・実装者 1 回 + QA/SEC/TDA 無負荷各 1〜3 回 / 2×nproc 飽和 3 回): 4.8〜12.8 無負荷・5.3〜14.5
+    //   飽和 (worst は #11 `redis-cli flushal ` / #12 `npm run migrat `・run により入替わる)。飽和時の余裕 ≈ 1.65×。
+    //   2 乗形は 42〜69 で分離。
     //   2 乗なら ≈ 40〜70 (旧 `*` 形の実測 39.7〜69.5・seed により変動)。閾値 24 は線形 p95 8.6 と 2 乗下限 ≈ 40 の
     //   間 (幾何中点 √(8.6 × 68) ≈ 24)。best-of-9 の min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)・15 連続緑
-    //   flake 0 (TDA R3)。二次形は ratio 判定の前に既定 5s timeout で落ちて診断が出ないことがあるため it の
-    //   timeout を明示する (QA-DB2R2-3)。
+    //   flake 0 (TDA R3)。
     const RATIO_MAX = 24;
+    // 二次形は ratio 判定の前に既定 5s timeout で落ちて診断が出ないことがあるため it の timeout を明示する
+    //   (QA-DB2R2-3)。
+    const LINEAR_IT_TIMEOUT_MS = 30_000;
+    /** 実測ケース数 (2026-08-28・16 ルール・汎用 + 派生 3 軸)。ルール追加 / 変更時に実測で更新。 */
+    const TOTAL_CASES_MEASURED = 104;
     const fill = (seed: string, n: number): string =>
       seed.repeat(Math.ceil(n / seed.length)).slice(0, n);
+    /** 汎用 seed。計測には載せるが、全ルールで非 vacuous なので vacuity guard の計数からは**外す**。 */
+    const GENERIC_SEED = "a ";
     // SEC-DB2R2-1: 敵対 seed は **rule.re.source から導出**する。sample 文字列の先頭語だと規則の先頭 literal に
     //   届くのが 16 ルール中 6 本・うち 3 本は seed が規則にマッチして O(1) short-circuit (vacuous) となり、実効
     //   4 本しか高コスト経路を測れなかった (sample を `sh -c '…'` 形に書き換えた 2 乗 regex が SURVIVED した実測)。
     //   regex の literal run (escape を剥がし構文記号で分割した英数字列) ごとに「完全一致の反復」と「末尾 1 字を
-    //   潰した near-miss の反復」を seed にし、**規則がマッチする seed は vacuous として計測から外す**。各ルールに
-    //   非 vacuous seed が最低 1 本あることを要求する (vacuity guard)。
+    //   潰した near-miss の反復」を seed にし、**規則がマッチする seed は vacuous として計測から外す**。
     const literalRuns = (re: RegExp): string[] =>
       re.source
         .replace(/\\[bBsSwWdDn]/g, " ")
         .replace(/\\(.)/g, "$1")
         .split(/[^A-Za-z0-9_]+/)
         .filter((s) => s.length >= 2 && !/^\d+$/.test(s));
-    const seedsFor = (rule: { re: RegExp }, i: number): string[] => {
-      const runs = literalRuns(rule.re);
+    /**
+     * 軸 (3): sample 由来「マッチしなくなる最長 prefix」。sample の末尾から 1 字ずつ削り、最初に規則へマッチしなく
+     * なった prefix に空白を足して返す (反復 seed 用)。sample が規則にマッチしない場合は null (1:1 pin が別途 RED)。
+     */
+    const prefixSeed = (re: RegExp, cmd: string): string | null => {
+      if (!re.test(cmd)) return null;
+      for (let k = cmd.length - 1; k >= 1; k--) {
+        const p = cmd.slice(0, k);
+        if (!re.test(p)) return `${p} `;
+      }
+      return null;
+    };
+    /** 派生 seed (軸 1〜3)。汎用 seed は含まない。 */
+    const derivedSeedsFor = (re: RegExp, cmd: string): string[] => {
       // QA-DB2R3-1: sample 先頭語の軸は **追加**であって置換ではない (軸は追加のみ・削除禁止)。source 由来の
       //   literal run は `(?:mysql|mariadb)admin` / `mysql_?admin` のような綴りで断片化して規則先頭に届かず、
       //   sample 先頭語がその穴を埋める (S1/S3 が RED へ反転する実測)。
-      const base = [...runs, samples[i]!.cmd.split(/\s+/)[0]!];
-      const out = new Set<string>(["a "]);
+      const base = [...literalRuns(re), cmd.split(/\s+/)[0]!];
+      const out = new Set<string>();
       for (const r of base) {
         out.add(`${r} `);
         out.add(`${r.slice(0, -1)}_ `);
       }
+      const prefix = prefixSeed(re, cmd);
+      if (prefix !== null) out.add(prefix);
       return [...out];
     };
+    /**
+     * 反復で埋めた入力が規則にマッチしない seed か。マッチする seed は O(1) で short-circuit しうるため計測から外す
+     * (非マッチが高コスト経路を保証するわけではない・TDA-LN-2)。
+     */
+    const isLive = (re: RegExp, seed: string): boolean => !re.test(fill(seed, SMALL));
+
+    let totalCases = 0;
     LITERAL_RULES.forEach((rule, i) => {
-      const seeds = seedsFor(rule, i);
-      const live = seeds.filter((seed) => !rule.re.test(fill(seed, SMALL)));
-      // SEC-DB2R4-3: 汎用 seed `a ` が常に非 vacuous なため本 guard は現状恒真 (tautology)。source / sample 由来に
-      //   限った計数への実効化は task 01a0484c-ecbd (走査範囲変更 = full)。
-      it(`#${i} ${String(rule.re)} has a non-vacuous adversarial seed`, () => {
-        expect(live.length, `seeds=${JSON.stringify(seeds)}`).toBeGreaterThan(0);
+      const cmd = samples[i]!.cmd;
+      const derived = derivedSeedsFor(rule.re, cmd);
+      const derivedLive = derived.filter((seed) => isLive(rule.re, seed));
+      const live = [...(isLive(rule.re, GENERIC_SEED) ? [GENERIC_SEED] : []), ...derivedLive];
+      totalCases += live.length;
+      // SEC-DB2R4-3: 汎用 seed を除いた派生 seed で計数する (含めると恒真)。
+      it(`#${i} ${String(rule.re)} has a non-vacuous derived adversarial seed`, () => {
+        expect(derivedLive.length, `derived=${JSON.stringify(derived)}`).toBeGreaterThan(0);
+        // 汎用 seed を派生集合へ戻すと guard が再び恒真になる (実装者 probe W8 が SURVIVED した形)。
+        expect(derivedLive, "guard は派生 seed のみで計数する").not.toContain(GENERIC_SEED);
+        expect(derived).not.toContain(GENERIC_SEED);
+      });
+      it(`#${i} ${String(rule.re)} has a sample-derived prefix seed wired into the derived set`, () => {
+        const prefix = prefixSeed(rule.re, cmd);
+        expect(prefix).not.toBeNull();
+        // QA-LN-2: helper 単体でなく derivedSeedsFor への配線を pin する (index 単位の剥がしで RED)。
+        expect(derived).toContain(prefix);
       });
       for (const seed of live) {
-        it(`#${i} ${String(rule.re)} seed=${JSON.stringify(seed)}`, () => {
-          const small = fill(seed, SMALL);
-          const large = fill(seed, LARGE);
-          const K = 20;
-          const tSmall = bestOfMs(() => {
-            for (let k = 0; k < K; k++) rule.re.test(small);
-          });
-          const tLarge = bestOfMs(() => {
-            for (let k = 0; k < K; k++) rule.re.test(large);
-          });
-          const ratio = tLarge / Math.max(tSmall, 0.005);
-          expect(ratio, `scaling ratio (8× input): ${ratio.toFixed(1)}`).toBeLessThan(RATIO_MAX);
-        }, 30_000);
+        it(
+          `#${i} ${String(rule.re)} seed=${JSON.stringify(seed)}`,
+          () => {
+            const small = fill(seed, SMALL);
+            const large = fill(seed, LARGE);
+            const tSmall = bestOfMs(() => {
+              for (let k = 0; k < K; k++) rule.re.test(small);
+            });
+            const tLarge = bestOfMs(() => {
+              for (let k = 0; k < K; k++) rule.re.test(large);
+            });
+            const ratio = tLarge / Math.max(tSmall, 0.005);
+            expect(ratio, `scaling ratio (8× input): ${ratio.toFixed(1)}`).toBeLessThan(RATIO_MAX);
+          },
+          LINEAR_IT_TIMEOUT_MS,
+        );
       }
+    });
+
+    // 自己弱化 pin (SEC-DB2R3-2 ≡ QA-DB2R3-5): metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の
+    //   除去 / RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は単独では緑のままだった。定数の絶対値・
+    //   seed 生成の挙動・ケース数の exact 一致・literal tripwire (宣言 / 使用側 / census) で RED にする。保証の範囲と
+    //   非被覆は describe 冒頭の header に単一出所で書く (保証範囲・非被覆の単一出所化・TDA-LN3-3。上の縮退リストは
+    //   header と同期する 2 コピー目・TDA-LN4-2)。値を変えるときは
+    //   理由コメントの実測も更新し full 監査。
+    describe("自己弱化 pin (SEC-DB2R3-2): metatest 自身の縮退を RED にする", () => {
+      it("RATIO_MAX は 24 (線形 p95 8.6 と 2 乗下限 ≈ 40 の幾何中点・変更は実測更新 + full 監査)", () => {
+        expect(RATIO_MAX).toBe(24);
+      });
+      it("it timeout は 30s (既定 5s では 2 乗形の診断が出ない・QA-DB2R2-3)", () => {
+        expect(LINEAR_IT_TIMEOUT_MS).toBe(30_000);
+      });
+      it("入力幾何 SMALL 4096 / SCALE 8 / K 20 / best-of 9 (QA-LN-1: SCALE を縮めると 2 乗形が閾値の下に入る)", () => {
+        // 2 乗形の ratio は SCALE² (8² = 64) で閾値 24 の上、SCALE 2 なら 4 で閾値の下に入り検出が消える。
+        expect(SMALL).toBe(4096);
+        expect(SCALE).toBe(8);
+        expect(LARGE).toBe(SMALL * SCALE);
+        expect(K).toBe(20);
+        expect(BEST_OF_REPEAT).toBe(9);
+      });
+      it("計測ケース数は実測 104 と exact 一致 (軸の差し戻しで RED・構造下限 3/ルールも併記)", () => {
+        // 各ルール最低 3 (汎用 1 + prefix 1 + source / sample 由来の非 vacuous 1・guard が保証)。実測 per-rule live は
+        //   3〜10・計 104 (2026-08-28・16 ルール・汎用 16 + 派生 88・QA-LN-3)。ルールの追加 / 変更で件数が変わったら
+        //   実測値を更新する (下げる場合は理由を書く)。
+        // 構造下限 (exact pin に包含される dead assertion だが、ルール変更で 104 を更新する際にも守られる
+        //   guard 由来の下限として残す・TDA-LN3-4)。
+        expect(totalCases).toBeGreaterThanOrEqual(LITERAL_RULES.length * 3);
+        // QA-LN2-2 (H): 実測値との **exact** 一致 + 実測定数の絶対値 pin。床を ×3 へ正した分、軸の差し戻しを
+        //   件数で捕まえる歯は「実測 104 との一致」が担う (ルール変更で件数が動いたら意識的に更新する)。
+        expect(totalCases).toBe(TOTAL_CASES_MEASURED);
+        expect(TOTAL_CASES_MEASURED).toBe(104);
+      });
+      it("literalRuns: escape 剥がし・構文記号分割・1 字と数字 (束縛値) の除外", () => {
+        expect(literalRuns(/\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i)).toEqual([
+          "mysqladmin",
+          "drop",
+        ]);
+        expect(literalRuns(/\bflush(?:all|db)\b/i)).toEqual(["flush", "all", "db"]);
+        expect(literalRuns(/:\(\)\s*\{/)).toEqual([]);
+        expect(literalRuns(/\ba\s+bc\b/)).toEqual(["bc"]);
+      });
+      it("derivedSeedsFor: 完全一致 + near-miss + sample 先頭語 + prefix の 3 軸を含む (mysqladmin 行を逐語 pin)", () => {
+        const i = LITERAL_RULES.findIndex((r) => r.re.source.includes("mysqladmin"));
+        expect(i).toBeGreaterThanOrEqual(0);
+        expect([...derivedSeedsFor(LITERAL_RULES[i]!.re, samples[i]!.cmd)].sort()).toEqual(
+          [
+            "dro_ ",
+            "drop ",
+            "mysqladmi_ ",
+            "mysqladmin ",
+            "mysqladmin -u root -p --force dro ",
+          ].sort(),
+        );
+      });
+      it("prefixSeed: 2 語連鎖 / alternation サブコマンド / wrapper 形の sample にも届く (R4 Z2/Z4/Z6 の形)", () => {
+        expect(
+          prefixSeed(/\bcockroach\s+sql\b[^|;&\n]*\bdrop\b/i, "cockroach sql -e 'drop database x'"),
+        ).toBe("cockroach sql -e 'dro ");
+        expect(
+          prefixSeed(/\bflush(?:all|db)\b[^|;&\n]*\bappdb\b/i, "redis-cli flushall appdb"),
+        ).toBe("redis-cli flushall appd ");
+        expect(prefixSeed(/\bfoo(?:sql|ctl)\b[^|;&\n]*\bdrop\b/i, "sh -c 'foosql -e drop x'")).toBe(
+          "sh -c 'foosql -e dro ",
+        );
+        expect(prefixSeed(/\bdropdb\b/i, "createdb x")).toBeNull();
+      });
+      it("vacuity guard は到達可能: 全派生 seed が vacuous な (re, cmd) で 0 になる (SEC-DB2R4-3 の恒真を解消)", () => {
+        const re = /a/;
+        const cmd = "ab";
+        expect(derivedSeedsFor(re, cmd).length).toBeGreaterThan(0);
+        expect(derivedSeedsFor(re, cmd).filter((seed) => isLive(re, seed))).toEqual([]);
+      });
+      it("literal tripwire: 定数宣言・使用側・guard・配線 pin の綴りが本ファイルの code 行に残っている (comment 除去後の source 走査)", () => {
+        // TDA-LN-1: comment を落とさずに走査すると、pin 行を comment へ逐語コピーしてから code を弱める 2 箇所編集が
+        //   通る。正準 stripComments (inv-approval / inv-check-classifier と同じ helper) の view を走査する。
+        // SEC-LN2-2 ≡ TDA-LN2-1: 平文 pattern (`/const SCALE = 8;/`) は本 assertion 行の regex リテラル自身にマッチして
+        //   恒真になる。宣言 pattern は **行アンカー** (`\n\s+…;\n` = 実改行 + インデント) にし、assertion 行の
+        //   `\n\s+` という綴りでは充足しない形にする (走査 view は不変)。
+        // SEC-LN2-1 ≡ TDA-LN2-2: 定数の**使用側** (fill の引数・K ループ・ratio 式・配線 pin) も pin する — 宣言を
+        //   残したまま使用側を書き換える 1 行編集で全 assertion が恒真化する経路。
+        // SEC-LN2-3: 同名 const の再宣言 (shadow) は宣言の**個数**で検出する (各 1 回)。
+        const self = stripComments(readFileSync(fileURLToPath(import.meta.url), "utf8"));
+        const declarations: readonly RegExp[] = [
+          /\n\s+const RATIO_MAX = 24;\n/,
+          /\n\s+const LINEAR_IT_TIMEOUT_MS = 30_000;\n/,
+          /\n\s+const TOTAL_CASES_MEASURED = 104;\n/,
+          /\n\s+const SMALL = 4096;\n/,
+          /\n\s+const SCALE = 8;\n/,
+          /\n\s+const LARGE = SMALL \* SCALE;\n/,
+          /\n\s+const K = 20;\n/,
+          /\n\s+const BEST_OF_REPEAT = 9;\n/,
+        ];
+        const usages: readonly RegExp[] = [
+          // SEC-LN3-1 ≡ QA-LN3-1: escape も改行も含まない綴りは本行自身に充足する。文字クラスで綴りを割り、
+          //   本行のテキスト (`REPEA[T]`) では充足しない形にする (使用側 pattern の規律: escape / 文字クラス /
+          //   実改行のいずれかを含める)。2 本目の `\)` 形は 1 本目の `\b` 形を包含する (単独では発火しない冗長
+          //   pattern) が、軸・変種は追加のみ・削除禁止の規律で残す (TDA-LN4-1)。
+          /repeat = BEST_OF_REPEA[T]\b/,
+          /repeat = BEST_OF_REPEA[T]\)/,
+          /const derivedLive = derived\.filter\(/,
+          /expect\(derivedLive\.length, [^\n]*\)\.toBeGreaterThan\(0\);/,
+          /expect\(derived\)\.toContain\(prefix\);/,
+          /const small = fill\(seed, SMALL\);\n\s+const large = fill\(seed, LARGE\);/,
+          /const tSmall = bestOfMs\(\(\) => \{\n\s+for \(let k = 0; k < K; k\+\+\) rule\.re\.test\(small\);/,
+          /const tLarge = bestOfMs\(\(\) => \{\n\s+for \(let k = 0; k < K; k\+\+\) rule\.re\.test\(large\);/,
+          /const ratio = tLarge \/ Math\.max\(tSmall, 0\.005\);/,
+          /\.toBeLessThan\(RATIO_MAX\);/,
+          /\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/,
+          /expect\(totalCases\)\.toBe\(TOTAL_CASES_MEASURED\);/,
+        ];
+        for (const re of [...declarations, ...usages]) {
+          expect(self, `tripwire ${String(re)}`).toMatch(re);
+        }
+        // 各定数の宣言はちょうど 1 回 (forEach 内での再宣言 = shadow を検出)。
+        const names = [
+          "RATIO_MAX",
+          "LINEAR_IT_TIMEOUT_MS",
+          "TOTAL_CASES_MEASURED",
+          "SMALL",
+          "SCALE",
+          "LARGE",
+          "K",
+          "BEST_OF_REPEAT",
+        ];
+        for (const name of names) {
+          const declared = self.match(new RegExp(`\\n\\s+(?:const|let|var) ${name}\\b`, "g")) ?? [];
+          expect(declared.length, `${name} is declared exactly once`).toBe(1);
+        }
+      });
     });
   });
 });
