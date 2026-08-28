@@ -27,12 +27,17 @@ import { PendingRoundTrips } from "./pending-round-trips.js";
 import {
   type AgentVisibilityWire,
   aggregateAgentReadiness,
+  aggregateDaemonCounters,
   asCodexSpawnErrorCode,
+  buildReadinessCounters,
+  type DaemonCountersWire,
   parseActivePendingRequestIds,
   parseAgentVisibilityWire,
+  parseDaemonCountersWire,
   parseRuntimeEpoch,
   type PolicyCategory,
   projectPolicyCategories,
+  type ReadinessCountersWire,
 } from "@actradeck/event-model";
 
 /** sidecar 接続が握る downstream 制御チャネル (ws の最小抽象)。 */
@@ -81,6 +86,13 @@ interface SidecarConn {
    */
   agentVisibility?: AgentVisibilityWire;
   /**
+   * TDA-V9-7: この daemon が hello に相乗りさせた縮退カウンタ (`unstableRequestIdCount`)。
+   * NO-RAW (非負整数のみ・parseDaemonCountersWire で検証射影済み)。未報告 (旧 dist / observe-only
+   * codex-rollout daemon) は undefined のまま (readiness の sum fold から除外)。
+   * accepted staleness: agentVisibility と同じく hello 時点値 (reannounce ごとに最新化)。
+   */
+  daemonCounters?: DaemonCountersWire;
+  /**
    * ADR 0014 Phase 4 (decision 019fd705): sidecar daemon **プロセス**の runtime epoch (sidecar 起動時
    * randomUUID・寿命内不変・hello で申告)。daemonId (per-connection churn) と異なり同一プロセスの
    * 再接続で不変ゆえ「再接続 vs 再起動」を診断区別できる。credential でない・NO-RAW (uuid のみ)。
@@ -98,6 +110,13 @@ interface SidecarConn {
 export interface AgentReadinessSummary extends AgentVisibilityWire {
   /** 観測している (open な) daemon の総数。policyCapable で絞らない=「観測しているか」に忠実。 */
   readonly daemonCount: number;
+  /**
+   * TDA-V9-7: 縮退カウンタの集約 (NO-RAW・非負整数のみ)。daemon 由来 (`unstableRequestIdCount`・
+   * 全 open conn の sum fold) と backend 由来 (`nonRetirableSkipCount`・ApprovalReconciler のローカル値)
+   * を 1 つの closed shape に束ねる。どちらも「0 が正常・>0 は要調査」の診断信号で、
+   * これが唯一の runtime 読取り路 (それまで getter のみで観測不能だった)。
+   */
+  readonly counters: ReadinessCountersWire;
 }
 
 /** sidecar が送る handshake フレーム形 (緩く検証する)。 */
@@ -114,6 +133,11 @@ interface HelloFrame {
    * parseAgentVisibilityWire で検証射影する (wire を盲信しない・多層防御)。
    */
   agent_visibility?: unknown;
+  /**
+   * TDA-V9-7: 縮退カウンタの相乗り (NO-RAW・非負整数のみ)。unknown 受け — handleHello が
+   * parseDaemonCountersWire で検証射影する (wire を盲信しない・余剰 field を構造的に落とす)。
+   */
+  daemon_counters?: unknown;
   /** ADR 0014 Phase 4: sidecar プロセスの runtime epoch (uuid 申告・診断用)。unknown 受け。 */
   runtime_epoch?: unknown;
   /**
@@ -500,6 +524,11 @@ export class SidecarRegistry {
     // 有効な visibility が来れば最新へ更新される (policy_capable と同じく hello が権威)。
     const visibility = parseAgentVisibilityWire(frame.agent_visibility);
     if (visibility !== undefined) conn.agentVisibility = visibility;
+    // TDA-V9-7: 縮退カウンタも同じ信頼境界を越える untrusted wire ゆえ event-model の正準パーサで
+    // 再検証射影する (非負安全整数のみ・余剰 field を構造的に落とす=NO-RAW)。未報告 (undefined) は
+    // 前回値を保持する (agent_visibility と同じく「最新の有効報告を残す」)。
+    const counters = parseDaemonCountersWire(frame.daemon_counters);
+    if (counters !== undefined) conn.daemonCounters = counters;
     if (Array.isArray(frame.session_ids)) {
       // ADR 019eb365: hello は **この接続の権威的 membership**。新集合を claim し、この接続が
       // 所有していたが新集合に**無い** session は release (grace→presence false)。sidecar が reap して
@@ -734,15 +763,26 @@ export class SidecarRegistry {
    *   codex rollout dir) ゆえ、いずれかの open daemon が見えていれば true (aggregateAgentReadiness の OR fold)。
    * - 報告ゼロ → 全 false (誰も観測していない=未配線・安全側)。
    */
-  agentReadiness(): AgentReadinessSummary {
+  agentReadiness(nonRetirableSkipCount?: number): AgentReadinessSummary {
     let daemonCount = 0;
     const reports: AgentVisibilityWire[] = [];
+    const counterReports: DaemonCountersWire[] = [];
     for (const conn of this.conns.values()) {
       if (!conn.link.open) continue;
       daemonCount++;
       if (conn.agentVisibility !== undefined) reports.push(conn.agentVisibility);
+      if (conn.daemonCounters !== undefined) counterReports.push(conn.daemonCounters);
     }
-    return { daemonCount, ...aggregateAgentReadiness(reports) };
+    return {
+      daemonCount,
+      ...aggregateAgentReadiness(reports),
+      // TDA-V9-7: daemon 由来は sum fold (延べ数)・backend 由来は呼び出し側 (route) が
+      // ApprovalReconciler から注入する。射影は event-model 正準 (endpoint は最終出口ゆえ再射影)。
+      counters: buildReadinessCounters(
+        aggregateDaemonCounters(counterReports),
+        nonRetirableSkipCount,
+      ),
+    };
   }
 
   /**

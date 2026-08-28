@@ -11,6 +11,25 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Added
+
+- **Two degradation counters that nothing could read are now on `GET /realtime/readiness`.** The
+  sidecar counted approval `request_id` mints that the redactor mangled (`unstableRequestIdCount`),
+  and the backend counted stale DB approvals it declined to retire because their id matched neither
+  the canonical nor a known-legacy form (`nonRetirableSkipCount`). Both were "observable" only in
+  the sense that a getter existed: no route, hello frame, log line, or telemetry ever read them, so
+  a real degradation was silent in a running deployment. The readiness endpoint — already the
+  read-only aggregate behind the `/realtime` bearer gate — now carries a `counters` object with
+  both, and the sidecar reports its own count on the hello frame it already sends. Zero is normal;
+  anything above zero is worth investigating.
+  Only non-negative integers cross the wire. A shared parser in the event model projects both the
+  hello field and the endpoint response onto a closed shape, so a buggy or hostile daemon that
+  stuffs a path or a token into an extra field has it dropped at the boundary, and a negative or
+  fractional count collapses to zero rather than reaching the endpoint. A daemon that reports
+  nothing (an older build, or the observe-only Codex rollout tail, which has no approval bridge) is
+  excluded from the sum rather than counted as zero. The counters carry no request id, session id,
+  or path — only how many, never which.
+
 ### Fixed
 
 - **`DROP DATABASE` now draws an approval card under ordinary approval.** The risk classifier
