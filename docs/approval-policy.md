@@ -52,7 +52,14 @@ intersect your enabled set.
 > CLI `mysqladmin … drop` (a `drop` word within 512 characters of `mysqladmin` inside the same shell
 > command — the run is cut by the same quote-aware splitter the rest of the classifier uses, so a
 > quoted or escaped metacharacter such as `-p'a;b'` no longer hides the subcommand, while a real
-> separator (`|`, `;`, `&`, a newline) still ends the run), the Mongo shell
+> separator (`|`, `;`, `&`, a newline) still ends the run. Two qualifications, so that the rule above
+> predicts the verdicts you will actually see. First, the original whole-command pattern is kept
+> alongside the segment scan as a backstop, so a redirect target such as `mysqladmin status > drop.log`
+> still rates `high` exactly as it did before — the splitter drops a redirect's target word, and
+> keeping the old pattern means no verdict got weaker. Second, when the command cannot be parsed at
+> all — an unterminated quote or heredoc — the splitter falls back to the coarse split plus the whole
+> command, so a quoted separator in an unterminated quote still ends up gated (fail-closed), which is
+> the same safe direction the rest of the classifier takes on unparseable input), the Mongo shell
 > `db.dropDatabase()` together with the snake_case `drop_database(` of pymongo / sqlalchemy-utils, and
 > redis `FLUSHALL` / `FLUSHDB`. Bare-token forms (`dropdb`, `flushall`, `flushdb`) fire on any command line
 > that mentions the word — a safe-direction over-gate that the benchmark measures. **Still not

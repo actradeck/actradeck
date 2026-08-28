@@ -74,14 +74,19 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   `; echo drop`, `&& echo drop` and a newline stay `low` as before. The original whole-command scan
   is kept next to the new one as a non-weakening backstop, because the splitter removes redirect
   operators together with their target word and a segment-only rule would have let
-  `mysqladmin status > drop.log` fall from `high` to `low`. The change is monotone against the
-  previous implementation: over the benchmark corpus plus 219 generated separator / quoting /
-  escape / redirect vectors, 110 verdicts move `low` → `high` / `db-drop` and none move the other
-  way. The published benchmark was regenerated (91 vectors; `db-drop` precision 75.0% → 78.6%;
-  default-gated precision 93.1% → 93.3%, recall stays 100%), and the corpus gained the
-  quoted-password form and a long-option invocation so the 512-character bound is exercised in
-  public. `INV-DB-DROP-BOUND-DOC` now derives that number from the pattern itself and pins it
-  against the prose, so the documented bound cannot drift from the code.
+  `mysqladmin status > drop.log` fall from `high` to `low`; that form still rates `high`, exactly as
+  before. When the splitter cannot parse the command at all — an unterminated quote or heredoc — it
+  falls back to the coarse split plus the whole command, so a quoted separator inside an unterminated
+  quote still ends up gated (fail-closed), the same direction the classifier takes elsewhere on
+  unparseable input. What the tests pin: no verdict in the benchmark corpus changed, the previously
+  documented limitations are now `high` / `db-drop`, and no vector narrows. (An audit sweep outside
+  the suite, recorded in decision 01a04955, moved 105 of 219 generated separator / quoting / escape /
+  redirect vectors and narrowed none.) The published benchmark was regenerated (91 vectors;
+  `db-drop` precision 75.0% → 78.6%; default-gated precision 93.1% → 93.3%, recall stays 100%), and
+  the corpus gained the quoted-password form and a long-option invocation whose gap is 319
+  characters — the widest the public corpus exercises, so the 512 bound's own boundary stays pinned
+  by unit tests rather than by the benchmark. `INV-DB-DROP-BOUND-DOC` derives that number from the
+  pattern itself and pins it against the prose, so the documented bound cannot drift from the code.
 - **You now have five minutes to answer an approval card, up from thirty seconds.** Thirty
   seconds was rarely enough to read a command and decide, and an unanswered card falls to the
   safe deny — so the old window mostly produced denials that nobody had actually judged. The

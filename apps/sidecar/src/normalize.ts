@@ -2481,12 +2481,14 @@ const REMOTE_EXEC_RUNNERS = new Set([
  * ReDoS 安全の基準は**入力長に対する線形スケーリング**であって量化子の本数ではない (SEC-DB2-1):
  *   `\b<program>\b[^…]*\b<word>\b` は開始位置 O(n) × 走査 O(n) で O(n²) になる (実測 exponent 2.00・
  *   16 KiB で 63 ms)。`{0,512}` で束縛して線形化 (判定は gap ≤ 512 で同値・境界 512/513 と現実的な長 option
- *   列 gap 319 を INV-DB-DROP-RISK-VERDICT が pin。公開 corpus の最大 gap は 20 で束縛値の歯は unit test 3 行に
- *   載る・SEC-DB2R3-4)。全ルールの線形性は INV-LITERAL-RULES-LINEAR (inv-policy-categories) が **regex source
+ *   列 gap 319 を INV-DB-DROP-RISK-VERDICT が pin。**TDA-MA-2 の訂正**: 公開 corpus の最大 gap は task
+ *   01a0480f-d29a で長 option 列の陽性を入れた結果 **319** になり (旧記述の 20 は失効)、束縛値の歯は
+ *   unit test **5 行** — 現実形 1 + whole-command の 512/513 + segment スコープの 512/513・SEC-DB2R3-4)。
+ *   全ルールの線形性は INV-LITERAL-RULES-LINEAR (inv-policy-categories) が **regex source
  *   由来の敵対 seed + sample 先頭語 seed + sample 由来 prefix seed** で best-of-N 回帰固定する。**網羅の範囲
  *   (SEC-DB2R3-1 / QA-DB2R3-1 / task 01a0484c-ecbd)**:
  *   source 由来 seed は先頭 literal が**平坦に綴られた**ルール (現行 17 スキャン regex 中 15 本・#2 fork-bomb は literal run 空、
- *   #11 flush は alternation で断片化・どちらも gap 無し) に届く。alternation / 任意記号を跨ぐ綴り
+ *   #12 flush は alternation で断片化・どちらも gap 無し。index は SCAN_TARGETS 基準・QA-MA-4) に届く。alternation / 任意記号を跨ぐ綴り
  *   (`(?:mysql|mariadb)admin` / `mysql_?admin`) では source seed が断片化するため、sample 先頭語を**追加軸**として
  *   常に併用する (軸は追加のみ・R2 で置換していたのを是正・2 乗形 S1/S3・R3 Y4 が RED へ反転する実測)。第 3 軸の
  *   sample 由来「マッチしなくなる最長 prefix」(task 01a0484c-ecbd) は規則の綴りに依存せず、(1)(2) の残余 =
@@ -2976,6 +2978,12 @@ function classifyCommandRiskInternal(
   //   作るため、legacy 側にも segmentRe を掛けると `mysqladmin status &> drop.log` のような
   //   **redirect 先ファイル名**まで high になり、意図した拡張 (引用内 metachar / 行継続) を超えて
   //   base から乖離する (実測 107→本条件で縮小)。legacy 側は base 逐語の whole-command スキャンのみ。
+  //   **例外 (SEC-MA-1・over-gate のみ / 弱化なし)**: 判定は splitter の **identity** なので、
+  //   `splitSegments` が構造解析不能 (未終端 quote / heredoc 等) と判断したときは
+  //   `splitSegmentsUnparseable` = 旧粗分割 + **command 全体** が返り、segment スコープが legacy 形の
+  //   テキストと command 全体にも当たる。つまり解析不能入力では引用内の区切りを跨いだ `drop` も gate
+  //   される (fail-closed) — 分類器全体の「解析不能は over-gate 方向」と同じ向きで、INV-DB-DROP-RISK-VERDICT
+  //   が挙動として pin する。
   const segmentScoped = split === splitSegments ? segments : NO_SEGMENTS;
   // 字面 high (LITERAL_RULES の high エントリ)。risk と category を**同一テーブル**から付与する (TDA-1)。
   //   category 側は high:false エントリも含む superset (現行テーブルでは全エントリ high)。
