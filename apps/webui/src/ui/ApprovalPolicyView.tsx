@@ -33,6 +33,7 @@ import { useLocale } from "./LocaleProvider";
 import { PersistedApprovalsPanel } from "./PersistedApprovalsPanel";
 import { PolicyPresetSelector } from "./PolicyPresetSelector";
 import { loadCandidateStubs, saveCandidateStubs } from "./policy-cache";
+import { POLICY_CATEGORY_LABEL_PARAMS } from "./use-policy";
 import {
   usePolicyAdmin,
   type PolicyRelayTarget,
@@ -595,7 +596,9 @@ export function ApprovalPolicyView({
                       onChange={() => toggleCat(cat)}
                       data-testid={`policyview-cat-input-${cat}`}
                     />
-                    <span className="ad-policy__cat-label">{t(`policy.cat.${cat}`)}</span>
+                    <span className="ad-policy__cat-label">
+                      {t(`policy.cat.${cat}`, POLICY_CATEGORY_LABEL_PARAMS)}
+                    </span>
                     {DEFAULT_SET.has(cat) ? (
                       <Tag tone="info" size="sm">
                         {t("policy.defaultTag")}

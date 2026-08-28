@@ -12,6 +12,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DB_DROP_LITERAL_FORMS } from "@actradeck/event-model";
+
 import { FixedLocaleProvider } from "../src/ui/LocaleProvider";
 import { PolicySettingsPanel } from "../src/ui/PolicySettingsPanel";
 import { parsePolicy, usePolicy, type UsePolicyResult } from "../src/ui/use-policy";
@@ -276,6 +278,14 @@ describe("PolicySettingsPanel interaction", () => {
     expect(rm.checked).toBe(true);
     // perm-change は既定 OFF (default タグ無し・unchecked)。
     expect(ctx.rootEl.querySelector('[data-testid="policy-cat-default-perm-change"]')).toBeNull();
+    // db-drop のラベルは event-model DB_DROP_LITERAL_FORMS から生成される (task 01a0480f-ffca・列挙コピーを持たない)。
+    const dbDropLabel =
+      ctx.rootEl.querySelector('[data-testid="policy-cat-db-drop"] .ad-policy__cat-label')
+        ?.textContent ?? "";
+    for (const form of DB_DROP_LITERAL_FORMS) {
+      expect(dbDropLabel.includes(form), `db-drop label carries ${form}`).toBe(true);
+    }
+    expect(dbDropLabel.includes("{forms}")).toBe(false);
     const perm = ctx.rootEl.querySelector(
       '[data-testid="policy-cat-input-perm-change"]',
     ) as HTMLInputElement;

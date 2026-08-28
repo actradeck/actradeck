@@ -19,7 +19,7 @@ import { DEFAULT_GATED_CATEGORIES, type PolicyCategory } from "@actradeck/event-
 import { Button, InlineAlert, Tag } from "./kit";
 import { useLocale } from "./LocaleProvider";
 import { PolicyPresetSelector } from "./PolicyPresetSelector";
-import { ALL_POLICY_CATEGORIES, usePolicy } from "./use-policy";
+import { ALL_POLICY_CATEGORIES, POLICY_CATEGORY_LABEL_PARAMS, usePolicy } from "./use-policy";
 
 export interface PolicySettingsPanelProps {
   readonly sessionId: string;
@@ -129,7 +129,9 @@ export function PolicySettingsPanel({ sessionId }: PolicySettingsPanelProps) {
                   onChange={() => toggleCat(cat)}
                   data-testid={`policy-cat-input-${cat}`}
                 />
-                <span className="ad-policy__cat-label">{t(`policy.cat.${cat}`)}</span>
+                <span className="ad-policy__cat-label">
+                  {t(`policy.cat.${cat}`, POLICY_CATEGORY_LABEL_PARAMS)}
+                </span>
                 {DEFAULT_SET.has(cat) ? (
                   <Tag tone="info" size="sm" data-testid={`policy-cat-default-${cat}`}>
                     {t("policy.defaultTag")}

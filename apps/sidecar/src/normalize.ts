@@ -2503,25 +2503,50 @@ interface LiteralRule {
   readonly category: PolicyCategory;
   /** risk を high へ押し上げるか (false=category-only)。 */
   readonly high: boolean;
+  /**
+   * 表示名 (docs / UI の列挙コピーとの two-way lock 用・task 01a0480f-ffca)。db-drop 行は event-model
+   * `DB_DROP_LITERAL_FORMS` の要素を持ち、INV-DB-DROP-ENUMERATION が和集合の一致を pin する。分類には使わない。
+   */
+  readonly labels: readonly string[];
 }
 export const LITERAL_RULES: readonly LiteralRule[] = [
-  { re: /\bmkfs\b/i, category: "disk-destroy", high: true },
-  { re: /\bdd\s+if=/i, category: "disk-destroy", high: true },
-  { re: /:\(\)\s*\{/, category: "fork-bomb", high: true },
-  { re: /\bdrop\s+table\b/i, category: "db-drop", high: true },
-  { re: /\btruncate\s+table\b/i, category: "db-drop", high: true },
-  { re: /\bdrop\s+database\b/i, category: "db-drop", high: true },
-  { re: /\bdropdb\b/i, category: "db-drop", high: true }, // PostgreSQL CLI 形 (同 class)
+  { re: /\bmkfs\b/i, category: "disk-destroy", high: true, labels: ["mkfs"] },
+  { re: /\bdd\s+if=/i, category: "disk-destroy", high: true, labels: ["dd if="] },
+  { re: /:\(\)\s*\{/, category: "fork-bomb", high: true, labels: [":(){ :|:& };:"] },
+  { re: /\bdrop\s+table\b/i, category: "db-drop", high: true, labels: ["DROP TABLE"] },
+  { re: /\btruncate\s+table\b/i, category: "db-drop", high: true, labels: ["TRUNCATE TABLE"] },
+  { re: /\bdrop\s+database\b/i, category: "db-drop", high: true, labels: ["DROP DATABASE"] },
+  { re: /\bdropdb\b/i, category: "db-drop", high: true, labels: ["dropdb"] }, // PostgreSQL CLI 形 (同 class)
   // task 01a0440b (TDA-DB-6): 他エンジン / 他粒度の同 class。追加のみ (削除禁止規律)。
-  { re: /\bdrop\s+schema\b/i, category: "db-drop", high: true }, // PostgreSQL schema 粒度 / MySQL の DATABASE 同義
-  { re: /\bdrop\s+owned\s+by\b/i, category: "db-drop", high: true }, // PostgreSQL: role 所有物の一括 drop
-  { re: /\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i, category: "db-drop", high: true }, // MySQL CLI 形 (quote 非認識の字面境界・512 字で束縛 = 線形)
-  { re: /\bdrop_?database\s*\(/i, category: "db-drop", high: true }, // mongosh db.dropDatabase() / pymongo・sqlalchemy-utils drop_database(
-  { re: /\bflush(?:all|db)\b/i, category: "db-drop", high: true }, // redis FLUSHALL / FLUSHDB (bare-token・dropdb と同じ FP class)
-  { re: /\bmigrate\b/i, category: "migrate-prod", high: true },
-  { re: /\bproduction\b/i, category: "migrate-prod", high: true },
-  { re: /\bgit\s+reset\s+--hard\b/i, category: "history-rewrite", high: true },
-  { re: /\bgit\s+clean\s+-[a-z]*f/i, category: "history-rewrite", high: true },
+  { re: /\bdrop\s+schema\b/i, category: "db-drop", high: true, labels: ["DROP SCHEMA"] }, // PostgreSQL schema 粒度 / MySQL の DATABASE 同義
+  { re: /\bdrop\s+owned\s+by\b/i, category: "db-drop", high: true, labels: ["DROP OWNED BY"] }, // PostgreSQL: role 所有物の一括 drop
+  {
+    re: /\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i,
+    category: "db-drop",
+    high: true,
+    labels: ["mysqladmin … drop"],
+  }, // MySQL CLI 形 (quote 非認識の字面境界・512 字で束縛 = 線形)
+  {
+    re: /\bdrop_?database\s*\(/i,
+    category: "db-drop",
+    high: true,
+    labels: ["dropDatabase(", "drop_database("],
+  }, // mongosh db.dropDatabase() / pymongo・sqlalchemy-utils drop_database(
+  { re: /\bflush(?:all|db)\b/i, category: "db-drop", high: true, labels: ["FLUSHALL", "FLUSHDB"] }, // redis FLUSHALL / FLUSHDB (bare-token・dropdb と同じ FP class)
+  { re: /\bmigrate\b/i, category: "migrate-prod", high: true, labels: ["migrate"] },
+  { re: /\bproduction\b/i, category: "migrate-prod", high: true, labels: ["production"] },
+  {
+    re: /\bgit\s+reset\s+--hard\b/i,
+    category: "history-rewrite",
+    high: true,
+    labels: ["git reset --hard"],
+  },
+  {
+    re: /\bgit\s+clean\s+-[a-z]*f/i,
+    category: "history-rewrite",
+    high: true,
+    labels: ["git clean -f"],
+  },
 ];
 
 /** 字面 high リテラルにマッチするか (LITERAL_RULES の high エントリの論理和・旧 HIGH_RISK_LITERAL_RE と同値)。 */

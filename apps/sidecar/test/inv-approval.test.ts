@@ -3534,7 +3534,10 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
   //   起点は PR #44 の dropdb 行 1 本で 2515→2516 に動いていた (余裕内で通り記録漏れ・TDA-DB2-1)。branch は
   //   **regex 中の `?` (`_?` / `(?:`) も計数される**ため +2 (ロジック分岐は 0)。executable 天井は実測 + 4、
   //   branch 天井 802 は据え置き (headroom +2・QA-DB2R2-2)。
-  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2525;
+  //   task 01a0480f-ffca (db-drop 列挙 two-way lock): 2521/800 → 2542/800 — LITERAL_RULES の全 16 行に `labels`
+  //   (表示名・データのみ) を付け prettier が行を折り返した。分岐なし。executable 天井は実測 + 4、branch 天井 802 は
+  //   据え置き (headroom +2)。
+  const MODULE_SET_EXECUTABLE_LINE_CEILING = 2546;
   const MODULE_SET_BRANCH_TOKEN_CEILING = 802;
 
   it("metatest: the classifier module set has a total-size ceiling that a file split cannot dodge", () => {
