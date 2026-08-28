@@ -59,8 +59,10 @@ describe("INV-DB-DROP-ENUMERATION: db-drop の列挙コピーは DB_DROP_LITERAL
     const row = doc.split("\n").find((l) => l.startsWith("| `db-drop`"));
     expect(row, "db-drop table row").toBeDefined();
     const cell = row!.split("|")[2]!;
+    // QA-FF-3: indexOf が -1 だと slice(0, -1) が非空になり length guard が自己充足するので、marker の存在を先に pin する。
+    expect(cell, "row cell carries the '(literal list' marker").toContain("(literal list");
     const list = cell.slice(0, cell.indexOf("(literal list"));
-    expect(list.length, "row cell carries the '(literal list' marker").toBeGreaterThan(0);
+    expect(list.length, "row cell lists forms before the marker").toBeGreaterThan(0);
     const tokens = [...list.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
     expect(sorted(tokens)).toEqual(sorted(FORMS));
     // 表示順もテーブル順 (読者が LITERAL_RULES と突き合わせられる)。
@@ -88,8 +90,9 @@ describe("INV-DB-DROP-ENUMERATION: db-drop の列挙コピーは DB_DROP_LITERAL
     for (let j = i + 1; j < lines.length && !/^\s*\*\s*- [a-z-]+:/.test(lines[j]!); j++) {
       text += " " + lines[j]!.replace(/^\s*\*\s?/, "");
     }
+    expect(text, "docstring carries the '(literal list' marker").toContain("(literal list");
     const list = text.slice(0, text.indexOf("(literal list"));
-    expect(list.length, "docstring carries the '(literal list' marker").toBeGreaterThan(0);
+    expect(list.length, "docstring lists forms before the marker").toBeGreaterThan(0);
     const tokens = list
       .split("/")
       .map((s) => s.trim())
