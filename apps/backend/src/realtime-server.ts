@@ -97,6 +97,13 @@ export interface RealtimeRouteOptions {
   readonly usageStore: UsageStore;
   readonly sidecarRegistry: SidecarRegistry;
   /**
+   * TDA-V9-7: `GET /realtime/readiness` に載せる backend 由来の縮退カウンタ観測元
+   * (ApprovalReconciler)。**非負整数の読取りのみ**の構造的部分型で、reconciler の他 API へは
+   * 到達しない (route から reconcile を起動できない = 読取り専用面を保つ)。省略時は 0
+   * (この配備では reconciler を配線していない = 縮退なしと同義の安全形)。
+   */
+  readonly reconcilerObserver?: { readonly nonRetirableSkipCount: number };
+  /**
    * ADR 019f0eca 方式B: policy resolve endpoint の path 封じ込め scope。省略時は
    * env ACTRADECK_PROJECT_SCOPE をパースする (audit/list 系と同一出所)。空=無制限 (default-off)。
    */
@@ -397,7 +404,11 @@ export function registerRealtimeRoute(app: FastifyInstance, opts: RealtimeRouteO
   //   GET (純読取り)。応答は **NO-RAW** (boolean + 非負整数のみ・path/settings/token を載せない)。集約は
   //   SidecarRegistry に閉じ (event-model の正準 aggregate を共有)、ここは整形のみ。
   app.get("/realtime/readiness", async (_req, reply) => {
-    return reply.send(opts.sidecarRegistry.agentReadiness());
+    // TDA-V9-7: daemon 由来カウンタ (hello 集約) + backend 由来 (reconciler) を registry が
+    // 単一の closed shape へ合流させる。ここは注入のみ (再解釈しない・正準射影は event-model)。
+    return reply.send(
+      opts.sidecarRegistry.agentReadiness(opts.reconcilerObserver?.nonRetirableSkipCount),
+    );
   });
 
   // ─── ADR 019f22a7 P1: first-run セーフティデモの起動 route ────────────────────────────────

@@ -121,6 +121,19 @@ export { normalizeScopePath, isPathWithinScope, sanitizeRepoLabel } from "./path
 export { parseAgentVisibilityWire, aggregateAgentReadiness } from "./agent-visibility-wire.js";
 export type { AgentVisibilityWire } from "./agent-visibility-wire.js";
 
+// 縮退カウンタ wire (非負整数のみ・NO-RAW) の射影 + 受信検証 + 集約
+//   (T1 single source: sidecar hello 射影 / backend handleHello 検証 + readiness 集約 / read 境界 parse・TDA-V9-7)
+export {
+  DAEMON_COUNTERS_FIELD,
+  ZERO_DAEMON_COUNTERS,
+  buildDaemonCountersHelloFields,
+  parseDaemonCountersWire,
+  aggregateDaemonCounters,
+  buildReadinessCounters,
+  parseReadinessCountersWire,
+} from "./observability-counters-wire.js";
+export type { DaemonCountersWire, ReadinessCountersWire } from "./observability-counters-wire.js";
+
 // 承認 request_id 採番の正準実装 (T1 single source: sidecar bridge / backend safety-demo が共有・Phase 4 R3)
 export {
   APPROVAL_REQUEST_ID_RE,

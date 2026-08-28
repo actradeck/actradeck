@@ -104,6 +104,8 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     usageStore?: UsageStore;
     telemetry?: AnonymousTelemetry;
     projectScope?: readonly string[];
+    /** TDA-V9-7: readiness 応答へ合流する backend 由来カウンタ (ApprovalReconciler の構造的部分型)。 */
+    reconcilerObserver?: { readonly nonRetirableSkipCount: number };
   }): Promise<FakeReplayCalls> {
     const calls: FakeReplayCalls = deps.calls ?? { commandOutputArgs: [] };
     const store = {
@@ -195,6 +197,9 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
           }),
         } as unknown as UsageStore),
       sidecarRegistry: registry,
+      ...(deps.reconcilerObserver !== undefined
+        ? { reconcilerObserver: deps.reconcilerObserver }
+        : {}),
       ...(deps.telemetry !== undefined ? { telemetry: deps.telemetry } : {}),
       // 既定は空 scope (無制限) を明示注入し、env ACTRADECK_PROJECT_SCOPE の混入を排除して決定論化する。
       projectScope: deps.projectScope ?? [],
@@ -1682,6 +1687,48 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
     expect(res.body).not.toContain("/home/victim");
   });
 
+  // ── TDA-V9-7: 縮退カウンタ 2 種の endpoint 露出 (getter のみで読取り路が無かった欠落の landing) ──
+  //   daemon 由来 (hello 集約) と backend 由来 (ApprovalReconciler 注入) が同一 closed shape で載り、
+  //   NO-RAW (非負整数のみ) を守ることを HTTP 面で pin する。
+  it("readiness: counters が daemon 由来 + backend 由来を非負整数のみで載せる (未配線なら 0 固定で RED)", async () => {
+    const link: SidecarLink = { open: true, send() {} };
+    registry.add(link);
+    registry.handleHello(link, {
+      type: "hello",
+      control_token: "c1",
+      session_ids: [],
+      // 敵対 daemon: 余剰 field (パス/secret 様) を counters にも詰める。
+      daemon_counters: {
+        unstableRequestIdCount: 5,
+        leakedPath: "/home/victim/.claude/settings.json",
+        token: "glpat-XXXXXXXXXXXXXXXXXXXX",
+      },
+    });
+    await mount({ reconcilerObserver: { nonRetirableSkipCount: 7 } });
+    const res = await app.inject({ method: "GET", url: "/realtime/readiness", headers: auth });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { counters: Record<string, unknown> };
+    expect(body.counters).toEqual({ unstableRequestIdCount: 5, nonRetirableSkipCount: 7 });
+    // NO-RAW: 余剰 field は endpoint まで到達しない。
+    expect(Object.keys(body.counters).sort()).toEqual([
+      "nonRetirableSkipCount",
+      "unstableRequestIdCount",
+    ]);
+    expect(res.body).not.toContain("settings.json");
+    expect(res.body).not.toContain("glpat-");
+    expect(res.body).not.toContain("/home/victim");
+  });
+
+  it("readiness: reconcilerObserver 未注入の配備は nonRetirableSkipCount=0 (安全形・throw しない)", async () => {
+    await mount({});
+    const res = await app.inject({ method: "GET", url: "/realtime/readiness", headers: auth });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { counters: unknown }).counters).toEqual({
+      unstableRequestIdCount: 0,
+      nonRetirableSkipCount: 0,
+    });
+  });
+
   it("readiness: query string を無視し応答形に影響しない (SEC-L1: query passthrough latent)", async () => {
     await mount({});
     const res = await app.inject({
@@ -1690,12 +1737,20 @@ describe("INV-REALTIME pull-route guards (fakes + real SidecarRegistry)", () => 
       headers: auth,
     });
     expect(res.statusCode).toBe(200);
-    const body = res.json() as { daemonCount: number; claude: unknown; codex: unknown };
+    const body = res.json() as {
+      daemonCount: number;
+      claude: unknown;
+      codex: unknown;
+      counters: unknown;
+    };
     // query は応答に echo されない・形は不変 (daemon 未 seed ゆえ 0 / all-false)。
+    // TDA-V9-7: toEqual で **応答 shape 全体**を pin する — counters 以外の新 field が生えたらここが RED
+    //   (NO-RAW by construction: endpoint に載るのは boolean 4 個 + 非負整数 3 個のみ)。
     expect(body).toEqual({
       daemonCount: 0,
       claude: { binaryOnPath: false, anyHook: false },
       codex: { binaryOnPath: false, rolloutDirResolved: false },
+      counters: { unstableRequestIdCount: 0, nonRetirableSkipCount: 0 },
     });
     expect(res.body).not.toContain("passwd");
     expect(res.body).not.toContain("secret");

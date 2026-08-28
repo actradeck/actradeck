@@ -23,7 +23,7 @@ import { MAX_ACTIVE_PENDING_IDS } from "@actradeck/event-model";
 
 import { buildEvent } from "../src/event-factory.js";
 import { EventStore } from "../src/store.js";
-import { pendingIdsFromBridge, WsClient } from "../src/ws-client.js";
+import { daemonCountersFromBridge, pendingIdsFromBridge, WsClient } from "../src/ws-client.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -540,5 +540,106 @@ describe("ADR 0014 Phase 4: hello runtime_epoch + active_pending_request_ids", (
     // 切り詰めて送ると「載らなかった生存 pending」が backend で偽 stale になる。省略なら
     // 受信側 (parseActivePendingRequestIds) の欠落扱いと同じ「reconcile しない」= fail-safe。
     expect("active_pending_request_ids" in hello).toBe(false);
+  });
+});
+
+/**
+ * TDA-V9-7: hello の `daemon_counters` (縮退カウンタ・NO-RAW 非負整数のみ)。
+ *
+ * 不変条件:
+ *  (C-1) daemonCountersProvider 設定時、hello に daemon_counters が載る (0 報告も載せる=「縮退なし」の宣言)。
+ *  (C-2) 未設定 (旧 daemon / observe-only codex-rollout) では field を載せない (未報告扱い・後方互換)。
+ *  (C-3) reannounce も同一 builder を通り provider を **送信ごとに再評価** する (2d/2g/P4-3 と同型:
+ *        片方の経路で落とすと backend 側の観測が silent に 0 へ降格する)。
+ *  (C-4) 正準配線 helper (daemonCountersFromBridge) の意味論: bridge 未生成 → undefined (省略)。
+ */
+describe("TDA-V9-7: hello daemon_counters", () => {
+  it("(C-1) provider 設定時は daemon_counters を載せる (0 報告も宣言として載る)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-cnt",
+      sessionIds: ["s1"],
+      daemonCountersProvider: () => ({ unstableRequestIdCount: 0 }),
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+
+    const hello = cap.frames[0] as { type?: string; daemon_counters?: unknown };
+    expect(hello.type).toBe("hello");
+    expect(hello.daemon_counters).toEqual({ unstableRequestIdCount: 0 });
+  });
+
+  it("(C-2) provider 未設定なら field を載せない (未報告扱い・後方互換)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-cnt-none",
+      sessionIds: ["s1"],
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length === 0; i++) await sleep(10);
+    const hello = cap.frames[0] as Record<string, unknown>;
+    expect(hello.type).toBe("hello");
+    expect("daemon_counters" in hello).toBe(false);
+  });
+
+  it("(C-3) reannounce も daemon_counters を載せ、送信ごとに再評価する (単一出所 builder)", async () => {
+    const cap = freshCapture();
+    const port = await startServer(cap);
+    store = new EventStore(":memory:");
+    let unstable = 0;
+    client = new WsClient({
+      url: `ws://127.0.0.1:${port}/ingest/ws`,
+      store,
+      ingestToken: "tok",
+      controlToken: "ctl-cnt-reann",
+      sessionIds: ["s1"],
+      daemonCountersProvider: () => ({ unstableRequestIdCount: unstable }),
+    });
+    client.connect();
+    for (let i = 0; i < 100 && cap.frames.length < 1; i++) await sleep(10);
+    expect(
+      (cap.frames[0] as { daemon_counters?: { unstableRequestIdCount?: unknown } }).daemon_counters
+        ?.unstableRequestIdCount,
+    ).toBe(0);
+
+    // ランタイム中に縮退が起きた状況を模して値を変え reannounce → 2 通目は新値 (落とさない)。
+    unstable = 9;
+    client.reannounce();
+    for (
+      let i = 0;
+      i < 100 && cap.frames.filter((f) => (f as { type?: string }).type === "hello").length < 2;
+      i++
+    )
+      await sleep(10);
+    const helloFrames = cap.frames.filter((f) => (f as { type?: string }).type === "hello");
+    expect(helloFrames.length).toBeGreaterThanOrEqual(2);
+    const reann = helloFrames[helloFrames.length - 1] as {
+      daemon_counters?: { unstableRequestIdCount?: unknown };
+    };
+    expect(reann.daemon_counters?.unstableRequestIdCount).toBe(9);
+  });
+
+  it("(C-4) daemonCountersFromBridge: bridge 未生成 → undefined (field 省略)・生成済 → 現在値", () => {
+    expect(daemonCountersFromBridge(() => undefined)()).toBeUndefined();
+    let count = 0;
+    const bridge = {
+      get unstableRequestIdCount(): number {
+        return count;
+      },
+    };
+    const provider = daemonCountersFromBridge(() => bridge);
+    expect(provider()).toEqual({ unstableRequestIdCount: 0 });
+    count = 3; // fresh per send: 呼ぶたび現在値。
+    expect(provider()).toEqual({ unstableRequestIdCount: 3 });
   });
 });

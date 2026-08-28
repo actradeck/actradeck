@@ -12,8 +12,16 @@ import { EventEmitter } from "node:events";
 
 import { WebSocket } from "ws";
 
-import type { AgentVisibilityWire, ApprovalDecision, PolicyCategory } from "@actradeck/event-model";
-import { buildApprovalReconcileHelloFields } from "@actradeck/event-model";
+import type {
+  AgentVisibilityWire,
+  ApprovalDecision,
+  DaemonCountersWire,
+  PolicyCategory,
+} from "@actradeck/event-model";
+import {
+  buildApprovalReconcileHelloFields,
+  buildDaemonCountersHelloFields,
+} from "@actradeck/event-model";
 import { tokenEquals } from "@actradeck/redaction";
 
 import type { EventStore } from "./store.js";
@@ -31,6 +39,27 @@ export function pendingIdsFromBridge(
   getBridge: () => { pendingRequestIds(): string[] } | undefined,
 ): () => readonly string[] | undefined {
   return () => getBridge()?.pendingRequestIds();
+}
+
+/**
+ * ApprovalBridge → daemonCountersProvider の正準配線 (TDA-V9-7・単一出所)。
+ *
+ * bridge の縮退カウンタ (`unstableRequestIdCount`: redaction に mangle された承認 request_id 採番の
+ * 延べ数・0 が正常) を hello へ載せ、backend の `GET /realtime/readiness` から観測可能にする
+ * (SEC-R4-4 が「runtime 側 consumer 未配線」と開示していた欠落の解消)。
+ *
+ * bridge 未生成 (コンストラクタ内の生成順序窓 / teardown 中) は **undefined** を返し hello から
+ * field を省略させる (backend は当該 daemon を counters 未報告として集約から除外 = 後方互換)。
+ * NO-RAW: 運ぶのは非負整数のみで request_id 原文は保持しない。
+ */
+export function daemonCountersFromBridge(
+  getBridge: () => { readonly unstableRequestIdCount: number } | undefined,
+): () => DaemonCountersWire | undefined {
+  return () => {
+    const bridge = getBridge();
+    if (bridge === undefined) return undefined;
+    return { unstableRequestIdCount: bridge.unstableRequestIdCount };
+  };
 }
 
 export type ApprovalDecisionMsg = {
@@ -334,6 +363,13 @@ export interface WsClientOptions {
    * reannounce で宣言が落ち偽 stale 化する)。
    */
   readonly pendingApprovalIdsProvider?: () => readonly string[] | undefined;
+  /**
+   * TDA-V9-7: hello に optional `daemon_counters` (縮退カウンタ・非負整数のみ) を相乗りさせる provider
+   * (`daemonCountersFromBridge` で ApprovalBridge から配線)。**送信直前に毎回呼ぶ** (agentVisibilityProvider
+   * と同じ fresh-per-send: 実行中に増えた縮退が次の hello / reannounce で届く)。undefined を返せば field を
+   * 省略する (bridge 未生成 / observe-only daemon = 未報告扱い・後方互換)。NO-RAW: 非負整数のみ。
+   */
+  readonly daemonCountersProvider?: () => DaemonCountersWire | undefined;
   /** 再接続バックオフ初期値 (ms)。 */
   readonly reconnectBaseMs?: number;
   readonly reconnectMaxMs?: number;
@@ -370,6 +406,7 @@ export class WsClient extends EventEmitter {
   private readonly agentVisibilityProvider: (() => AgentVisibilityWire | undefined) | undefined;
   private readonly runtimeEpoch: string | undefined;
   private readonly pendingApprovalIdsProvider: (() => readonly string[] | undefined) | undefined;
+  private readonly daemonCountersProvider: (() => DaemonCountersWire | undefined) | undefined;
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
   private reconnectAttempts = 0;
@@ -390,6 +427,7 @@ export class WsClient extends EventEmitter {
     this.agentVisibilityProvider = opts.agentVisibilityProvider;
     this.runtimeEpoch = opts.runtimeEpoch;
     this.pendingApprovalIdsProvider = opts.pendingApprovalIdsProvider;
+    this.daemonCountersProvider = opts.daemonCountersProvider;
     this.reconnectBaseMs = opts.reconnectBaseMs ?? 500;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 10_000;
   }
@@ -604,6 +642,8 @@ export class WsClient extends EventEmitter {
     // provider が undefined を返す (bridge 未生成・TDA-8) なら field 省略 = backend は reconcile しない)。
     // **空配列は送る** (pending ゼロの宣言が stale 判定の根拠)。
     const pendingIds = this.pendingApprovalIdsProvider?.();
+    // TDA-V9-7: 送信直前に縮退カウンタを解決 (provider 未配線 / undefined なら field 省略)。
+    const daemonCounters = this.daemonCountersProvider?.();
     return JSON.stringify({
       type: "hello",
       control_token: this.controlToken,
@@ -625,6 +665,10 @@ export class WsClient extends EventEmitter {
       // field 名・cap は event-model の正準実装と共有 (TDA-2: 手書きミラー禁止)。cap 超過は切り詰め
       // でなく field 省略 (TDA-9: 切り詰めは偽 stale を作る・省略は「reconcile しない」= fail-safe)。
       ...buildApprovalReconcileHelloFields(this.runtimeEpoch, pendingIds),
+      // TDA-V9-7: 縮退カウンタ (NO-RAW 非負整数のみ) を相乗り。値があるときだけ載せる conditional field で、
+      // connect/reannounce 両経路を本 builder が単一出所として通る (TDA-1 019f1859: 片方欠落だと reannounce で
+      // 観測が落ち、backend の readiness 集約から当該 daemon が消える)。
+      ...buildDaemonCountersHelloFields(daemonCounters),
     });
   }
 

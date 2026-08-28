@@ -67,6 +67,16 @@ export default defineConfig({
           functions: 90,
           lines: 95,
         },
+        // observability-counters-wire.ts (縮退カウンタの NO-RAW 射影 / 非負整数ゲート / sum fold・
+        //   TDA-V9-7) = 同上。INV-OBSERVABILITY-COUNTERS-WIRE が worst 100/100/100/100 まで網羅
+        //   → floor 95/90/90/95 (per-file-coverage-floor-below-worst-not-best・erosion tripwire)。
+        //   負数/非整数ゲートの分岐が未到達になると trip する (endpoint を「負の観測」で汚す回帰の防止)。
+        "src/observability-counters-wire.ts": {
+          statements: 95,
+          branches: 90,
+          functions: 90,
+          lines: 95,
+        },
       },
     },
   },
