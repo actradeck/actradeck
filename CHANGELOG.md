@@ -32,6 +32,20 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Fixed
 
+- **Taking over a stale lock no longer deletes a live one.** The advisory file lock that
+  serializes the approval allowlist, the approval policy, and attach settings across processes
+  decided a lock was stale (unreadable, its own leftover, or held by a dead pid) and then removed
+  it with a separate `unlink`. Between those two steps the previous holder could release and a
+  third process could take the lock — and the `unlink` then deleted *that* live lock, letting two
+  processes run the read-modify-write at once and lose one of the writes. A missing lock file was
+  read as "corrupt" and hit the same path. Takeover is now identity-checked: the lock is detached
+  atomically with `rename`, discarded only when the detached file still holds the exact bytes the
+  staleness check read, and otherwise linked back with the acquirer backing off (a restore that
+  cannot be completed aborts loudly rather than continuing with two holders). A lock that is simply
+  missing is treated as "just released" and retried without deleting anything. A lock whose content
+  cannot be read at all is no longer taken over. `INV-FILELOCK-STALE-TAKEOVER-IDENTITY` reproduces
+  both races with three real processes.
+
 - **`DROP DATABASE` now draws an approval card under ordinary approval.** The risk classifier
   rated `psql -c 'DROP DATABASE …'` as `low` while attaching the `db-drop` category, so the
   category-driven bypass/YOLO gate held it but ordinary approval — which keys off the risk verdict

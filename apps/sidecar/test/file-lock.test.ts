@@ -5,18 +5,34 @@
  * - 相互排他: lock 保持中 (`fn` 実行中) は lockfile が存在し、別の取得は素通ししない。
  * - fail-loud: 生存保持者がいて maxRetries を超えたら throw (無言継続しない)。
  * - stale 奪取: 死亡 pid の lock は奪取して取得できる。
+ * - **奪取の同一性**: 判定した当の lock だけを消す (rename で取り外し → 内容再検証 → 不一致なら復元)。
+ *   `absent` (ENOENT) は stale ではなく「解放直後」として unlink せず即再試行する。
  * - 自己 unlink: 正常終了・例外時とも finally で lockfile を消す。
  *
  * mutation: withFileLock を「素通し (lock 取らず fn 実行)」に変えると、
  * 「保持中は二重取得が fail-loud」「保持中 lockfile 存在」テストが赤化する。
  *
- * NOTE: 「空ファイル窓 (create→pid 可視の TOCTOU) で二重取得しない」INV は実 multi-process harness が
- *   必要なため、承認永続の並走テスト inv-approval-allowlist-store.test.ts の
- *   `INV-FILELOCK-NO-EMPTY-WINDOW` に同居する (実 spawn worker + acquireDelayMs 注入で falsifiable)。
+ * NOTE: 実 multi-process harness が必要な INV は別ファイルに同居/常駐する。
+ *   - 「空ファイル窓 (create→pid 可視の TOCTOU) で二重取得しない」= 承認永続の並走テスト
+ *     inv-approval-allowlist-store.test.ts の `INV-FILELOCK-NO-EMPTY-WINDOW`
+ *     (実 spawn worker + acquireDelayMs 注入で falsifiable)。
+ *   - 「stale 奪取が判定した当の lock だけを消す」= inv-file-lock-stale-takeover.test.ts の
+ *     `INV-FILELOCK-STALE-TAKEOVER-IDENTITY` (実 spawn worker 3 本 + seam 注入で falsifiable)。
+ *   本ファイルの以下の describe は同じ機構を **同期・単一プロセス**で分岐単位に pin する
+ *   (実プロセス INV の代替ではなく補完)。
  *
  * 🔴 すべて os.tmpdir() 配下。実設定不可侵。
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -116,6 +132,145 @@ describe("INV-ATTACH-WIRE-LOCK: stale takeover", () => {
     const ret = withFileLock(target, () => "ok", { isAlive: () => true });
     expect(ret).toBe("ok");
   });
+
+  it("takes over its own leftover lockfile (self remnant)", () => {
+    // 前回の自分 (同一 pid) が残した lock は自分の残骸として奪取してよい。
+    writeFileSync(lockPath, `${process.pid}\n`);
+    let ran = false;
+    const ret = withFileLock(target, () => {
+      ran = true;
+      return "ok";
+    });
+    expect(ran).toBe(true);
+    expect(ret).toBe("ok");
+  });
+
+  it("leaves no .stale-* debris behind after a takeover", () => {
+    writeFileSync(lockPath, "999999\n");
+    withFileLock(target, () => "ok", { isAlive: () => false });
+    expect(readdirSync(dir).filter((n) => n.includes(".stale-"))).toEqual([]);
+  });
+});
+
+/**
+ * INV-FILELOCK-STALE-TAKEOVER-IDENTITY (同期・単一プロセス側の分岐 pin)。
+ *
+ * 実プロセス版は inv-file-lock-stale-takeover.test.ts。ここでは `onLockContended`
+ * (holder 読取り前) / `onHolderObserved` (奪取判断前) の seam を使って、判定と取り外しの間に
+ * lock が入れ替わる各分岐を決定的に踏む。
+ *
+ * mutation: 「rename → 内容再検証 → 不一致なら復元」を無条件 unlink へ戻すと
+ * 「復元して backoff する」テストが赤化する。「absent を stale 扱いして unlink」へ戻すと
+ * 「解放直後に立った生きた lock を消さない」テストが赤化する。
+ */
+describe("INV-FILELOCK-STALE-TAKEOVER-IDENTITY: 取り外す lock の同一性", () => {
+  const DEAD = 999999;
+
+  it("判定 → 取り外しの間に内容が変わったら復元して backoff する (消さない)", () => {
+    writeFileSync(lockPath, `${DEAD}\n`);
+    const observed: string[] = [];
+    const sleeps: number[] = [];
+    let round = 0;
+    const ret = withFileLock(target, () => "ok", {
+      isAlive: (pid) => pid !== DEAD, // DEAD だけ死亡扱い
+      sleep: (ms) => sleeps.push(ms),
+      onHolderObserved: (kind) => {
+        observed.push(kind);
+        if (round === 0) {
+          // 判定直後・取り外し前に「別プロセスの生きた lock」へ差し替える。
+          writeFileSync(lockPath, "1\n");
+        } else {
+          // 復元されていること = 生きた lock を消していないことの直接証拠。
+          expect(readFileSync(lockPath, "utf8")).toBe("1\n");
+          unlinkSync(lockPath); // その holder が解放したことにして先へ進ませる
+        }
+        round += 1;
+      },
+    });
+    expect(ret).toBe("ok");
+    expect(observed).toEqual(["pid", "pid"]);
+    // 復元後は「生存保持者あり」扱い = backoff を挟む (即再試行しない)。
+    expect(sleeps.length).toBeGreaterThanOrEqual(1);
+    expect(readdirSync(dir).filter((n) => n.includes(".stale-"))).toEqual([]);
+  });
+
+  it("absent (解放直後) を stale 扱いせず、その窓で立った生きた lock を消さない", () => {
+    writeFileSync(lockPath, `${DEAD}\n`);
+    const observed: string[] = [];
+    let contended = 0;
+    let seen = 0;
+    const ret = withFileLock(target, () => "ok", {
+      isAlive: () => true, // 何も死んでいない = 奪取経路へ入らない
+      sleep: () => {},
+      onLockContended: () => {
+        // 1 回目だけ: holder 読取りの直前に前保持者が解放したことにする。
+        if (contended === 0) unlinkSync(lockPath);
+        contended += 1;
+      },
+      onHolderObserved: (kind) => {
+        observed.push(kind);
+        if (seen === 0) {
+          // absent 観測の直後に別プロセスが**生きた** lock を立てた。
+          writeFileSync(lockPath, "1\n");
+        } else {
+          // 生きた lock が消されずに残っていること (旧実装はここで消していた)。
+          expect(readFileSync(lockPath, "utf8")).toBe("1\n");
+          unlinkSync(lockPath);
+        }
+        seen += 1;
+      },
+    });
+    expect(ret).toBe("ok");
+    expect(observed[0]).toBe("absent");
+    expect(observed).toEqual(["absent", "pid"]);
+  });
+
+  it("取り外す前に他者が消していたら (rename ENOENT) backoff せず即再試行する", () => {
+    writeFileSync(lockPath, `${DEAD}\n`);
+    const sleeps: number[] = [];
+    let seen = 0;
+    const ret = withFileLock(target, () => "ok", {
+      isAlive: () => false,
+      sleep: (ms) => sleeps.push(ms),
+      onHolderObserved: () => {
+        if (seen === 0) unlinkSync(lockPath); // 他者が先に取り外した
+        seen += 1;
+      },
+    });
+    expect(ret).toBe("ok");
+    expect(seen).toBe(1);
+    expect(sleeps).toEqual([]); // 即再試行 (backoff を挟まない)
+  });
+
+  it("free ↔ held を無限に往復したら fail-loud で止まる (無言 busy-loop にしない)", () => {
+    writeFileSync(lockPath, "1\n");
+    let spins = 0;
+    expect(() =>
+      withFileLock(target, () => "never", {
+        isAlive: () => true,
+        sleep: () => {},
+        onLockContended: () => {
+          // 読取り直前に消す → absent 観測
+          try {
+            unlinkSync(lockPath);
+          } catch {
+            /* noop */
+          }
+        },
+        onHolderObserved: () => {
+          spins += 1;
+          writeFileSync(lockPath, "1\n"); // 判定直後に立て直す → 永久 flapping
+        },
+      }),
+    ).toThrow(/kept flapping/);
+    expect(spins).toBeGreaterThan(1000);
+  });
+
+  it("内容を読めない lock (ディレクトリ) は奪取せず fail-loud にする", () => {
+    // 読めない lock は同一性を再検証できない。旧実装は全 read 失敗を stale 扱いして奪取していた。
+    mkdirSync(lockPath);
+    expect(() => withFileLock(target, () => "never")).toThrow(/EISDIR/);
+  });
 });
 
 describe("INV-ATTACH-WIRE-LOCK: fail-loud", () => {
@@ -154,6 +309,14 @@ describe("INV-ATTACH-WIRE-LOCK: self-unlink on throw", () => {
     // finally は holder !== self を検出して unlink しない → 他者の lock を尊重。
     expect(existsSync(lockPath)).toBe(true);
     expect(readFileSync(lockPath, "utf8").trim()).toBe(String(otherLivePid));
+  });
+
+  it("releases a lock whose content got corrupted while held", () => {
+    // 自分が立てた lock の内容が壊された残骸は掃除する (放置すると次回まで残る)。
+    withFileLock(target, () => {
+      writeFileSync(lockPath, "not-a-pid\n");
+    });
+    expect(existsSync(lockPath)).toBe(false);
   });
 });
 

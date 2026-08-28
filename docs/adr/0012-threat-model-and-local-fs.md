@@ -17,6 +17,12 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
   same file during `systemctl` restarts, etc.) is serialized with an **advisory file
   lock** (hardlink `linkSync` exclusive create — content-complete with the holder pid,
   so there is no empty-file window; pid-based stale detection; fail-loud on timeout).
+  Taking over a stale lock is **identity-checked**: the lock is detached atomically with
+  `rename` and only discarded when the detached file still holds the exact bytes the
+  staleness check read; otherwise it is linked back and the acquirer backs off. A lock
+  that is simply *missing* (`ENOENT`) is treated as "just released", not as stale, and is
+  never unlinked. Without both, the non-atomic read-then-`unlink` could delete a *live*
+  lock that a third process created in between, letting two processes hold it at once.
 - **At-rest secrecy.** Secret/token-bearing state files are written **`0600`** via a
   single shared atomic helper — `writeJson0600` (temp-write → `rename`) — so all
   such writers share one audited implementation instead of drifting copies.
