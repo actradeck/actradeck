@@ -61,8 +61,49 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   class — a quadratic rule spelled with a carriage return in its gap class, given a sample with a
   carriage return before its leading word, still measures as linear. No rule that ships today has a
   sample or a spelling of any of the three shapes. Widening the fourth seed to every suffix, and
-  coupling the test's copy of the gap class to the classifier's, are both tracked as follow-up work
-  for v0.9.
+  coupling the test's copy of the gap class to the classifier's, were tracked as follow-up work and
+  are closed by the entry below.
+
+- **That metatest now derives a fifth seed, judges the scaling ratio from three measurements instead
+  of one, and is coupled to the classifier's own gap classes.** Three holes closed together, because
+  closing any one alone would have left the other two able to hide a quadratic rule.
+  *The fifth seed* takes every suffix that follows a shell separator in the sample, not only the one
+  after the last separator, and derives the same non-matching prefix from each. The fourth seed went
+  null whenever the sample carried a separator both before the rule's leading word and after the
+  match completed - the tail then no longer matched the rule - and the third seed was already broken
+  up by the leading separator, so such a sample evaded all four. A quadratic rule was injected with a
+  sample in each of five such shapes (a leading `&&` with a trailing pipe, a leading `&&` with a
+  trailing `;`, a leading pipe with a trailing pipe, two quoted `;` inside a wrapper, and newlines on
+  both sides); every one survived the four seeds at ratios of 7.9 to 8.5 and fails on the fifth at
+  median ratios of 62.7 to 64.1. The fifth seed is a superset of the fourth, which is kept rather
+  than replaced. No rule that ships today has such a sample, so the measured case count is unchanged
+  at 110; the teeth are a per-rule synthetic command that wraps each sample in both a leading and a
+  trailing separator, non-vacuous for all 17 scanned expressions, where the fourth seed is null by
+  construction.
+  *The ratio verdict* is now two-sided. A single measurement let a genuinely quadratic rule pass once
+  in twelve runs inside the test harness, and let a linear rule fail above the threshold on a loaded
+  machine. The test now measures the ratio three times and requires the median below 24 and the
+  maximum below 40: a single low outlier can no longer make a quadratic rule green, and a single high
+  outlier can no longer make a linear rule red. The per-test timeout moves from 30s to 120s because a
+  quadratic rule now takes three measurements to diagnose.
+  *The coupling* replaces the test's hand-written copy of the classifier's gap class with an
+  assertion about the classifier itself: for every scanned expression, the characters its quantified
+  character classes exclude must be a subset of the separators the seed derivation cuts on. A rule
+  spelled with a carriage return in its gap class, one spelled with redirection characters, and one
+  using a positive class all fail that assertion, where before they measured as linear and shipped
+  silently. One exemption is recorded, keyed to both the expression and the class it exempts, for the
+  flag-matching `[a-z]` in the `git clean` rule, which is not a gap between two words. Alongside it,
+  a structural gate refuses any rule whose whole-command expression spells a separator class by hand
+  unless it also carries the canonical segment-scoped expression and a sample that only the segment
+  scope matches - the discipline that a hand-written separator class is a second parser, previously
+  only written down in the rules, is now enforced by a failing test.
+  What remains open is stated in the test and in the classifier's documentation, and it is what this
+  round's search found, not a claim of completeness. A rule whose trailing literal is reconstructed
+  by repeating its own leading literal still evades every seed. And the coupling compares against a
+  finite set of characters (ASCII plus five control characters and five non-ASCII separators), so a
+  gap class that excludes only some character outside that set would pass the coupling and evade the
+  cut - measured with a non-breaking space, which is why the set now contains one and is documented
+  as add-only.
 
 ### Fixed
 
