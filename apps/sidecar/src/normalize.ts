@@ -2507,17 +2507,22 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   **後**に gap metachar なし」の積集合に限る。
  *   **SEC-LN-1 は部分閉塞** (SEC-LN4-1 ≡ TDA-LN4-2・base 同値ゆえ非ブロッカー): 閉じたのは「最後の metachar
  *   以降の後尾が**なお規則を踏む**」sample に限る。**以下は R1 full 監査 + 実装者 probe が列挙できた死角であって
- *   網羅の主張ではない** (R1 の 2 件列挙に対し実装者 probe が 3 件目を見つけた) — ① 末尾 literal が先頭 literal の
+ *   網羅の主張ではない** (R1 の死角リストは 2 件だったが同じ R1 の SEC-LN4-3 / QA-LN4-1 が ③ を実測済み = リスト側の
+ *   取りこぼし・SEC-LN4R2-4) — ① 末尾 literal が先頭 literal の
  *   反復で再構成される規則 (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし)、② 先頭 literal の**前と**
  *   マッチ完了の**後**の両方に gap metachar がある sample (`cd /app && prog … word | tee log` /
  *   `… word; echo done` / 改行後続) — 後尾が規則を踏まず第 4 軸が null になり、第 3 軸も反復が分断済みゆえ
  *   **4 軸すべてを回避**する (2 乗形が 7.7〜9.1 に留まって SURVIVED・現行 17 に該当 sample なし・是正 = 第 5 軸
  *   「各 metachar 以降の全 suffix」は task 01a05374-36d2-7419-ac3f-4a22c160cbcc・v0.9・full)、③ 規則の gap クラスが
  *   test 側 `TAIL_METACHARS` より**広い**綴り (`[^|;&\r\n]` 等) でその差分文字を前置した sample — 後尾の切り出しが
- *   働かず第 4 軸が第 3 軸へ退化する (実装者 probe 3 run で CR 前置の 2 乗ルールが SURVIVED 8.4〜16.0・下記
- *   SEC-LN4-3 の手写しミラー問題が seed 軸に現れたもの)。
+ *   働かず第 4 軸が第 3 軸へ退化する (SEC R1 が CR 前置 / QA R1 が `>` 前置で SURVIVED を実測・実装者 probe 3 run で
+ *   8.4〜16.0 を再現・正のクラス gap `[\w\s-]*` + 絶対パス sample でも 4 軸 SURVIVED 7.5〜11.0 (SEC-LN4R2-2)・下記
+ *   SEC-LN4-3 の手写しミラー問題が seed 軸に現れたもの。`TAIL_METACHARS` を**広げる**方向も last-only 切り出しでは
+ *   `… > out.log` 形の検出を失う (SEC-LN4R2-1) ため、拡張は第 5 軸と同時にのみ行う)。
  *   なお ratio 判定は**単発比**で、2 乗形の 1 seed が vitest harness 内 12 回中 1 回だけ緑になった実測がある
- *   (bare node 60 回では 0/60・N 回 max へ直す是正は task 01a05374-36d2-7419-ac3f-4f88be2481fc・v0.9・targeted)。
+ *   (bare node 60 回では 0/60)。逆に全 suite 並走 + 2×nproc 外部負荷 (load 35〜48) では線形ルールが 24 超の false RED
+ *   になる実測もある (QA-LN4R2-2・base 26.88・pre-existing)。両側の是正 (max 単独でなく両側判定 + 分離幅再測) は
+ *   task 01a05374-36d2-7419-ac3f-4f88be2481fc・v0.9・targeted。
  *   test 側 `TAIL_METACHARS` は src の gap クラス `[^|;&\n]` の**手写し 2 コピー目**で結合 pin が無い
  *   (SEC-LN4-3・将来 `[^|;&\r\n]` 等の綴りが入ると第 4 軸が取り残される・構造ゲートは task 01a04989-4a0c・
  *   v0.9・full)。

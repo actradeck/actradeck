@@ -500,8 +500,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         なし」の積集合に限る。
   //     **SEC-LN-1 は部分閉塞** (SEC-LN4-1 ≡ TDA-LN4-2・M・base 同値ゆえ非ブロッカー): 軸 (4) が閉じたのは
   //     「最後の metachar 以降の後尾が**なお規則を踏む**」sample に限る。**以下は R1 full 監査 (SEC/QA/TDA) +
-  //     実装者の再現で列挙できた死角であって、網羅の主張ではない** (「残るのは N つだけ」と書かない — 実際
-  //     R1 の 2 件列挙に対し実装者 probe が 3 件目 (3) を見つけている):
+  //     実装者の再現で列挙できた死角であって、網羅の主張ではない** (「残るのは N つだけ」と書かない — R1 の死角
+  //     **リスト**は 2 件だったが、同じ R1 の別所見 SEC-LN4-3 / QA-LN4-1 が (3) を実測済みで、リスト側の取りこぼし
+  //     だった。SEC-LN4R2-4):
   //     (1) 末尾 literal が先頭 literal の反復で再構成される規則 (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2): prefix の
   //         反復が規則を再びマッチさせ vacuous になる。現行 17 スキャン regex に該当形なし (sweep 019fd74b E)。
   //     (2) 先頭 literal の**前と**マッチ完了の**後**の両方に gap metachar がある sample
@@ -511,8 +512,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         E/F/G を 61〜63 で RED にしケース数 110 不変と実測済) は task 01a05374-36d2-7419-ac3f-4a22c160cbcc
   //         (v0.9・full 監査)。現行 17 スキャン regex に該当 sample なし。
   //     (3) 規則の gap クラスが `TAIL_METACHARS` より**広い**綴り (`[^|;&\r\n]` / `[^|;&\n<>]` 等) で、その
-  //         差分文字を前置した sample: 後尾の切り出しが働かず軸 (4) が軸 (3) と同一 seed へ退化する。実装者 probe
-  //         (3 run) で `[^|;&\r\n]` gap + CR 前置の 2 乗ルールが軸 1..4 でも SURVIVED (8.4〜16.0) を実測。
+  //         差分文字を前置した sample: 後尾の切り出しが働かず軸 (4) が軸 (3) と同一 seed へ退化する。SEC R1
+  //         (`[^|;&\r\n]` + CR 前置) / QA R1 (`[^|;&\n<>]` + `>` 前置) が SURVIVED を実測し、実装者 probe (3 run)
+  //         が 8.4〜16.0 で再現。gap が**正のクラス** (`[\w\s-]*` 等) でも同じで、通常の絶対パス sample の `/` を gap
+  //         が除外するため 4 軸すべて 7.5〜11.0 で SURVIVED (対照 clean sample は 124.9・SEC-LN4R2-2・shipping に
+  //         `[a-z]` の正クラスが既存)。
   //         これは (1)(2) と違い「導出の穴」でなく下の `TAIL_METACHARS` docstring の**手写し 2 コピー目**問題
   //         (SEC-LN4-3・task 01a04989-4a0c・v0.9・full) が seed 軸に現れたもの。
   //     **ratio 判定は単発比** (SEC-LN4-4・M・base 同値): 2 乗形の 1 seed に対し vitest harness 内で 12 回中 1 回
@@ -563,8 +567,13 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     //   **2026-08-30 の R1 再測 (110 ケース全体・レンジ表記・単一 worst を書かない・SEC-LN-3 規律)**: 無負荷 worst
     //   8.46〜14.35 (実装者 5 run + QA 20 run) / 2×nproc 飽和 worst 12.72〜**19.05** (load avg 28〜38・実装者 5 run +
     //   QA 5 run) / `CI=true` worst 16.20 (QA 3 run)。飽和時の余裕は **≈ 1.26×** まで詰まる (QA-LN4-5・base 同値の
-    //   pre-existing L・sweep 019fd74b で watch)。28 run で失敗 0・2 乗形は飽和下でも 42〜69 で分離するため閾値 24
-    //   は据え置き。値を動かすなら full 監査 (seed 生成 / RATIO_MAX / 入力幾何 = 走査範囲・SEC-DB2R3-3)。
+    //   pre-existing L・sweep 019fd74b で watch)。28 run で失敗 0 は**ファイル単独 regime (load 28〜38) に bound**
+    //   された記述で、**全 suite 並走 + 2×nproc 外部負荷 (load 35〜48) では 24 超の false RED を実測** (QA-LN4R2-2・
+    //   base 1/8 run 26.88 / head 2/8 run 24.62〜25.68・seed は base 同一集合内の軸 1〜3・base 同値の pre-existing M)。
+    //   2 乗形の分離も同 regime では load 42〜45 で 25.9 (1.08×) まで下振れた観測がある (SEC-LN4R2-5)。よって閾値 24
+    //   は「ファイル単独 regime での分離」に bound された値。両側 (false RED / false green) の是正は task
+    //   01a05374-36d2-7419-ac3f-4f88be2481fc (v0.9・targeted・max 単独でなく両側判定 + 分離幅再測)。本 PR では
+    //   据え置き。値を動かすなら full 監査 (seed 生成 / RATIO_MAX / 入力幾何 = 走査範囲・SEC-DB2R3-3)。
     //   2 乗なら ≈ 40〜70 (旧 `*` 形の実測 39.7〜69.5・seed により変動)。閾値 24 は線形 p95 8.6 と 2 乗下限 ≈ 40 の
     //   間 (幾何中点 √(8.6 × 68) ≈ 24)。best-of-9 の min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)・15 連続緑
     //   flake 0 (TDA R3)。
@@ -612,8 +621,13 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * QA-LN4-1・M)。現行 17 スキャン regex の否定文字クラスは `[^|;&\n]` 1 本 (#9 mysqladmin の
      * whole-command) だけなので一致しているが、将来 `[^|;&\r\n]` や `[^|;&\n<>]` のような綴りの規則が
      * 入ると TAIL_METACHARS が**狭いまま**取り残され、その区切りを前置した 2 乗 sample が軸 (4) を
-     * すり抜ける (CR 前置 / `>` 前置の 2 乗ルールが SURVIVED する実測あり)。逆方向 (TAIL_METACHARS が
-     * 広い) は安全側。src から導出するか「全スキャン regex の否定文字クラスの除外集合 ⊆ TAIL_METACHARS」
+     * すり抜ける (CR 前置 / `>` 前置の 2 乗ルールが SURVIVED する実測あり)。**逆方向 (TAIL_METACHARS を
+     * 広げる) も last-only 切り出しでは検出を失いうる** (SEC-LN4R2-1): `cd /app && prog … word > out.log`
+     * 形の sample は現行では軸 (4) seed が RED (25.9〜94.2) だが、`[|;&\n<>]` へ広げると後尾が ` out.log`
+     * になって null 化し残り 7.1〜11.4 で SURVIVED (実測)。集合の拡張は軸 (5) 全 suffix (task
+     * 01a05374-36d2-7419-ac3f-4a22c160cbcc) と同時にのみ単調で安全。結合条件も否定クラス限定にしない
+     * (SEC-LN4R2-2: 正のクラス `[\w\s-]*` の gap は `/` を除外し絶対パス sample で 4 軸 SURVIVED・shipping に
+     * `[a-z]` 既存)。src から導出するか「全スキャン regex の**量化されたクラスの補集合** ⊆ TAIL_METACHARS」
      * を assert する結合は **task 01a04989-4a0c (v0.9・full 監査)** — 「手書き分離子クラスを新規行に
      * 書かない」規律 (.claude/rules/security.md mysqladmin 節) の構造ゲートに test 側も含める。
      */
