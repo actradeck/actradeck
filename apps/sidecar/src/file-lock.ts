@@ -8,20 +8,34 @@
  * 設計:
  * - **pid を含む temp を書いてから `linkSync(tmp, lockPath)` で atomic に立てる** (旧: `openSync('wx')`
  *   で空ファイルを排他生成してから pid を追記していた)。`linkSync` は EEXIST で排他を保証しつつ、
- *   lockPath が **出現した瞬間から pid を含む** ため「作成済みだが pid 未書込 (holder===undefined)」の
+ *   lockPath が **出現した瞬間から pid を含む** ため「作成済みだが pid 未書込」の
  *   **空ファイル窓が存在しない**。取得後 temp は unlink する (lockPath が inode を保持)。
- * - 取得失敗 (EEXIST) 時は lockPath の pid を読み `process.kill(pid, 0)` で生存判定し、
- *   **死んでいれば stale とみなして奪取** (unlink → 再試行)。生存していれば短い backoff で retry。
- *   上限超過で **fail-loud (throw)** — 無言継続しない。
+ * - 取得失敗 (EEXIST) 時は lockPath を **3 値** で観測する (`absent` / `corrupt` / `pid`)。
+ *   - `absent` (ENOENT) は **stale ではなく「解放直後」**。unlink せず delay 無しで即 re-link 再試行する。
+ *   - `corrupt` / 自分の残骸 / 死亡 pid は stale。ただし **unlink では取り外さない**（下記）。
+ *   - 生存 pid なら短い backoff で retry し、上限超過で **fail-loud (throw)** — 無言継続しない。
  * - finally で必ず unlink (自分が保持している lock のみ)。
+ *
+ * **奪取は「同一性を保った取り外し」で行う (stale 奪取 TOCTOU の構造修正)**: 旧実装は
+ * 「holder を読む → stale と判定 → `unlinkSync(lockPath)`」が非原子で、判定と unlink の間に
+ * 前保持者 A が解放し別プロセス C が新しい lock を立てると、**C の生きた lock を消して**しまい
+ * C と自分 (または後続の D) が二重に critical section へ入る = lost-update を起こした
+ * (PR #46 CI run 33187020993 の INV-FILELOCK-NO-EMPTY-WINDOW 8→7 の実観測)。
+ * 現行は `renameSync(lockPath, ${lockPath}.stale-<pid>-<seq>)` で **原子的に取り外してから**、
+ * 取り外したファイルの内容が判定時に読んだ逐語内容と**一致するときだけ** unlink する。
+ * 一致しなければ「別プロセスの生きた lock を外した」ので `linkSync` で元へ**復元**して backoff retry
+ * する。復元できない (EEXIST 等) なら **fail-loud (throw)** — 二重保持のまま無言継続しない。
+ * `unlink` は「奪取の勝者は 1 つ」しか保証しないが、`rename` + 内容再検証は
+ * **消すのが本当に自分が判定したその lock か** を保証する (勝者が 1 つでも、消す対象が
+ * 生きた別 lock なら直列化は破れる)。
  *
  * 空ファイル窓を閉じる理由 (QA・実プロセス回帰 INV-FILELOCK-NO-EMPTY-WINDOW): 旧 openSync 方式は
  * 「排他生成」と「pid 書込」が 2 syscall に分かれ、その間に契約者が deschedule されると lockPath が
  * **pid 無しで一瞬存在**する。CPU 逼迫下 (10 プロセス cold-start 競合等) でこの窓が広がると、別プロセスが
- * 空 lockPath を `holder===undefined`=stale と誤判定して奪取 → **二重保持 → lost-update** を起こす
+ * 空 lockPath を stale と誤判定して奪取 → **二重保持 → lost-update** を起こす
  * (approval allowlist / policy 永続の直列化が破れる)。linkSync 方式は窓自体を消して構造的に閉じる。
  *
- * 非対象 (意図的): これは advisory lock。`linkSync`/`O_EXCL` は同一 fs 上で原子的だが、
+ * 非対象 (意図的): これは advisory lock。`linkSync`/`O_EXCL`/`rename` は同一 fs 上で原子的だが、
  * NFS 等では保証が弱い。ActraDeck の settings は local fs 前提 (ADR 019ea476)。
  * **worker_threads 非対象 (SEC-3)**: stale 奪取は holder pid を自 pid と比較して「自分の残骸」を
  * 奪うため、同一 pid を共有する worker スレッド間では self-steal になり直列化が成立しない。本 lock は
@@ -31,14 +45,53 @@
  * write 権を持つ主体間でのみ意味を持つ。pid 偽装耐性 (悪意ある holder が他 pid を詐称して
  * lock を奪う/保持し続ける) は **設計外**。前提は single-operator / local fs / loopback で、
  * その境界内では advisory 直列化で lost-update を防げば十分とする。
+ * 内容再検証も同じ境界内でのみ意味を持つ (holder が自分の pid を書き換えて偽装する系は非対象)。
  *
  * 注入 seam (TDA-2/TDA-4): 本番呼び出しは **既定値のみ** を使う。`isAlive` / `sleep` /
- * `onLockAcquired` / `acquireDelayMs` は INV テスト (生存 holder の擬装・budget 計測・critical
- * section 内 read の pin・取得直後 deschedule 窓の実プロセス反証) 専用の差し替え点であり本番
- * コードパスでは渡さない (env `ACTRADECK_TEST_LOCK_ACQUIRE_DELAY_MS` も本番デーモンは設定しない)。
+ * `onLockAcquired` / `acquireDelayMs` / `onLockContended` / `onHolderObserved` は INV テスト
+ * (生存 holder の擬装・budget 計測・critical section 内 read の pin・取得直後 deschedule 窓と
+ * stale 奪取 TOCTOU の実プロセス反証) 専用の差し替え点であり本番コードパスでは渡さない
+ * (env `ACTRADECK_TEST_LOCK_ACQUIRE_DELAY_MS` も本番デーモンは設定しない)。
  */
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+
+/**
+ * lock file の観測結果 (3 値)。`raw` は **取り外し後の同一性再検証**に使う逐語内容
+ * (pid へ正規化した値ではなく生バイト列で比べる)。
+ *
+ * **粒度の正直な開示 (TDA-FL-1 / SEC-FL-4 / QA-FL-3)**: 比較は生バイト列であり、lock 内容が
+ * 常に `${pid}\n` である以上これは実質 **pid 粒度**であって lock インスタンス粒度ではない。
+ * 同一 pid が鋳造した別 lock は区別できない。ADR 0012 の out-of-scope は pid **偽装**のみで、良性の
+ * pid **再利用**は信頼境界の内側に残る残余 (`isAlive` が偽を返した直後の窓に限られる)。
+ * (dev, ino) による同一性は v0.9 で検討する。
+ */
+type LockHolder =
+  | { readonly kind: "absent" }
+  | { readonly kind: "corrupt"; readonly raw: string }
+  | { readonly kind: "pid"; readonly pid: number; readonly raw: string };
+
+/** `onHolderObserved` seam へ渡す観測種別 (原文非依存・module 内部型)。 */
+type LockHolderKind = LockHolder["kind"];
+
+/**
+ * lock が free ↔ held を無限に往復した場合の fail-loud 上限。
+ * `absent` / 奪取成功は backoff を挟まず即再試行するため、これが無いと病的な状況で
+ * 無言の busy-loop になりうる。到達したら throw する (無言継続しない)。
+ */
+const MAX_CONTENTION_SPINS = 1000;
+
+/** 奪取 (stale 取り外し) の結果。 */
+type TakeoverResult =
+  /** 判定した lock を原子的に取り外して破棄した。即再試行してよい。 */
+  | "removed"
+  /** 取り外す前に他者が先に取り外していた (rename が ENOENT)。即再試行してよい。 */
+  | "gone"
+  /** 取り外したものが判定した lock と別物だった。復元済み → backoff retry すべき。 */
+  | "restored";
+
+/** 自プロセス内の奪取シーケンス番号 (stale 退避名の衝突回避)。 */
+let staleSeq = 0;
 
 /** lock 取得の調整オプション (既定は settings 配線向けに保守的)。 */
 export interface FileLockOptions {
@@ -71,6 +124,19 @@ export interface FileLockOptions {
    * clamp する (本番で env が漏れても取得遅延を注入できない)。opts 明示値も同じく 60s に clamp。
    */
   readonly acquireDelayMs?: number;
+  /**
+   * テスト用 seam (本番未使用): 取得が EEXIST で競合したとき、**保持者を読む前**に毎回呼ばれる。
+   * INV-FILELOCK-STALE-TAKEOVER-IDENTITY が「保持者を読む直前に前保持者が解放する」窓
+   * (= readLockHolder が `absent` を返す ENOENT 経路) を実プロセスで決定的に作るための注入点。
+   * 本番呼び出しは渡さない。
+   */
+  readonly onLockContended?: () => void;
+  /**
+   * テスト用 seam (本番未使用): 保持者を読んだ**直後・奪取/backoff を決める前**に、観測種別
+   * (`absent` / `corrupt` / `pid`) を伴って毎回呼ばれる。判定と取り外しの間に別プロセスが lock を
+   * 立て直す TOCTOU を実プロセスで決定的に作るための注入点。本番呼び出しは渡さない。
+   */
+  readonly onHolderObserved?: (kind: LockHolderKind) => void;
 }
 
 /** 既定の pid 生存判定 (signal 0)。EPERM=存在 (権限なし) は生存扱い。 */
@@ -95,14 +161,78 @@ function defaultSleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** lock file から保持者 pid を読む (壊れていれば undefined)。 */
-function readLockPid(lockPath: string): number | undefined {
+/**
+ * lock file を 3 値で観測する。
+ * - ENOENT → `absent` (**解放直後**。「壊れた lock」と混同しない)。
+ * - 読めたが pid でない → `corrupt`。
+ * - 読めて pid → `pid`。
+ *
+ * ENOENT 以外の read 失敗 (EISDIR / EACCES 等) は **rethrow** して fail-loud にする。
+ * 内容が読めない lock は同一性を再検証できず、奪取してよいか判断できないため
+ * (旧実装は全 error を `undefined`= stale 扱いにして奪取していた)。
+ */
+function readLockHolder(lockPath: string): LockHolder {
+  let raw: string;
   try {
-    const raw = readFileSync(lockPath, "utf8").trim();
-    const pid = Number.parseInt(raw, 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
-  } catch {
-    return undefined;
+    raw = readFileSync(lockPath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    throw err;
+  }
+  const pid = Number.parseInt(raw.trim(), 10);
+  return Number.isInteger(pid) && pid > 0 ? { kind: "pid", pid, raw } : { kind: "corrupt", raw };
+}
+
+/** 判定時に読んだ lock と、取り外した lock が **同一内容** か (absent は同一とみなさない)。 */
+function sameLockContent(observed: LockHolder, detached: LockHolder): boolean {
+  return observed.kind !== "absent" && detached.kind !== "absent" && observed.raw === detached.raw;
+}
+
+/**
+ * stale と判定した lock を **原子的に取り外し**、取り外したものが本当に判定した lock かを
+ * 内容で再検証してから破棄する。別物 (= 判定と取り外しの間に他プロセスが立て直した生きた lock)
+ * だったら元へ復元し、呼び出し側へ `"restored"` を返して backoff させる。
+ *
+ * @throws 復元できなかったとき (fail-loud・二重保持のまま無言継続しない)。
+ */
+function detachStaleLock(lockPath: string, observed: LockHolder): TakeoverResult {
+  const stalePath = `${lockPath}.stale-${process.pid}-${staleSeq++}`;
+  try {
+    renameSync(lockPath, stalePath);
+  } catch (err) {
+    // 他者が先に取り外した → 何も壊していない。即再試行させる。
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "gone";
+    throw err;
+  }
+  let removed = false;
+  try {
+    if (sameLockContent(observed, readLockHolder(stalePath))) {
+      unlinkSync(stalePath);
+      removed = true;
+      return "removed";
+    }
+    // 判定 → rename の間に内容が変わった = 別プロセスの**生きた** lock を外してしまった。復元する。
+    try {
+      linkSync(stalePath, lockPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+      throw new Error(
+        `withFileLock: detached ${lockPath} as stale but its content changed in between, ` +
+          `and restoring the live holder failed (${code}). ` +
+          `aborting to avoid double-holding the lock.`,
+        { cause: err },
+      );
+    }
+    return "restored";
+  } finally {
+    // 退避名の残骸を残さない (復元済みなら余分な link、復元失敗なら孤児 inode)。
+    if (!removed) {
+      try {
+        unlinkSync(stalePath);
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 }
 
@@ -111,6 +241,7 @@ function readLockPid(lockPath: string): number | undefined {
  * 同期 fn 専用 (settings の read→compute→write は同期 I/O)。fn の戻り値を返す。
  *
  * @throws lock を maxRetries 以内に取得できなかったとき (fail-loud)。
+ * @throws stale と判定して取り外した lock を復元できなかったとき (fail-loud)。
  */
 export function withFileLock<T>(targetPath: string, fn: () => T, opts: FileLockOptions = {}): T {
   const lockPath = opts.lockPath ?? `${targetPath}.actradeck-lock`;
@@ -147,6 +278,7 @@ export function withFileLock<T>(targetPath: string, fn: () => T, opts: FileLockO
     //   残骸 tmp を掃除する (旧: try の外にあり、write 途中失敗で 0-byte tmp が残りえた)。
     writeFileSync(tmpPath, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
     let attempts = 0;
+    let spins = 0;
     // 取得ループ: linkSync 排他生成で取得、失敗 (EEXIST) 時は stale 奪取 or backoff。
     for (;;) {
       try {
@@ -161,25 +293,48 @@ export function withFileLock<T>(targetPath: string, fn: () => T, opts: FileLockO
         break;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-        // 既存 lock。保持者の生存を確認。
-        const holder = readLockPid(lockPath);
-        if (holder === undefined || holder === process.pid || !isAlive(holder)) {
-          // stale (壊れた lock / 自分の残骸 / 保持者が死亡) → 奪取。
-          // race: 別プロセスも同時に奪取しうるが、unlink 後の linkSync が
-          // 再び排他生成を保証する (奪取の勝者は 1 つ)。
-          try {
-            unlinkSync(lockPath);
-          } catch {
-            /* 既に他者が unlink/奪取済 → 次ループの linkSync で再判定 */
-          }
-          continue; // delay を挟まず即再試行 (stale 奪取は速やかに)
+        // テスト seam (本番未使用): 保持者を読む前の窓。
+        opts.onLockContended?.();
+        // 既存 lock を 3 値で観測する。
+        const holder = readLockHolder(lockPath);
+        // テスト seam (本番未使用): 判定 → 取り外しの間の窓。
+        opts.onHolderObserved?.(holder.kind);
+
+        // `absent` は stale ではなく **解放直後**。ここで unlink すると、この窓の内に
+        // 別プロセスが立てた**生きた** lock を消してしまう (旧実装の TOCTOU)。何も消さず即再試行する。
+        // `pid`/`corrupt` が stale なら rename で取り外し、内容一致を再検証してから破棄する。
+        let retryWithoutDelay = false;
+        if (holder.kind === "absent") {
+          retryWithoutDelay = true;
+        } else if (
+          holder.kind === "corrupt" ||
+          holder.pid === process.pid ||
+          !isAlive(holder.pid)
+        ) {
+          // "restored" は「判定した stale ではなく他者の生きた lock だった」= backoff すべき。
+          retryWithoutDelay = detachStaleLock(lockPath, holder) !== "restored";
         }
-        // 生存保持者あり → backoff retry。
+
+        if (retryWithoutDelay) {
+          // delay を挟まず即再試行 (解放直後 / stale 奪取は速やかに)。病的な flapping は fail-loud。
+          spins += 1;
+          if (spins > MAX_CONTENTION_SPINS) {
+            throw new Error(
+              `withFileLock: ${lockPath} kept flapping between free and stale for ` +
+                `${MAX_CONTENTION_SPINS} immediate retries. ` +
+                `aborting to avoid corrupting ${targetPath}.`,
+            );
+          }
+          continue;
+        }
+
+        // 生存保持者あり (または復元した他者の lock) → backoff retry。
         attempts += 1;
         if (attempts > maxRetries) {
           throw new Error(
             `withFileLock: failed to acquire ${lockPath} after ${maxRetries} retries ` +
-              `(held by live pid ${holder}). aborting to avoid corrupting ${targetPath}.`,
+              `(held by live pid ${holder.kind === "pid" ? holder.pid : "unknown"}). ` +
+              `aborting to avoid corrupting ${targetPath}.`,
           );
         }
         sleep(retryDelayMs);
@@ -197,10 +352,16 @@ export function withFileLock<T>(targetPath: string, fn: () => T, opts: FileLockO
   try {
     return fn();
   } finally {
-    // 自分が保持している lock のみ解放 (奪取された後に他者の lock を消さない)。
+    // 自分が保持している lock のみ解放する。**非 racy な形でのみ「他者の lock を消さない」が成立する
+    // (SEC-FL-3・head/base 同率)**: 解放側の read → 判定 → unlink は非原子で、判定と unlink の間に
+    // 他者が lock を差し替える窓が残る (取得側と違い rename→再検証にしていない)。この窓を閉じる
+    // (解放側も rename→再検証へ寄せる) のは v0.9 の follow-up。
+    // absent = 既に消えている → 何もしない。corrupt = 自分が立てた lock が壊された残骸とみなし掃除する。
+    // 内容を読めない lock (EACCES/EISDIR) はここでも rethrow され catch に落ちるため unlink されない
+    // (SEC-FL-1: 自動回復しない・ADR 0012 / CHANGELOG に帰結を開示済み)。
     try {
-      const holder = readLockPid(lockPath);
-      if (holder === undefined || holder === process.pid) {
+      const holder = readLockHolder(lockPath);
+      if (holder.kind === "corrupt" || (holder.kind === "pid" && holder.pid === process.pid)) {
         unlinkSync(lockPath);
       }
     } catch {
