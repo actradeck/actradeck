@@ -2485,7 +2485,7 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   01a0480f-d29a で長 option 列の陽性を入れた結果 **319** になり (旧記述の 20 は失効)、束縛値の歯は
  *   unit test **5 行** — 現実形 1 + whole-command の 512/513 + segment スコープの 512/513・SEC-DB2R3-4)。
  *   全ルールの線形性は INV-LITERAL-RULES-LINEAR (inv-policy-categories) が **regex source
- *   由来の敵対 seed + sample 先頭語 seed + sample 由来 prefix seed** で best-of-N 回帰固定する。**網羅の範囲
+ *   由来の敵対 seed + sample 先頭語 seed + sample 由来 prefix seed + 後尾由来 prefix seed** で best-of-N 回帰固定する。**網羅の範囲
  *   (SEC-DB2R3-1 / QA-DB2R3-1 / task 01a0484c-ecbd)**:
  *   source 由来 seed は先頭 literal が**平坦に綴られた**ルール (現行 17 スキャン regex 中 15 本・#2 fork-bomb は literal run 空、
  *   #12 flush は alternation で断片化・どちらも gap 無し。index は SCAN_TARGETS 基準・QA-MA-4) に届く。alternation / 任意記号を跨ぐ綴り
@@ -2494,11 +2494,41 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   sample 由来「マッチしなくなる最長 prefix」(task 01a0484c-ecbd) は規則の綴りに依存せず、(1)(2) の残余 =
  *   **sample 先頭語 ≠ 規則の先頭 literal** (`sh -c '…'` / `sudo …` の sample・alternation 綴りのサブコマンドが
  *   先頭 literal・先頭が 2 語連鎖 `A\s+B[^…]*C`・SEC-DB2R4-2 / QA-DB2R3-2) も RED へ反転させる (R4 の Z2/Z4/Z5/Z6 を
- *   coordinated 再注入して実測)。残る構造的死角は「末尾 literal が先頭 literal の反復で再構成される規則」
- *   (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし) と、sample が先頭 literal より**前**に gap クラスの
- *   除外文字 (`|` `;` `&` 改行) を含む形で prefix の反復が分断される条件 (SEC-LN-1・base 同値・現行 sample に該当なし・
- *   第 4 軸は task 01a048cd-95ae・v0.9・full)。vacuity guard は汎用 seed `a ` を除いた派生 seed で
+ *   coordinated 再注入して実測)。**第 4 軸 (task 01a048cd-95ae)** は sample の**最後の gap クラス metachar
+ *   (`|` `;` `&` 改行) 以降の後尾**へ同じ prefix 導出を掛ける: 第 3 軸は「反復した seed が gap クラスに触れない」
+ *   前提に依存し、sample が先頭 literal より**前**に除外文字を含む形 (`cd /app && prog … word` /
+ *   `sh -c 'echo go; prog … word'` / `cat f | prog … word`) では反復が分断され 2 乗形が線形域
+ *   (worst 7.7〜13.5・レンジ表記) に留まって SURVIVED していた (SEC-LN-1) — 後尾から取れば反復しても除外文字を
+ *   含まず、7 形 (`&&` / `;` / `|` / 改行前置 / metachar 複数 / 空白なし / `2>&1`) とも RED (61.5〜67.9) へ反転する
+ *   (coordinated 再注入で 3 レーン + 実装者が独立実測)。現行 sample に該当形は無いので**ケース数は 110 のまま**で、配線の歯は
+ *   per-rule の合成 metachar 前置 cmd (15/17 スキャン regex で非 vacuous) が持つ。**第 4 軸の固有寄与は積集合**
+ *   (SEC-LN4-6 / TDA-LN4-4): 先頭 literal が平坦に綴られた規則なら第 1 軸が既に RED (37〜67) なので、第 4 軸が
+ *   唯一の検出手段になるのは「source literal が断片化 ∧ 先頭 literal の**前**に gap metachar ∧ マッチ完了の
+ *   **後**に gap metachar なし」の積集合に限る。
+ *   **SEC-LN-1 は部分閉塞** (SEC-LN4-1 ≡ TDA-LN4-2・base 同値ゆえ非ブロッカー): 閉じたのは「最後の metachar
+ *   以降の後尾が**なお規則を踏む**」sample に限る。**以下は R1 full 監査 + 実装者 probe が列挙できた死角であって
+ *   網羅の主張ではない** (R1 の死角リストは 2 件だったが同じ R1 の SEC-LN4-3 / QA-LN4-1 が ③ を実測済み = リスト側の
+ *   取りこぼし・SEC-LN4R2-4) — ① 末尾 literal が先頭 literal の
+ *   反復で再構成される規則 (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし)、② 先頭 literal の**前と**
+ *   マッチ完了の**後**の両方に gap metachar がある sample (`cd /app && prog … word | tee log` /
+ *   `… word; echo done` / 改行後続) — 後尾が規則を踏まず第 4 軸が null になり、第 3 軸も反復が分断済みゆえ
+ *   **4 軸すべてを回避**する (2 乗形が 7.7〜9.1 に留まって SURVIVED・現行 17 に該当 sample なし・是正 = 第 5 軸
+ *   「各 metachar 以降の全 suffix」は task 01a05374-36d2-7419-ac3f-4a22c160cbcc・v0.9・full)、③ 規則の gap クラスが
+ *   test 側 `TAIL_METACHARS` より**広い**綴り (`[^|;&\r\n]` 等) でその差分文字を前置した sample — 後尾の切り出しが
+ *   働かず第 4 軸が第 3 軸へ退化する (SEC R1 が CR 前置 / QA R1 が `>` 前置で SURVIVED を実測・実装者 probe 3 run で
+ *   8.4〜16.0 を再現・正のクラス gap `[\w\s-]*` + 絶対パス sample でも 4 軸 SURVIVED 7.5〜11.0 (SEC-LN4R2-2)・下記
+ *   SEC-LN4-3 の手写しミラー問題が seed 軸に現れたもの。`TAIL_METACHARS` を**広げる**方向も last-only 切り出しでは
+ *   `… > out.log` 形の検出を失う (SEC-LN4R2-1) ため、拡張は第 5 軸と同時にのみ行う)。
+ *   なお ratio 判定は**単発比**で、2 乗形の 1 seed が vitest harness 内 12 回中 1 回だけ緑になった実測がある
+ *   (bare node 60 回では 0/60)。逆に全 suite 並走 + 2×nproc 外部負荷 (load 35〜48) では線形ルールが 24 超の false RED
+ *   になる実測もある (QA-LN4R2-2・base 26.88・pre-existing)。両側の是正 (max 単独でなく両側判定 + 分離幅再測) は
+ *   task 01a05374-36d2-7419-ac3f-4f88be2481fc・v0.9・targeted。
+ *   test 側 `TAIL_METACHARS` は src の gap クラス `[^|;&\n]` の**手写し 2 コピー目**で結合 pin が無い
+ *   (SEC-LN4-3・将来 `[^|;&\r\n]` 等の綴りが入ると第 4 軸が取り残される・構造ゲートは task 01a04989-4a0c・
+ *   v0.9・full)。
+ *   vacuity guard は汎用 seed `a ` を除いた派生 seed で
  *   計数し (SEC-DB2R4-3 の恒真を解消)、metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の除去 /
+ *   軸 4 の区切り集合の縮小 /
  *   RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は自己弱化 pin が **pin 済みの綴り (定数宣言 / 使用側 / 宣言個数 census) を触る単独編集の
  *   範囲で** RED にする (SEC-DB2R3-2・計測 helper 本体・`for (const seed of live)` ループ header・pin 自身は非被覆・
  *   coordinated 編集は通る・TDA-LN2-3 /

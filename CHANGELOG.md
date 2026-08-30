@@ -30,6 +30,40 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   excluded from the sum rather than counted as zero. The counters carry no request id, session id,
   or path — only how many, never which.
 
+### Changed
+
+- **The metatest that keeps the approval classifier's literal rules linear now derives a fourth
+  adversarial seed.** Those rules are scanned on every command the approval gate classifies, and a
+  `program … keyword` rule with an unbounded gap between the two words is quadratic in the input
+  length; the metatest catches that by measuring how each rule's runtime scales on seeds it derives
+  from the rule's own source and its sample command. The third seed — the longest prefix of the
+  sample that no longer matches the rule — quietly lost its teeth whenever the sample carried a
+  shell separator (`|`, `;`, `&`, or a newline) *before* the rule's leading word: repeating such a
+  prefix re-inserts the separator, the rule's gap class refuses to cross it, and a genuinely
+  quadratic rule measured as linear. The metatest now additionally takes the sample's tail after
+  its last separator and derives the same prefix from that, which repeats cleanly. One quadratic
+  rule was injected with a sample in each separator form — `&&`, `;`, `|`, a leading newline, two
+  separators, no surrounding space, and `2>&1` — and every form survived the first three seeds and
+  fails on the fourth, at scaling ratios of 61 to 68 against a threshold of 24. No rule that ships
+  today has such a sample, so the measured case count is unchanged and no classifier behaviour
+  changed: this is a hole in the test, and it is closed for samples whose tail after the last
+  separator still matches the rule — a partial closure, not a complete one.
+  What the fourth seed uniquely buys is narrower than it looks: when a rule spells its leading word
+  flatly, the first seed already fails such a rule, so the fourth seed is the only detector at the
+  intersection of a leading literal fragmented in the rule's source, a separator before it in the
+  sample, and no separator after the match completes. Three structural blind spots are disclosed in
+  the test and in the classifier's documentation — and that list is what review and re-measurement
+  have found so far, not a claim that nothing else remains. A rule whose trailing literal is
+  reconstructed by repeating its own leading literal. A sample carrying a separator both before the
+  leading word and after the match completes: the tail then no longer matches the rule, the fourth
+  seed is null, and, because the third seed is already broken up, such a sample evades all four
+  seeds. And a rule whose gap class excludes more characters than the test's own copy of that
+  class — a quadratic rule spelled with a carriage return in its gap class, given a sample with a
+  carriage return before its leading word, still measures as linear. No rule that ships today has a
+  sample or a spelling of any of the three shapes. Widening the fourth seed to every suffix, and
+  coupling the test's copy of the gap class to the classifier's, are both tracked as follow-up work
+  for v0.9.
+
 ### Fixed
 
 - **Taking over a stale lock no longer deletes a live one.** The advisory file lock that
