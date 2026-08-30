@@ -2485,7 +2485,7 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   01a0480f-d29a で長 option 列の陽性を入れた結果 **319** になり (旧記述の 20 は失効)、束縛値の歯は
  *   unit test **5 行** — 現実形 1 + whole-command の 512/513 + segment スコープの 512/513・SEC-DB2R3-4)。
  *   全ルールの線形性は INV-LITERAL-RULES-LINEAR (inv-policy-categories) が **regex source
- *   由来の敵対 seed + sample 先頭語 seed + sample 由来 prefix seed** で best-of-N 回帰固定する。**網羅の範囲
+ *   由来の敵対 seed + sample 先頭語 seed + sample 由来 prefix seed + 後尾由来 prefix seed** で best-of-N 回帰固定する。**網羅の範囲
  *   (SEC-DB2R3-1 / QA-DB2R3-1 / task 01a0484c-ecbd)**:
  *   source 由来 seed は先頭 literal が**平坦に綴られた**ルール (現行 17 スキャン regex 中 15 本・#2 fork-bomb は literal run 空、
  *   #12 flush は alternation で断片化・どちらも gap 無し。index は SCAN_TARGETS 基準・QA-MA-4) に届く。alternation / 任意記号を跨ぐ綴り
@@ -2494,11 +2494,17 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   sample 由来「マッチしなくなる最長 prefix」(task 01a0484c-ecbd) は規則の綴りに依存せず、(1)(2) の残余 =
  *   **sample 先頭語 ≠ 規則の先頭 literal** (`sh -c '…'` / `sudo …` の sample・alternation 綴りのサブコマンドが
  *   先頭 literal・先頭が 2 語連鎖 `A\s+B[^…]*C`・SEC-DB2R4-2 / QA-DB2R3-2) も RED へ反転させる (R4 の Z2/Z4/Z5/Z6 を
- *   coordinated 再注入して実測)。残る構造的死角は「末尾 literal が先頭 literal の反復で再構成される規則」
- *   (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし) と、sample が先頭 literal より**前**に gap クラスの
- *   除外文字 (`|` `;` `&` 改行) を含む形で prefix の反復が分断される条件 (SEC-LN-1・base 同値・現行 sample に該当なし・
- *   第 4 軸は task 01a048cd-95ae・v0.9・full)。vacuity guard は汎用 seed `a ` を除いた派生 seed で
+ *   coordinated 再注入して実測)。**第 4 軸 (task 01a048cd-95ae)** は sample の**最後の gap クラス metachar
+ *   (`|` `;` `&` 改行) 以降の後尾**へ同じ prefix 導出を掛ける: 第 3 軸は「反復した seed が gap クラスに触れない」
+ *   前提に依存し、sample が先頭 literal より**前**に除外文字を含む形 (`cd /app && prog … word` /
+ *   `sh -c 'echo go; prog … word'` / `cat f | prog … word`) では反復が分断され 2 乗形が線形域に留まって
+ *   SURVIVED していた (SEC-LN-1) — 後尾から取れば反復しても除外文字を含まず、3 形とも RED へ反転する
+ *   (coordinated 再注入で実測)。現行 sample に該当形は無いので**ケース数は 110 のまま**で、配線の歯は
+ *   per-rule の合成 metachar 前置 cmd (15/17 スキャン regex で非 vacuous) が持つ。残る構造的死角は「末尾 literal が
+ *   先頭 literal の反復で再構成される規則」(`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし)。
+ *   vacuity guard は汎用 seed `a ` を除いた派生 seed で
  *   計数し (SEC-DB2R4-3 の恒真を解消)、metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の除去 /
+ *   軸 4 の区切り集合の縮小 /
  *   RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は自己弱化 pin が **pin 済みの綴り (定数宣言 / 使用側 / 宣言個数 census) を触る単独編集の
  *   範囲で** RED にする (SEC-DB2R3-2・計測 helper 本体・`for (const seed of live)` ループ header・pin 自身は非被覆・
  *   coordinated 編集は通る・TDA-LN2-3 /

@@ -30,6 +30,26 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   excluded from the sum rather than counted as zero. The counters carry no request id, session id,
   or path — only how many, never which.
 
+### Changed
+
+- **The metatest that keeps the approval classifier's literal rules linear now derives a fourth
+  adversarial seed.** Those rules are scanned on every command the approval gate classifies, and a
+  `program … keyword` rule with an unbounded gap between the two words is quadratic in the input
+  length; the metatest catches that by measuring how each rule's runtime scales on seeds it derives
+  from the rule's own source and its sample command. The third seed — the longest prefix of the
+  sample that no longer matches the rule — quietly lost its teeth whenever the sample carried a
+  shell separator (`|`, `;`, `&`, or a newline) *before* the rule's leading word: repeating such a
+  prefix re-inserts the separator, the rule's gap class refuses to cross it, and a genuinely
+  quadratic rule measured as linear. The metatest now additionally takes the sample's tail after
+  its last separator and derives the same prefix from that, which repeats cleanly. Three quadratic
+  rules — one for each separator form — were injected to confirm it: every one survived the first
+  three seeds and fails on the fourth, at scaling ratios of 62 to 64 against a threshold of 24.
+  No rule that ships today has such a sample, so the measured case count is unchanged and no
+  classifier behaviour changed: this is a hole in the test, closed before a rule could fall into
+  it. The remaining structural blind spot — a rule whose trailing literal is reconstructed by
+  repeating its own leading literal — stays disclosed in the test and in the classifier's
+  documentation.
+
 ### Fixed
 
 - **Taking over a stale lock no longer deletes a live one.** The advisory file lock that
