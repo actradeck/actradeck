@@ -1370,7 +1370,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /expect\(suffixWiredCases\)\.toBe\(17\);/,
         ];
         // 追加のみ・削除禁止 (finding-registry): pin pattern の**本数**自体を pin し、1 本を静かに
-        //   落とす編集を RED にする (header の「定数宣言 14 本・使用側 38 pattern」の機械的な出所)。
+        //   落とす編集を RED にする (header の「定数宣言 14 本・使用側 42 pattern」の機械的な出所)。
         expect(declarations.length, "宣言 pin の本数").toBe(14);
         expect(usages.length, "使用側 pin の本数").toBe(42);
         for (const re of [...declarations, ...usages]) {
