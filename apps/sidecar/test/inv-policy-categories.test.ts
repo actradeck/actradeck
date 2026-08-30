@@ -471,7 +471,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   // INV-LITERAL-RULES-LINEAR (SEC-DB2-1): 全 LITERAL_RULES が入力長に対して線形にスケールする。
   //   `\b<program>\b[^…]*\b<word>\b` 形は開始位置 O(n) × 走査 O(n) で O(n²) (mysqladmin ルールの初版・
   //   exponent 2.00 実測)。量化子の本数ではなく**スケーリングを測る**。テーブル駆動で追加ルールを自動網羅する。
-  //   seed は 4 軸 (追加のみ・削除禁止):
+  //   seed は 5 軸 (追加のみ・削除禁止):
   //     (1) regex source 由来の literal run の完全一致 + near-miss (SEC-DB2R2-1) — 先頭 literal が**平坦に綴られた**
   //         ルールに届く (現行 **15/17**・#2 fork-bomb は literal run 空・**#12** flush は alternation で断片化。
   //         分母も index も **SCAN_TARGETS 基準** = LITERAL_RULES の `re` + `segmentRe` の並び・QA-MA-4)。
@@ -498,37 +498,52 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         `"foosql "` が既に RED (37〜67) なので、軸 (4) が**唯一の**検出手段になるのは「source literal が
   //         alternation 等で断片化 ∧ 先頭 literal の**前**に gap metachar ∧ マッチ完了の**後**に gap metachar
   //         なし」の積集合に限る。
-  //     **SEC-LN-1 は部分閉塞** (SEC-LN4-1 ≡ TDA-LN4-2・M・base 同値ゆえ非ブロッカー): 軸 (4) が閉じたのは
-  //     「最後の metachar 以降の後尾が**なお規則を踏む**」sample に限る。**以下は R1 full 監査 (SEC/QA/TDA) +
-  //     実装者の再現で列挙できた死角であって、網羅の主張ではない** (「残るのは N つだけ」と書かない — R1 の死角
-  //     **リスト**は 2 件だったが、同じ R1 の別所見 SEC-LN4-3 / QA-LN4-1 が (3) を実測済みで、リスト側の取りこぼし
-  //     だった。SEC-LN4R2-4):
+  //     (5) sample の**各** gap クラス metachar 以降の**全 suffix**へ軸 (3) と同じ導出を掛ける
+  //         (task 01a05374-36d2-7419-ac3f-4a22c160cbcc)。軸 (4) の **superset** (最後の metachar 以降は全 suffix の
+  //         1 本) だが軸 (4) は削除しない。軸 (4) が閉じたのは「最後の metachar 以降の後尾が**なお規則を踏む**」
+  //         sample に限られ、先頭 literal の**前と**マッチ完了の**後**の両方に metachar がある形では後尾が
+  //         規則を踏まず null になって 4 軸すべてを回避していた (旧死角 ②)。全 suffix なら「先頭 literal の
+  //         直前の metachar で切った suffix」が必ず候補に入る。**実測 (本 PR・coordinated 再注入・vitest 内)**:
+  //         E `… && prog … word | tee log` / F `… && prog … word; echo done` / G `cat f | prog … word | grep y` /
+  //         L `sh -c 'echo go; prog … word; echo done'` / M 改行前置 + 改行後続 の 5 形が **4 軸では SURVIVED
+  //         (max 7.9〜8.5)・5 軸では RED (median 62.7〜64.1)**。現行 sample に該当形は無く**ケース数は 110 のまま**
+  //         (軸 (4) と同じく dedup)、配線の歯は per-rule の合成 cmd `cd /app && <sample> | tee log`
+  //         (**17/17** で非 vacuous・`suffixWiredCases`・同じ cmd で軸 (4) は null) が持つ。
+  //   **上記で閉じた形は「実測した形」に限る。以下は本 PR の反証探索 (Z1〜Z10・決定論的 seed 集合判定 + 実測) で
+  //   列挙できた残余であって、網羅の主張ではない** (「残るのは N つだけ」と書かない):
   //     (1) 末尾 literal が先頭 literal の反復で再構成される規則 (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2): prefix の
   //         反復が規則を再びマッチさせ vacuous になる。現行 17 スキャン regex に該当形なし (sweep 019fd74b E)。
-  //     (2) 先頭 literal の**前と**マッチ完了の**後**の両方に gap metachar がある sample
-  //         (`cd /app && prog … word | tee log` / `… word; echo done` / 改行後続): 後尾が規則を踏まず軸 (4) が
-  //         null になり、軸 (3) も反復が分断済みなので **4 軸すべてを回避**する (2 乗形が 7.7〜9.1 に留まって
-  //         SURVIVED・base も同値)。是正 = 軸 (5)「各 metachar 以降の**全** suffix」(現行 last-only の superset・
-  //         E/F/G を 61〜63 で RED にしケース数 110 不変と実測済) は task 01a05374-36d2-7419-ac3f-4a22c160cbcc
-  //         (v0.9・full 監査)。現行 17 スキャン regex に該当 sample なし。
-  //     (3) 規則の gap クラスが `TAIL_METACHARS` より**広い**綴り (`[^|;&\r\n]` / `[^|;&\n<>]` 等) で、その
-  //         差分文字を前置した sample: 後尾の切り出しが働かず軸 (4) が軸 (3) と同一 seed へ退化する。SEC R1
-  //         (`[^|;&\r\n]` + CR 前置) / QA R1 (`[^|;&\n<>]` + `>` 前置) が SURVIVED を実測し、実装者 probe (3 run)
-  //         が 8.4〜16.0 で再現。gap が**正のクラス** (`[\w\s-]*` 等) でも同じで、通常の絶対パス sample の `/` を gap
-  //         が除外するため 4 軸すべて 7.5〜11.0 で SURVIVED (対照 clean sample は 124.9・SEC-LN4R2-2・shipping に
-  //         `[a-z]` の正クラスが既存)。
-  //         これは (1)(2) と違い「導出の穴」でなく下の `TAIL_METACHARS` docstring の**手写し 2 コピー目**問題
-  //         (SEC-LN4-3・task 01a04989-4a0c・v0.9・full) が seed 軸に現れたもの。
-  //     **ratio 判定は単発比** (SEC-LN4-4・M・base 同値): 2 乗形の 1 seed に対し vitest harness 内で 12 回中 1 回
-  //     だけ閾値未満で緑になった実測がある (bare node 60 回では 0/60)。真に 2 乗のルールが CI で 1 回だけ
-  //     素通りしうる = N 回の max で判定する是正は task 01a05374-36d2-7419-ac3f-4f88be2481fc (v0.9・targeted)。
+  //         軸 (5) でも閉じない (Z10: clean な deep seed が出ない)。
+  //     (2) **結合検査の universe が有限**: `CHAR_UNIVERSE` (ASCII 95 + 制御 5 + 非 ASCII 分離子 5) の**外**の
+  //         文字だけを除外する gap クラスは「除外集合 ⊆ TAIL_METACHARS」を満たして coupling を素通りし、
+  //         その文字を前置した sample は軸 (4)(5) の切り出しも受けない (Z8 NBSP を実測: universe に入れると RED /
+  //         入れないと素通り)。よって universe は**追加のみ**で、非 ASCII 分離子は見つけ次第足す。
+  //     旧死角 ③ (規則の gap クラスが `TAIL_METACHARS` より広い綴り `[^|;&\r\n]` / `[^|;&\n<>]`・正のクラス
+  //     `[\w\s-]*`) は **seed 軸としては依然閉じていない**が、下の coupling metatest (task 01a04989-4a0c) が
+  //     「全スキャン regex の量化クラスが除外する文字 ⊆ TAIL_METACHARS」を assert して**そのような規則の着地自体を
+  //     RED にする** (本 PR 実測: CR 綴り / `<>` 綴り / 正クラス `[\w\s-]` の 3 形とも当該 assertion で RED・
+  //     現行 17 は緑)。正のクラスの例外は `(re.source, class.source)` の対で keyed した明示 exemption 1 件
+  //     (`git clean -[a-z]*f`) のみ。手書き分離子クラス (`[^|;&\n]` 様) を `segmentRe` 無しで足す編集は構造ゲート
+  //     (TDA-MA-1) が RED にする。
+  //     反証探索で**覆われていた**形 (いずれも軸 (5) が clean seed を出す): Z1 `$(…)` 前置 + 後置 / Z2 CRLF /
+  //     Z3 後置のみ / Z4 後置 metachar 複数 / Z6 引用内 metachar 前置 / Z7 多重出現。Z5 (gap span の**内側**に
+  //     metachar がある sample) は規則が sample にマッチしないため、既存の 1:1 pin
+  //     (`expect(rule.re.test(s.cmd)).toBe(true)`) が corpus への着地を構造的に禁じる。
+  //     **ratio 判定は両側** (SEC-LN4-4 の是正・task 01a05374-36d2-7419-ac3f-4f88be2481fc): 単発比は
+  //     false green (2 乗形が vitest 内 12 回中 1 回だけ 24 未満) と false RED (全 suite 並走 + 2×nproc 外部負荷で
+  //     線形ルールが 26.88) の**両側**に振れた。`RATIO_REPEAT`=3 回計測し「**中央値** < `RATIO_MAX` (24) **かつ**
+  //     **最大** < `RATIO_MAX_HI` (40)」で判定する。低側の外れ値 1 本では緑にならず、高側の外れ値 1 本では
+  //     赤にならない。実測は下の `RATIO_MAX` 近傍のコメント。
   //   vacuity guard は汎用 seed `a ` を**除いた派生 seed** の非 vacuous 数で判定する (SEC-DB2R4-3: `a ` は全ルールで
   //   非 vacuous なので含めると恒真)。保守手順: guard が RED になったら seed を削るのでなく **軸を足す** (追加のみ)。
-  //   seed 生成 / RATIO_MAX / timeout の変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。metatest 自身の縮退 (軸の
-  //   差し戻し / near-miss 除去 / 数字除外の除去 / 軸 4 の区切り集合の縮小 / RATIO_MAX 緩和 / 入力幾何の縮小 /
+  //   seed 生成 / RATIO_MAX / RATIO_MAX_HI / RATIO_REPEAT / CHAR_UNIVERSE / 結合検査 / 構造ゲート / timeout の
+  //   変更は走査範囲変更 = full 監査既定 (SEC-DB2R3-3)。metatest 自身の縮退 (軸の
+  //   差し戻し / near-miss 除去 / 数字除外の除去 / 軸 4/5 の区切り集合の縮小 / RATIO_MAX 緩和 / 両側判定の片側化 /
+  //   universe の縮小 / exemption の追加 / 入力幾何の縮小 /
   //   guard 無効化 / timeout 短縮) は
-  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 9 本・使用側 21 pattern / 20 サイト (fill 引数・
-  //   K ループ・ratio 式・配線 pin・軸 3/4 の `out.add` 本体・軸 4 の合成 cmd 構築行と 2 本の配線 assertion・件数 pin 等)・
+  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 14 本・使用側 42 pattern (fill 引数・
+  //   K ループ・ratio 反復ループと中央値 / 最大の算出と 2 本の assertion・配線 pin・軸 3/4/5 の `out.add` / `out.push` 本体・
+  //   軸 4 の合成前置 cmd と 軸 5 の合成前置 + 後置 cmd の構築行と各配線 assertion・結合検査 / 構造ゲートの走査行と件数 pin 等)・
   //   宣言個数 census — を触る単独編集」に限る** (SEC-DB2R3-2 ≡
   //   QA-DB2R3-5・SEC-LN2-1 / TDA-LN2-2)。**非被覆**: 計測 helper 本体 (`minOf` / `bestOfMs` / `fill` / `isLive`)・
   //   `for (const seed of live)` ループ header・pin describe 自身 (toBe 値・tripwire pattern) — これらの単独編集や
@@ -571,16 +586,45 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     //   された記述で、**全 suite 並走 + 2×nproc 外部負荷 (load 35〜48) では 24 超の false RED を実測** (QA-LN4R2-2・
     //   base 1/8 run 26.88 / head 2/8 run 24.62〜25.68・seed は base 同一集合内の軸 1〜3・base 同値の pre-existing M)。
     //   2 乗形の分離も同 regime では load 42〜45 で 25.9 (1.08×) まで下振れた観測がある (SEC-LN4R2-5)。よって閾値 24
-    //   は「ファイル単独 regime での分離」に bound された値。両側 (false RED / false green) の是正は task
-    //   01a05374-36d2-7419-ac3f-4f88be2481fc (v0.9・targeted・max 単独でなく両側判定 + 分離幅再測)。本 PR では
-    //   据え置き。値を動かすなら full 監査 (seed 生成 / RATIO_MAX / 入力幾何 = 走査範囲・SEC-DB2R3-3)。
+    //   は「ファイル単独 regime での分離」に bound された値だった。
+    //   **本 PR の両側判定と再測 (task 01a05374-36d2-7419-ac3f-4f88be2481fc)**:
+    //   注入した 2 乗ルール (死角 ② E 形・軸 (5) seed) を **31 trial / 93 ratio 点**測った —
+    //   無負荷 11 trial (33 点) は 59.6〜66.1、**2×nproc 飽和 20 trial (60 点) は 13.3〜149.2** (load 24〜46) で、
+    //   飽和下では**下にも上にも**大きく振れる。40 未満に落ちた点は 5/93 (13.3 / 14.6 / 37.1 / 38.0 / 39.6) で、
+    //   うち 24 未満は 2 点。**単発比なら false green 2/31** (13.321 と 14.627 がその trial の 1 本目)、
+    //   **両側判定 (median < 24 かつ max < 40) では 0/31** — 低側の外れ値は同 trial の他 2 点 (48〜125) が
+    //   中央値を押し上げて RED のまま。false RED 側は **全 suite 並走 + 2×nproc 外部負荷 8 run (load 14〜54) で
+    //   LINEAR の ratio 失敗 0**・無負荷 全 suite 10 run 0・ファイル単独飽和 5 run (load 10〜37) 0。
+    //   ただし同じ並走 + 飽和 regime では **LINEAR 以外の性能系テスト**が 5〜7 件落ちる
+    //   (inv-redaction perf / redaction truncation straddle / detail-diff size / approval request-id stable /
+    //   ws backoff・いずれも本 PR で触っていないファイル)。残る偽判定率は「両側判定で 0/31 (2 乗) ・0/23 run
+    //   (線形)」であって**ゼロの証明ではない** — 特に飽和下の分散は大きく、規模の大きい標本では再び出うる。
+    //   値を動かすなら full 監査 (seed 生成 / RATIO_MAX / RATIO_MAX_HI / RATIO_REPEAT / 入力幾何 = 走査範囲・
+    //   SEC-DB2R3-3)。
     //   2 乗なら ≈ 40〜70 (旧 `*` 形の実測 39.7〜69.5・seed により変動)。閾値 24 は線形 p95 8.6 と 2 乗下限 ≈ 40 の
     //   間 (幾何中点 √(8.6 × 68) ≈ 24)。best-of-9 の min は 16× CPU 飽和下でも 6/6 緑 (SEC R2 実測)・15 連続緑
     //   flake 0 (TDA R3)。
     const RATIO_MAX = 24;
+    /**
+     * **両側判定の上側** (task 01a05374-36d2-7419-ac3f-4f88be2481fc)。単発比 1 本での判定は
+     * false green (2 乗形が vitest harness 内 12 回中 1 回だけ 24 未満・bare node 60 回では 0/60) と
+     * false RED (全 suite 並走 + 2×nproc 外部負荷 load 35〜48 で線形ルールが 26.88) の**両側**に振れた。
+     * `RATIO_REPEAT` 回計測し「**中央値** < RATIO_MAX (低側の外れ値 1 本では緑にならない) **かつ**
+     * **最大** < RATIO_MAX_HI (高側の外れ値 1 本で赤にならない)」で判定する。
+     * 40 は 2 乗形の下限寄り (実測 39.7〜69.5・飽和下の下振れ 25.9 は中央値側が捕まえる)。
+     */
+    const RATIO_MAX_HI = 40;
+    /** ratio の反復計測回数 (中央値を採るため**奇数**)。 */
+    const RATIO_REPEAT = 3;
+    const medianOf = (xs: number[]): number =>
+      [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]!;
+    const maxOf = (xs: number[]): number => xs.reduce((a, b) => (b > a ? b : a), -Infinity);
     // 二次形は ratio 判定の前に既定 5s timeout で落ちて診断が出ないことがあるため it の timeout を明示する
-    //   (QA-DB2R2-3)。
-    const LINEAR_IT_TIMEOUT_MS = 30_000;
+    //   (QA-DB2R2-3)。`RATIO_REPEAT` 倍の計測になったので 30s では 2 乗形が ratio 診断の前に timeout し、
+    //   「RED だが理由が出ない」になる (実測: 注入した 2 乗ルール 1 ケースが **37.0〜38.9s**・無負荷)。
+    //   2×nproc 飽和で ≈ 3× を見込んで 120s に置く。線形ルールの 1 ケースは 1〜60ms なので余裕は変わらない。
+    //   (timeout は同期テスト本体を中断しないので、超過しても RED として終わる — 短すぎて困るのは診断だけ。)
+    const LINEAR_IT_TIMEOUT_MS = 120_000;
     /**
      * 実測ケース数 (2026-08-30・16 ルール = 17 スキャン regex・汎用 + 派生 4 軸)。ルール / スコープ追加時に
      * 実測で更新。軸 (4) は現行 sample に metachar 前置形が無いため **件数を増やさない** (軸 3 と同一 seed か
@@ -632,6 +676,68 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * 書かない」規律 (.claude/rules/security.md mysqladmin 節) の構造ゲートに test 側も含める。
      */
     const TAIL_METACHARS = /[|;&\n]/;
+    /**
+     * クラスの受理 / 除外集合を**実際に走らせて**求めるための文字 universe
+     * (ASCII 印字可能 95 + ASCII 制御 5 + 非 ASCII 分離子 5)。手写しの文字集合を並べるのでなく
+     * `new RegExp("^<class>$")` で判定するので、綴り (`\r` / `\n` / `\s` / range / 否定) の差が
+     * 挙動として出る。
+     *
+     * **有限であることが残余**: universe の外の文字だけを除外する gap クラス
+     * (`[^|;&\n<NBSP>]` 等) は「除外集合 ⊆ TAIL_METACHARS」を満たしてしまい結合検査を素通りする
+     * (実装者 probe で NBSP 版を実測・universe に入れれば RED になることも同 probe で確認)。
+     * よって universe は **追加のみ・削除禁止**で、非 ASCII 分離子は見つけ次第足す
+     * (軸と同じ規律・finding-registry)。
+     */
+    const CHAR_UNIVERSE: readonly string[] = [
+      ...Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i)),
+      "\t",
+      "\n",
+      "\r",
+      "\v",
+      "\f",
+      "\u0085", // NEL (次行)
+      "\u00a0", // NBSP
+      "\u2028", // LINE SEPARATOR
+      "\u2029", // PARAGRAPH SEPARATOR
+      "\u3000", // IDEOGRAPHIC SPACE
+    ];
+    /** regex source から**量化された文字クラス** (`[...]` + `*` `+` `?` `{n,m}`) を抜き出す。 */
+    const QUANTIFIED_CLASS_RE = /\[\^?(?:\\.|[^\\\]])*\](?:[*+?]|\{\d+(?:,\d*)?\})/g;
+    const quantifiedClasses = (source: string): string[] =>
+      (source.match(QUANTIFIED_CLASS_RE) ?? []).map((m) =>
+        m.replace(/(?:[*+?]|\{\d+(?:,\d*)?\})$/, ""),
+      );
+    /**
+     * 量化クラスが**除外**する文字 (否定クラスなら列挙文字・正のクラスなら「クラス外」)。
+     * 除外文字は「反復した seed をそこで分断する文字」= 軸 (4)(5) が切るべき点なので、
+     * この集合が `TAIL_METACHARS` に収まっているかが src ↔ test の結合条件になる
+     * (SEC-LN4-3 ≡ TDA-LN4-3 ≡ QA-LN4-1 の手写し 2 コピー目問題)。
+     */
+    const excludedCharsOf = (re: RegExp): string[] => {
+      const out = new Set<string>();
+      for (const cls of quantifiedClasses(re.source)) {
+        const probe = new RegExp(`^${cls}$`);
+        for (const c of CHAR_UNIVERSE) if (!probe.test(c)) out.add(c);
+      }
+      return [...out];
+    };
+    /**
+     * 正のクラスで「クラス外」が `TAIL_METACHARS` に収まらないが、**2 つの literal を跨ぐ gap ではない**
+     * ため軸の前提を壊さない量化クラスの明示 exemption。**(スキャン regex source, クラス source) の対で
+     * keyed** — 新しい規則 / 新しい綴りは自動では免除されない (規則を 1 本足して正クラスを使うと RED)。
+     */
+    const NON_GAP_CLASS_EXEMPTIONS: ReadonlyArray<{
+      reSource: string;
+      classSource: string;
+      reason: string;
+    }> = [
+      {
+        reSource: "\\bgit\\s+clean\\s+-[a-z]*f",
+        classSource: "[a-z]",
+        reason:
+          "フラグ token 内 (`-[a-z]*f`) であって 2 literal 間の gap ではない。反復 seed は `git clean - ` で、クラス外文字で分断されても走査は各開始位置で O(1) に失敗する",
+      },
+    ];
     /** cmd の**最後の** gap クラス metachar 以降の後尾 (metachar が無ければ cmd 全体)。 */
     const tailAfterLastMetachar = (cmd: string): string => {
       let cut = -1;
@@ -667,7 +773,41 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      */
     const tailPrefixSeed = (re: RegExp, cmd: string): string | null =>
       prefixSeed(re, tailAfterLastMetachar(cmd));
-    /** 派生 seed (軸 1〜4)。汎用 seed は含まない。 */
+    /** cmd の**各** gap クラス metachar 以降の suffix (metachar が無ければ空)。 */
+    const suffixesAfterMetachars = (cmd: string): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < cmd.length; i++) {
+        if (TAIL_METACHARS.test(cmd[i]!)) out.push(cmd.slice(i + 1));
+      }
+      return out;
+    };
+    /**
+     * 軸 (5): **各** metachar 以降の全 suffix へ軸 (3) と同じ導出を掛ける
+     * (task 01a05374-36d2-7419-ac3f-4a22c160cbcc)。軸 (4) は「**最後の** metachar 以降」だけを見るため、
+     * 先頭 literal の**前と**マッチ完了の**後**の両方に gap metachar がある sample
+     * (`cd /app && prog … word | tee log` / `… word; echo done` / 改行後続) では後尾が規則を踏まず
+     * null になり、軸 (3) も反復が分断済みなので **4 軸すべてを回避**していた (死角 ②・
+     * SEC-LN4-1 ≡ TDA-LN4-2)。全 suffix を取れば「先頭 literal の直前の metachar」で切った suffix が
+     * 必ず候補に入るので、その形でも除外文字を含まない seed が出る (E/F/G/L/M 5 形とも 62.3〜64.6 で
+     * RED へ反転する実測・4 軸では 7.9〜8.5 で SURVIVED)。
+     *
+     * 軸 (4) の **superset** (最後の metachar 以降は全 suffix の 1 本) だが、軸 (4) は削除しない
+     * (軸は追加のみ・削除禁止・finding-registry)。metachar が無い sample では空配列を返し、
+     * 軸 (3) が同じ seed を既に出している (件数は増えない)。
+     *
+     * `TAIL_METACHARS` を**広げる**方向が last-only では検出を失った件 (SEC-LN4R2-1:
+     * `… word > out.log` に `<>` を足すと後尾が ` out.log` で null 化) も、全 suffix なら cut 点が
+     * 増えるだけなので単調 (実測で確認)。
+     */
+    const suffixPrefixSeeds = (re: RegExp, cmd: string): string[] => {
+      const out: string[] = [];
+      for (const suffix of suffixesAfterMetachars(cmd)) {
+        const seed = prefixSeed(re, suffix);
+        if (seed !== null) out.push(seed);
+      }
+      return out;
+    };
+    /** 派生 seed (軸 1〜5)。汎用 seed は含まない。 */
     const derivedSeedsFor = (re: RegExp, cmd: string): string[] => {
       // QA-DB2R3-1: sample 先頭語の軸は **追加**であって置換ではない (軸は追加のみ・削除禁止)。source 由来の
       //   literal run は `(?:mysql|mariadb)admin` / `mysql_?admin` のような綴りで断片化して規則先頭に届かず、
@@ -684,6 +824,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       //   軸 (3) の反復が分断されるため、後尾由来 prefix を併せて載せる。
       const tailPrefix = tailPrefixSeed(re, cmd);
       if (tailPrefix !== null) out.add(tailPrefix);
+      // 死角 ② (task 01a05374-36d2-7419-ac3f-4a22c160cbcc): 軸 (5) も **追加**であって置換ではない。
+      //   軸 (4) が見る「最後の metachar 以降」は全 suffix の 1 本なので集合としては superset だが、
+      //   軸 (4) の配線 (`out.add(tailPrefix)`) は逐語で残す (軸は追加のみ・削除禁止)。
+      for (const suffixPrefix of suffixPrefixSeeds(re, cmd)) out.add(suffixPrefix);
       return [...out];
     };
     /**
@@ -714,6 +858,12 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * 出る本数)。現行 sample には metachar 前置形が無いので、配線の歯は合成 cmd で数える。
      */
     let tailWiredCases = 0;
+    /**
+     * 軸 (5) の配線 pin が **非 vacuous** に走った scan target 数 (前置**と**後置の両方に metachar を
+     * 持つ合成 cmd で suffix seed が出る本数)。現行 sample に死角 ② の形は無いので、配線の歯は
+     * 合成 cmd で数える。
+     */
+    let suffixWiredCases = 0;
     SCAN_TARGETS.forEach((rule, i) => {
       const cmd = rule.cmd;
       const derived = derivedSeedsFor(rule.re, cmd);
@@ -724,6 +874,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       const splicedCmd = `cd /app && ${cmd}`;
       const splicedTail = tailPrefixSeed(rule.re, splicedCmd);
       if (splicedTail !== null) tailWiredCases += 1;
+      // 軸 (5) の per-rule 配線 pin 用の合成 cmd (死角 ② = 前置 `&&` **と** 後置 `|` の両方)。
+      const straddledCmd = `cd /app && ${cmd} | tee log`;
+      const straddledSeeds = suffixPrefixSeeds(rule.re, straddledCmd);
+      if (straddledSeeds.length > 0) suffixWiredCases += 1;
       // SEC-DB2R4-3: 汎用 seed を除いた派生 seed で計数する (含めると恒真)。
       it(`#${i} ${String(rule.re)} has a non-vacuous derived adversarial seed`, () => {
         expect(derivedLive.length, `derived=${JSON.stringify(derived)}`).toBeGreaterThan(0);
@@ -752,21 +906,43 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         } else {
           // 後尾が規則を踏まない = sample 自身が gap クラス metachar を含む形 (#2 fork-bomb と
           //   mysqladmin の segment sample)。vacuous になった**理由**を pin する。
-          // SEC-LN4-5 / LN4-G: この null は 2 種あり、ここの pin は**両方を区別しない** (assert の
-          //   追加は sweep 019fd74b・本 PR は開示のみ)。
-          //   (a) **良性 null** — 規則の gap クラスが metachar を除外しない (`[\s\S]` の
-          //       mysqladmin segmentRe)。軸 (3) の prefix 反復は分断されず、軸 (3) が既に高コスト
-          //       経路を測っているので検出は失われない。
-          //   (b) **盲目 null** — 規則の gap クラスは metachar を除外するが、末尾語の**後ろ**にも
-          //       metachar があり後尾が規則を踏まない形 (SEC-LN4-1 / TDA-LN4-2 = LN4-B の
-          //       `prog … word | tee log` 形)。このとき軸 (3) も反復が分断済みなので**検出が失われる**
-          //       (2 乗形が線形域に留まって SURVIVED する・現行 corpus に該当 sample なし)。
-          //   区別するには「軸 (3) の prefix が gap metachar を含まない」を併せて assert する。
+          // SEC-LN4-5 / LN4-G (sweep 019fd74b・本 PR で assert 化): この null は 2 種あり**意味が違う**。
+          //   (a) **良性 null** — 規則の量化クラスが gap metachar を除外しない (`[\s\S]` の
+          //       mysqladmin segmentRe / そもそもクラスを持たない #2 fork-bomb)。軸 (3) の prefix
+          //       反復は分断されず、軸 (3) が既に高コスト経路を測っているので検出は失われない。
+          //   (b) **盲目 null** — 規則の量化クラスは metachar を除外するのに、末尾語の**後ろ**にも
+          //       metachar があり後尾が規則を踏まない形 (死角 ② = `prog … word | tee log`)。
+          //       軸 (3) も反復が分断済みなので、軸 (5) が seed を出していなければ検出が失われる。
+          //   判別は `excludedCharsOf`(= 量化クラスの除外集合) で行う。「seed に metachar が含まれるか」
+          //   では `[\s\S]` gap の mysqladmin segment sample (`-p'a;b'`) を盲目と誤判定する。
           expect(TAIL_METACHARS.test(cmd), `sample=${JSON.stringify(cmd)}`).toBe(true);
+          const benign = !excludedCharsOf(rule.re).some((c) => TAIL_METACHARS.test(c));
+          expect(
+            benign || suffixPrefixSeeds(rule.re, cmd).length > 0,
+            `軸 (4) null の種別: 良性 (量化クラスが metachar を除外しない) か、盲目なら軸 (5) が seed を出す`,
+          ).toBe(true);
         }
         // sample 自身の後尾 seed も (非 null なら) 派生集合へ配線されている。
         const own = tailPrefixSeed(rule.re, cmd);
         if (own !== null) expect(derived).toContain(own);
+      });
+      it(`#${i} ${String(rule.re)} has per-metachar suffix prefix seeds wired into the derived set`, () => {
+        // 死角 ② (task 01a05374-36d2-7419-ac3f-4a22c160cbcc): 現行 sample には「先頭 literal の前と
+        //   マッチ完了の後の**両方**に metachar」形が無いので、配線の歯は合成 cmd で per-rule に張る
+        //   (17/17 で非 vacuous・`suffixWiredCases`)。軸 (5) を derivedSeedsFor から剥がすと RED。
+        expect(straddledSeeds.length, `straddled=${JSON.stringify(straddledCmd)}`).toBeGreaterThan(
+          0,
+        );
+        const straddledDerived = derivedSeedsFor(rule.re, straddledCmd);
+        for (const seed of straddledSeeds) expect(straddledDerived).toContain(seed);
+        // **軸 (5) の固有寄与**: 同じ合成 cmd で軸 (4) は null (最後の metachar `|` 以降の後尾
+        //   ` tee log` が規則を踏まない) = 死角 ②。後置 (` | tee log`) を外すと軸 (4) が非 null に
+        //   なりこの行が RED になる (合成の後置が load-bearing であることの歯)。
+        expect(tailPrefixSeed(rule.re, straddledCmd)).toBeNull();
+        // 前置 (`cd /app && `) を外すと suffix が cmd 全体へ寄り軸 (3) の複製へ退化する。
+        expect(straddledSeeds).not.toContain(prefixSeed(rule.re, cmd));
+        // sample 自身の suffix seed も (あれば) 派生集合へ配線されている。
+        for (const seed of suffixPrefixSeeds(rule.re, cmd)) expect(derived).toContain(seed);
       });
       for (const seed of live) {
         it(
@@ -774,14 +950,23 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           () => {
             const small = fill(seed, SMALL);
             const large = fill(seed, LARGE);
-            const tSmall = bestOfMs(() => {
-              for (let k = 0; k < K; k++) rule.re.test(small);
-            });
-            const tLarge = bestOfMs(() => {
-              for (let k = 0; k < K; k++) rule.re.test(large);
-            });
-            const ratio = tLarge / Math.max(tSmall, 0.005);
-            expect(ratio, `scaling ratio (8× input): ${ratio.toFixed(1)}`).toBeLessThan(RATIO_MAX);
+            // 両側判定 (task 01a05374-36d2-7419-ac3f-4f88be2481fc): 単発比は false green / false RED の
+            //   両側に振れたので RATIO_REPEAT 回測り、中央値と最大の**両方**で判定する。
+            const ratios: number[] = [];
+            for (let r = 0; r < RATIO_REPEAT; r++) {
+              const tSmall = bestOfMs(() => {
+                for (let k = 0; k < K; k++) rule.re.test(small);
+              });
+              const tLarge = bestOfMs(() => {
+                for (let k = 0; k < K; k++) rule.re.test(large);
+              });
+              ratios.push(tLarge / Math.max(tSmall, 0.005));
+            }
+            const median = medianOf(ratios);
+            const worst = maxOf(ratios);
+            const shown = ratios.map((x) => x.toFixed(1)).join("/");
+            expect(median, `scaling ratio median (8× input): ${shown}`).toBeLessThan(RATIO_MAX);
+            expect(worst, `scaling ratio max (8× input): ${shown}`).toBeLessThan(RATIO_MAX_HI);
           },
           LINEAR_IT_TIMEOUT_MS,
         );
@@ -799,8 +984,27 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       it("RATIO_MAX は 24 (線形 p95 8.6 と 2 乗下限 ≈ 40 の幾何中点・変更は実測更新 + full 監査)", () => {
         expect(RATIO_MAX).toBe(24);
       });
-      it("it timeout は 30s (既定 5s では 2 乗形の診断が出ない・QA-DB2R2-3)", () => {
-        expect(LINEAR_IT_TIMEOUT_MS).toBe(30_000);
+      it("両側判定: 中央値 < 24 かつ 最大 < 40 を RATIO_REPEAT=3 回計測で判定 (奇数)", () => {
+        expect(RATIO_MAX_HI).toBe(40);
+        expect(RATIO_REPEAT).toBe(3);
+        // 中央値を採るので偶数は不可 (偶数だと下側の外れ値 1 本で中央値が沈む)。
+        expect(RATIO_REPEAT % 2).toBe(1);
+        // 上側は 2 乗形の下限より下 (2 乗を素通ししない)・下側の閾値より上 (線形の外れ値で赤くしない)。
+        expect(RATIO_MAX_HI).toBeGreaterThan(RATIO_MAX);
+      });
+      it("medianOf / maxOf の挙動 (中央値は奇数長で中央・max は最大)", () => {
+        expect(medianOf([9, 1, 5])).toBe(5);
+        expect(medianOf([60, 5, 6])).toBe(6);
+        expect(medianOf([5])).toBe(5);
+        expect(maxOf([9, 1, 5])).toBe(9);
+        expect(maxOf([1])).toBe(1);
+        // 2 乗形が 1 回だけ低く出ても中央値は高いまま (false green の閉塞方向)。
+        expect(medianOf([20, 62, 64])).toBe(62);
+        // 線形が 1 回だけ高く出ても中央値は低いまま (false RED の閉塞方向)。
+        expect(medianOf([27, 8, 9])).toBe(9);
+      });
+      it("it timeout は 120s (RATIO_REPEAT 倍の計測で 2 乗形 1 ケースが無負荷 37〜39s・飽和 3× 想定)", () => {
+        expect(LINEAR_IT_TIMEOUT_MS).toBe(120_000);
       });
       it("入力幾何 SMALL 4096 / SCALE 8 / K 20 / best-of 9 (QA-LN-1: SCALE を縮めると 2 乗形が閾値の下に入る)", () => {
         // 2 乗形の ratio は SCALE² (8² = 64) で閾値 24 の上、SCALE 2 なら 4 で閾値の下に入り検出が消える。
@@ -843,7 +1047,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(literalRuns(/:\(\)\s*\{/)).toEqual([]);
         expect(literalRuns(/\ba\s+bc\b/)).toEqual(["bc"]);
       });
-      it("derivedSeedsFor: 完全一致 + near-miss + sample 先頭語 + prefix + 後尾 prefix の 4 軸を含む (逐語 pin)", () => {
+      it("derivedSeedsFor: 完全一致 + near-miss + sample 先頭語 + prefix + 後尾 prefix + 全 suffix prefix の 5 軸を含む (逐語 pin)", () => {
         const i = LITERAL_RULES.findIndex((r) => r.re.source.includes("mysqladmin"));
         expect(i).toBeGreaterThanOrEqual(0);
         // metachar を含まない sample: 軸 (4) は軸 (3) と同一 seed になり Set で dedup される (件数不変)。
@@ -856,7 +1060,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
             "mysqladmin -u root -p --force dro ",
           ].sort(),
         );
-        // SEC-LN-1 の metachar 前置形: 軸 (4) の後尾 seed が **追加**で載る (軸 1〜3 は逐語で残る)。
+        // SEC-LN-1 の metachar 前置形: 軸 (4) の後尾 seed と軸 (5) の各 suffix seed が **追加**で載る
+        //   (軸 1〜3 は逐語で残る)。`&&` の 2 文字目で切った `"& foosql …"` が軸 (5) の固有分。
         expect(
           [
             ...derivedSeedsFor(/\bfoosql\b[^|;&\n]*\bwipeall\b/i, "cd /app && foosql -e wipeall x"),
@@ -870,6 +1075,29 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
             "cd ",
             "c_ ",
             "cd /app && foosql -e wipeal ",
+            " foosql -e wipeal ",
+            "& foosql -e wipeal ",
+          ].sort(),
+        );
+        // 死角 ② (前置 **と** 後置の両方に metachar): 軸 (4) は null だが軸 (5) が 2 本を **追加**で載せる
+        //   (軸 1〜3 は逐語で残る)。軸 (5) を剥がすとこの逐語 pin が RED。
+        expect(
+          [
+            ...derivedSeedsFor(
+              /\bfoosql\b[^|;&\n]*\bwipeall\b/i,
+              "cd /app && foosql -e wipeall x | tee log",
+            ),
+          ].sort(),
+        ).toEqual(
+          [
+            "foosql ",
+            "foosq_ ",
+            "wipeall ",
+            "wipeal_ ",
+            "cd ",
+            "c_ ",
+            "cd /app && foosql -e wipeal ",
+            "& foosql -e wipeal ",
             " foosql -e wipeal ",
           ].sort(),
         );
@@ -896,6 +1124,128 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         //   metachar を含むため後尾が規則を踏まない。per-rule pin 側でその理由を pin している。
         expect(tailWiredCases).toBe(15);
         expect(SCAN_TARGETS.length).toBe(17);
+      });
+      it("suffixPrefixSeeds: 4 区切り (`&` `;` `|` 改行) × 前置/後置で各 metachar 以降の全 suffix から prefix を取る", () => {
+        const re = /\bfoosql\b[^|;&\n]*\bwipeall\b/i;
+        // 死角 ②: 前置 **と** 後置の両方に metachar。軸 (4) は null なのに軸 (5) は seed を出す。
+        expect(suffixPrefixSeeds(re, "cd /app && foosql -e wipeall x | tee log")).toEqual([
+          "& foosql -e wipeal ",
+          " foosql -e wipeal ",
+        ]);
+        expect(tailPrefixSeed(re, "cd /app && foosql -e wipeall x | tee log")).toBeNull();
+        expect(suffixPrefixSeeds(re, "sh -c 'echo go; foosql -e wipeall x; echo done'")).toEqual([
+          " foosql -e wipeal ",
+        ]);
+        expect(suffixPrefixSeeds(re, "cat f | foosql -e wipeall x | grep y")).toEqual([
+          " foosql -e wipeal ",
+        ]);
+        expect(suffixPrefixSeeds(re, "cd /app\nfoosql -e wipeall x\necho done")).toEqual([
+          "foosql -e wipeal ",
+        ]);
+        // 軸 (4) の superset: 前置のみの形では軸 (4) の seed を**含む** (削除でなく追加であることの歯)。
+        expect(suffixPrefixSeeds(re, "cd /app && foosql -e wipeall x")).toContain(
+          tailPrefixSeed(re, "cd /app && foosql -e wipeall x"),
+        );
+        // metachar が無ければ空 (軸 (3) が同じ seed を既に出しているので件数は増えない)。
+        expect(suffixPrefixSeeds(re, "foosql -e wipeall x")).toEqual([]);
+      });
+      it("軸 (5) の per-rule 配線 pin は 17/17 スキャン regex で非 vacuous (合成 metachar 前置 + 後置)", () => {
+        // 軸 (4) の 15/17 と違い、前置側の suffix が必ず候補に入るので全スキャン regex で歯が立つ。
+        expect(suffixWiredCases).toBe(17);
+        expect(SCAN_TARGETS.length).toBe(17);
+      });
+      it("quantifiedClasses / excludedCharsOf: 量化クラスの抽出と除外集合 (否定は列挙・正はクラス外)", () => {
+        expect(quantifiedClasses("\\bmysqladmin\\b[^|;&\\n]{0,512}\\bdrop\\b")).toEqual([
+          "[^|;&\\n]",
+        ]);
+        expect(quantifiedClasses("\\bmysqladmin\\b[\\s\\S]{0,512}\\bdrop\\b")).toEqual([
+          "[\\s\\S]",
+        ]);
+        expect(quantifiedClasses("\\bgit\\s+clean\\s+-[a-z]*f")).toEqual(["[a-z]"]);
+        // 量化されていないクラス (`[abc]` 単発) と escape 済み `\[` は gap ではないので拾わない。
+        expect(quantifiedClasses(String.raw`\bfoo[abc]bar`)).toEqual([]);
+        expect(quantifiedClasses(String.raw`\bfoo\[abc\]bar`)).toEqual([]);
+        // 2 本持つ source も両方拾う (走査範囲が 1 本目で止まらない)。
+        expect(quantifiedClasses("[ab]+x[^;]*y")).toEqual(["[ab]", "[^;]"]);
+        expect(excludedCharsOf(/\bmysqladmin\b[^|;&\n]{0,512}\bdrop\b/i).sort()).toEqual(
+          ["|", ";", "&", "\n"].sort(),
+        );
+        expect(excludedCharsOf(/\bmysqladmin\b[\s\S]{0,512}\bdrop\b/i)).toEqual([]);
+        // クラスを持たない規則は除外集合が空 (良性 null の判別根拠)。
+        expect(excludedCharsOf(/:\(\)\s*\{/)).toEqual([]);
+        // 正のクラスは「クラス外」を返す (絶対パスの `/` を含む = 死角 ③ の実体)。
+        expect(excludedCharsOf(/\bfoosql\b[\w\s-]*\bwipeall\b/i)).toContain("/");
+        // CHAR_UNIVERSE は制御文字を含む (`\r` が無いと CR 綴りの結合検査が素通しになる)。
+        expect(CHAR_UNIVERSE).toContain("\r");
+        expect(CHAR_UNIVERSE).toContain("\n");
+        expect(CHAR_UNIVERSE).toContain("<");
+        // 非 ASCII 分離子 (実装者 probe: universe に無いと NBSP を除外する gap クラスが結合検査を
+        //   素通りした)。**追加のみ・削除禁止** — 落とすとその文字の綴りが検出不能に戻る。
+        expect(CHAR_UNIVERSE).toContain("\u00a0");
+        expect(CHAR_UNIVERSE).toContain("\u3000");
+        expect(excludedCharsOf(/\bfoosql\b[^|;&\n\u00a0]*\bwipeall\b/i)).toContain("\u00a0");
+        expect(CHAR_UNIVERSE.length).toBe(0x7f - 0x20 + 10);
+        expect(new Set(CHAR_UNIVERSE).size).toBe(CHAR_UNIVERSE.length);
+      });
+      it("coupling (task 01a04989-4a0c): 全スキャン regex の量化クラスが除外する文字は TAIL_METACHARS に収まる", () => {
+        // SEC-LN4-3 ≡ TDA-LN4-3 ≡ QA-LN4-1: TAIL_METACHARS は src の gap クラスの**手写し 2 コピー目**
+        //   だった。src 側の綴りが `[^|;&\r\n]` / `[^|;&\n<>]` / 正クラス `[\w\s-]*` へ動くと、軸
+        //   (4)(5) の切り出しが取り残されて 2 乗形が SURVIVED する (3 形とも実測)。ここで結合する。
+        const tailChars = CHAR_UNIVERSE.filter((c) => TAIL_METACHARS.test(c));
+        expect([...tailChars].sort()).toEqual(["\n", "&", ";", "|"].sort());
+        let checked = 0;
+        let asserted = 0;
+        for (const target of SCAN_TARGETS) {
+          for (const cls of quantifiedClasses(target.re.source)) {
+            checked += 1;
+            if (
+              NON_GAP_CLASS_EXEMPTIONS.some(
+                (e) => e.reSource === target.re.source && e.classSource === cls,
+              )
+            ) {
+              continue;
+            }
+            asserted += 1;
+            const probe = new RegExp(`^${cls}$`);
+            const excluded = CHAR_UNIVERSE.filter((c) => !probe.test(c));
+            expect(
+              excluded.filter((c) => !TAIL_METACHARS.test(c)),
+              `${target.re.source} の量化クラス ${cls} が TAIL_METACHARS 外の文字を除外する (軸 4/5 の切り出しが取り残される)`,
+            ).toEqual([]);
+          }
+        }
+        // 走査が実際に回ったこと (regex を 1 本も見ずに緑になる恒真を防ぐ)。`asserted` は exemption を
+        //   広げて全クラスを素通しさせる編集 (checked は変わらない) を RED にする。
+        expect(checked, "量化クラスの本数 (mysqladmin whole + segment + git clean)").toBe(3);
+        expect(asserted, "結合検査を実際に適用した量化クラスの本数 (exemption を除く)").toBe(2);
+        // exemption は明示 1 件のみ。増やすときは理由を書き full 監査 (走査範囲の変更)。
+        expect(NON_GAP_CLASS_EXEMPTIONS.length).toBe(1);
+        expect(NON_GAP_CLASS_EXEMPTIONS[0]!.reSource).toBe("\\bgit\\s+clean\\s+-[a-z]*f");
+        expect(NON_GAP_CLASS_EXEMPTIONS[0]!.classSource).toBe("[a-z]");
+      });
+      it("構造ゲート (TDA-MA-1): 手書き分離子クラスを持つ行は segmentRe と segment sample を要求する", () => {
+        // .claude/rules/security.md「手書き分離子クラスを新規行に書かない (segment 単位が要るなら
+        //   segmentRe)」の構造化。`segmentRe` 無しで `[^|;&\n]` 様のクラスを足すと、SEC-DB2-2 と同じ
+        //   defect (引用内 metachar で境界が分断され high が low へ落ちる) が無警告で着地する。
+        let gated = 0;
+        LITERAL_RULES.forEach((rule, i) => {
+          const separatorClasses = quantifiedClasses(rule.re.source).filter((cls) => {
+            if (!cls.startsWith("[^")) return false; // 正のクラスは手書き分離子ではない
+            const probe = new RegExp(`^${cls}$`);
+            return CHAR_UNIVERSE.some((c) => TAIL_METACHARS.test(c) && !probe.test(c));
+          });
+          if (separatorClasses.length === 0) return;
+          gated += 1;
+          expect(
+            rule.segmentRe,
+            `#${i} ${rule.re.source}: 手書き分離子クラス ${separatorClasses.join(",")} を持つ行は正準 splitter の segment スコープ (segmentRe) を併記する`,
+          ).toBeDefined();
+          expect(
+            samples[i]?.segmentCmd,
+            `#${i}: segmentRe を持つ行は segment スコープでしか踏めない sample (segmentCmd) を持つ`,
+          ).toBeDefined();
+        });
+        expect(gated, "分離子クラスを持つ行の本数 (現行は mysqladmin の 1 本)").toBe(1);
       });
       it("prefixSeed: 2 語連鎖 / alternation サブコマンド / wrapper 形の sample にも届く (R4 Z2/Z4/Z6 の形)", () => {
         expect(
@@ -927,7 +1277,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         const self = stripComments(readFileSync(fileURLToPath(import.meta.url), "utf8"));
         const declarations: readonly RegExp[] = [
           /\n\s+const RATIO_MAX = 24;\n/,
-          /\n\s+const LINEAR_IT_TIMEOUT_MS = 30_000;\n/,
+          // 両側判定 (task 01a05374-…-4f88be2481fc): 上側を緩める / 反復回数を 1 へ戻すと単発比へ退化する。
+          /\n\s+const RATIO_MAX_HI = 40;\n/,
+          /\n\s+const RATIO_REPEAT = 3;\n/,
+          /\n\s+const LINEAR_IT_TIMEOUT_MS = 120_000;\n/,
           /\n\s+const TOTAL_CASES_MEASURED = 110;\n/,
           /\n\s+const SMALL = 4096;\n/,
           /\n\s+const SCALE = 8;\n/,
@@ -937,6 +1290,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           // SEC-LN-1 (task 01a048cd-95ae): 軸 (4) の区切り集合。空にする / 1 文字落とすと軸 (4) が軸 (3) へ
           //   退化する (seed 生成 = 走査範囲) ので宣言を逐語で pin する。
           /\n\s+const TAIL_METACHARS = \/\[\|;&\\n\]\/;\n/,
+          // task 01a04989-4a0c: 結合検査 (coupling) と構造ゲートの走査道具。抽出 regex を緩める /
+          //   universe から制御文字を落とすと、CR 綴り・`<>` 綴り・正クラスの検出が静かに消える。
+          /\n\s+const QUANTIFIED_CLASS_RE = \//,
+          /\n\s+const CHAR_UNIVERSE: readonly string\[\] = \[/,
+          /\n\s+const NON_GAP_CLASS_EXEMPTIONS: ReadonlyArray<\{/,
         ];
         const usages: readonly RegExp[] = [
           // SEC-LN3-1 ≡ QA-LN3-1: escape も改行も含まない綴りは本行自身に充足する。文字クラスで綴りを割り、
@@ -952,6 +1310,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           //   1 行削除が per-rule pin の RED 経由でしか出ない・SEC-LN-1)。
           /if \(prefix !== null\) out\.add\(prefix\);/,
           /if \(tailPrefix !== null\) out\.add\(tailPrefix\);/,
+          // 軸 (5) (task 01a05374-…-4a22c160cbcc): 切り出し本体・prefix 導出・derivedSeedsFor への配線を
+          //   左右対称に pin する (軸 (3)(4) と同じ規律)。1 行削ると死角 ② が戻る。
+          /if \(TAIL_METACHARS\.test\(cmd\[i\]!\)\) out\.push\(cmd\.slice\(i \+ 1\)\);/,
+          /if \(seed !== null\) out\.push\(seed\);/,
+          /for \(const suffixPrefix of suffixPrefixSeeds\(re, cmd\)\) out\.add\(suffixPrefix\);/,
           /expect\(derivedSeedsFor\(rule\.re, splicedCmd\)\)\.toContain\(splicedTail\);/,
           // QA-LN4-2 ≡ TDA-LN4-1 (M): 軸 (4) の per-rule 配線 pin は現行 corpus では **合成 cmd の
           //   metachar 前置**だけが非 vacuous 性の出所なので、assertion 行だけでなく**構築行の綴り**も
@@ -962,10 +1325,27 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           // 左右対称 (finding-registry): 軸 (4) の per-rule assertion は 2 本あるので 2 本とも pin する。
           //   合成前置が軸 (3) と**別の** seed を生んでいることの歯 (前置除去で 15 本 RED・M19 実測)。
           /expect\(splicedTail\)\.not\.toBe\(prefixSeed\(rule\.re, cmd\)\);/,
+          // 軸 (5) の per-rule 配線: 構築行 (前置 `&&` **と** 後置 `| tee log` の両方が load-bearing) と
+          //   3 本の assertion を左右対称に pin する。後置を落とすと軸 (4) の複製へ、前置を落とすと
+          //   軸 (3) の複製へ無音で退化する。
+          /const straddledCmd = `cd \/app && \$\{cmd\} \| tee log`;/,
+          /expect\(straddledDerived\)\.toContain\(seed\);/,
+          /expect\(tailPrefixSeed\(rule\.re, straddledCmd\)\)\.toBeNull\(\);/,
+          /expect\(straddledSeeds\)\.not\.toContain\(prefixSeed\(rule\.re, cmd\)\);/,
+          // 軸 (4) null の良性 / 盲目の判別 (sweep 019fd74b G-2)。恒真化すると盲目 null が素通しに戻る。
+          /const benign = !excludedCharsOf\(rule\.re\)\.some\(\(c\) => TAIL_METACHARS\.test\(c\)\);/,
           /const small = fill\(seed, SMALL\);\n\s+const large = fill\(seed, LARGE\);/,
           /const tSmall = bestOfMs\(\(\) => \{\n\s+for \(let k = 0; k < K; k\+\+\) rule\.re\.test\(small\);/,
           /const tLarge = bestOfMs\(\(\) => \{\n\s+for \(let k = 0; k < K; k\+\+\) rule\.re\.test\(large\);/,
-          /const ratio = tLarge \/ Math\.max\(tSmall, 0\.005\);/,
+          // 両側判定 (task 01a05374-…-4f88be2481fc): 反復ループ・比の蓄積・中央値 / 最大の算出・2 本の
+          //   assertion をすべて pin する。旧 `const ratio = …` 行は `ratios.push(…)` へ移った (削除でなく
+          //   移設なので pattern も追随させる・単発比へ戻す編集は反復ループ pattern が RED にする)。
+          /for \(let r = 0; r < RATIO_REPEA[T]; r\+\+\) \{/,
+          /ratios\.push\(tLarge \/ Math\.max\(tSmall, 0\.005\)\);/,
+          /const median = medianOf\(ratios\);/,
+          /const worst = maxOf\(ratios\);/,
+          /expect\(median, [^\n]*\)\.toBeLessThan\(RATIO_MAX\);/,
+          /expect\(worst, [^\n]*\)\.toBeLessThan\(RATIO_MAX_H[I]\);/,
           /\.toBeLessThan\(RATIO_MAX\);/,
           /\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/,
           /expect\(totalCases\)\.toBe\(TOTAL_CASES_MEASURED\);/,
@@ -977,17 +1357,33 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /expect\(SCAN_TARGETS\.length\)\.toBe\(\n\s+LITERAL_RULES\.length \+ LITERAL_RULES\.filter\(/,
           /expect\(SCAN_TARGET[S]\.map\(\(t\) => t\.re\.source\)\)\.toEqual\(/,
           /expect\(totalCases\)\.toBeGreaterThanOrEqual\(SCAN_TARGET[S]\.length \* 3\);/,
+          // task 01a04989-4a0c: coupling / 構造ゲート / 軸 (5) 件数の**歯**も使用側として pin する
+          //   (走査行 1 本を削るだけで「量化クラスを 1 本も見ずに緑」になる恒真化経路)。
+          /const excluded = CHAR_UNIVERSE\.filter\(\(c\) => !probe\.test\(c\)\);/,
+          /expect\(\n\s+excluded\.filter\(\(c\) => !TAIL_METACHARS\.test\(c\)\),/,
+          /expect\(checked, [^\n]*\)\.toBe\(3\);/,
+          /expect\(asserted, [^\n]*\)\.toBe\(2\);/,
+          // 構造ゲートの 2 本の assertion 本体 (count pin だけでは 1 行削除を捕まえられない)。
+          /expect\(\n\s+rule\.segmentRe,/,
+          /expect\(\n\s+samples\[i\]\?\.segmentCmd,/,
+          /expect\(gated, [^\n]*\)\.toBe\(1\);/,
+          /expect\(suffixWiredCases\)\.toBe\(17\);/,
         ];
         // 追加のみ・削除禁止 (finding-registry): pin pattern の**本数**自体を pin し、1 本を静かに
-        //   落とす編集を RED にする (header の「定数宣言 9 本・使用側 21 pattern」の機械的な出所)。
-        expect(declarations.length, "宣言 pin の本数").toBe(9);
-        expect(usages.length, "使用側 pin の本数").toBe(21);
+        //   落とす編集を RED にする (header の「定数宣言 14 本・使用側 38 pattern」の機械的な出所)。
+        expect(declarations.length, "宣言 pin の本数").toBe(14);
+        expect(usages.length, "使用側 pin の本数").toBe(42);
         for (const re of [...declarations, ...usages]) {
           expect(self, `tripwire ${String(re)}`).toMatch(re);
         }
         // 各定数の宣言はちょうど 1 回 (forEach 内での再宣言 = shadow を検出)。
         const names = [
           "RATIO_MAX",
+          "RATIO_MAX_HI",
+          "RATIO_REPEAT",
+          "QUANTIFIED_CLASS_RE",
+          "CHAR_UNIVERSE",
+          "NON_GAP_CLASS_EXEMPTIONS",
           "LINEAR_IT_TIMEOUT_MS",
           "TOTAL_CASES_MEASURED",
           "SMALL",
