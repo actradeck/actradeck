@@ -62,7 +62,8 @@ import { dirname } from "node:path";
  *
  * **粒度の正直な開示 (TDA-FL-1 / SEC-FL-4 / QA-FL-3)**: 比較は生バイト列であり、lock 内容が
  * 常に `${pid}\n` である以上これは実質 **pid 粒度**であって lock インスタンス粒度ではない。
- * 同一 pid が鋳造した別 lock は区別できない (pid 再利用・pid 偽装は ADR 0012 の out-of-scope)。
+ * 同一 pid が鋳造した別 lock は区別できない。ADR 0012 の out-of-scope は pid **偽装**のみで、良性の
+ * pid **再利用**は信頼境界の内側に残る残余 (`isAlive` が偽を返した直後の窓に限られる)。
  * (dev, ino) による同一性は v0.9 で検討する。
  */
 type LockHolder =
