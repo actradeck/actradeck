@@ -43,8 +43,19 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   staleness check read, and otherwise linked back with the acquirer backing off (a restore that
   cannot be completed aborts loudly rather than continuing with two holders). A lock that is simply
   missing is treated as "just released" and retried without deleting anything. A lock whose content
-  cannot be read at all is no longer taken over. `INV-FILELOCK-STALE-TAKEOVER-IDENTITY` reproduces
-  both races with three real processes.
+  cannot be read at all is no longer taken over — and that trade has a cost worth stating plainly:
+  such a lock (`EACCES`, `EISDIR`) no longer recovers on its own. Until the file is removed, the
+  approval allowlist's add, revoke, and clear and the approval-policy persist all fail — the daemon
+  does not crash, it reports only the failure count — and an auto-allow that was already persisted
+  stays in force until its TTL (7 days by default) runs out, so an entry the operator believes they
+  revoked can keep allowing without a UI approval. The operator clears this by removing the
+  offending `*.actradeck-lock` by hand. What it buys: previously an unreadable lock was taken over
+  blindly, and a lock path that was a directory spun in a silent busy-loop that never timed out.
+  A pathological free-to-held flap now aborts loudly after 1000 immediate retries rather than
+  spinning in silence. The `<lockPath>.stale-<pid>-<seq>` file a takeover detaches into is removed
+  on every normal path, but a crash between the detach and that cleanup can leave one behind; there
+  is no reaper, and such a file is never read as a lock.
+  `INV-FILELOCK-STALE-TAKEOVER-IDENTITY` reproduces both races with three real processes.
 - **The daily public-metrics snapshot lands on a dedicated `metrics` branch instead of `main`.**
   The `main` ruleset requires a pull request and the `verify` check, so every scheduled run from
   2026-08-26 to 2026-08-28 was rejected with GH013 and no snapshot was recorded. The workflow now

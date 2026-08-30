@@ -23,6 +23,29 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
   that is simply *missing* (`ENOENT`) is treated as "just released", not as stale, and is
   never unlinked. Without both, the non-atomic read-then-`unlink` could delete a *live*
   lock that a third process created in between, letting two processes hold it at once.
+  A lock whose content cannot be read at all (`EACCES`, `EISDIR`) is **not** taken over,
+  because its identity cannot be re-verified. The consequence is that such a lock does not
+  recover on its own: until the file is removed, the approval allowlist's add/revoke/clear
+  and the approval-policy persist fail (the daemon does not crash; it reports the failure
+  count), and an auto-allow that is already persisted stays in force until its TTL — 7 days
+  by default — expires. The operator removes the offending `*.actradeck-lock` by hand. This
+  is a deliberate trade against the previous behaviour, which took an unreadable lock over
+  blindly and, when the lock path was a directory, spun in a silent busy-loop with no timeout.
+
+  Three limits of this mechanism, stated honestly:
+
+  1. **The identity re-check is byte-for-byte, which is pid granularity, not lock-instance
+     granularity.** The lock content is only ever `${pid}\n`, so two locks minted by the same
+     pid are indistinguishable. Reaching that case requires pid reuse, which is out of scope
+     below. Identity by `(dev, ino)` is a candidate refinement for v0.9.
+  2. **The restore-failure abort is reachable under third-party contention**, not dead code.
+     A concurrent acquirer can take the lock path between the `rename` that detaches it and
+     the `linkSync` that would restore it. The process that fails to restore throws and never
+     enters the critical section, so it is not itself a double-holder; the residual exposure is
+     that the evicted live holder and the third party can overlap. Tracked for v0.9.
+  3. **`<lockPath>.stale-<pid>-<seq>` remnants can survive a crash** between the detach and
+     the cleanup that follows it. There is no reaper. The sequence number is monotonic within
+     a process, so such a name is never reused, and no code path ever reads one as a lock.
 - **At-rest secrecy.** Secret/token-bearing state files are written **`0600`** via a
   single shared atomic helper — `writeJson0600` (temp-write → `rename`) — so all
   such writers share one audited implementation instead of drifting copies.

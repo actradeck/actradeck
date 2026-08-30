@@ -24,6 +24,7 @@
  * 🔴 すべて os.tmpdir() 配下。実設定不可侵。
  */
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -263,7 +264,10 @@ describe("INV-FILELOCK-STALE-TAKEOVER-IDENTITY: 取り外す lock の同一性",
         },
       }),
     ).toThrow(/kept flapping/);
-    expect(spins).toBeGreaterThan(1000);
+    // QA-FL-4: 上限の実値を pin する (`toBeGreaterThan(1000)` だと上限を上げても検査されない)。
+    // spins は onHolderObserved (= 各周回の判定直後) で数えるため、実装が spins > 1000 で throw する
+    // 周回とちょうど同数になる。
+    expect(spins).toBe(1001);
   });
 
   it("内容を読めない lock (ディレクトリ) は奪取せず fail-loud にする", () => {
@@ -271,6 +275,88 @@ describe("INV-FILELOCK-STALE-TAKEOVER-IDENTITY: 取り外す lock の同一性",
     mkdirSync(lockPath);
     expect(() => withFileLock(target, () => "never")).toThrow(/EISDIR/);
   });
+
+  it("同一 pid・別バイトの lock へ差し替わったら復元して backoff する (比較は生バイト列)", () => {
+    // FL-B / QA-FL-3: 同一性の比較は parseInt 後の pid ではなく**生バイト列**。同じ pid を持つが
+    // バイト列の違う lock を判定→取り外しの窓に差すと、復元されて backoff する
+    // (pid 比較へ緩めると取り外して破棄してしまう = このテストが赤くなる)。
+    writeFileSync(lockPath, `${DEAD}\n`);
+    const observed: string[] = [];
+    const sleeps: number[] = [];
+    const restored: string[] = [];
+    let round = 0;
+    const ret = withFileLock(target, () => "ok", {
+      isAlive: (pid) => pid !== DEAD, // DEAD だけ死亡扱い
+      sleep: (ms) => sleeps.push(ms),
+      onHolderObserved: (kind) => {
+        observed.push(kind);
+        if (round === 0) {
+          // 判定直後・取り外し前に「同じ pid を書き直した別 lock」へ差し替える。
+          // parseInt すると同値 (DEAD) だが逐語バイト列は別物。
+          writeFileSync(lockPath, `${DEAD} x\n`);
+        } else if (round === 1) {
+          // 復元されており、かつ**差し替えた側の内容が保存されている**こと。
+          restored.push(readFileSync(lockPath, "utf8"));
+        }
+        round += 1;
+      },
+    });
+    expect(ret).toBe("ok");
+    expect(observed).toEqual(["pid", "pid"]);
+    expect(restored).toEqual([`${DEAD} x\n`]);
+    // 復元後は「生存保持者あり」扱い = backoff を挟む (即再試行しない)。
+    expect(sleeps.length).toBeGreaterThanOrEqual(1);
+    expect(readdirSync(dir).filter((n) => n.includes(".stale-"))).toEqual([]);
+  });
+});
+
+/**
+ * SEC-FL-1: 内容を読めない lock (EACCES) の縮退を pin する。
+ *
+ * head は「読めない lock は同一性を再検証できないので奪取しない」= 即 fail-loud。その帰結として
+ * **自動回復しない** (承認 allowlist の add/revoke/clear・policy 永続が、当該 lock file が
+ * 除去されるまで失敗し続ける)。ここは「安全側だが自動回復しない」という文書どおりの挙動を
+ * 落ちるテストとして固定する場所であり、望ましさの主張ではない。
+ * 詳細は CHANGELOG / docs/adr/0012 の Concurrency 節。
+ *
+ * root では chmod が権限判定に効かない (CAP_DAC_OVERRIDE) ため skip する。
+ */
+const runningAsRoot = process.getuid?.() === 0;
+
+describe("INV-ATTACH-WIRE-LOCK: 読めない lock (EACCES) の縮退", () => {
+  it.skipIf(runningAsRoot)(
+    "他プロセスの読めない lock は奪取せず即 throw する (backoff もしない・root では skip)",
+    () => {
+      writeFileSync(lockPath, "12345\n"); // 別 pid の lock
+      chmodSync(lockPath, 0o000);
+      const sleeps: number[] = [];
+      expect(() =>
+        withFileLock(target, () => "never", {
+          sleep: (ms) => sleeps.push(ms),
+          isAlive: () => false, // 死亡扱いにしても読めない以上は奪取しない
+        }),
+      ).toThrow(/EACCES/);
+      expect(sleeps).toEqual([]); // retry せず即 fail-loud (timeout を消費しない)
+      expect(existsSync(lockPath)).toBe(true); // 読めない lock は消さない
+      chmodSync(lockPath, 0o600); // afterEach の掃除用
+    },
+    5_000,
+  );
+
+  it.skipIf(runningAsRoot)(
+    "保持中に自分の lock が読めなくなると解放できず lock が残る (自動回復しない・root では skip)",
+    () => {
+      const ret = withFileLock(target, () => {
+        chmodSync(lockPath, 0o000); // critical section 中に読めなくなる
+        return "ok";
+      });
+      expect(ret).toBe("ok");
+      // 解放も readLockHolder を通るため EACCES で unlink されない = 除去まで恒久 wedge。
+      expect(existsSync(lockPath)).toBe(true);
+      chmodSync(lockPath, 0o600); // afterEach の掃除用
+    },
+    5_000,
+  );
 });
 
 describe("INV-ATTACH-WIRE-LOCK: fail-loud", () => {

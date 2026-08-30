@@ -85,9 +85,14 @@ export default defineConfig({
         // QA-1 (file-lock 空ファイル窓修正・R1): withFileLock は approval allowlist / policy 永続 /
         //   attach settings の直列化を担う security-adjacent primitive。per-file floor が無いと取得
         //   ロジックの被覆が silent に erode しうる。file-lock.ts は完全同期・非決定 async 無しゆえ
-        //   coverage は環境間で安定 (実測 3/3 run 同値 92.45/93.47/100/97.95)。floor は監査時 worst
-        //   90.19/87.5/100/97.87 の下 3-5pt (per-file-coverage-floor-below-worst-not-best・funcs は
-        //   100 観測の小ファイルゆえ 95・erosion tripwire であって target ではない)。
+        //   coverage は環境間で安定。floor は WORST-observed の下 3-5pt に置く
+        //   (per-file-coverage-floor-below-worst-not-best・funcs は 100 観測の小ファイルゆえ 95・
+        //   erosion tripwire であって target ではない)。
+        //   根拠更新 (TDA-FL-4・stale 奪取 同一性修正 R1 unblock): 旧コメントは修正前 base の実測
+        //   (92.45/93.47/100/97.95) のままだった。**現 head 実測 94.25/91.17/100/97.53**
+        //   (未被覆は復元失敗 throw の 2 行のみ = QA-FL-1・到達には第三者競合が要るため v0.9 で seam 化を追跡)。
+        //   floor は据え置き (margin +8.25/+8.17/+5.00/+4.53)。branch は base 比で 2.3pt 下がるが
+        //   これは fail-loud 分岐を足した分母増であり被覆の erosion ではない。
         "src/file-lock.ts": { statements: 86, branches: 83, functions: 95, lines: 93 },
         // QA-3 / TDA-7 (ADR 019f4206 A段・裁定 019f4244 unblock): codex-spawn-manager.ts は cockpit-relayed
         //   Codex spawn の cap / cwd 二段封じ込め / 値ベース deny / lifecycle を担う security-adjacent 一次表面。

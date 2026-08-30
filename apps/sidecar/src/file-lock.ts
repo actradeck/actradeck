@@ -58,15 +58,20 @@ import { dirname } from "node:path";
 
 /**
  * lock file の観測結果 (3 値)。`raw` は **取り外し後の同一性再検証**に使う逐語内容
- * (pid へ正規化した値ではなく生バイト列で比べる: 同じ pid を書き直した別 lock も別物として扱う)。
+ * (pid へ正規化した値ではなく生バイト列で比べる)。
+ *
+ * **粒度の正直な開示 (TDA-FL-1 / SEC-FL-4 / QA-FL-3)**: 比較は生バイト列であり、lock 内容が
+ * 常に `${pid}\n` である以上これは実質 **pid 粒度**であって lock インスタンス粒度ではない。
+ * 同一 pid が鋳造した別 lock は区別できない (pid 再利用・pid 偽装は ADR 0012 の out-of-scope)。
+ * (dev, ino) による同一性は v0.9 で検討する。
  */
 type LockHolder =
   | { readonly kind: "absent" }
   | { readonly kind: "corrupt"; readonly raw: string }
   | { readonly kind: "pid"; readonly pid: number; readonly raw: string };
 
-/** `onHolderObserved` seam へ渡す観測種別 (テスト専用の公開型・原文非依存)。 */
-export type LockHolderKind = LockHolder["kind"];
+/** `onHolderObserved` seam へ渡す観測種別 (原文非依存・module 内部型)。 */
+type LockHolderKind = LockHolder["kind"];
 
 /**
  * lock が free ↔ held を無限に往復した場合の fail-loud 上限。
@@ -346,8 +351,13 @@ export function withFileLock<T>(targetPath: string, fn: () => T, opts: FileLockO
   try {
     return fn();
   } finally {
-    // 自分が保持している lock のみ解放 (奪取された後に他者の lock を消さない)。
+    // 自分が保持している lock のみ解放する。**非 racy な形でのみ「他者の lock を消さない」が成立する
+    // (SEC-FL-3・head/base 同率)**: 解放側の read → 判定 → unlink は非原子で、判定と unlink の間に
+    // 他者が lock を差し替える窓が残る (取得側と違い rename→再検証にしていない)。この窓を閉じる
+    // (解放側も rename→再検証へ寄せる) のは v0.9 の follow-up。
     // absent = 既に消えている → 何もしない。corrupt = 自分が立てた lock が壊された残骸とみなし掃除する。
+    // 内容を読めない lock (EACCES/EISDIR) はここでも rethrow され catch に落ちるため unlink されない
+    // (SEC-FL-1: 自動回復しない・ADR 0012 / CHANGELOG に帰結を開示済み)。
     try {
       const holder = readLockHolder(lockPath);
       if (holder.kind === "corrupt" || (holder.kind === "pid" && holder.pid === process.pid)) {
