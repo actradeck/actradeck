@@ -551,22 +551,38 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   差し戻し / near-miss 除去 / 数字除外の除去 / 軸 4/5 の区切り集合の縮小 / RATIO_MAX 緩和 / 両側判定の片側化 /
   //   universe の縮小 / exemption の追加 / 入力幾何の縮小 /
   //   計測 helper 本体の潰し (`return minOf(out)` → 定数 / `out.push(1)` / `fill` の cap 固定 / `isLive` の判定長縮小) /
-  //   seed ループの間引き (`live.slice(0, 1)`) /
+  //   seed ループの間引き (`live.slice(0, 1)`) / 折返し許容 pin の無界化 (`[^;]*?` → `[\s\S]*?`・SEC-HP-1) /
   //   guard 無効化 / timeout 短縮) は
-  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 14 本・使用側 53 pattern (fill 引数・
+  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 16 本・使用側 53 pattern (fill 引数・
   //   K ループ・ratio 反復ループと中央値 / 最大の算出と 2 本の assertion・配線 pin・軸 3/4/5 の `out.add` / `out.push` 本体・
   //   軸 4 の合成前置 cmd と 軸 5 の合成前置 + 後置 cmd の構築行と各配線 assertion・結合検査 / 構造ゲートの走査行と件数 pin・
   //   exemption の対 keyed 走査行・
   //   **計測 helper 本体** (`minOf` / `bestOfMs` の warm-up + 反復ループ + `return minOf(out)` / `fill` / `isLive`) と
   //   `for (const seed of live)` ループ header + `totalCases += 1` — task 01a048f6-67a5 で追加)・
-  //   宣言個数 census (21 名・本数も pin・`medianOf` / `maxOf` / 計測 helper 4 名 / `totalCases` を含む・走査は
+  //   宣言個数 census (23 名・本数も pin・`medianOf` / `maxOf` / 計測 helper 4 名 / `totalCases` /
+  //   `MAX_PIN_SPAN` / `WRAP_TOLERANT_PINS` を含む・走査は
   //   LINEAR describe の範囲に限定) — を触る単独編集」に限る** (SEC-DB2R3-2 ≡
   //   QA-DB2R3-5・SEC-LN2-1 / TDA-LN2-2)。件数は**実際に it を登録した回数**で数えるので、`live.slice(0, 1)` の
   //   ような seed ループの間引きも exact 件数 pin が RED にする (R4 で 3 レーンが SURVIVED を実測した最大の
   //   silent lever・QA-LN3-2)。各 pattern が「本 tripwire it を切り落とした view」でも ≥1 マッチすることを
-  //   機械 assert するので、pattern が自分の regex リテラルだけで満たされる自己充足は構造的に禁じられる
-  //   (QA-LN3-1・R2 で `repeat = BEST_OF_REPEAT\b` が実際に恒真化した形)。
-  //   **非被覆**: pin describe 自身 (toBe 値・tripwire pattern)。メタ pin / census の**走査マーカー**
+  //   機械 assert するので、**pin ブロック外に対象を持たない pattern** (自分の regex リテラルだけで満たされる
+  //   自己充足形) は RED になる (QA-LN3-1・R2 で `repeat = BEST_OF_REPEAT\b` が実際に恒真化した形)。
+  //   ただしこれは**構造的な禁止ではない** (SEC-HP-4 の bound): メタ pin 自身が負 assert 2 本に依存し、
+  //   参照リテラルの改名で恒真化しうる形が実測されている (SEC-HP-2 の META-2b) ため、R2 で同一リテラルの
+  //   POSITIVE 対を併設して**その 1 手を RED にした**。保証は「POSITIVE 対 + 切除点の負 assert +
+  //   走査マーカーの 3 点を同時に書き換えない限り」に bound される。
+  //   **span の有界化 (SEC-HP-1 ≡ QA-1 ≡ TDA-1・R2)**: 折返し許容 pin 6 本の gap は文境界クラス
+  //   `[^;]*?` で有界化し (無界 `[\s\S]*?` は別 assertion の tail まで span して歯を失った・実測
+  //   14,474 / 8,451 字)、さらに全 pin の match span に `MAX_PIN_SPAN` (400・現行実測 max は
+  //   pristine 108 / 折返し worst 144) の上限を張る。加えて 6 本すべてに **in-memory の歯の保存テスト**
+  //   (対象の matcher / 値を弱化 → pattern が非マッチへ落ちる) を張り、綴り変更の受け入れ基準を
+  //   「静的な同一行一致」から「歯の保存」へ上げた (QA-3 / overlay playbook ⑤)。
+  //   **非被覆**: pin describe 自身 (toBe 値・tripwire pattern・**歯の保存テストと span backstop の
+  //   構築行**。いずれも tripwire it の**内側**なので、メタ pin の「pin ブロック外に対象を持つ」要求と
+  //   両立せず pin できない — 削除は TS の未使用参照 / 件数 pin で loud に落ちる)。件数は**登録した it の
+  //   実数**であって**実行した計測数ではない** (SEC-HP-3・base 同値の pre-existing): `it(` → `it.skip(`
+  //   の 1 site、または it 本体先頭の早期 return で 110 件全部が計測されなくても `totalCases` は 110 の
+  //   まま rc=0 (実測・head/base 同値。executed-count pin は task 01a0574f-521a v0.9)。メタ pin / census の**走査マーカー**
   //   (`describe` / `it` の title 文字列を code として `indexOf` する。マーカー綴りは 2 分割 + `join` で
   //   組み立て、逐語版が「宣言行自身に当たって切除点が配列の後ろへずれ、メタ pin が恒真化する」形を避ける
   //   — 実装者 probe で逐語版がマーカー書き換え後も 295 全緑 SURVIVED を実測) も同様で、title と
@@ -1030,9 +1046,77 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       }
     });
 
+    /**
+     * 1 本の pin が張ってよい match span の上限 (QA-2 / TDA-1 推奨 3 の構造 backstop)。
+     *
+     * 折返し許容化のために gap を `[\s\S]*?` にすると、pin head と**別 assertion の tail** を
+     * またいで充足しうる (SEC-HP-1 ≡ QA-1 ≡ TDA-1 の実測: `derivedLive` 14,474 字 / `gated`
+     * 8,451 字)。gap の綴りに依らず span 自体へ上限を張り、将来の無界 pattern 混入を構造的に
+     * 止める。**実測 (本 PR 時点)**: 全 pin の max span は **144** 字 (pristine 108 /
+     * message を数語伸ばして prettier で折り返した最悪形 144・実装者 probe)。400 は 144 の
+     * 2.7 倍で、折返しの余裕を残しつつ「別文へ跨いだ」span (最小でも 8,451) を確実に切る。
+     */
+    const MAX_PIN_SPAN = 400;
+    /**
+     * **折返し許容 pin の単一出所** (SEC-HP-1 ≡ QA-1 ≡ TDA-1 の unblock・task 01a048f6-67a5 R2)。
+     *
+     * message つき assertion の pin は `expect\(<name>, [^\n]*\)` 形だと printWidth の余裕が
+     * 数字分しかなく、message を数語伸ばすだけで prettier が `expect(` の直後で折り返して
+     * **pattern が偽 RED になる**。R1 ではこれを `[\s\S]*?` で許容したが、`[\s\S]` は改行も
+     * `;` も越えるため pin が**文境界を外れ**、6 本中 2 本 (`derivedLive` / `gated`) が
+     * 「対象行を vacuous 化しても別 assertion の tail で充足する」= 歯を失った (base RED →
+     * head SURVIVED・3 レーンが独立再現)。
+     *
+     * R2 の有界化は **`[^;]*?`** (文境界クラス)。実測した候補 2 案の比較 (実装者 matrix probe):
+     *   - 4 シナリオ (pristine 緑 / prettier 折返し後 match / vacuous 化 no-match / 折返し +
+     *     vacuous no-match) は `[^;]*?` と `[\s\S]{0,300}?` の**両案とも 6/6 OK**。
+     *   - 決め手は「近傍に無害な同型 tail が 1 行増える」形。`gated` / `checked` / `median` の
+     *     3 ケースで弱化 + 87/86/59 字先に同型 tail を足すと、`[\s\S]{0,300}?` は span
+     *     167/181/142 で **SURVIVED (歯を失う)**、`[^;]*?` は **3/3 RED**。距離依存 (現行
+     *     corpus の最近接 foreign tail が偶然 8,451 字先である事実) に頼らない方を採る。
+     * 文境界クラスと `MAX_PIN_SPAN` は**失敗モードが別**なので二重に効く (構造 + 距離)。
+     *
+     * `from` / `to` は「対象の matcher / 値を弱める」書換え。pin の match text の**内側だけ**に
+     * 適用して in-memory で歯の保存を assert する (TDA-1 推奨 2 の landing テスト)。綴りは
+     * 他の pin の逐語コピーにならない形 (先頭の `)` と末尾の `);` を持たない) にして、
+     * pin 対象を 2 箇所へ増やさない (1 site 削除が素通りするのを防ぐ)。
+     */
+    const WRAP_TOLERANT_PINS: ReadonlyArray<{ re: RegExp; from: string; to: string }> = [
+      {
+        re: /expect\(\s*derivedLive\.length,[^;]*?\)\.toBeGreaterThan\(0\);/,
+        from: "toBeGreaterThan(0",
+        to: "toBeGreaterThanOrEqual(0",
+      },
+      {
+        re: /expect\(\s*median,[^;]*?\)\.toBeLessThan\(RATIO_MAX\);/,
+        from: "toBeLessThan(RATIO_MAX",
+        to: "toBeLessThan(Infinity",
+      },
+      {
+        re: /expect\(\s*worst,[^;]*?\)\.toBeLessThan\(RATIO_MAX_H[I]\);/,
+        from: "toBeLessThan(RATIO_MAX_HI",
+        to: "toBeLessThan(Infinity",
+      },
+      {
+        re: /expect\(\s*checked,[^;]*?\)\.toBe\(3\);/,
+        from: "toBe(3",
+        to: "toBeGreaterThanOrEqual(0",
+      },
+      {
+        re: /expect\(\s*asserted,[^;]*?\)\.toBe\(2\);/,
+        from: "toBe(2",
+        to: "toBeGreaterThanOrEqual(0",
+      },
+      {
+        re: /expect\(\s*gated,[^;]*?\)\.toBe\(1\);/,
+        from: "toBe(1",
+        to: "toBeGreaterThanOrEqual(0",
+      },
+    ];
     // 自己弱化 pin (SEC-DB2R3-2 ≡ QA-DB2R3-5): metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の
     //   除去 / 軸 4/5 の区切り集合の縮小 / RATIO_MAX 緩和 / 両側判定の片側化 / universe の縮小 /
     //   exemption の追加 / 入力幾何の縮小 / 計測 helper 本体の潰し / seed ループの間引き /
+    //   折返し許容 pin の無界化 (`[^;]*?` → `[\s\S]*?`) /
     //   guard 無効化 / timeout 短縮) は
     //   単独では緑のままだった (QA-LN5-5: このリストは header と同期する 2 コピー目)。定数の絶対値・
     //   seed 生成の挙動・ケース数の exact 一致・literal tripwire (宣言 / 使用側 / census) で RED にする。保証の範囲と
@@ -1353,6 +1437,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         // SEC-LN2-3: 同名 const の再宣言 (shadow) は宣言の**個数**で検出する (各 1 回)。
         const self = stripComments(readFileSync(fileURLToPath(import.meta.url), "utf8"));
         const declarations: readonly RegExp[] = [
+          // QA-2 / TDA-1 推奨 3 (task 01a048f6-67a5 R2): span 上限の構造 backstop。
+          /\n\s+const MAX_PIN_SPAN = 400;\n/,
+          /\n\s+const WRAP_TOLERANT_PINS: ReadonlyArray<\{ re: RegExp; from: string; to: string \}> = \[/,
           /\n\s+const RATIO_MAX = 24;\n/,
           // 両側判定 (task 01a05374-…-4f88be2481fc): 上側を緩める / 反復回数を 1 へ戻すと単発比へ退化する。
           /\n\s+const RATIO_MAX_HI = 40;\n/,
@@ -1385,6 +1472,12 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /const t = process\.hrtime\.bigint\(\);\n\s+run\(\);/,
           /out\.push\(Number\(process\.hrtime\.bigint\(\) - t\) \/ 1e6\);/,
           /return minOf\(out\);/,
+          // TDA-5 (実測 bound): この 1 本だけは `=>` 直後の **printWidth 由来の折返し**を綴りに焼き込む
+          //   (`\n\s+`)。1 行に畳んだ長さは 105 字で printWidth 100 との差は **5 字**しかなく、
+          //   引数名 / 型注釈を短くする無害な整形で prettier が結合すると**偽 RED**になる (他の新 pin —
+          //   `minOf` 91 字 / `isLive` 86 字 / `bestOfMs` header / ループ header — は文構造由来の改行なので
+          //   安定)。折返し許容形 (`=>\s+`) への緩和は歯の保存 vector を要するので R2 では見送り、
+          //   注記に留める (sweep 019fd74b)。
           /const fill = \(seed: string, n: number\): string =>\n\s+seed\.repeat\(Math\.ceil\(n \/ seed\.length\)\)\.slice\(0, n\);/,
           /const isLive = \(re: RegExp, seed: string\): boolean => !re\.test\(fill\(seed, SMALL\)\);/,
           // 最大の silent lever (R4): ループ header と、**登録した it の実数**で数える件数加算。
@@ -1393,6 +1486,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           // SEC-LN3-1 ≡ QA-LN3-1: escape も改行も含まない綴りは本行自身に充足する。文字クラスで綴りを割り、
           //   本行のテキスト (`REPEA[T]`) では充足しない形にする (使用側 pattern の規律: escape / 文字クラス /
           //   実改行のいずれかを含める)。
+          // TDA-2 (R2 で開示を訂正): 包含チェーンは **2 本ではなく 3 本**。直上に足した `bestOfMs` header
+          //   pattern (`repeat = BEST_OF_REPEA[T]\): number => \{` + warm-up 2 行) は `\b` 形と `\)` 形の
+          //   **両方**を支配する (3 本とも唯一の対象が同一開始位置)。よって `\b` 形も `\)` 形も独立の RED を
+          //   作れない = 恒久的な保守コストのみ (削除は規律で禁止)。実効的な歯は header pattern が持つ。
           // TDA-LN4-1 (task 01a048f6-67a5 で**実測確認**): 2 本目の `\)` 形は 1 本目の `\b` 形に包含される
           //   (`)` は非単語文字ゆえ `\b` 側が必ず先に満たす) = 単独では発火しない冗長 pattern。両者の対象は
           //   `bestOfMs` の**同一行** 1 箇所しか無いので、削除 (規律で禁止) 以外に包含を解く綴りは無い
@@ -1401,13 +1498,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /repeat = BEST_OF_REPEA[T]\b/,
           /repeat = BEST_OF_REPEA[T]\)/,
           /const derivedLive = derived\.filter\(/,
-          // QA-LN2-3 ≡ QA-LN3-3 ≡ QA-LN4-3 (task 01a048f6-67a5 で着地): message つき assertion の pin は
-          //   `expect\(<name>, [^\n]*\)` 形だと printWidth の余裕が数字分しかなく、message を数語伸ばすだけで
-          //   prettier が `expect(` の直後で折り返し **pattern が偽 RED になる** (実測: message を伸ばして
-          //   `prettier --write` を掛けると `derivedLive` / `checked` の 2 本が旧形では非マッチ・新形は
-          //   マッチ継続)。`expect\(\s*<name>,` + `[\s\S]*?` で開き括弧側・引数側の両方の折返しを許容する。
-          //   6 本すべてで折返し前の match 対象が旧形と逐語同一であることを probe で確認済み。
-          /expect\(\s*derivedLive\.length,[\s\S]*?\)\.toBeGreaterThan\(0\);/,
+          // 折返し許容 pin 6 本は `WRAP_TOLERANT_PINS` (上) が単一出所。歯の保存 (SEC-HP-1) を
+          //   同じ配列から in-memory 変異で機械 assert するため、pattern はそこにだけ書く。
+          ...WRAP_TOLERANT_PINS.map((p) => p.re),
           /expect\(derived\)\.toContain\(prefix\);/,
           // 軸 (3)(4) の **配線本体**も左右対称に pin する (assertion だけだと derivedSeedsFor 側の
           //   1 行削除が per-rule pin の RED 経由でしか出ない・SEC-LN-1)。
@@ -1451,8 +1544,6 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /ratios\.push\(tLarge \/ Math\.max\(tSmall, 0\.005\)\);/,
           /const median = medianOf\(ratios\);/,
           /const worst = maxOf\(ratios\);/,
-          /expect\(\s*median,[\s\S]*?\)\.toBeLessThan\(RATIO_MAX\);/,
-          /expect\(\s*worst,[\s\S]*?\)\.toBeLessThan\(RATIO_MAX_H[I]\);/,
           /\.toBeLessThan\(RATIO_MAX\);/,
           /\n\s+LINEAR_IT_TIMEOUT_MS,\n\s+\);/,
           /expect\(totalCases\)\.toBe\(TOTAL_CASES_MEASURED\);/,
@@ -1472,21 +1563,51 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           //   出ない)。合成ケースの値 pin と左右対称に、走査行の綴りもここで pin する。
           /\(e\) => e\.reSource === target\.re\.source && e\.classSource === cls,/,
           /expect\(\n\s+excluded\.filter\(\(c\) => !TAIL_METACHARS\.test\(c\)\),/,
-          /expect\(\s*checked,[\s\S]*?\)\.toBe\(3\);/,
-          /expect\(\s*asserted,[\s\S]*?\)\.toBe\(2\);/,
           // 構造ゲートの 2 本の assertion 本体 (count pin だけでは 1 行削除を捕まえられない)。
           /expect\(\n\s+rule\.segmentRe,/,
           /expect\(\n\s+samples\[i\]\?\.segmentCmd,/,
-          /expect\(\s*gated,[\s\S]*?\)\.toBe\(1\);/,
           /expect\(suffixWiredCases\)\.toBe\(17\);/,
         ];
         // 追加のみ・削除禁止 (finding-registry): pin pattern の**本数**自体を pin し、1 本を静かに
         //   落とす編集を RED にする (header の宣言 / 使用側 pattern 数の機械的な出所 — 数値は直下の 2 本の assertion が正で、ここには繰り返さない)。
-        expect(declarations.length, "宣言 pin の本数").toBe(14);
+        expect(declarations.length, "宣言 pin の本数").toBe(16);
         expect(usages.length, "使用側 pin の本数").toBe(53);
         for (const re of [...declarations, ...usages]) {
           expect(self, `tripwire ${String(re)}`).toMatch(re);
+          // QA-2 / TDA-1 推奨 3 (span 上限の構造 backstop): 綴りに依らず「1 本の pin が別文へ
+          //   跨ぐ」形を止める。歯を失った 2 本の実測 span は 14,474 / 8,451 字で、健全な最大
+          //   (折返し後 144 字) とは 2 桁違う。将来 `[\s\S]*?` 様の無界 gap が混入しても、対象を
+          //   vacuous 化した瞬間に span が伸びてここで RED になる。
+          const hitSpan = (self.match(re) ?? [""])[0].length;
+          expect(
+            hitSpan,
+            `pin span (無界 gap の混入 = 別文への跨ぎを止める): ${String(re)}`,
+          ).toBeLessThanOrEqual(MAX_PIN_SPAN);
         }
+        // (a) の landing テスト (SEC-HP-1 ≡ QA-1 ≡ TDA-1 の evidence を逐語 pin・TDA-1 推奨 2):
+        //   「綴り変更の受け入れ基準は静的な同一行一致ではなく**歯の保存**」を機械化する。各
+        //   折返し許容 pin について、その match text の**内側だけ**を弱化した source を in-memory で
+        //   作り、pattern が**非マッチへ落ちる**ことを assert する (ファイル書込なし)。R1 の
+        //   `[\s\S]*?` 形ではこの assertion が `derivedLive` / `gated` の 2 本で RED になる。
+        let teethChecked = 0;
+        for (const v of WRAP_TOLERANT_PINS) {
+          // 有界化の綴りを直接 pin する (無界形への差し戻しをここで止める)。
+          expect(v.re.source, `折返し許容は文境界クラスで有界化する: ${String(v.re)}`).toContain(
+            "[^;]*?",
+          );
+          const hit = self.match(v.re);
+          expect(hit, `折返し許容 pin の対象が存在する: ${String(v.re)}`).not.toBeNull();
+          const weakened = hit![0].replace(v.from, v.to);
+          // vector が実際に対象を書き換えている (from が空振りする綴りずれを RED に)。
+          expect(weakened, `弱化 vector が効いていない: ${String(v.re)}`).not.toBe(hit![0]);
+          const mutated = self.replace(hit![0], weakened);
+          expect(
+            mutated,
+            `歯の保存: 対象を弱化しても pin が別 span で充足する (SEC-HP-1 の再発): ${String(v.re)}`,
+          ).not.toMatch(v.re);
+          teethChecked += 1;
+        }
+        expect(teethChecked, "歯の保存を検査した折返し許容 pin の本数").toBe(6);
         // 非自己充足メタ pin (QA-LN3-1 / SEC-LN3-1・task 01a048f6-67a5): 上の `toMatch(self)` は
         //   **本 it ブロック自身**の regex リテラルで満たされうる。R2 unblock で `\)` → `\b` へ変えた
         //   `repeat = BEST_OF_REPEAT\b` が実際に自分の pattern 行に充足して恒真化した (綴りを
@@ -1508,8 +1629,24 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         const outsideTripwire = self.slice(0, tripwireStart);
         // 切除点が **pattern 配列より前**にあることを、マーカーの綴りに依らず直接 pin する
         //   (配列が view に残ると各 pattern が自分の regex リテラルで満たされ恒真化する)。
-        expect(outsideTripwire).not.toContain("const declarations: readonly RegExp[] = [");
-        expect(outsideTripwire).not.toContain("const usages: readonly RegExp[] = [");
+        // SEC-HP-2 (task 01a048f6-67a5 R2・playbook ⑥): negative assert は**参照が消えるだけで
+        //   黙って恒真化**する。R1 では配列の型注釈を無害に改名する 1 手 (META-2b:
+        //   `readonly RegExp[]` → `ReadonlyArray<RegExp>`・2 site・挙動同値) で 2 本とも真になり、
+        //   marker 再指定 (META-5) と自己充足 pattern 注入 (META-6) を重ねてもメタ pin が完全に
+        //   死んだまま 295 全緑だった。**同一リテラルの POSITIVE 対**を併設し、参照リテラルが
+        //   source から消えたら negative より先に RED にする。
+        //   リテラルは **2 分割 + `join`** で組み立てる (逐語で書くと本 assertion 行自身が
+        //   `self` 内の出現になり POSITIVE 側が恒真化する — マーカーと同じ規律)。
+        const DECLARATIONS_HEAD = ["const declarations: readonly", "RegExp[] = ["].join(" ");
+        const USAGES_HEAD = ["const usages: readonly", "RegExp[] = ["].join(" ");
+        expect(self, "切除 view 構築の参照リテラル (declarations) が code に残っている").toContain(
+          DECLARATIONS_HEAD,
+        );
+        expect(self, "切除 view 構築の参照リテラル (usages) が code に残っている").toContain(
+          USAGES_HEAD,
+        );
+        expect(outsideTripwire).not.toContain(DECLARATIONS_HEAD);
+        expect(outsideTripwire).not.toContain(USAGES_HEAD);
         for (const re of [...declarations, ...usages]) {
           expect(
             outsideTripwire,
@@ -1527,6 +1664,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         //   (`totalCases`) も同じ理由で census に載せる — 本体を逐語 pin しても、`SCAN_TARGETS.forEach`
         //   の中で `const fill = (s: string) => s` を再宣言すれば pin 済みの綴りを残したまま計測が潰れる。
         const names = [
+          "MAX_PIN_SPAN",
+          "WRAP_TOLERANT_PINS",
           "minOf",
           "bestOfMs",
           "fill",
@@ -1550,7 +1689,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           "TAIL_METACHARS",
         ];
         // 追加のみ・削除禁止 (finding-registry): census の本数自体を pin する (1 名を静かに落とす編集を RED に)。
-        expect(names.length, "宣言個数 census の名前数").toBe(21);
+        expect(names.length, "宣言個数 census の名前数").toBe(23);
         // SEC-LN3-5 ≡ TDA-LN3-5 (task 01a048f6-67a5): census をファイル全域で総称名 (`K` / `SMALL` /
         //   `fill` / `minOf`) の走査に掛けると、**本 describe と無関係な**将来の宣言が偽 RED を作る
         //   (安全方向だが誤診断)。走査を LINEAR describe の範囲へ限定する。マーカーはやはり **code**
@@ -1561,6 +1700,12 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           "INV-LITERAL-RULES-LINEAR",
           "(SEC-DB2-1): 各 LITERAL_RULES",
         ].join(" ");
+        // TDA-3 (実測 bound・R2 で開示): 右境界は **LINEAR describe の終端ではなく、隣接する無関係な
+        //   describe の title** に錨づけている。ゆえに (i) LINEAR と NETWORK-EXEC の**間**に総称名
+        //   (`const K` 等) を持つ describe を挟むと偽 RED、(ii) NETWORK-EXEC describe の rename / 移動 /
+        //   削除で `linearEnd = -1` になり `toBeGreaterThan(tripwireStart)` が偽 RED になる (probe P2a で
+        //   実測)。EOF 側の無関係宣言は塞げている (P2b: base 偽 RED / head 緑) ので改善は実在するが、
+        //   窓は残る。いずれも安全方向 (偽 RED) の誤診断。専用 sentinel 化は別 PR (走査範囲の変更)。
         const AFTER_LINEAR_MARKER = ["INV-NETWORK-EXEC-SINGLE-SOURCE", "(TDA-2): egress 判定"].join(
           " ",
         );
