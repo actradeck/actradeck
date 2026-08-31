@@ -2485,7 +2485,8 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   01a0480f-d29a で長 option 列の陽性を入れた結果 **319** になり (旧記述の 20 は失効)、束縛値の歯は
  *   unit test **5 行** — 現実形 1 + whole-command の 512/513 + segment スコープの 512/513・SEC-DB2R3-4)。
  *   全ルールの線形性は INV-LITERAL-RULES-LINEAR (inv-policy-categories) が **regex source
- *   由来の敵対 seed + sample 先頭語 seed + sample 由来 prefix seed + 後尾由来 prefix seed** で best-of-N 回帰固定する。**網羅の範囲
+ *   由来の敵対 seed + sample 先頭語 seed + sample 由来 prefix seed + 後尾由来 prefix seed + 各 metachar 以降の全 suffix 由来
+ *   prefix seed** で best-of-N 回帰固定する (両側 ratio 判定)。**網羅の範囲
  *   (SEC-DB2R3-1 / QA-DB2R3-1 / task 01a0484c-ecbd)**:
  *   source 由来 seed は先頭 literal が**平坦に綴られた**ルール (現行 17 スキャン regex 中 15 本・#2 fork-bomb は literal run 空、
  *   #12 flush は alternation で断片化・どちらも gap 無し。index は SCAN_TARGETS 基準・QA-MA-4) に届く。alternation / 任意記号を跨ぐ綴り
@@ -2505,30 +2506,36 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   (SEC-LN4-6 / TDA-LN4-4): 先頭 literal が平坦に綴られた規則なら第 1 軸が既に RED (37〜67) なので、第 4 軸が
  *   唯一の検出手段になるのは「source literal が断片化 ∧ 先頭 literal の**前**に gap metachar ∧ マッチ完了の
  *   **後**に gap metachar なし」の積集合に限る。
- *   **SEC-LN-1 は部分閉塞** (SEC-LN4-1 ≡ TDA-LN4-2・base 同値ゆえ非ブロッカー): 閉じたのは「最後の metachar
- *   以降の後尾が**なお規則を踏む**」sample に限る。**以下は R1 full 監査 + 実装者 probe が列挙できた死角であって
- *   網羅の主張ではない** (R1 の死角リストは 2 件だったが同じ R1 の SEC-LN4-3 / QA-LN4-1 が ③ を実測済み = リスト側の
- *   取りこぼし・SEC-LN4R2-4) — ① 末尾 literal が先頭 literal の
- *   反復で再構成される規則 (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし)、② 先頭 literal の**前と**
- *   マッチ完了の**後**の両方に gap metachar がある sample (`cd /app && prog … word | tee log` /
- *   `… word; echo done` / 改行後続) — 後尾が規則を踏まず第 4 軸が null になり、第 3 軸も反復が分断済みゆえ
- *   **4 軸すべてを回避**する (2 乗形が 7.7〜9.1 に留まって SURVIVED・現行 17 に該当 sample なし・是正 = 第 5 軸
- *   「各 metachar 以降の全 suffix」は task 01a05374-36d2-7419-ac3f-4a22c160cbcc・v0.9・full)、③ 規則の gap クラスが
- *   test 側 `TAIL_METACHARS` より**広い**綴り (`[^|;&\r\n]` 等) でその差分文字を前置した sample — 後尾の切り出しが
- *   働かず第 4 軸が第 3 軸へ退化する (SEC R1 が CR 前置 / QA R1 が `>` 前置で SURVIVED を実測・実装者 probe 3 run で
- *   8.4〜16.0 を再現・正のクラス gap `[\w\s-]*` + 絶対パス sample でも 4 軸 SURVIVED 7.5〜11.0 (SEC-LN4R2-2)・下記
- *   SEC-LN4-3 の手写しミラー問題が seed 軸に現れたもの。`TAIL_METACHARS` を**広げる**方向も last-only 切り出しでは
- *   `… > out.log` 形の検出を失う (SEC-LN4R2-1) ため、拡張は第 5 軸と同時にのみ行う)。
- *   なお ratio 判定は**単発比**で、2 乗形の 1 seed が vitest harness 内 12 回中 1 回だけ緑になった実測がある
- *   (bare node 60 回では 0/60)。逆に全 suite 並走 + 2×nproc 外部負荷 (load 35〜48) では線形ルールが 24 超の false RED
- *   になる実測もある (QA-LN4R2-2・base 26.88・pre-existing)。両側の是正 (max 単独でなく両側判定 + 分離幅再測) は
- *   task 01a05374-36d2-7419-ac3f-4f88be2481fc・v0.9・targeted。
- *   test 側 `TAIL_METACHARS` は src の gap クラス `[^|;&\n]` の**手写し 2 コピー目**で結合 pin が無い
- *   (SEC-LN4-3・将来 `[^|;&\r\n]` 等の綴りが入ると第 4 軸が取り残される・構造ゲートは task 01a04989-4a0c・
- *   v0.9・full)。
+ *   **第 5 軸 (task 01a05374-36d2-7419-ac3f-4a22c160cbcc・本 PR)** は sample の**各** gap metachar 以降の
+ *   **全 suffix** へ同じ prefix 導出を掛ける (第 4 軸の superset・第 4 軸は削除しない)。第 4 軸が閉じたのは
+ *   「最後の metachar 以降の後尾が**なお規則を踏む**」sample に限られ、先頭 literal の**前と**マッチ完了の
+ *   **後**の両方に metachar がある形 (`cd /app && prog … word | tee log` / `… word; echo done` / 改行後続) では
+ *   後尾が規則を踏まず null になって 4 軸すべてを回避していた。全 suffix なら「先頭 literal の直前の metachar で
+ *   切った suffix」が必ず候補に入る — E/F/G/L/M の 5 形が **4 軸 SURVIVED (max 7.9〜8.5) → 5 軸 RED
+ *   (median 62.7〜64.1)** へ反転する (coordinated 再注入で実測)。現行 sample に該当形は無く**ケース数は 110 のまま**で、
+ *   配線の歯は per-rule の合成 cmd `cd /app && <sample> | tee log` (**17/17** で非 vacuous・同じ cmd で第 4 軸は null)。
+ *   **閉じた形は実測した形に限る。以下は反証探索 (Z1〜Z10) で列挙できた残余であって網羅の主張ではない** —
+ *   ① 末尾 literal が先頭 literal の反復で再構成される規則 (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし・
+ *   第 5 軸でも閉じない)、② 結合検査の文字 universe が有限 (ASCII 95 + 制御 5 + 非 ASCII 分離子 5) で、その外の文字
+ *   だけを除外する gap クラスは結合検査を素通りし切り出しも受けない (NBSP で実測・universe は追加のみ)、
+ *   ③' **結合検査と構造ゲートは綴りに bound される (TDA-LN5-1)**: どちらも量化クラス抽出
+ *   (`QUANTIFIED_CLASS_RE`) の結果にしか適用されない = **`[...]` の直後に量化子が隣接する綴り**に限る。
+ *   実測で抽出されなかった綴り: 群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation
+ *   `(?:[^|;&\n]|x)*` / 量化 shorthand `\S*` `\s+` / 未量化 `[abc]` (lazy `*?` と `{n,m}` は抽出される)。
+ *   これらの綴りで書かれた規則には結合検査も構造ゲートも適用されない (seed 軸は綴りに依らず全スキャン
+ *   regex を測るので、失われるのは 2 ゲートの適用であって計測ではない)。現行 17 に該当する綴りは無い。
+ *   旧死角 ③ (gap クラスが test 側 `TAIL_METACHARS` より広い綴り `[^|;&\r\n]` / `[^|;&\n<>]`・正のクラス
+ *   `[\w\s-]*`) は seed 軸としては閉じていないが、**結合検査 (task 01a04989-4a0c・本 PR)** が
+ *   「全スキャン regex の量化クラスが除外する文字 ⊆ `TAIL_METACHARS`」を assert して**そのような規則の着地を
+ *   RED にする** (3 形とも当該 assertion で RED を実測・現行 17 は緑。ただし上の ③' の綴りで書けば抽出されず
+ *   通る)。正のクラスの例外は `(re.source, class.source)` 対で keyed した明示 exemption 1 件
+ *   (`git clean -[a-z]*f`) のみで、対の**片側だけ**一致するケースは免除されない (対 keyed の意味論を複製 helper の合成ケースで pin 済み・走査行自体は逐語 tripwire が守る)。
+ *   ratio 判定は**両側** (単発比の false green = 2 乗形が 12 回中 1 回緑 / false RED = 全 suite 並走 + 2×nproc 外部
+ *   負荷で線形が 26.88 の両方を是正・task 01a05374-36d2-7419-ac3f-4f88be2481fc・本 PR): 3 回計測し
+ *   「中央値 < 24 かつ 最大 < 40」で判定する。
  *   vacuity guard は汎用 seed `a ` を除いた派生 seed で
  *   計数し (SEC-DB2R4-3 の恒真を解消)、metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の除去 /
- *   軸 4 の区切り集合の縮小 /
+ *   軸 4/5 の区切り集合の縮小 / 両側判定の片側化 / 結合検査 universe の縮小 /
  *   RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は自己弱化 pin が **pin 済みの綴り (定数宣言 / 使用側 / 宣言個数 census) を触る単独編集の
  *   範囲で** RED にする (SEC-DB2R3-2・計測 helper 本体・`for (const seed of live)` ループ header・pin 自身は非被覆・
  *   coordinated 編集は通る・TDA-LN2-3 /
@@ -2569,6 +2576,26 @@ interface LiteralRule {
    */
   readonly labels: readonly string[];
 }
+/**
+ * **規律: 手書きの分離子クラスを新規行に書かない (task 01a04989-4a0c)**。
+ *
+ * `[^|;&\n]` のような「区切りを跨がない」を字面で表現するクラスは正準 splitter を共有しない**第二の
+ * パーサ**で (`security-gate-reuse-canonical-parser` が禁じる形)、引用内 metachar (`-p'a;b'`) や行継続で
+ * 境界が分断され high が low へ落ちる (SEC-DB2-2 の実体)。segment 単位の判定が要るなら正準
+ * `splitSegments` の segment に適用する `segmentRe` を併記すること。whole-command 側に既存の綴りを
+ * **非弱化 backstop** として残すのは可 (mysqladmin 行がその形)。
+ *
+ * これは docs 上の願いではなく INV-LITERAL-RULES-LINEAR (inv-policy-categories) の**構造ゲート**が
+ * 機械的に強制する: `re` の否定文字クラスが `|` `;` `&` 改行のいずれかを列挙する行は `segmentRe` と
+ * segment sample (`samples[i].segmentCmd`) を持たなければ RED。さらに全スキャン regex の**量化クラスが
+ * 除外する文字**は test 側 `TAIL_METACHARS` に収まっていなければ RED (seed 軸 (4)(5) の切り出しとの結合・
+ * 正のクラスの例外は (regex source, class source) 対で keyed した明示 exemption のみ)。
+ *
+ * **強制の範囲は綴りに bound される (TDA-LN5-1・実測)**: どちらのゲートも「`[...]` の直後に量化子が
+ * 隣接する綴り」しか抽出しない。群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation /
+ * 量化 shorthand `\S*` `\s+` / 未量化 `[abc]` はどちらのゲートも通らないので、**規律そのものは依然
+ * 人が守る必要がある** (機械的強制はこれらの綴りには届かない)。
+ */
 export const LITERAL_RULES: readonly LiteralRule[] = [
   { re: /\bmkfs\b/i, category: "disk-destroy", high: true, labels: ["mkfs"] },
   { re: /\bdd\s+if=/i, category: "disk-destroy", high: true, labels: ["dd if="] },
