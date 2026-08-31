@@ -129,20 +129,53 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   staleness check read, and otherwise linked back with the acquirer backing off (a restore that
   cannot be completed aborts loudly rather than continuing with two holders). A lock that is simply
   missing is treated as "just released" and retried without deleting anything. A lock whose content
-  cannot be read at all is no longer taken over — and that trade has a cost worth stating plainly:
-  such a lock (`EACCES`, `EISDIR`) no longer recovers on its own. Until the file is removed, the
-  approval allowlist's add, revoke, and clear, the approval-policy persist, and the attach-settings
-  merge/detach all fail — the daemon does not crash, it reports only the failure count; the CLI
-  paths fail loudly — and an auto-allow that was already persisted
-  stays in force until its TTL (7 days by default) runs out, so an entry the operator believes they
-  revoked can keep allowing without a UI approval. The operator clears this by removing the
-  offending `*.actradeck-lock` by hand. What it buys: previously an unreadable lock was taken over
-  blindly, and a lock path that was a directory spun in a silent busy-loop that never timed out.
+  cannot be read at all is no longer taken over, because its identity cannot be re-verified against
+  what the staleness check saw; previously such a lock was taken over blindly, and a lock path that
+  was a directory spun in a silent busy-loop that never timed out. (Releasing your _own_ lock no
+  longer needs to read it — see the identity entry below.)
   A pathological free-to-held flap now aborts loudly after 1000 immediate retries rather than
   spinning in silence. The `<lockPath>.stale-<pid>-<seq>` file a takeover detaches into is removed
   on every normal path, but a crash between the detach and that cleanup can leave one behind; there
   is no reaper, and such a file is never read as a lock.
   `INV-FILELOCK-STALE-TAKEOVER-IDENTITY` reproduces both races with three real processes.
+- **A lock is now identified by the file it is, not by the pid written in it.** The identity
+  re-check above compared the detached file's bytes with the bytes the staleness check read. A lock
+  only ever contains `${pid}\n`, so that comparison was really pid-granular: a holder that released
+  and immediately re-acquired produced a byte-identical but _different_ file, and the acquirer
+  discarded that live lock and entered the critical section alongside it. The acquirer now records
+  the `(dev, ino)` of the inode it links into place and requires **both** that pair and the exact
+  bytes to match before discarding anything (the byte check is kept, not replaced), so a same-bytes
+  different-inode swap is restored and backed off instead of destroyed.
+  What this narrows rather than eliminates: the pair is still a number the operating system may
+  recycle. Reaching the ambiguous case now needs the same pid _and_ a recycled inode number, where
+  before the same pid alone sufficed. `INV-FILELOCK-IDENTITY-V2` reproduces the race with real
+  processes, and had to allocate decoy files to stop ext4 handing the freed inode number straight
+  back — measured, not assumed.
+- **Releasing a lock is now atomic the same way taking one over is.** Release read the lock,
+  decided it was ours, then unlinked it; a third party could swap the lock in between, and the
+  unlink then removed theirs. Release now detaches with `rename`, re-checks `(dev, ino)`, and only
+  then unlinks — and if what it detached turns out to be someone else's, it links it back and, when
+  even that fails, aborts loudly rather than silently leaving the serialization broken. That abort
+  is raised only when the guarded function itself succeeded; if the function threw, its error is the
+  one that propagates.
+- **A lock that becomes unreadable while you hold it no longer wedges the approval allowlist.**
+  Because release now identifies its own lock by `(dev, ino)` — which `stat` reports without read
+  permission — a lock whose mode or ownership changes out from under a running daemon is still
+  released. Previously release went through the same read as takeover, so an `EACCES` lock stayed on
+  disk: the approval allowlist's add, revoke and clear, the approval-policy persist and the
+  attach-settings merge/detach all failed until an operator deleted the file by hand, and an
+  auto-allow already on disk kept allowing without a UI approval until its TTL (7 days by default)
+  ran out. Acquisition is unchanged and still refuses to take over a lock it cannot read — that one
+  might belong to somebody else. A lock file that is unreadable _and_ not the inode this process
+  linked into place is still left alone, and one that cannot even be `stat`ed still needs the
+  operator.
+- **A takeover that cannot restore what it detached now keeps that file instead of deleting it.**
+  When a third process grabs the lock path in the window between the `rename` that detaches a lock
+  and the `link` that would put it back, the restore fails and the acquirer aborts without entering
+  the critical section — but the cleanup that followed then deleted the detached file, destroying
+  the lock of a holder that was still running. The detached inode is now kept under its
+  `.stale-<pid>-<seq>` name and the error message names the path. The exposure this does not remove:
+  the evicted holder and the third party can still overlap, which is why the abort is loud.
 - **The daily public-metrics snapshot lands on a dedicated `metrics` branch instead of `main`.**
   The `main` ruleset requires a pull request and the `verify` check, so every scheduled run from
   2026-08-26 to 2026-08-28 was rejected with GH013 and no snapshot was recorded. The workflow now
