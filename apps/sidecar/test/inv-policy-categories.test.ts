@@ -525,7 +525,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         (lazy `*?` と `{n,m}` は抽出される)。これらの綴りで書かれた規則は coupling も構造ゲートも通らない
   //         ので、「TAIL_METACHARS がその規則の区切りを覆っている」保証と `segmentRe` 要求が効かない。
   //         seed 軸自体は綴りに依らず全スキャン regex を測るため、失われるのは計測ではなく**この 2 つの
-  //         ゲートの適用**。現行 17 スキャン regex に該当する綴りは無い。
+  //         ゲートの適用**。ただし ③' の綴りと下の ②/③ の seed 死角を**併せ持つ**規則は、ゲートにも seed にも
+  //         捕まらない (実測: 群括り gap の 2 乗ルール + CR 前置 sample で coupling / 構造ゲート / ratio がすべて
+  //         緑・SEC-LN5R2-2)。現行 17 スキャン regex に該当する綴りは無い。緩和は task 01a0574f-521a。
   //     旧死角 ③ (規則の gap クラスが `TAIL_METACHARS` より広い綴り `[^|;&\r\n]` / `[^|;&\n<>]`・正のクラス
   //     `[\w\s-]*`) は **seed 軸としては依然閉じていない**が、下の coupling metatest (task 01a04989-4a0c) が
   //     「全スキャン regex の量化クラスが除外する文字 ⊆ TAIL_METACHARS」を assert して**そのような規則の着地自体を
@@ -637,7 +639,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     //   「RED だが理由が出ない」になる (実測: 注入した 2 乗ルール 1 ケースが **37.0〜38.9s**・無負荷)。
     //   **QA-LN5-4 の訂正**: 旧記述の「飽和 ≈ 3× を見込んで 120s」は余裕の根拠になっていない。実測の
     //   contention 係数は **4.05×** (2×nproc 飽和 / 無負荷) なので、2 乗を注入した it は 37〜39s × 4.05
-    //   ≈ **150〜158s > 120s** になりうる = 飽和下では診断の前に timeout しうる。それでも値を 120s に
+    //   ≈ **150〜158s > 120s** になりうる (2 乗注入 it の直接実測でも飽和下 261〜279s)。= 飽和下では診断の前に timeout しうる。それでも値を 120s に
     //   据え置くのは、**timeout が同期テスト本体を中断しない**ため超過しても RED として終わる (失うのは
     //   診断のみ・偽 green にはならない) から。線形ルールの 1 ケースは 1〜60ms なのでそちら側の余裕は
     //   変わらない。値を動かすなら走査範囲の変更として full 監査。
@@ -1258,8 +1260,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         // QA-LN5-1: 上の走査は「**(reSource, classSource) の対**で keyed」に依存する。片側 keyed へ
         //   弱める 1 行編集 (`&& e.classSource === cls` を落とす) は、`git clean` 行に**別の**クラスを
         //   足したときそれも黙って免除する。データ (`NON_GAP_CLASS_EXEMPTIONS` の中身) は変えずに、
-        //   合成した (reSource, classSource) の組で predicate の**値**を直接 pin する。走査行そのものの
-        //   綴りは自己弱化 tripwire の usages でも pin する (左右対称: 判定の値と走査行の両方)。
+        //   対 keyed の意味論を**ローカル複製 helper** (`exemptionApplies`) の値として pin する。走査
+        //   predicate 本体の値ではない — 走査行自体の歯は自己弱化 tripwire の逐語 pin (T4 で RED 実測) で、
+        //   pin 済み行を残したまま隣接行に別 predicate を挿入する編集は非被覆 (TDA-LN5R2-2 / QA-LN5R2-1・
+        //   走査の単一出所化は task 01a0574f-521a)。
         const exemptionApplies = (reSource: string, cls: string): boolean =>
           NON_GAP_CLASS_EXEMPTIONS.some((e) => e.reSource === reSource && e.classSource === cls);
         // 対が一致するときだけ免除される。
@@ -1420,13 +1424,15 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /expect\(suffixWiredCases\)\.toBe\(17\);/,
         ];
         // 追加のみ・削除禁止 (finding-registry): pin pattern の**本数**自体を pin し、1 本を静かに
-        //   落とす編集を RED にする (header の「定数宣言 14 本・使用側 42 pattern」の機械的な出所)。
+        //   落とす編集を RED にする (header の宣言 / 使用側 pattern 数の機械的な出所 — 数値は直下の 2 本の assertion が正で、ここには繰り返さない)。
         expect(declarations.length, "宣言 pin の本数").toBe(14);
         expect(usages.length, "使用側 pin の本数").toBe(43);
         for (const re of [...declarations, ...usages]) {
           expect(self, `tripwire ${String(re)}`).toMatch(re);
         }
-        // 各定数の宣言はちょうど 1 回 (forEach 内での再宣言 = shadow を検出)。
+        // 各定数の宣言はちょうど 1 回 (forEach 内での再宣言 = shadow を検出)。census の走査は
+        //   `const / let / var` 綴りに限り、`function` 宣言形の shadow は見えない (TDA-LN5R2-1・綴り
+        //   非依存化は task 01a0574f-521a)。
         // TDA-LN5-3/4: 両側判定の**集約関数** (`medianOf` / `maxOf`) も census に載せる。定数と違って
         //   絶対値 pin が無いので、`SCAN_TARGETS.forEach` の中で `const medianOf = (xs) => Math.min(...xs)`
         //   / `const maxOf = (xs) => xs[0]` を再宣言すると、判定が単発比相当へ静かに退化したまま全緑に

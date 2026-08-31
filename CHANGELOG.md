@@ -94,7 +94,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   silently. One exemption is recorded, keyed to both the expression and the class it exempts, for the
   flag-matching `[a-z]` in the `git clean` rule, which is not a gap between two words; a case
   matching only one half of that pair - the same expression with a different class, or the same
-  class on a different expression - is not exempted, and the test pins that directly. Alongside it,
+  class on a different expression - is not exempted. The test pins that meaning on a local copy of
+  the predicate, and holds the scanning line itself with the verbatim tripwire. Alongside it,
   a structural gate refuses a rule whose whole-command expression spells a separator class by hand
   with the quantifier written immediately after the class, unless it also carries the canonical
   segment-scoped expression and a sample that only the segment scope matches - the discipline that a
@@ -110,8 +111,10 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   quantifier directly after them: a class wrapped in a group or a capture, one written as an
   alternation, a quantified shorthand such as `\S*`, and an unquantified class are not extracted at
   all - measured - so neither gate applies to a rule spelled that way. The seeds still measure every
-  scanned expression regardless of its spelling; what those spellings escape is the two gates, not
-  the measurement.
+  scanned expression regardless of its spelling, so what those spellings escape on their own is the
+  two gates, not the measurement - but a rule that combines such a spelling with one of the open
+  seed blind spots above escapes the measurement too (measured: a group-wrapped quadratic gap with a
+  carriage-return-prefixed sample passed the coupling, the gate, and every ratio check).
 
 ### Fixed
 

@@ -2529,7 +2529,7 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   「全スキャン regex の量化クラスが除外する文字 ⊆ `TAIL_METACHARS`」を assert して**そのような規則の着地を
  *   RED にする** (3 形とも当該 assertion で RED を実測・現行 17 は緑。ただし上の ③' の綴りで書けば抽出されず
  *   通る)。正のクラスの例外は `(re.source, class.source)` 対で keyed した明示 exemption 1 件
- *   (`git clean -[a-z]*f`) のみで、対の**片側だけ**一致するケースは免除されない (合成ケースで値を pin 済み)。
+ *   (`git clean -[a-z]*f`) のみで、対の**片側だけ**一致するケースは免除されない (対 keyed の意味論を複製 helper の合成ケースで pin 済み・走査行自体は逐語 tripwire が守る)。
  *   ratio 判定は**両側** (単発比の false green = 2 乗形が 12 回中 1 回緑 / false RED = 全 suite 並走 + 2×nproc 外部
  *   負荷で線形が 26.88 の両方を是正・task 01a05374-36d2-7419-ac3f-4f88be2481fc・本 PR): 3 回計測し
  *   「中央値 < 24 かつ 最大 < 40」で判定する。
