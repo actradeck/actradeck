@@ -92,18 +92,26 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   spelled with a carriage return in its gap class, one spelled with redirection characters, and one
   using a positive class all fail that assertion, where before they measured as linear and shipped
   silently. One exemption is recorded, keyed to both the expression and the class it exempts, for the
-  flag-matching `[a-z]` in the `git clean` rule, which is not a gap between two words. Alongside it,
-  a structural gate refuses any rule whose whole-command expression spells a separator class by hand
-  unless it also carries the canonical segment-scoped expression and a sample that only the segment
-  scope matches - the discipline that a hand-written separator class is a second parser, previously
-  only written down in the rules, is now enforced by a failing test.
+  flag-matching `[a-z]` in the `git clean` rule, which is not a gap between two words; a case
+  matching only one half of that pair - the same expression with a different class, or the same
+  class on a different expression - is not exempted, and the test pins that directly. Alongside it,
+  a structural gate refuses a rule whose whole-command expression spells a separator class by hand
+  with the quantifier written immediately after the class, unless it also carries the canonical
+  segment-scoped expression and a sample that only the segment scope matches - the discipline that a
+  hand-written separator class is a second parser, previously only written down in the rules, is now
+  enforced by a failing test for that spelling.
   What remains open is stated in the test and in the classifier's documentation, and it is what this
   round's search found, not a claim of completeness. A rule whose trailing literal is reconstructed
-  by repeating its own leading literal still evades every seed. And the coupling compares against a
+  by repeating its own leading literal still evades every seed. The coupling compares against a
   finite set of characters (ASCII plus five control characters and five non-ASCII separators), so a
   gap class that excludes only some character outside that set would pass the coupling and evade the
   cut - measured with a non-breaking space, which is why the set now contains one and is documented
-  as add-only.
+  as add-only. And both the coupling and the structural gate read only classes written with a
+  quantifier directly after them: a class wrapped in a group or a capture, one written as an
+  alternation, a quantified shorthand such as `\S*`, and an unquantified class are not extracted at
+  all - measured - so neither gate applies to a rule spelled that way. The seeds still measure every
+  scanned expression regardless of its spelling; what those spellings escape is the two gates, not
+  the measurement.
 
 ### Fixed
 

@@ -2517,12 +2517,19 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   **閉じた形は実測した形に限る。以下は反証探索 (Z1〜Z10) で列挙できた残余であって網羅の主張ではない** —
  *   ① 末尾 literal が先頭 literal の反復で再構成される規則 (`\bfoo\b[^…]*\bfoo\b`・TDA-DB2R3-2・現行 17 に該当形なし・
  *   第 5 軸でも閉じない)、② 結合検査の文字 universe が有限 (ASCII 95 + 制御 5 + 非 ASCII 分離子 5) で、その外の文字
- *   だけを除外する gap クラスは結合検査を素通りし切り出しも受けない (NBSP で実測・universe は追加のみ)。
+ *   だけを除外する gap クラスは結合検査を素通りし切り出しも受けない (NBSP で実測・universe は追加のみ)、
+ *   ③' **結合検査と構造ゲートは綴りに bound される (TDA-LN5-1)**: どちらも量化クラス抽出
+ *   (`QUANTIFIED_CLASS_RE`) の結果にしか適用されない = **`[...]` の直後に量化子が隣接する綴り**に限る。
+ *   実測で抽出されなかった綴り: 群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation
+ *   `(?:[^|;&\n]|x)*` / 量化 shorthand `\S*` `\s+` / 未量化 `[abc]` (lazy `*?` と `{n,m}` は抽出される)。
+ *   これらの綴りで書かれた規則には結合検査も構造ゲートも適用されない (seed 軸は綴りに依らず全スキャン
+ *   regex を測るので、失われるのは 2 ゲートの適用であって計測ではない)。現行 17 に該当する綴りは無い。
  *   旧死角 ③ (gap クラスが test 側 `TAIL_METACHARS` より広い綴り `[^|;&\r\n]` / `[^|;&\n<>]`・正のクラス
  *   `[\w\s-]*`) は seed 軸としては閉じていないが、**結合検査 (task 01a04989-4a0c・本 PR)** が
- *   「全スキャン regex の量化クラスが除外する文字 ⊆ `TAIL_METACHARS`」を assert して**そのような規則の着地自体を
- *   RED にする** (3 形とも当該 assertion で RED を実測・現行 17 は緑)。正のクラスの例外は
- *   `(re.source, class.source)` 対で keyed した明示 exemption 1 件 (`git clean -[a-z]*f`) のみ。
+ *   「全スキャン regex の量化クラスが除外する文字 ⊆ `TAIL_METACHARS`」を assert して**そのような規則の着地を
+ *   RED にする** (3 形とも当該 assertion で RED を実測・現行 17 は緑。ただし上の ③' の綴りで書けば抽出されず
+ *   通る)。正のクラスの例外は `(re.source, class.source)` 対で keyed した明示 exemption 1 件
+ *   (`git clean -[a-z]*f`) のみで、対の**片側だけ**一致するケースは免除されない (合成ケースで値を pin 済み)。
  *   ratio 判定は**両側** (単発比の false green = 2 乗形が 12 回中 1 回緑 / false RED = 全 suite 並走 + 2×nproc 外部
  *   負荷で線形が 26.88 の両方を是正・task 01a05374-36d2-7419-ac3f-4f88be2481fc・本 PR): 3 回計測し
  *   「中央値 < 24 かつ 最大 < 40」で判定する。
@@ -2583,6 +2590,11 @@ interface LiteralRule {
  * segment sample (`samples[i].segmentCmd`) を持たなければ RED。さらに全スキャン regex の**量化クラスが
  * 除外する文字**は test 側 `TAIL_METACHARS` に収まっていなければ RED (seed 軸 (4)(5) の切り出しとの結合・
  * 正のクラスの例外は (regex source, class source) 対で keyed した明示 exemption のみ)。
+ *
+ * **強制の範囲は綴りに bound される (TDA-LN5-1・実測)**: どちらのゲートも「`[...]` の直後に量化子が
+ * 隣接する綴り」しか抽出しない。群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation /
+ * 量化 shorthand `\S*` `\s+` / 未量化 `[abc]` はどちらのゲートも通らないので、**規律そのものは依然
+ * 人が守る必要がある** (機械的強制はこれらの綴りには届かない)。
  */
 export const LITERAL_RULES: readonly LiteralRule[] = [
   { re: /\bmkfs\b/i, category: "disk-destroy", high: true, labels: ["mkfs"] },
