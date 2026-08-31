@@ -322,7 +322,9 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   behavioural assertion or a CI gate first, with a new verbatim pin only when neither can cover it.
   Still not covered: the pin block itself (including the teeth and span checks added here), an edit
   that rewrites the pins together with the constants or the pinned code lines, a scan marker
-  rewritten together with the title it points at, and the census right boundary, which is anchored
+  rewritten together with the title it points at, the negative control's calibration factor (not
+  pinned; reverting it to 1 was measured as surviving and only degrades measurement quality under
+  load), and the census right boundary, which is anchored
   to a neighbouring describe title and reports a false failure if an unrelated describe is inserted
   in between. The pins exist to make such an edit deliberate, not to prove the metatest cannot be
   weakened. Test-only: the classifier and the approval gate are unchanged.
@@ -330,17 +332,22 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   actually run.** The negative control's small-input measurement took 0.33ms, small enough that
   scheduler jitter dominated the ratio when the whole suite runs against 2x nproc of external load,
   so its inner loop now repeats eight times. The geometry and thresholds are untouched and both
-  sides of the ratio grow by the same factor, so the expected ratio is unchanged; measured over 24
-  samples per factor in that regime, the uncalibrated control reported a false violation 8 times and
-  the calibrated one 0 times, and the worst median fell from 29.4 to 13.6 against a threshold of 24.
-  Eight saturated full-suite runs produced no false failure from the calibrated control. Separately,
+  sides of the ratio grow by the same factor, so the expected ratio is unchanged. The calibration
+  sweep measured a byte-identical copy of the control's measurement placed elsewhere in the suite,
+  not the control itself: over 24 samples per factor in that regime the uncalibrated copy reported a
+  false violation 8 times and the calibrated one 0 times, and the worst median fell from 29.4 to
+  13.6 against a threshold of 24. The real control at its own position reported none in eight
+  saturated runs even uncalibrated, so the calibration is justified by escaping the jitter-dominated
+  band rather than by a failure observed in place; eight saturated full-suite runs produced no false
+  failure from the calibrated control. Separately,
   the count of control cases was taken at registration time, so replacing `it(` with `it.skip(` at
   one site, or an early return at the top of the callback, silently ran nothing while the suite
   stayed green; the callback now records that it reached its end and an `afterAll` requires both
   control cases to have done so, and `scripts/ci/assert-inv-ran.mjs` gained a `sidecar-linear` suite
-  so CI also refuses a skipped or todo linear metatest. Both mutations, and deleting the recording
-  line itself, were measured as red on this branch and green on its base. The main loop's 110 cases
-  remain a registration-time count.
+  so CI also refuses a skipped or todo linear metatest. Both mutations were measured as red on this
+  branch and green on its base; deleting the recording line itself — a line the base does not
+  have — was measured as red on this branch alone. The main loop's 110 cases remain a
+  registration-time count.
 
 ## [0.8.1] - 2026-08-26
 

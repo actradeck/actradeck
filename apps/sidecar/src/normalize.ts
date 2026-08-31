@@ -2558,8 +2558,10 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   **R2 unblock (裁定 01a0586b)**: (a) 陰性コントロールの内側ループを **×8** に較正した (幾何 `K` /
  *   `SMALL` / `SCALE` / `BEST_OF_REPEAT` / `RATIO_REPEAT` は不変・分子分母を同倍するので比の期待値も不変)。
  *   陰性の分母 `tSmall` が 0.33ms しかなく飽和下で jitter に支配されていたため。実測 (full-suite 並走 +
- *   2×nproc・倍率あたり n=24): ×1 で false RED 8/24 → **×8 で 0/24** (中央値 max 29.4 → 13.6)。着地 8 run の
- *   飽和 full-suite でコントロールの false RED **0**。(b) コントロール 2 件の**実行**を `afterAll` で照合する
+ *   2×nproc・倍率あたり n=24・計測コードを byte 同値で写した移設 sweep での値): ×1 で false RED 8/24 →
+ *   **×8 で 0/24** (中央値 max 29.4 → 13.6)。実コントロール位置の ×1 は同じ飽和 8 run で 0/8 =
+ *   8/24 は実コントロールの実測ではない (SEC-R3-1)。着地 8 run の飽和 full-suite でコントロールの
+ *   false RED **0**。(b) コントロール 2 件の**実行**を `afterAll` で照合する
  *   (`controlCasesExecuted`)。(c) 下の被覆主張を実測へ bound。
  *   **コントロールの被覆帯域 (実測 bound・全称を書かない)**: 検出できるのは「陽性 fixture の実測比を閾値の
  *   下へ押し下げる」編集に限る。陽性 median は無負荷 55.1〜55.9 / 飽和 63.5〜187.3 なので、`RATIO_MAX` を
