@@ -38,7 +38,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   length; the metatest catches that by measuring how each rule's runtime scales on seeds it derives
   from the rule's own source and its sample command. The third seed — the longest prefix of the
   sample that no longer matches the rule — quietly lost its teeth whenever the sample carried a
-  shell separator (`|`, `;`, `&`, or a newline) *before* the rule's leading word: repeating such a
+  shell separator (`|`, `;`, `&`, or a newline) _before_ the rule's leading word: repeating such a
   prefix re-inserts the separator, the rule's gap class refuses to cross it, and a genuinely
   quadratic rule measured as linear. The metatest now additionally takes the sample's tail after
   its last separator and derives the same prefix from that, which repeats cleanly. One quadratic
@@ -67,7 +67,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 - **That metatest now derives a fifth seed, judges the scaling ratio from three measurements instead
   of one, and is coupled to the classifier's own gap classes.** Three holes closed together, because
   closing any one alone would have left the other two able to hide a quadratic rule.
-  *The fifth seed* takes every suffix that follows a shell separator in the sample, not only the one
+  _The fifth seed_ takes every suffix that follows a shell separator in the sample, not only the one
   after the last separator, and derives the same non-matching prefix from each. The fourth seed went
   null whenever the sample carried a separator both before the rule's leading word and after the
   match completed - the tail then no longer matched the rule - and the third seed was already broken
@@ -80,13 +80,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   at 110; the teeth are a per-rule synthetic command that wraps each sample in both a leading and a
   trailing separator, non-vacuous for all 17 scanned expressions, where the fourth seed is null by
   construction.
-  *The ratio verdict* is now two-sided. A single measurement let a genuinely quadratic rule pass once
+  _The ratio verdict_ is now two-sided. A single measurement let a genuinely quadratic rule pass once
   in twelve runs inside the test harness, and let a linear rule fail above the threshold on a loaded
   machine. The test now measures the ratio three times and requires the median below 24 and the
   maximum below 40: a single low outlier can no longer make a quadratic rule green, and a single high
   outlier can no longer make a linear rule red. The per-test timeout moves from 30s to 120s because a
   quadratic rule now takes three measurements to diagnose.
-  *The coupling* replaces the test's hand-written copy of the classifier's gap class with an
+  _The coupling_ replaces the test's hand-written copy of the classifier's gap class with an
   assertion about the classifier itself: for every scanned expression, the characters its quantified
   character classes exclude must be a subset of the separators the seed derivation cuts on. A rule
   spelled with a carriage return in its gap class, one spelled with redirection characters, and one
@@ -275,11 +275,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   as the sample does regardless of spelling; the vacuity guard now counts derived seeds only (the
   generic seed had made it a tautology); and the metatest pins its own threshold, input geometry,
   timeout, seed axes and case count so that a single-site edit of any pinned construct (the
-  constant declarations, their use sites, the declaration census) fails on its own. The pins do
-  not cover the measurement helpers themselves, the seed loop header (`for (const seed of
-live)`) or the pin block, and an edit that rewrites the pin block together with the constants
-  still passes; the pins exist to make that edit deliberate, not to prove the metatest cannot be
-  weakened. Test-only: the classifier and the approval gate are unchanged.
+  constant declarations, their use sites, the declaration census) fails on its own. The pins now
+  also cover the measurement helpers themselves (`minOf`, the warm-up, repeat loop and return of
+  `bestOfMs`, `fill`, `isLive`) and the seed loop header, and the case count is taken from the
+  number of tests actually registered rather than from the derived set: thinning the seed loop to
+  one case per rule had silently dropped 85% of the ratio measurements while the count pin stayed
+  green, and now fails. Every pin pattern is additionally checked against a view of the file with
+  the pin block cut out, which structurally forbids a pattern that is satisfied only by its own
+  regex literal. Still not covered: the pin block itself, and an edit that rewrites the pins
+  together with the constants or with the pinned code lines; the pins exist to make that edit
+  deliberate, not to prove the metatest cannot be weakened. Test-only: the classifier and the
+  approval gate are unchanged.
 
 ## [0.8.1] - 2026-08-26
 

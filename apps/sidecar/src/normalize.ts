@@ -2536,10 +2536,14 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   vacuity guard は汎用 seed `a ` を除いた派生 seed で
  *   計数し (SEC-DB2R4-3 の恒真を解消)、metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の除去 /
  *   軸 4/5 の区切り集合の縮小 / 両側判定の片側化 / 結合検査 universe の縮小 /
- *   RATIO_MAX 緩和 / 入力幾何の縮小 / guard 無効化 / timeout 短縮) は自己弱化 pin が **pin 済みの綴り (定数宣言 / 使用側 / 宣言個数 census) を触る単独編集の
- *   範囲で** RED にする (SEC-DB2R3-2・計測 helper 本体・`for (const seed of live)` ループ header・pin 自身は非被覆・
- *   coordinated 編集は通る・TDA-LN2-3 /
- *   SEC-LN3-2・残余は task 01a048f6-67a5 v0.9)。**LINEAR metatest の seed 生成 / RATIO_MAX /
+ *   RATIO_MAX 緩和 / 入力幾何の縮小 / 計測 helper 本体の潰し / seed ループの間引き / guard 無効化 / timeout 短縮) は
+ *   自己弱化 pin が **pin 済みの綴り (定数宣言 / 使用側 / 宣言個数 census) を触る単独編集の
+ *   範囲で** RED にする (SEC-DB2R3-2)。**task 01a048f6-67a5 (本 PR) で被覆へ移った**もの: 計測 helper 本体
+ *   (`minOf` / `bestOfMs` / `fill` / `isLive`)・`for (const seed of live)` ループ header・件数を**登録した it の
+ *   実数**で数える加算 (旧 `totalCases += live.length` はループ前加算ゆえ `live.slice(0, 1)` の 1 行編集で
+ *   ratio 計測の 85% が無音で消えても件数 pin が発火しなかった)・各 pattern が「pin ブロックを除いた view」でも
+ *   マッチする非自己充足メタ pin。**非被覆のまま**: pin ブロック自身 (toBe 値・pattern 綴り) と、pin を追随更新
+ *   しながら定数 / code 行を弱める coordinated 編集 (TDA-LN2-3 / SEC-LN3-2 / QA-LN4R2-1)。**LINEAR metatest の seed 生成 / RATIO_MAX /
  *   timeout の変更は境界ゲートの走査範囲変更 = full 監査既定** (finding-registry・SEC-DB2R3-3)。束縛後の残余コスト (16 KiB 敵対入力・
  *   base 比): risk 経路 ≈ 3.8× / categories 経路 ≈ 7.0× / 承認 hook 経路 ≈ 1.7× (TDA-DB2R2-7 / SEC R2 実測・
  *   良性入力は 1.0×)。
