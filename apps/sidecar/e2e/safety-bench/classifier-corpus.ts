@@ -235,6 +235,17 @@ export const COMMANDS: readonly CommandVector[] = [
     expectCategories: ["db-drop"],
     note: "redis flush of the selected database (task 01a0440b; FLUSHALL is the same literal class)",
   },
+  // TDA-DB2-7 (sweep 019fd74b) — how to RETIRE this accepted false positive, if the bare-token
+  //   literals ever gain a narrower form. The human label below is already the post-fix truth
+  //   (`low` / no category), so the corpus row does NOT move: keep this benign carrier exactly as
+  //   it is, so the class stays measured either way. What moves is (a) the behaviour pin in
+  //   `apps/sidecar/test/inv-policy-categories.test.ts` (INV-DB-DROP-RISK-VERDICT, the two
+  //   `expect(...)` lines that pin this same command as `high` / `db-drop`) — flip them to `low` /
+  //   `false` rather than deleting them, so the FP's disappearance is asserted instead of merely
+  //   unpinned; and (b) the published numbers (`PUBLISHED` in inv-safety-bench-published.test.ts
+  //   plus docs/benchmarks/redaction-and-risk-classifier.md), which the two-way lock will force in
+  //   the same commit. Do not retire the FP by removing the vector: that would silently restore the
+  //   100% precision the doc used to over-claim.
   {
     command: "grep -rn flushall src/",
     expectRisk: "low",

@@ -225,8 +225,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   exists. The approval wait is now the canonical
   value in `@actradeck/event-model` and every hook timeout is **derived** from it with a margin,
   bounded so the derived value stays within Claude Code's documented default for HTTP hooks.
-  `INV-APPROVAL-TIMEOUT-ORDERING` pins the ordering, the derivation, and — by reading the
-  consuming sources — the fact that no call site has drifted back to a hand-written literal.
+  `INV-APPROVAL-TIMEOUT-ORDERING` pins the ordering and the derivation, and reads the four
+  enumerated consuming sources to check that each one still calls the canonical derivation and has
+  not drifted back to one of the known hand-written literals. That check is scoped to those four
+  files rather than to the repository at large; what covers a consumer written some other way is
+  the companion `INV-APPROVAL-TIMEOUT-EMIT`, which pins the value actually written into settings.
   Honest scope: this ordering guarantee covers the Claude Code hook path. Managed Codex receives
   approvals as inbound JSON-RPC requests, so how long it waits for a response is not something
   ActraDeck configures, and Codex rollout tailing is observe-only and never blocks.

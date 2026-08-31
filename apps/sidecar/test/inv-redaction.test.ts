@@ -29,6 +29,11 @@ import { WsClient } from "../src/ws-client.js";
 //   パッケージ境界を跨ぐ共有 test-utils 新設は過剰 (過剰工作禁止)、(b) 両パッケージとも test/** は
 //   tsc 対象外 (tsconfig exclude) ゆえ型レベルの単一出所化利得が無い、(c) cross-package の相対 test
 //   import はより脆く smell。redactor 移設時の意図的複製 (decision 019f2d4f)。**編集時は両コピーを同期**。
+//   **同期対象は上記 2 コピーだけ (TDA-DB2R3-7・sweep 019fd74b)**: 同じ best-of-N の考え方を使う
+//   3 つ目の実装が apps/sidecar/test/inv-policy-categories.test.ts (`minOf` / `bestOfMs`・LINEAR
+//   計測 helper) にあるが、あれは **verbatim コピーではない** — 名前も反復数の既定も違い、
+//   `medianOf` / `maxOf` と両側 ratio 判定を持つ独立系で、自身の宣言・使用箇所・本体が pin 群で
+//   凍結されている。ここを編集しても向こうへ持っていかない (逆も同じ)。
 // median は contention でスパイクするため使わず、best-of-N の **最小値 (min)** を取る:
 // 計測ノイズは加法的ゆえ min が無競合の真の計算時間に最も近い (QA-10 / 再#5d flake の教訓)。
 const redosMinOf = (xs: number[]): number => xs.reduce((a, b) => (b < a ? b : a), Infinity);

@@ -80,6 +80,17 @@ export function deriveDemoApprovalRequestId(sessionId: string): string {
  *    SEC-V9-2: production src の第 2 採番点で、この形の demo pending は base では retire されていた)。
  *  - tag 以前 (コード履歴のみ): `${sessionId}:apr-<Date.now()>-<seq>`。
  *
+ * **列挙は出荷形そのものではなく、その superset を閉じた形で保持している (SEC-V9R2-1・sweep 019fd74b)**。
+ * 上の 3 形を正確に書き写すと、採番器の内部 (連番の現在値・`Date.now()` の実際の桁) に依存した
+ * 列挙になり、旧 DB の実データを取りこぼす。よって各 RE は数字部を桁範囲で受ける:
+ * 実際に出荷した `apr-1` に対して `apr-\d{1,9}` を、`Date.now()` 由来の id に対して
+ * `apr-\d{13}-\d{1,9}` を持つ (base64url 22 文字形は `randomBytes(16).toString("base64url")` の
+ * 出力長・文字集合と一致)。差分として、出荷していない数値 (例 `apr-4242`) も retire 対象に入るが、
+ * **方向は既存 3 形と同じ**で、増えるのは「合成 cancel してよい」と見なす id の範囲だけである。
+ * 広げてよい上限は閉じたまま保つ: 3 形はいずれも `^`/`$` で全体を固定し、session prefix を
+ * `[A-Za-z0-9_.-]{1,128}` に、数字部を上記の桁数に bound する (無界の `\d+` にしない)。
+ * これは「列挙が出荷形と一対一」という主張ではなく、「出荷形をすべて含む閉じた superset」という主張である。
+ *
  * session prefix は plausible な session id 文字集合 (`[A-Za-z0-9_.-]`) に限る — redaction marker
  * (`[REDACTED:…]` 等・`[` `]` `:` を含む) に置換された prefix はここで**構造的に排除**される
  * (mangled legacy id を「legacy 形」として誤って retire しない)。
