@@ -103,7 +103,9 @@ describe("INV-DB-DROP-ENUMERATION: db-drop の列挙コピーは DB_DROP_LITERAL
 
   it("(3') 語境界判定は部分文字列一致の**厳格化**であって緩和でない (QA-FF-2)", () => {
     // 新判定にマッチする位置は必ず部分文字列一致の位置でもある (境界は前後を制約するだけ)。
-    //   注記本文で両方向を実測し、旧一致集合 ⊇ 新一致集合 を pin する。
+    //   下の per-form ループはこの構成上の含意の確認であって単独の歯ではない (QA-DE-4) —
+    //   実際の歯は本 it の POSITIVE/NEGATIVE 対 4 本 (語境界一致と substring 一致が食い違う
+    //   実ベクタで両方向を実測する側) にある。
     const doc = read("../../../docs/approval-policy.md");
     const start = doc.indexOf("> **`db-drop` is a literal list");
     const note = doc.slice(start, doc.indexOf("\n\n", start)).replace(/`/g, "");

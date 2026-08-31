@@ -70,8 +70,10 @@ A change is not ready if any of these fail. CI runs the same checks on every PR.
 **What the format gate covers — and why Markdown is out of it.** `pnpm format` is
 `prettier --check` over `{packages,apps,db}/**/*.{ts,tsx,mts,mjs,json}` plus the root-level
 `*.{json,mjs}` files (see `package.json`). Markdown is **deliberately excluded**: `docs/**/*.md`
-and the top-level `*.md` files are not matched by that glob, and no workflow in `.github/workflows/`
-runs prettier, markdownlint or any other Markdown formatter over them. The exclusion is load-bearing,
+and the top-level `*.md` files are not matched by that glob. The CI format step
+(`pnpm run format` in `.github/workflows/ci.yml`) checks that same glob, so while a workflow does
+run prettier, neither it nor any other workflow applies a formatter to the Markdown files
+themselves. The exclusion is load-bearing,
 not an oversight — several invariant tests read the shipped documents and pin sentences from them
 verbatim (`INV-SAFETY-BENCH-PUBLISHED` on `docs/benchmarks/redaction-and-risk-classifier.md`,
 `INV-DB-DROP-ENUMERATION` on `docs/approval-policy.md`), and an automatic re-wrap would turn those

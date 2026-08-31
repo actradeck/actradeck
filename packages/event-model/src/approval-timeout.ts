@@ -77,8 +77,9 @@ export function hookTimeoutSecondsFor(approvalTimeoutMs: number): number {
  *
  * **どの枝が現行 production で効くか (QA-V9R2-4・sweep 019fd74b)**: 実際に呼ばれるのは
  * `hookTimeoutSecondsFor` と `effectiveApprovalTimeoutMs` からで、引数は既定 (300s) か
- * operator 供給の `timeoutMs` に限られる。よって `MAX_APPROVAL_TIMEOUT_MS` 枝は**現行では
- * 到達しない** — `effectiveApprovalTimeoutMs` が実効値を既定で頭打ちにするため。ここが効くのは
+ * operator 供給の `timeoutMs` に限られる。`Math.min(…, MAX_APPROVAL_TIMEOUT_MS)` は operator
+ * 供給経路で毎回**実行される**が、**現行では実効値を変えない** (QA-DE-2) —
+ * `effectiveApprovalTimeoutMs` が実効値を既定で頭打ちにするため。上限が実際に切り詰めるのは
  * 既定を 600s 超へ昇格させたときで、この関数はその昇格経路の上界ガードとして残っている。
  * 不正値 → 既定の枝は通常経路でも生きている (operator 供給値の fail-safe)。
  */
