@@ -30,7 +30,8 @@ node scripts/collect-public-metrics.mjs --dry-run
 ```
 
 A missed day is backfilled by dispatching the workflow with its `date` input (or locally with
-`--date YYYY-MM-DD`). The npm daily figure is exact for the requested day because the npm API is
+`--date YYYY-MM-DD`). Each dispatch covers exactly one day — backfill a multi-day gap one day at
+a time, with one dispatch per missed date (the three-day gap below took three dispatches). The npm daily figure is exact for the requested day because the npm API is
 queried by date; the seven-day per-version window and the release-asset counters are whatever
 the APIs report at collection time, and `collected_at` in the file says when that was. The
 2026-08-25 to 2026-08-27 snapshots were backfilled this way on 2026-08-28 (UTC) after the
