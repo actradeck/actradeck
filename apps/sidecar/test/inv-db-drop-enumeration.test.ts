@@ -25,6 +25,23 @@ const read = (rel: string): string =>
 const FORMS: ReadonlySet<string> = new Set(DB_DROP_LITERAL_FORMS);
 const sorted = (xs: Iterable<string>): string[] => [...xs].sort();
 
+/**
+ * QA-FF-2: 表示名が散文の中に **語として** 現れるか。
+ *
+ * 部分文字列一致だと `DROP TABLESPACE` が `DROP TABLE` の言及として通る — 注記は
+ * `DROP TABLESPACE` を「認識しない形」として実際に名指ししているので、`DROP TABLE` の言及を
+ * 丸ごと削っても検査が空虚に充足していた。境界は form の**端が単語文字のときだけ**課す
+ * (`dropDatabase(` / `drop_database(` は `(` で終わるので後端を課すと必ず落ちる)。
+ * `mysqladmin … drop` のように内部に空白や非 ASCII を含む form も、端の 2 文字だけを見るので
+ * そのまま扱える。
+ */
+const formMentionRe = (form: string): RegExp => {
+  const escaped = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const lead = /^\w/.test(form) ? "(?<!\\w)" : "";
+  const trail = /\w$/.test(form) ? "(?!\\w)" : "";
+  return new RegExp(`${lead}${escaped}${trail}`);
+};
+
 describe("INV-DB-DROP-ENUMERATION: db-drop の列挙コピーは DB_DROP_LITERAL_FORMS と two-way に一致", () => {
   it("DB_DROP_LITERAL_FORMS は重複なし・空文字なし・secret 様でない表示名", () => {
     expect(DB_DROP_LITERAL_FORMS.length).toBe(FORMS.size);
@@ -69,15 +86,42 @@ describe("INV-DB-DROP-ENUMERATION: db-drop の列挙コピーは DB_DROP_LITERAL
     expect(tokens).toEqual([...DB_DROP_LITERAL_FORMS]);
   });
 
-  it("(3) docs/approval-policy.md の db-drop 注記は全形を含む (片方向・注記は非認識形も語る)", () => {
+  it("(3) docs/approval-policy.md の db-drop 注記は全形を**語として**含む (片方向・注記は非認識形も語る)", () => {
     const doc = read("../../../docs/approval-policy.md");
     const start = doc.indexOf("> **`db-drop` is a literal list");
     expect(start, "db-drop note paragraph").toBeGreaterThanOrEqual(0);
     const end = doc.indexOf("\n\n", start);
     const note = doc.slice(start, end).replace(/`/g, "");
     for (const f of DB_DROP_LITERAL_FORMS) {
+      // POSITIVE (旧判定・維持): 部分文字列として現れる。
       expect(note.includes(f), `note mentions ${f}`).toBe(true);
+      // POSITIVE (QA-FF-2・厳格化): 語として現れる。旧判定だけだと注記が非認識形として名指ししている
+      //   `DROP TABLESPACE` が `DROP TABLE` の言及に化け、`DROP TABLE` の言及を丸ごと消しても緑だった。
+      expect(formMentionRe(f).test(note), `note mentions ${f} as a word`).toBe(true);
     }
+  });
+
+  it("(3') 語境界判定は部分文字列一致の**厳格化**であって緩和でない (QA-FF-2)", () => {
+    // 新判定にマッチする位置は必ず部分文字列一致の位置でもある (境界は前後を制約するだけ)。
+    //   下の per-form ループはこの構成上の含意の確認であって単独の歯ではない (QA-DE-4) —
+    //   実際の歯は本 it の POSITIVE/NEGATIVE 対 4 本 (語境界一致と substring 一致が食い違う
+    //   実ベクタで両方向を実測する側) にある。
+    const doc = read("../../../docs/approval-policy.md");
+    const start = doc.indexOf("> **`db-drop` is a literal list");
+    const note = doc.slice(start, doc.indexOf("\n\n", start)).replace(/`/g, "");
+    for (const f of DB_DROP_LITERAL_FORMS) {
+      if (formMentionRe(f).test(note)) expect(note.includes(f), f).toBe(true);
+    }
+    // 同一リテラルの POSITIVE / NEGATIVE 対。旧判定が空虚充足していた実例をそのまま使う。
+    const tableRe = formMentionRe("DROP TABLE");
+    expect(tableRe.test("recognises the SQL forms DROP TABLE / DROP DATABASE")).toBe(true);
+    expect(tableRe.test("(DROP TABLE)")).toBe(true);
+    const tablespaceOnly = "Still not recognised: DROP TABLESPACE / DROP USER";
+    expect(tablespaceOnly.includes("DROP TABLE"), "substring match was vacuously true").toBe(true);
+    expect(tableRe.test(tablespaceOnly), "word-boundary match rejects it").toBe(false);
+    // 末尾が単語文字でない form には後端境界を課さない (課すと `dropDatabase(` が落ちる)。
+    expect(formMentionRe("dropDatabase(").test("the Mongo shell db.dropDatabase()")).toBe(true);
+    expect(formMentionRe("dropDatabase(").test("grep -rn dropDatabase docs/")).toBe(false);
   });
 
   it("(4) event-model payload.ts docstring の db-drop 行の列挙 == DB_DROP_LITERAL_FORMS", () => {

@@ -177,9 +177,16 @@ describe("INV-SAFETY-BENCH-PUBLISHED: the doc's numbers match the live bench AND
       expect(doc, `category row ${row.category}`).toMatch(re);
     }
     // gate rows: "| default-gated (out-of-box)          | 93.5%     | 100.0% | 29 / 2 / 0 / 22   |"
+    // QA-DBR2-1: anchor the row to its own policy name. Without the anchor the two rows carry
+    //   only numbers, so swapping the two labels in the doc — printing the strict-all figures
+    //   under "default-gated (out-of-box)" — left this lock green (measured: SURVIVED). The
+    //   per-category rows above are already anchored this way; this makes the pair symmetric.
+    //   The label cell continues past the policy name ("(out-of-box)"), so consume the rest of
+    //   the cell with `[^|]*` instead of demanding the name fill it.
     for (const g of c.gate) {
+      expect(g.policyName, "policy name is used unescaped in a RegExp").toMatch(/^[A-Za-z0-9-]+$/);
       const re = new RegExp(
-        `${g.precisionPct}%\\s*\\|\\s*${g.recallPct}%\\s*\\|\\s*${g.tp} / ${g.fp} / ${g.fn} / ${g.tn}`,
+        `\\|\\s*${g.policyName}\\b[^|]*\\|\\s*${g.precisionPct}%\\s*\\|\\s*${g.recallPct}%\\s*\\|\\s*${g.tp} / ${g.fp} / ${g.fn} / ${g.tn}`,
       );
       expect(doc, `gate row ${g.policyName}`).toMatch(re);
     }

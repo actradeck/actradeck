@@ -134,6 +134,21 @@ describe("INV-APPROVAL-TIMEOUT-ORDERING", () => {
   /**
    * source-coupling: 消費側が正準出所を**実際に**引いていることを固定する。
    * 値の pin だけでは、消費側がリテラルへ戻る drift を検出できない (両方が偶然一致しうる)。
+   *
+   * **保証の範囲 (C-2(a)・sweep 019fd74b)**: この it が走査するのは下に**逐語で列挙した 4 ファイル**
+   * (settings-merge / settings-injection / approval-bridge / approval-display) だけであり、
+   * リポジトリ全体を掃いてはいない。よって「どの call site もリテラルへ戻っていない」を単独で
+   * 保証するものではない。実際に効いているのは次の**合成**である:
+   *   (a) 本 it — 列挙 4 ファイルが導出関数を呼び、import を実在させ、既知の旧リテラル形
+   *       (`? 35 :` / `? 330 :` / `?? 30_000` 等) へ戻っていないこと。comment-strip 後に照合するため、
+   *       呼び出し文字列をコメントに残す偽 green は成立しない。
+   *   (b) sidecar の INV-APPROVAL-TIMEOUT-EMIT — settings へ**実際に書き込まれた値**を pin する。
+   *       綴りが未知の書き換えでも、値が動けばそちらが RED になる。
+   *   (c) tsc / eslint — 片側だけの編集を拾う (import だけ落とせば未定義識別子で tsc が、
+   *       呼び出しだけ落とせば未使用 import で `@typescript-eslint/no-unused-vars` が)。
+   *       import と呼び出しを同時に消す coordinated 編集を拾うのは (a) の NEGATIVE 群。
+   * 列挙に無い**新しい**消費点は、(b) が値として観測できる範囲でしか捕まらない。
+   * 消費点を増やしたらこの列挙にも足すこと。
    */
   it("消費側は正準出所を import しており、手書きリテラルへ戻っていない", () => {
     // TDA-V9-2: コメントを落としてから照合する (正準呼び出し文字列をコメントに残した inline 化で

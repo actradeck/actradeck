@@ -146,7 +146,10 @@ metric RED.
 ## Results — risk classifier
 
 Measured against `classifyCommandWithCategories` (`apps/sidecar/src/normalize.ts`).
-Classifier results below were regenerated on 2026-08-28.
+Classifier results below were regenerated on 2026-08-28. That date is maintained by hand and is
+**not** pinned by the two-way lock: `INV-SAFETY-BENCH-PUBLISHED` binds the numbers in this section
+to the live bench and to this file's text, but no test compares the date against the run that
+produced them, so a stale date can survive a green suite (sweep 019fd74b, TDA-DB-5).
 
 **Scope.** This benchmarks the **command-pattern** categories the classifier derives from the
 command string: `recursive-rm`, `disk-destroy`, `history-rewrite`, `db-drop`, `fork-bomb`,

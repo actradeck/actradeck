@@ -43,6 +43,14 @@ export const APPROVAL_HOOK_MARGIN_MS = 30_000;
 /**
  * 承認待ちの上限 (ms)。導出フック timeout が CC の `http` 既定 600s を超えない範囲。
  * これを超える値は「未検証の領域でゲートが素通りに反転しうる」ため受け付けない。
+ *
+ * **現行 production では到達しない (QA-V9R2-4・sweep 019fd74b)**: 出荷経路の入口は
+ * `effectiveApprovalTimeoutMs`（実効値を `DEFAULT_APPROVAL_TIMEOUT_MS` = 300s で頭打ちにする）と
+ * `hookTimeoutSecondsFor(DEFAULT_APPROVAL_TIMEOUT_MS)`（引数が既定そのもの）の 2 つだけなので、
+ * この上限が実際に切り詰めるケースは今のところ無い。守っているのは**既定を昇格させたときの上界**
+ * であり、`DEFAULT_APPROVAL_TIMEOUT_MS` を 600s 超へ引き上げる編集がここで頭打ちになる
+ * (= フック timeout が CC の既定 600s を超えて未検証域に入るのを防ぐ) ためのガードとして残す。
+ * 「今どこからも効いていない」ことは削除の理由にならない — 削除するとその昇格経路が無防備になる。
  */
 export const MAX_APPROVAL_TIMEOUT_MS = 570_000;
 
@@ -66,6 +74,14 @@ export function hookTimeoutSecondsFor(approvalTimeoutMs: number): number {
 /**
  * 承認待ち (ms) を有効域へ丸める。非有限・非正・上限超過は**安全側**へ倒す
  * (上限超過は上限へ・不正値は既定へ)。silent に無界化させない。
+ *
+ * **どの枝が現行 production で効くか (QA-V9R2-4・sweep 019fd74b)**: 実際に呼ばれるのは
+ * `hookTimeoutSecondsFor` と `effectiveApprovalTimeoutMs` からで、引数は既定 (300s) か
+ * operator 供給の `timeoutMs` に限られる。`Math.min(…, MAX_APPROVAL_TIMEOUT_MS)` は operator
+ * 供給経路で毎回**実行される**が、**現行では実効値を変えない** (QA-DE-2) —
+ * `effectiveApprovalTimeoutMs` が実効値を既定で頭打ちにするため。上限が実際に切り詰めるのは
+ * 既定を 600s 超へ昇格させたときで、この関数はその昇格経路の上界ガードとして残っている。
+ * 不正値 → 既定の枝は通常経路でも生きている (operator 供給値の fail-safe)。
  */
 export function clampApprovalTimeoutMs(approvalTimeoutMs: number): number {
   if (!Number.isFinite(approvalTimeoutMs) || approvalTimeoutMs < MIN_APPROVAL_TIMEOUT_MS) {
