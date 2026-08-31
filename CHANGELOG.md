@@ -38,7 +38,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   length; the metatest catches that by measuring how each rule's runtime scales on seeds it derives
   from the rule's own source and its sample command. The third seed — the longest prefix of the
   sample that no longer matches the rule — quietly lost its teeth whenever the sample carried a
-  shell separator (`|`, `;`, `&`, or a newline) *before* the rule's leading word: repeating such a
+  shell separator (`|`, `;`, `&`, or a newline) _before_ the rule's leading word: repeating such a
   prefix re-inserts the separator, the rule's gap class refuses to cross it, and a genuinely
   quadratic rule measured as linear. The metatest now additionally takes the sample's tail after
   its last separator and derives the same prefix from that, which repeats cleanly. One quadratic
@@ -67,7 +67,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 - **That metatest now derives a fifth seed, judges the scaling ratio from three measurements instead
   of one, and is coupled to the classifier's own gap classes.** Three holes closed together, because
   closing any one alone would have left the other two able to hide a quadratic rule.
-  *The fifth seed* takes every suffix that follows a shell separator in the sample, not only the one
+  _The fifth seed_ takes every suffix that follows a shell separator in the sample, not only the one
   after the last separator, and derives the same non-matching prefix from each. The fourth seed went
   null whenever the sample carried a separator both before the rule's leading word and after the
   match completed - the tail then no longer matched the rule - and the third seed was already broken
@@ -80,13 +80,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   at 110; the teeth are a per-rule synthetic command that wraps each sample in both a leading and a
   trailing separator, non-vacuous for all 17 scanned expressions, where the fourth seed is null by
   construction.
-  *The ratio verdict* is now two-sided. A single measurement let a genuinely quadratic rule pass once
+  _The ratio verdict_ is now two-sided. A single measurement let a genuinely quadratic rule pass once
   in twelve runs inside the test harness, and let a linear rule fail above the threshold on a loaded
   machine. The test now measures the ratio three times and requires the median below 24 and the
   maximum below 40: a single low outlier can no longer make a quadratic rule green, and a single high
   outlier can no longer make a linear rule red. The per-test timeout moves from 30s to 120s because a
   quadratic rule now takes three measurements to diagnose.
-  *The coupling* replaces the test's hand-written copy of the classifier's gap class with an
+  _The coupling_ replaces the test's hand-written copy of the classifier's gap class with an
   assertion about the classifier itself: for every scanned expression, the characters its quantified
   character classes exclude must be a subset of the separators the seed derivation cuts on. A rule
   spelled with a carriage return in its gap class, one spelled with redirection characters, and one
@@ -275,11 +275,79 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   as the sample does regardless of spelling; the vacuity guard now counts derived seeds only (the
   generic seed had made it a tautology); and the metatest pins its own threshold, input geometry,
   timeout, seed axes and case count so that a single-site edit of any pinned construct (the
-  constant declarations, their use sites, the declaration census) fails on its own. The pins do
-  not cover the measurement helpers themselves, the seed loop header (`for (const seed of
-live)`) or the pin block, and an edit that rewrites the pin block together with the constants
-  still passes; the pins exist to make that edit deliberate, not to prove the metatest cannot be
+  constant declarations, their use sites, the declaration census) fails on its own. The pins now
+  also cover the measurement helpers themselves (`minOf`, the warm-up, repeat loop and return of
+  `bestOfMs`, `fill`, `isLive`) and the seed loop header, and the case count is taken from the
+  number of tests actually registered rather than from the derived set: thinning the seed loop to
+  one case per rule had silently dropped 85% of the ratio measurements while the count pin stayed
+  green, and now fails. Every pin pattern is additionally checked against a view of the file with
+  the pin block cut out, which fails a pattern that has no target outside the pin block.
+  Six pins that tolerate a prettier wrap are bounded to a single statement (`[^;]*?`): the earlier
+  unbounded form let a pin head reach the tail of a *different* assertion 8,451 and 14,474
+  characters away, so making the target line vacuous left the pin green. Each of the six now
+  carries the weakening that must kill it, and the metatest builds the mutated source in memory and
+  asserts the pattern stops matching; every pin must also match within 400 characters, two orders
+  of magnitude below those cross-statement spans and well above the observed maxima (108 pristine;
+  after a wrap the worst span depends on how far the probe lengthens the message, and three probes
+  measured 144, 167 and 175, so the cap has 2.3x to 2.8x of headroom). The two negative asserts
+  that pin the cut point gained positive pairs on the same literal, because renaming the array type
+  annotation had silently made both vacuous.
+- **The linear metatest now protects itself with executable controls instead of only source-spelling
+  pins.** Three fixture rules — a known-quadratic one, a known-linear one that differs only by
+  bounding the same gap, and one whose seed matches at the measurement size — run through the same
+  seed derivation, vacuity filter, timing helpers, geometry and thresholds as the real rules, and
+  assert that the positive control is reported as a violation, the negative one is not, and the
+  vacuous seed is excluded from measurement. Because the controls assert behaviour rather than
+  spelling, collapsing a timing helper, shrinking the input geometry or capping `fill` makes them
+  fail without anyone having written a pin for that particular spelling. Seven such edits were
+  measured, each with its pin updated in step so the spelling checks stayed green: collapsing
+  `bestOfMs`, pushing a constant duration, constant-folding `minOf`, capping `fill`, shrinking the
+  `isLive` probe, shrinking the scale factor from 8 to 2, and raising the ratio threshold from 24
+  to 100. Six of them fail on a control on their own. The seventh is only *uniquely* a control's
+  catch
+  when both ratio bounds are raised together (24 to 100 and 40 to 200); raising the lower bound
+  alone is already caught by the pre-existing assertion that the upper bound exceeds the lower one,
+  and a modest raise (24 to 39) is caught by nothing.
+  That is the shape of the covered band, and it is bounded by measurement rather than claimed in
+  general: a control fires when the edit pushes the known-quadratic fixture's measured ratio below
+  the threshold. That fixture's median is 55.1-55.9 unloaded and 63.5-187.3 under 2x nproc load, so
+  edits that keep the threshold below it — the 24-to-39 raise, and a scale factor of 6 instead of
+  8 — were measured as surviving. The same coordinated method confirmed what else survives: the six
+  statements inside the main test's callback are not shared with the controls, and relaxing only the
+  upper ratio bound, the repeat count or the inner loop count leaves the controls green — those stay
+  on the verbatim pins, as does making the vacuity guard tautological. Thinning the seed loop is
+  caught, but by the structural floor on the case count rather than by a control. The measured case
+  count stays 110; control cases are counted separately. With the controls in place the pin corpus
+  is frozen: existing pins stay (removal remains forbidden), and a new tooth is added as a
+  behavioural assertion or a CI gate first, with a new verbatim pin only when neither can cover it.
+  Still not covered: the pin block itself (including the teeth and span checks added here), an edit
+  that rewrites the pins together with the constants or the pinned code lines, a scan marker
+  rewritten together with the title it points at, the negative control's calibration factor (not
+  pinned; reverting it to 1 was measured as surviving and only degrades measurement quality under
+  load), and the census right boundary, which is anchored
+  to a neighbouring describe title and reports a false failure if an unrelated describe is inserted
+  in between. The pins exist to make such an edit deliberate, not to prove the metatest cannot be
   weakened. Test-only: the classifier and the approval gate are unchanged.
+- **The linear metatest's controls are now calibrated for a saturated machine and asserted to have
+  actually run.** The negative control's small-input measurement took 0.33ms, small enough that
+  scheduler jitter dominated the ratio when the whole suite runs against 2x nproc of external load,
+  so its inner loop now repeats eight times. The geometry and thresholds are untouched and both
+  sides of the ratio grow by the same factor, so the expected ratio is unchanged. The calibration
+  sweep measured a byte-identical copy of the control's measurement placed elsewhere in the suite,
+  not the control itself: over 24 samples per factor in that regime the uncalibrated copy reported a
+  false violation 8 times and the calibrated one 0 times, and the worst median fell from 29.4 to
+  13.6 against a threshold of 24. The real control at its own position reported none in eight
+  saturated runs even uncalibrated, so the calibration is justified by escaping the jitter-dominated
+  band rather than by a failure observed in place; eight saturated full-suite runs produced no false
+  failure from the calibrated control. Separately,
+  the count of control cases was taken at registration time, so replacing `it(` with `it.skip(` at
+  one site, or an early return at the top of the callback, silently ran nothing while the suite
+  stayed green; the callback now records that it reached its end and an `afterAll` requires both
+  control cases to have done so, and `scripts/ci/assert-inv-ran.mjs` gained a `sidecar-linear` suite
+  so CI also refuses a skipped or todo linear metatest. Both mutations were measured as red on this
+  branch and green on its base; deleting the recording line itself — a line the base does not
+  have — was measured as red on this branch alone. The main loop's 110 cases remain a
+  registration-time count.
 
 ## [0.8.1] - 2026-08-26
 

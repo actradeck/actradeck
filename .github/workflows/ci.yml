@@ -284,6 +284,11 @@ jobs:
           rc=0
           pnpm --filter @actradeck/sidecar exec vitest run --reporter=json --outputFile=/tmp/sidecar-e2e.json || rc=$?
           RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-egress
+          # SEC-HPR2-1: the same JSON report already covers the whole sidecar suite, so the
+          #   linear metatest's executable controls are asserted to have RUN (not skipped) here
+          #   rather than in a separate step (a new step name would also have to be mirrored in
+          #   scripts/ci-preflight.sh for the drift tripwire).
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-linear
 
       # 再#QA-4 (再監査 a547b9f2): webui の coverage 閾値 (vitest.config.ts: realtime core +
       #   liveness-display) を CI で実評価する。plain `vitest run` は閾値を見ないため dormant
