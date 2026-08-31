@@ -14,15 +14,14 @@
  *
  * 🔴 すべて os.tmpdir() 配下。実 ~/.actradeck 不可侵。
  */
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ApprovalAllowlistStore, repoLabelOf } from "../src/approval-allowlist-store.js";
+import { spawnWorker, workerScript } from "./helpers/lock-test-support.js";
 
 let dir: string;
 let storePath: string;
@@ -216,19 +215,9 @@ describe("ApprovalAllowlistStore (ADR 019ee0c0)", () => {
  * 🔴 store は os.tmpdir 配下。実 ~/.actradeck 不可侵。
  */
 describe("INV-APPROVAL-PERSIST-CONCURRENT (QA-3): multi-process withFileLock 直列化", () => {
-  const testDir = dirname(fileURLToPath(import.meta.url));
-  const repoRoot = resolve(testDir, "../../..");
-  const sidecarRoot = resolve(testDir, "..");
-  // tsx is a devDependency of @actradeck/sidecar. pnpm's strict (non-hoisted)
-  // layout — the default on a clean `pnpm install` (fresh clone) — puts its bin
-  // under the package's OWN node_modules; only an older/hoisted dev install puts
-  // it at the workspace root. Resolve robustly across both so this invariant
-  // test runs on a fresh clone, not just on a hoisted dev machine.
-  const tsxBin =
-    [join(sidecarRoot, "node_modules/.bin/tsx"), join(repoRoot, "node_modules/.bin/tsx")].find(
-      (p) => existsSync(p),
-    ) ?? join(repoRoot, "node_modules/.bin/tsx");
-  const workerPath = join(testDir, "helpers/persist-add-worker.mts");
+  // FL-L5b: tsx 解決 + spawn ラッパの骨格は lock 系 INV の共有ハーネスへ集約済み
+  // (実プロセス = distinct pid でしか検証できない理由もそちらに記載)。
+  const workerPath = workerScript("persist-add-worker.mts");
 
   /**
    * worker を 1 プロセス spawn し exit code を待つ。
@@ -240,23 +229,13 @@ describe("INV-APPROVAL-PERSIST-CONCURRENT (QA-3): multi-process withFileLock 直
     signature: string,
     acquireDelayMs?: number,
   ): Promise<number> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn(tsxBin, [workerPath], {
-        env: {
-          ...process.env,
-          STORE_PATH: storePath,
-          SIG: signature,
-          SCOPE: "scope0000001",
-          TTL_MS: String(60 * 60_000),
-          NOW: "1000000",
-          ...(acquireDelayMs
-            ? { ACTRADECK_TEST_LOCK_ACQUIRE_DELAY_MS: String(acquireDelayMs) }
-            : {}),
-        },
-        stdio: ["ignore", "ignore", "inherit"],
-      });
-      child.on("error", reject);
-      child.on("exit", (code) => resolvePromise(code ?? -1));
+    return spawnWorker(workerPath, {
+      STORE_PATH: storePath,
+      SIG: signature,
+      SCOPE: "scope0000001",
+      TTL_MS: String(60 * 60_000),
+      NOW: "1000000",
+      ...(acquireDelayMs ? { ACTRADECK_TEST_LOCK_ACQUIRE_DELAY_MS: String(acquireDelayMs) } : {}),
     });
   }
 

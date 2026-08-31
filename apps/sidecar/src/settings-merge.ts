@@ -27,7 +27,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, hookTimeoutSecondsFor } from "@actradeck/event-model";
-import { withFileLock, type FileLockOptions } from "./file-lock.js";
+import { withFileLock, type FileLockCallOptions, type FileLockOptions } from "./file-lock.js";
 import { writeJson0600 } from "./fs-atomic.js";
 import {
   HOOK_TOKEN_HEADER,
@@ -35,7 +35,7 @@ import {
   OBSERVE_ONLY_HOOK_TIMEOUT_SECONDS,
 } from "./settings-injection.js";
 
-export type { FileLockOptions };
+export type { FileLockCallOptions, FileLockOptions };
 
 /** Attach も managed と同一の hook event 集合を使う (差分 events は forward-compat)。 */
 export const ATTACH_HOOK_EVENTS = MANAGED_HOOK_EVENTS;
@@ -82,11 +82,14 @@ export interface MergeOptions {
   /** 配線する event 群 (既定 ATTACH_HOOK_EVENTS)。 */
   readonly events?: readonly string[];
   /**
-   * file lock の調整オプション (本番未使用・INV テスト用の注入 seam)。
-   * `withFileLock` へそのまま渡る。`onLockAcquired` で critical section 内 read を pin し、
-   * `maxRetries`/`sleep`/`isAlive` で本番呼び出し経路の retry budget を縛るために使う。
+   * file lock の調整オプション。`withFileLock` へそのまま渡る。
+   * 本番呼び出しは渡さない (既定値のみ)。INV テストは `testHooks` で
+   * critical section 内 read (`onLockAcquired`) や retry budget (`maxRetries`/`sleep`/`isAlive`) を
+   * 本番呼び出し経路ごしに pin する。`testHooks` は **test モードでしか受理されない**
+   * (本番モードで渡すと `withFileLock` が throw する) ため、この受け口が本番の lock 意味論を
+   * 弱める経路にはならない。
    */
-  readonly lockOptions?: FileLockOptions;
+  readonly lockOptions?: FileLockCallOptions;
 }
 
 export interface MergeResult {
@@ -501,7 +504,7 @@ function groupHasActradeckEntryOriginally(group: HookGroup): boolean {
  */
 export function detachAttachHooks(
   settingsPath: string,
-  lockOptions?: FileLockOptions,
+  lockOptions?: FileLockCallOptions,
 ): DetachResult {
   if (!existsSync(settingsPath)) return { removed: false, settings: {} };
   return withFileLock(
