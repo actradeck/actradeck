@@ -553,14 +553,14 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   計測 helper 本体の潰し (`return minOf(out)` → 定数 / `out.push(1)` / `fill` の cap 固定 / `isLive` の判定長縮小) /
   //   seed ループの間引き (`live.slice(0, 1)`) / 折返し許容 pin の無界化 (`[^;]*?` → `[\s\S]*?`・SEC-HP-1) /
   //   guard 無効化 / timeout 短縮) は
-  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 16 本・使用側 53 pattern (fill 引数・
+  //   末尾の「自己弱化 pin」が RED にする。**保証の範囲は「pin 済みの綴り — 定数宣言 19 本・使用側 63 pattern (fill 引数・
   //   K ループ・ratio 反復ループと中央値 / 最大の算出と 2 本の assertion・配線 pin・軸 3/4/5 の `out.add` / `out.push` 本体・
   //   軸 4 の合成前置 cmd と 軸 5 の合成前置 + 後置 cmd の構築行と各配線 assertion・結合検査 / 構造ゲートの走査行と件数 pin・
   //   exemption の対 keyed 走査行・
   //   **計測 helper 本体** (`minOf` / `bestOfMs` の warm-up + 反復ループ + `return minOf(out)` / `fill` / `isLive`) と
   //   `for (const seed of live)` ループ header + `totalCases += 1` — task 01a048f6-67a5 で追加)・
-  //   宣言個数 census (23 名・本数も pin・`medianOf` / `maxOf` / 計測 helper 4 名 / `totalCases` /
-  //   `MAX_PIN_SPAN` / `WRAP_TOLERANT_PINS` を含む・走査は
+  //   宣言個数 census (27 名・本数も pin・`medianOf` / `maxOf` / 計測 helper 4 名 / `totalCases` /
+  //   `MAX_PIN_SPAN` / `WRAP_TOLERANT_PINS` / コントロール 4 名を含む・走査は
   //   LINEAR describe の範囲に限定) — を触る単独編集」に限る** (SEC-DB2R3-2 ≡
   //   QA-DB2R3-5・SEC-LN2-1 / TDA-LN2-2)。件数は**実際に it を登録した回数**で数えるので、`live.slice(0, 1)` の
   //   ような seed ループの間引きも exact 件数 pin が RED にする (R4 で 3 レーンが SURVIVED を実測した最大の
@@ -591,6 +591,29 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   **pin と定数の coordinated 編集**も、**pin と code 行の coordinated 編集** (pin 済みの綴りを追随更新しながら
   //   code を弱める 2 site 編集・K-M4/M5-coord が実例) も通る (TDA-LN-1 / QA-LN-5 / QA-LN4R2-1)。
   //   pin はその編集を意識的にさせる装置であって証明ではない。
+  //   **実行可能コントロール (ADR 01a057d0・R2 で着地)**: 上の綴り pin は 3 PR 連続で「pin 自身の弱化レバー」を
+  //   生み続けた (いたちごっこ)。R2 で **既知 2 乗 / 既知線形 / 既知 vacuous の 3 fixture** を主 pipeline と
+  //   同じ helper・定数・幾何 (`derivedSeedsFor` / `prefixSeed` / `isLive` / `fill` / `bestOfMs` / `minOf` /
+  //   `medianOf` / `maxOf` / `SMALL` / `LARGE` / `SCALE` / `K` / `RATIO_REPEAT` / `RATIO_MAX` / `RATIO_MAX_HI`)
+  //   へ流し、「陽性は違反として検出される・陰性は検出されない・vacuous seed は live 集合から外れる」を
+  //   **挙動で** assert する。綴りに依らないので、helper 本体の潰し / 幾何の縮小 / `RATIO_MAX` の緩和 /
+  //   `fill` の cap / `isLive` の判定長縮小はコントロールが RED にする (実測は下の probe 表と報告書)。
+  //   **コントロールが RED にする実測クラス (pin を追随更新した coordinated 編集で確認・7/7)**:
+  //   `bestOfMs` の `return minOf(out)` → 定数 / `out.push(1)` / `minOf` の定数化 / `fill` の cap 固定 /
+  //   `isLive` の判定長縮小 (SMALL→64) / `RATIO_MAX` 緩和 (24→100) / `SCALE` 縮小 (8→2)。いずれも
+  //   R1 までは「pin を同時に書き換えれば通る」形だった。
+  //   **コントロールが捕まえない面 (同じ coordinated 変異で実測・すべて SURVIVED)**: ①主 `it` の
+  //   callback 本体 6 文 (`const small = fill(seed, SMALL)` 〜 2 本の assertion) は共有していないので、
+  //   そこだけの編集 (`rule.re.test(large)` → `(small)` 等) は逐語 pin でしか出ない
+  //   ②`RATIO_MAX_HI` の**緩和**方向 (40 → 100) は陽性 verdict が中央値側で成立するため素通りし、
+  //   宣言 pin と絶対値 pin が担う ③`RATIO_REPEAT` を 1 へ / `BEST_OF_REPEAT` ループを 1 回へ /
+  //   `K` を 1 へ戻す編集は 2 乗の分離が残るためコントロールでは出ない (宣言 pin が担う)
+  //   ④vacuity guard の恒真化はコントロールの対象外 (折返し許容 pin の有界化 + 歯の保存テストが担う)。
+  //   `live` ループの間引き (`live.slice(0, 1)`) は、exact 件数 pin まで追随更新しても**構造下限**
+  //   (`totalCases >= SCAN_TARGETS.length * 3`) が RED にする (実測: 17 >= 51 で失敗)。
+  //   **pin corpus 凍結 (ADR 01a057d0 決定 2)**: コントロール着地をもって綴り pin / census / メタ pin の
+  //   **新規追加を停止**する (既存は削除禁止のまま維持)。以後に新設・改変する検出ロジックの保護は
+  //   コントロールが担い、pin を足すのは**コントロール配線を守る場合のみ**とする。
   //   tripwire は正準 `stripComments` で comment を落とした自 source を走査し、宣言 pattern は行アンカー・使用側
   //   pattern は escape / 文字クラス / 実改行を含む綴りで assertion 行自身には充足しない (SEC-LN2-2 / TDA-LN2-1 /
   //   SEC-LN3-1)。行末 `//` と文字列リテラル内の逐語コピーは依然素通し (sweep 019fd74b C-2 と同じ限界)。
@@ -1047,6 +1070,136 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     });
 
     /**
+     * ===== 実行可能コントロール (ADR 01a057d0・task 01a048f6-67a5 R2) =====
+     *
+     * **なぜ**: PR #52 R1 → PR #53 R1 → hp R1 と 3 連続で M/H の中心が「pin 自身の弱化レバー」に
+     * なった (綴り pin 67→70 本・census 21 名・メタ pin の 3 層が、各層で新しいレバーを生む)。
+     * 綴り pin は意味同値の綴りが無限にあるので 1 レバー塞ぐごとに新レバーが生えるいたちごっこ
+     * (memory `security-gate-reuse-canonical-parser` の「denylist いたちごっこ = 構造ゲート化のサイン」)。
+     * コントロールは**綴りでなく挙動**を assert するので、helper 本体 / 幾何 / 閾値 / 集約 /
+     * seed 生成のどこを弱めても「既知 2 乗が検出されなくなる」= RED になる (将来のレバーも自動被覆)。
+     *
+     * **設計**: 陽性 (既知 2 乗) と陰性 (既知線形) の 2 規則は **`[^|;&\n]` gap の量化子だけが違う**
+     * — `*` (無界 = 各開始位置から末尾まで走査 = O(n²)) と `{0,512}` (有界 = O(512n) = 線形)。
+     * LITERAL_RULES の実規則が線形なのはまさにこの上限のおかげなので、コントロール対は
+     * 「metatest が検出すべき性質」そのものを最小差分で表す。第 3 の vacuous コントロールは
+     * 「SMALL で規則にマッチする seed は O(1) short-circuit するので計測から外す」= `isLive` の歯。
+     *
+     * **同一配線の範囲 (実測 bound・過大表示しない)**: コントロールは主ループと
+     * `derivedSeedsFor` / `prefixSeed` / `isLive` / `fill` / `bestOfMs` / `minOf` / `medianOf` /
+     * `maxOf` / `SMALL` / `LARGE` / `SCALE` / `K` / `RATIO_REPEAT` / `RATIO_MAX` / `RATIO_MAX_HI` を
+     * **共有**する (同一の関数オブジェクト・同一の定数)。**共有していない**のは主 `it` の callback
+     * 本体 6 文 (`const small = fill(seed, SMALL)` 〜 2 本の assertion) で、そこだけは逐語 pin が
+     * 引き続き歯を持つ (主 it 本体を control 用 helper へ括り出すと既存 9 pin の対象が消えるため、
+     * R2 では括り出さない)。よって「主ループ本体の 1 行編集」はコントロールでは捕まらない
+     * — 何が非被覆かは describe header の非被覆列挙に書く。
+     *
+     * **pin corpus 凍結 (ADR 01a057d0 決定 2)**: 本コントロール着地をもって、綴り pin / census /
+     * メタ pin の**新規追加を停止**する (既存は削除禁止のまま維持)。以後に新設・改変する検出
+     * ロジックの保護は**コントロールが担う**。例外は「コントロール配線自体を狙う coordinated 編集」
+     * を守る pin だけ (~70 点の各点 → 1 点へ縮小・ADR の残余開示)。
+     */
+    const CONTROL_FILLER = " filler".repeat(64);
+    /**
+     * コントロール規則 (**fixture であって `LITERAL_RULES` ではない**)。承認ゲートには載らないので
+     * 手書き分離子クラスの構造ゲート (TDA-MA-1) / coupling metatest の対象外 — どちらも
+     * `SCAN_TARGETS` / `LITERAL_RULES` だけを走査する (`CONTROL_TARGETS` を混ぜない)。
+     * `TOTAL_CASES_MEASURED` (110) も動かさない: コントロールのケースは
+     * `controlCasesMeasured` で別に数える。
+     *
+     * `seed` は `prefixSeed` が返すはずの値を**逐語で**書く (helper 呼び出しの結果を使うと
+     * seed 生成が壊れても assertion が恒真になる)。filler を長くしてあるのは、反復 seed 中の
+     * 先頭 literal 出現密度を下げて 2 乗コントロールの**実時間**を抑えるため (ratio は
+     * SCALE² ≈ 64 のまま・実測 無負荷 ≈ 1.1s / 2×nproc 飽和 ≈ 4.3〜5.4s)。
+     */
+    const CONTROL_TARGETS: ReadonlyArray<{
+      kind: "quadratic" | "linear" | "vacuous";
+      re: RegExp;
+      cmd: string;
+      seed: string;
+    }> = [
+      {
+        kind: "quadratic",
+        re: /\bzzctlq\b[^|;&\n]*\bzzendq\b/i,
+        cmd: `zzctlq${CONTROL_FILLER} zzendq now`,
+        seed: `zzctlq${CONTROL_FILLER} zzend `,
+      },
+      {
+        kind: "linear",
+        re: /\bzzctll\b[^|;&\n]{0,512}\bzzendl\b/i,
+        cmd: `zzctll${CONTROL_FILLER} zzendl now`,
+        seed: `zzctll${CONTROL_FILLER} zzend `,
+      },
+      {
+        kind: "vacuous",
+        re: /(?:zzv ){900}/,
+        cmd: "zzv zzv zzv",
+        seed: "zzv ",
+      },
+    ];
+    /**
+     * 主 `it` の 2 本の assertion (`median < RATIO_MAX` **かつ** `worst < RATIO_MAX_HI`) の
+     * 否定 = 「違反として検出される」。コントロールはこの verdict を通して主判定を再現する。
+     */
+    const verdictViolates = (m: number, w: number): boolean => !(m < RATIO_MAX && w < RATIO_MAX_HI);
+    let controlCasesMeasured = 0;
+    CONTROL_TARGETS.forEach((ctl) => {
+      const derived = derivedSeedsFor(ctl.re, ctl.cmd);
+      const live = derived.filter((seed) => isLive(ctl.re, seed));
+      it(`control(${ctl.kind}) の seed が主 pipeline の seed 生成と vacuity filter を通る`, () => {
+        expect(derived, `control derived=${derived.length}`).toContain(ctl.seed);
+        if (ctl.kind === "vacuous") {
+          // `isLive` の歯: SMALL で規則にマッチする seed は O(1) short-circuit しうるので
+          //   計測から外れなければならない。`fill` の cap 固定 (`.slice(0, 512)`) や `isLive` の
+          //   判定長縮小 (`fill(seed, 64)`) はこの seed を live へ反転させる (実測: 規則は
+          //   3,600 字で初めてマッチするので 64 / 512 / 2048 のいずれでも非マッチ = live 扱い)。
+          expect(isLive(ctl.re, ctl.seed)).toBe(false);
+          expect(live).not.toContain(ctl.seed);
+        } else {
+          expect(live).toContain(ctl.seed);
+        }
+      });
+      if (ctl.kind === "vacuous") return;
+      controlCasesMeasured += 1;
+      it(
+        `control(${ctl.kind}) は主 pipeline の判定で ${ctl.kind === "quadratic" ? "違反として検出される" : "検出されない"}`,
+        () => {
+          const controlSmall = fill(ctl.seed, SMALL);
+          const controlLarge = fill(ctl.seed, LARGE);
+          const controlRatios: number[] = [];
+          for (let rep = 0; rep < RATIO_REPEAT; rep++) {
+            const tSmall = bestOfMs(() => {
+              for (let k = 0; k < K; k++) ctl.re.test(controlSmall);
+            });
+            const tLarge = bestOfMs(() => {
+              for (let k = 0; k < K; k++) ctl.re.test(controlLarge);
+            });
+            controlRatios.push(tLarge / Math.max(tSmall, 0.005));
+          }
+          const controlMedian = medianOf(controlRatios);
+          const controlWorst = maxOf(controlRatios);
+          const shown = controlRatios.map((x) => x.toFixed(1)).join("/");
+          if (ctl.kind === "quadratic") {
+            // 陽性: 主判定の verdict が「違反」を返す。加えて**中央値側**が閾値を超えることを
+            //   要求する — `RATIO_MAX` を 100 等へ緩める編集は verdict だけでは上側 (`RATIO_MAX_HI`)
+            //   経由で検出が残るため素通りする。中央値側は実測 (無負荷 54.8〜57.4 / 2×nproc 飽和
+            //   70.8〜107.1・余裕は最小 2.28×) で安定している。
+            expect(verdictViolates(controlMedian, controlWorst), `positive ${shown}`).toBe(true);
+            expect(controlMedian, `positive control median: ${shown}`).toBeGreaterThanOrEqual(
+              RATIO_MAX,
+            );
+          } else {
+            // 陰性: 過剰厳格化 (閾値を下げる / 幾何を壊す) を対で防ぐ。実測 median 無負荷
+            //   8.2〜8.3 / 飽和 9.1〜18.8、worst 飽和 9.2〜19.8 (`RATIO_MAX` 24 への余裕は
+            //   飽和下で 1.28× — 主 it の線形ケースと同じ pre-existing の false RED 面)。
+            expect(verdictViolates(controlMedian, controlWorst), `negative ${shown}`).toBe(false);
+          }
+        },
+        LINEAR_IT_TIMEOUT_MS,
+      );
+    });
+
+    /**
      * 1 本の pin が張ってよい match span の上限 (QA-2 / TDA-1 推奨 3 の構造 backstop)。
      *
      * 折返し許容化のために gap を `[\s\S]*?` にすると、pin head と**別 assertion の tail** を
@@ -1159,6 +1312,16 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(LARGE).toBe(SMALL * SCALE);
         expect(K).toBe(20);
         expect(BEST_OF_REPEAT).toBe(9);
+      });
+      it("実行可能コントロールは陽性 1 / 陰性 1 / vacuous 1 で、110 とは別カウンタで数える (ADR 01a057d0)", () => {
+        // TOTAL_CASES_MEASURED (110) の意味論を汚さないための分離 (裁定 01a057eb unblock (d))。
+        expect(CONTROL_TARGETS.length).toBe(3);
+        expect(CONTROL_TARGETS.map((c) => c.kind)).toEqual(["quadratic", "linear", "vacuous"]);
+        expect(controlCasesMeasured).toBe(2);
+        // verdict はメインの 2 本の assertion の否定 (中央値 **かつ** 最大の両側判定) を再現する。
+        expect(verdictViolates(RATIO_MAX - 1, RATIO_MAX_HI - 1)).toBe(false);
+        expect(verdictViolates(RATIO_MAX, RATIO_MAX_HI - 1)).toBe(true);
+        expect(verdictViolates(RATIO_MAX - 1, RATIO_MAX_HI)).toBe(true);
       });
       it("計測ケース数は実測 110 と exact 一致 (軸の差し戻しで RED・構造下限 3/ルールも併記)", () => {
         // 各ルール最低 3 (汎用 1 + prefix 1 + source / sample 由来の非 vacuous 1・guard が保証)。実測 per-rule live は
@@ -1439,6 +1602,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         const declarations: readonly RegExp[] = [
           // QA-2 / TDA-1 推奨 3 (task 01a048f6-67a5 R2): span 上限の構造 backstop。
           /\n\s+const MAX_PIN_SPAN = 400;\n/,
+          // ADR 01a057d0 (実行可能コントロール): fixture・verdict・入力幾何の宣言。差し替えると
+          //   「既知 2 乗が検出される」という主張の中身が黙って変わる。
+          /\n\s+const CONTROL_FILLER = " filler"\.repeat\(64\);\n/,
+          /\n\s+const CONTROL_TARGETS: ReadonlyArray<\{/,
+          /\n\s+const verdictViolates = \(m: number, w: number\): boolean =>\s+!\(m < RATIO_MAX && w < RATIO_MAX_H[I]\);\n/,
           /\n\s+const WRAP_TOLERANT_PINS: ReadonlyArray<\{ re: RegExp; from: string; to: string \}> = \[/,
           /\n\s+const RATIO_MAX = 24;\n/,
           // 両側判定 (task 01a05374-…-4f88be2481fc): 上側を緩める / 反復回数を 1 へ戻すと単発比へ退化する。
@@ -1567,11 +1735,23 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /expect\(\n\s+rule\.segmentRe,/,
           /expect\(\n\s+samples\[i\]\?\.segmentCmd,/,
           /expect\(suffixWiredCases\)\.toBe\(17\);/,
+          // ADR 01a057d0: **コントロール配線**の pin。ADR の残余開示どおり、コントロール自体を
+          //   狙う coordinated 編集はここでしか止まらない (綴り pin ~70 点の各点 → この 1 面へ縮小)。
+          /const live = derived\.filter\(\(seed\) => isLive\(ctl\.re, seed\)\);/,
+          /const controlSmall = fill\(ctl\.seed, SMALL\);\n\s+const controlLarge = fill\(ctl\.seed, LARGE\);/,
+          /for \(let k = 0; k < K; k\+\+\) ctl\.re\.test\(controlSmall\);/,
+          /for \(let k = 0; k < K; k\+\+\) ctl\.re\.test\(controlLarge\);/,
+          /controlRatios\.push\(tLarge \/ Math\.max\(tSmall, 0\.005\)\);/,
+          /const controlMedian = medianOf\(controlRatios\);\n\s+const controlWorst = maxOf\(controlRatios\);/,
+          /verdictViolates\(controlMedian, controlWorst\), `positive \$\{shown\}`\)\.toBe\(true\);/,
+          /verdictViolates\(controlMedian, controlWorst\), `negative \$\{shown\}`\)\.toBe\(false\);/,
+          /\)\.toBeGreaterThanOrEqual\(\n\s+RATIO_MAX,\n\s+\);/,
+          /expect\(controlCasesMeasured\)\.toBe\(2\);/,
         ];
         // 追加のみ・削除禁止 (finding-registry): pin pattern の**本数**自体を pin し、1 本を静かに
         //   落とす編集を RED にする (header の宣言 / 使用側 pattern 数の機械的な出所 — 数値は直下の 2 本の assertion が正で、ここには繰り返さない)。
-        expect(declarations.length, "宣言 pin の本数").toBe(16);
-        expect(usages.length, "使用側 pin の本数").toBe(53);
+        expect(declarations.length, "宣言 pin の本数").toBe(19);
+        expect(usages.length, "使用側 pin の本数").toBe(63);
         for (const re of [...declarations, ...usages]) {
           expect(self, `tripwire ${String(re)}`).toMatch(re);
           // QA-2 / TDA-1 推奨 3 (span 上限の構造 backstop): 綴りに依らず「1 本の pin が別文へ
@@ -1664,6 +1844,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         //   (`totalCases`) も同じ理由で census に載せる — 本体を逐語 pin しても、`SCAN_TARGETS.forEach`
         //   の中で `const fill = (s: string) => s` を再宣言すれば pin 済みの綴りを残したまま計測が潰れる。
         const names = [
+          "CONTROL_FILLER",
+          "CONTROL_TARGETS",
+          "verdictViolates",
+          "controlCasesMeasured",
           "MAX_PIN_SPAN",
           "WRAP_TOLERANT_PINS",
           "minOf",
@@ -1689,7 +1873,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           "TAIL_METACHARS",
         ];
         // 追加のみ・削除禁止 (finding-registry): census の本数自体を pin する (1 名を静かに落とす編集を RED に)。
-        expect(names.length, "宣言個数 census の名前数").toBe(23);
+        expect(names.length, "宣言個数 census の名前数").toBe(27);
         // SEC-LN3-5 ≡ TDA-LN3-5 (task 01a048f6-67a5): census をファイル全域で総称名 (`K` / `SMALL` /
         //   `fill` / `minOf`) の走査に掛けると、**本 describe と無関係な**将来の宣言が偽 RED を作る
         //   (安全方向だが誤診断)。走査を LINEAR describe の範囲へ限定する。マーカーはやはり **code**

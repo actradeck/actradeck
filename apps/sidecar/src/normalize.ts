@@ -2536,14 +2536,34 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   vacuity guard は汎用 seed `a ` を除いた派生 seed で
  *   計数し (SEC-DB2R4-3 の恒真を解消)、metatest 自身の縮退 (軸の差し戻し / near-miss 除去 / 数字除外の除去 /
  *   軸 4/5 の区切り集合の縮小 / 両側判定の片側化 / 結合検査 universe の縮小 /
- *   RATIO_MAX 緩和 / 入力幾何の縮小 / 計測 helper 本体の潰し / seed ループの間引き / guard 無効化 / timeout 短縮) は
+ *   RATIO_MAX 緩和 / 入力幾何の縮小 / 計測 helper 本体の潰し / seed ループの間引き / 折返し許容 pin の無界化 /
+ *   guard 無効化 / timeout 短縮) は
  *   自己弱化 pin が **pin 済みの綴り (定数宣言 / 使用側 / 宣言個数 census) を触る単独編集の
  *   範囲で** RED にする (SEC-DB2R3-2)。**task 01a048f6-67a5 (本 PR) で被覆へ移った**もの: 計測 helper 本体
  *   (`minOf` / `bestOfMs` / `fill` / `isLive`)・`for (const seed of live)` ループ header・件数を**登録した it の
  *   実数**で数える加算 (旧 `totalCases += live.length` はループ前加算ゆえ `live.slice(0, 1)` の 1 行編集で
  *   ratio 計測の 85% が無音で消えても件数 pin が発火しなかった)・各 pattern が「pin ブロックを除いた view」でも
- *   マッチする非自己充足メタ pin。**非被覆のまま**: pin ブロック自身 (toBe 値・pattern 綴り) と、pin を追随更新
- *   しながら定数 / code 行を弱める coordinated 編集 (TDA-LN2-3 / SEC-LN3-2 / QA-LN4R2-1)。**LINEAR metatest の seed 生成 / RATIO_MAX /
+ *   マッチする非自己充足メタ pin。
+ *   **R2 unblock (裁定 01a057eb)**: ①折返し許容 pin 6 本の gap を文境界クラス `[^;]*?` へ有界化
+ *   (無界 `[\s\S]*?` は pin head と**別 assertion の tail** を span 14,474 / 8,451 字でまたぎ、対象行を
+ *   vacuous 化しても緑のままだった = base より弱い) ②全 pin の match span に上限 400 (実測 max は
+ *   pristine 108 / 折返し worst 144) ③6 本すべてに in-memory の**歯の保存**テスト (対象を弱化 → pattern が
+ *   非マッチへ落ちる) ④切除 view の負 assert に同一リテラルの POSITIVE 対 (型注釈の無害な改名 1 手で
+ *   両方が黙って恒真化していた) ⑤**実行可能コントロール** — 既知 2 乗 / 既知線形 / 既知 vacuous の 3 fixture を
+ *   主 pipeline と同じ helper・定数・幾何へ流し「陽性は検出される / 陰性は検出されない / vacuous seed は
+ *   live 集合から外れる」を挙動で assert する (綴りに依らないので helper 本体・幾何・`RATIO_MAX` 緩和・
+ *   `fill` cap・`isLive` 判定長のどれを弱めても RED)。以後 **pin corpus は凍結**し、新規 pin は
+ *   コントロール配線を守る場合のみとする (ADR 01a057d0)。
+ *   **非被覆のまま**: pin ブロック自身 (toBe 値・pattern 綴り・R2 で足した歯の保存テスト / span backstop の
+ *   構築行) と、pin を追随更新
+ *   しながら定数 / code 行を弱める coordinated 編集 (TDA-LN2-3 / SEC-LN3-2 / QA-LN4R2-1)。メタ pin / census の
+ *   **走査マーカー** (`describe` / `it` の title 文字列を code として `indexOf` する) も、title とマーカー宣言を
+ *   同時に書き換えれば切除点・走査範囲が動く (片側だけならマーカー消失で RED)。census の**右境界**は
+ *   隣接する無関係な describe の title に錨づけており、その間に総称名を持つ describe を挟むと偽 RED になる
+ *   (安全方向・TDA-3)。件数は**登録した it の実数**であって**実行した計測数ではない**: `it(` → `it.skip(` の
+ *   1 site や it 本体先頭の早期 return で 110 件が計測されなくても件数 pin は緑 (SEC-HP-3・base 同値・
+ *   executed-count pin は task 01a0574f-521a)。コントロールも主 `it` の callback 本体 6 文は共有しないので、
+ *   そこだけの 1 行編集は逐語 pin でしか出ない。**LINEAR metatest の seed 生成 / RATIO_MAX /
  *   timeout の変更は境界ゲートの走査範囲変更 = full 監査既定** (finding-registry・SEC-DB2R3-3)。束縛後の残余コスト (16 KiB 敵対入力・
  *   base 比): risk 経路 ≈ 3.8× / categories 経路 ≈ 7.0× / 承認 hook 経路 ≈ 1.7× (TDA-DB2R2-7 / SEC R2 実測・
  *   良性入力は 1.0×)。
