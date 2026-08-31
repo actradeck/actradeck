@@ -16,6 +16,16 @@ import { WsClient } from "../src/ws-client.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 「条件が満たされるまで待つ」poll の上限ステップ数 (×10ms)。
+ *
+ * これは**待つ上限**であって assertion ではない — 条件が本当に満たされないなら上限を伸ばしても
+ * 落ちる。旧値 (50 = 500ms) は、この suite が実プロセス spawn を伴う lock 系 INV と同居して
+ * 走るようになってから、切断イベントの観測を稀に取りこぼした (full suite 18 回中 2 回・単独実行や
+ * CPU burner 負荷では再現せず)。上限だけを 3s へ伸ばし、判定は据え置く。
+ */
+const SETTLE_STEPS = 300;
+
 let server: WebSocketServer | undefined;
 let client: WsClient | undefined;
 afterEach(async () => {
@@ -66,12 +76,12 @@ describe("WsClient: connect / reconnect / backoff", () => {
     const onDisconnected = vi.fn();
     client.on("disconnected", onDisconnected);
     client.connect();
-    for (let i = 0; i < 50 && !client.connected; i++) await sleep(10);
+    for (let i = 0; i < SETTLE_STEPS && !client.connected; i++) await sleep(10);
     expect(client.connected).toBe(true);
 
     // サーバ側から切断 → disconnected + scheduleReconnect 経路。
     for (const c of first.conns) c.close();
-    for (let i = 0; i < 50 && client.connected; i++) await sleep(10);
+    for (let i = 0; i < SETTLE_STEPS && client.connected; i++) await sleep(10);
     expect(onDisconnected).toHaveBeenCalled();
 
     // 同 port で再起動 → backoff 後に再接続する。
@@ -81,7 +91,7 @@ describe("WsClient: connect / reconnect / backoff", () => {
       wss.on("listening", () => resolve({ wss }));
     });
     server = again.wss;
-    for (let i = 0; i < 80 && !client.connected; i++) await sleep(10);
+    for (let i = 0; i < SETTLE_STEPS && !client.connected; i++) await sleep(10);
     expect(client.connected).toBe(true);
     store.close();
   });
