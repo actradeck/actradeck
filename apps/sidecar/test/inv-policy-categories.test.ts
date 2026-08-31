@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 import { stripComments } from "./util/strip-comments.js";
 
@@ -573,8 +573,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   走査マーカーの 3 点を同時に書き換えない限り」に bound される。
   //   **span の有界化 (SEC-HP-1 ≡ QA-1 ≡ TDA-1・R2)**: 折返し許容 pin 6 本の gap は文境界クラス
   //   `[^;]*?` で有界化し (無界 `[\s\S]*?` は別 assertion の tail まで span して歯を失った・実測
-  //   14,474 / 8,451 字)、さらに全 pin の match span に `MAX_PIN_SPAN` (400・現行実測 max は
-  //   pristine 108 / 折返し worst 144) の上限を張る。加えて 6 本すべてに **in-memory の歯の保存テスト**
+  //   14,474 / 8,451 字)、さらに全 pin の match span に `MAX_PIN_SPAN` (400) の上限を張る。
+  //   **実測 (QA-R2-5 の是正・probe 依存なのでレンジで書く)**: pristine の max は全 pin で 108
+  //   (折返し許容 6 本だけなら 84)。折返し後の worst は「message をどれだけ伸ばすか」で決まるため
+  //   probe ごとに違い、**144 (R1 実装者 probe) / 167 (本 PR 再測・6 本に message +40 字) /
+  //   175 (QA R2 probe)** — cap 400 への余裕は **2.3〜2.8×**。跨ぎ span (最小 8,451) とは 1.7 桁違う。加えて 6 本すべてに **in-memory の歯の保存テスト**
   //   (対象の matcher / 値を弱化 → pattern が非マッチへ落ちる) を張り、綴り変更の受け入れ基準を
   //   「静的な同一行一致」から「歯の保存」へ上げた (QA-3 / overlay playbook ⑤)。
   //   **非被覆**: pin describe 自身 (toBe 値・tripwire pattern・**歯の保存テストと span backstop の
@@ -582,7 +585,14 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   両立せず pin できない — 削除は TS の未使用参照 / 件数 pin で loud に落ちる)。件数は**登録した it の
   //   実数**であって**実行した計測数ではない** (SEC-HP-3・base 同値の pre-existing): `it(` → `it.skip(`
   //   の 1 site、または it 本体先頭の早期 return で 110 件全部が計測されなくても `totalCases` は 110 の
-  //   まま rc=0 (実測・head/base 同値。executed-count pin は task 01a0574f-521a v0.9)。メタ pin / census の**走査マーカー**
+  //   まま rc=0 (実測・head/base 同値。主ループ側の executed-count pin は task 01a0574f-521a v0.9)。
+  //   **コントロール 2 件についてだけは R2 unblock (b) で閉じた** (SEC-HPR2-1・裁定 01a0586b): 計測
+  //   callback の**末尾**で `controlCasesExecuted` を加算し `afterAll` で 2 と照合する。本 PR 実測 —
+  //   `it(` → `it.skip(` 1 site: base rc=0 (299 passed / 2 skipped) → head **rc=1**、callback 先頭の
+  //   早期 return 2 行: base rc=0 (301 passed) → head **rc=1**、加算行の削除 (vacuous 化): head **rc=1**。
+  //   CI 二段目は `scripts/ci/assert-inv-ran.mjs` の `sidecar-linear` suite (skipped/todo を silent
+  //   green にしない)。**副作用**: コントロールが本当に落ちたときは当該 assertion と afterAll の
+  //   2 件が RED になる (末尾加算ゆえ・主因は前者)。メタ pin / census の**走査マーカー**
   //   (`describe` / `it` の title 文字列を code として `indexOf` する。マーカー綴りは 2 分割 + `join` で
   //   組み立て、逐語版が「宣言行自身に当たって切除点が配列の後ろへずれ、メタ pin が恒真化する」形を避ける
   //   — 実装者 probe で逐語版がマーカー書き換え後も 295 全緑 SURVIVED を実測) も同様で、title と
@@ -596,24 +606,43 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   同じ helper・定数・幾何 (`derivedSeedsFor` / `prefixSeed` / `isLive` / `fill` / `bestOfMs` / `minOf` /
   //   `medianOf` / `maxOf` / `SMALL` / `LARGE` / `SCALE` / `K` / `RATIO_REPEAT` / `RATIO_MAX` / `RATIO_MAX_HI`)
   //   へ流し、「陽性は違反として検出される・陰性は検出されない・vacuous seed は live 集合から外れる」を
-  //   **挙動で** assert する。綴りに依らないので、helper 本体の潰し / 幾何の縮小 / `RATIO_MAX` の緩和 /
-  //   `fill` の cap / `isLive` の判定長縮小はコントロールが RED にする (実測は下の probe 表と報告書)。
-  //   **コントロールが RED にする実測クラス (pin を追随更新した coordinated 編集で確認・7/7)**:
+  //   **挙動で** assert する。綴りに依らないので、helper 本体の潰し / 幾何の縮小 / `fill` の cap /
+  //   `isLive` の判定長縮小はコントロールが RED にする (実測は下の probe 表と報告書)。
+  //   **コントロールが単独で RED にする実測クラス (pin を追随更新した coordinated 編集で確認・6 形)**:
   //   `bestOfMs` の `return minOf(out)` → 定数 / `out.push(1)` / `minOf` の定数化 / `fill` の cap 固定 /
-  //   `isLive` の判定長縮小 (SMALL→64) / `RATIO_MAX` 緩和 (24→100) / `SCALE` 縮小 (8→2)。いずれも
-  //   R1 までは「pin を同時に書き換えれば通る」形だった。
+  //   `isLive` の判定長縮小 (SMALL→64) / `SCALE` 縮小 (8→2)。いずれも R1 までは「pin を同時に
+  //   書き換えれば通る」形だった。
+  //   **7 形目 (`RATIO_MAX` 緩和) は条件つき — R1 の「7/7」は過大表示だった** (QA-R2-1 ≡ 裁定 01a0586b・
+  //   本 PR で再実測): 24→100 の**単独**緩和で RED になるのは事実だが、そこでは base 既存の
+  //   `expect(RATIO_MAX_HI).toBeGreaterThan(RATIO_MAX)` も同時に落ちる (実測: 40 > 100 が false) ので
+  //   コントロールの**固有寄与ではない**。両閾値を同時に上げた形 (24→100 ∧ 40→200) で初めて
+  //   **コントロールだけ**が RED になる (実測: `positive 57.3/59.4/54.7: expected false to be true`)。
+  //   **穏当な緩和 24→39 はどの assertion も RED にしない** (実測 SURVIVED・301 passed)。
+  //   **被覆帯域 (実測 bound・全称を書かない)**: コントロールが検出できるのは「陽性 fixture の実測比を
+  //   閾値の下へ押し下げる」編集に限る。陽性 median は**無負荷 55.1〜55.9 / 2×nproc 飽和 63.5〜187.3**
+  //   (本 PR 実測・飽和は full-suite 並走 8 run) なので、閾値をそこより下に保つ緩和 (24→39) や、
+  //   ratio が SCALE² = 36 に留まる縮小 (8→6) は**非検出** (2 形とも本 PR で SURVIVED を実測)。
+  //   よって「pin を書いていない将来の変種も自動被覆」ではなく「**陽性 fixture の分離を壊す**変種を
+  //   被覆」が正しい主張 (この 2 点が実測した非被覆点)。
   //   **コントロールが捕まえない面 (同じ coordinated 変異で実測・すべて SURVIVED)**: ①主 `it` の
   //   callback 本体 6 文 (`const small = fill(seed, SMALL)` 〜 2 本の assertion) は共有していないので、
   //   そこだけの編集 (`rule.re.test(large)` → `(small)` 等) は逐語 pin でしか出ない
   //   ②`RATIO_MAX_HI` の**緩和**方向 (40 → 100) は陽性 verdict が中央値側で成立するため素通りし、
   //   宣言 pin と絶対値 pin が担う ③`RATIO_REPEAT` を 1 へ / `BEST_OF_REPEAT` ループを 1 回へ /
   //   `K` を 1 へ戻す編集は 2 乗の分離が残るためコントロールでは出ない (宣言 pin が担う)
-  //   ④vacuity guard の恒真化はコントロールの対象外 (折返し許容 pin の有界化 + 歯の保存テストが担う)。
+  //   ④vacuity guard の恒真化はコントロールの対象外 (折返し許容 pin の有界化 + 歯の保存テストが担う)
+  //   ⑤帯域外の閾値 / 幾何の穏当な緩和 (`RATIO_MAX` 24→39 / `SCALE` 8→6) ⑥pin describe 自身の
+  //   構築行 (tripwire pattern / 歯の保存テスト / span backstop) ⑦陰性 control の内側ループ倍率を
+  //   1 へ戻す編集 (**非 pin**・実測 SURVIVED — 飽和下の false RED 率が上がるだけの計測品質の劣化)。
   //   `live` ループの間引き (`live.slice(0, 1)`) は、exact 件数 pin まで追随更新しても**構造下限**
   //   (`totalCases >= SCAN_TARGETS.length * 3`) が RED にする (実測: 17 >= 51 で失敗)。
   //   **pin corpus 凍結 (ADR 01a057d0 決定 2)**: コントロール着地をもって綴り pin / census / メタ pin の
   //   **新規追加を停止**する (既存は削除禁止のまま維持)。以後に新設・改変する検出ロジックの保護は
   //   コントロールが担い、pin を足すのは**コントロール配線を守る場合のみ**とする。
+  //   **凍結の例外 carve (裁定 01a0586b)**: 上の非被覆クラスに将来「歯」を足す必要が出たら、①綴りに
+  //   依らない挙動 assert (コントロール / 実行証跡カウンタ) ②CI ゲート (`assert-inv-ran` の suite) の
+  //   順に検討し、**どちらでも覆えない場合に限り**綴り pin を足す。R2 unblock (b) は ①+② で閉じ
+  //   **新規 pin 0 本**だった (declarations 19 / usages 63 / census 27 は R1 から不変)。
   //   tripwire は正準 `stripComments` で comment を落とした自 source を走査し、宣言 pattern は行アンカー・使用側
   //   pattern は escape / 文字クラス / 実改行を含む綴りで assertion 行自身には充足しない (SEC-LN2-2 / TDA-LN2-1 /
   //   SEC-LN3-1)。行末 `//` と文字列リテラル内の逐語コピーは依然素通し (sweep 019fd74b C-2 と同じ限界)。
@@ -1098,6 +1127,13 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * メタ pin の**新規追加を停止**する (既存は削除禁止のまま維持)。以後に新設・改変する検出
      * ロジックの保護は**コントロールが担う**。例外は「コントロール配線自体を狙う coordinated 編集」
      * を守る pin だけ (~70 点の各点 → 1 点へ縮小・ADR の残余開示)。
+     *
+     * **凍結の例外 carve (裁定 01a0586b・実態に合わせた条件文)**: 下の非被覆クラスに将来「歯」を
+     * 足したくなったら、①挙動 assert (コントロール / 実行証跡カウンタのような**綴りに依らない**
+     * 形) ②CI ゲート (`scripts/ci/assert-inv-ran.mjs` の suite = skip を silent green にしない)
+     * の順に検討し、**どちらでも覆えない場合に限り**綴り pin を足す。R2 unblock (b)
+     * (SEC-HP-3 の「登録 ≠ 実行」) は ① `controlCasesExecuted` の `afterAll` と ②
+     * `sidecar-linear` suite で閉じ、**新規 pin 0 本**だった — これがこの carve の運用実例。
      */
     const CONTROL_FILLER = " filler".repeat(64);
     /**
@@ -1111,6 +1147,17 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * seed 生成が壊れても assertion が恒真になる)。filler を長くしてあるのは、反復 seed 中の
      * 先頭 literal 出現密度を下げて 2 乗コントロールの**実時間**を抑えるため (ratio は
      * SCALE² ≈ 64 のまま・実測 無負荷 ≈ 1.1s / 2×nproc 飽和 ≈ 4.3〜5.4s)。
+     *
+     * **entries 自体は無 pin (SEC-HPR2-3・実測 bound)**: 宣言 pin は `const CONTROL_TARGETS:
+     * ReadonlyArray<{` の 1 行だけで、`re` / `cmd` / `seed` の中身は逐語 pin されていない
+     * (pin corpus 凍結 = ADR 01a057d0 の帰結・意図どおり)。自己検出できるのは **fixture が
+     * 弱くなる方向**に限る: `kind` 配列の逐語 pin (`["quadratic", "linear", "vacuous"]`) と陽性の
+     * `controlMedian >= RATIO_MAX` が「陽性 fixture を 2 乗でない形へ差し替える」編集を RED にし、
+     * vacuous の `isLive(...) === false` と陰陽の `live` 包含 assertion が seed 破壊を RED にする。
+     * **検出できない**のは (i) 陽性をより極端な 2 乗へ**強める**方向 (ii) 陰性を別の線形規則へ
+     * 差し替える方向 (iii) `CONTROL_FILLER` 長の変更 (宣言は pin 済みだが値の意味は非 assert)。
+     * いずれも「コントロールの検出下限がどこにあるか」を動かすので、触るときは陽性 median の
+     * 実測を更新すること (下限は下の実測レンジが正)。
      */
     const CONTROL_TARGETS: ReadonlyArray<{
       kind: "quadratic" | "linear" | "vacuous";
@@ -1143,6 +1190,16 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      */
     const verdictViolates = (m: number, w: number): boolean => !(m < RATIO_MAX && w < RATIO_MAX_HI);
     let controlCasesMeasured = 0;
+    /**
+     * **実行された**コントロール計測数 (SEC-HPR2-1・裁定 01a0586b unblock (b))。
+     *
+     * `controlCasesMeasured` は it を**登録した**回数なので、`it(` → `it.skip(` の 1 site や
+     * callback 先頭の早期 return では動かない (`totalCases` の SEC-HP-3 と同じ構造で、head/base とも
+     * 301 passed / 0 skipped のまま緑だった)。ここは計測 callback の**末尾**で加算し、`afterAll` で
+     * 2 と照合する — 早期 return / skip / 例外のどれでも RED になる (実測は報告書の反転ログ)。
+     * 加算行そのものを消す vacuous 化も同じ assertion が RED にする。
+     */
+    let controlCasesExecuted = 0;
     CONTROL_TARGETS.forEach((ctl) => {
       const derived = derivedSeedsFor(ctl.re, ctl.cmd);
       const live = derived.filter((seed) => isLive(ctl.re, seed));
@@ -1166,13 +1223,35 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         () => {
           const controlSmall = fill(ctl.seed, SMALL);
           const controlLarge = fill(ctl.seed, LARGE);
+          // 陰性 control の飽和較正 (QA-R2-1・裁定 01a0586b unblock (a))。**幾何 (`K` / `SMALL` /
+          //   `SCALE` / `BEST_OF_REPEAT` / `RATIO_REPEAT`) は変えず**、陰性 control の内側ループだけを
+          //   8 倍する。理由: 陰性の `tSmall` は無負荷で 0.33ms しかなく、飽和下ではスケジューラの
+          //   jitter が分母を支配して比が跳ねた (QA-R2-1 の実測 24〜47.7・false RED)。分子と分母を
+          //   同じ倍率で伸ばすので**比の期待値は不変** (≈ SCALE) で、閾値との関係は変わらない。
+          //   陽性は 1 倍のまま (2 乗形は 8 倍すると飽和下で 35〜43s / 1 ケースになるため)。
+          //   **較正の実測 (本 PR・full-suite 並走 + 2×nproc 飽和・倍率あたり n=24・load 42〜49)**:
+          //   倍率 1 → false RED **8/24** (median max 29.4)、2 → 9/24、4 → 14/24 (**単調ではない**:
+          //   2/4 は分母がまだ小さいまま計測位置が後ろへずれるため)、**8 → 0/24** (median max 13.6・
+          //   閾値 24 への余裕 1.76×)、16 → 0/24 (11.8・2.03×)。落ちるのはほぼ**中央値側**で、
+          //   上側 (`RATIO_MAX_HI` 40) は倍率 1 では 0/24。倍率 8 を採ったのは 0/24 を満たす最小の
+          //   倍率だから (16 の追加利得は 1.76×→2.03× に対し所要時間が飽和下 4.3s→6.7s)。
+          //   コストは陰性 1 ケースあたり**無負荷 ≈ +0.7s / 飽和 ≈ +3.8s** (LINEAR ファイル単独の
+          //   実行時間は 9.52s → 9.71s)。
+          //   この倍率は**非 pin** (綴り pin を足さない・ADR 01a057d0 の凍結) — 1 へ戻す編集は
+          //   RED にならず (本 PR で実測 SURVIVED)、飽和下の false RED 率が上がるだけの計測品質の
+          //   劣化として扱う。
+          const innerRepeat = ctl.kind === "linear" ? 8 : 1;
           const controlRatios: number[] = [];
           for (let rep = 0; rep < RATIO_REPEAT; rep++) {
             const tSmall = bestOfMs(() => {
-              for (let k = 0; k < K; k++) ctl.re.test(controlSmall);
+              for (let inner = 0; inner < innerRepeat; inner++) {
+                for (let k = 0; k < K; k++) ctl.re.test(controlSmall);
+              }
             });
             const tLarge = bestOfMs(() => {
-              for (let k = 0; k < K; k++) ctl.re.test(controlLarge);
+              for (let inner = 0; inner < innerRepeat; inner++) {
+                for (let k = 0; k < K; k++) ctl.re.test(controlLarge);
+              }
             });
             controlRatios.push(tLarge / Math.max(tSmall, 0.005));
           }
@@ -1182,21 +1261,47 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           if (ctl.kind === "quadratic") {
             // 陽性: 主判定の verdict が「違反」を返す。加えて**中央値側**が閾値を超えることを
             //   要求する — `RATIO_MAX` を 100 等へ緩める編集は verdict だけでは上側 (`RATIO_MAX_HI`)
-            //   経由で検出が残るため素通りする。中央値側は実測 (無負荷 54.8〜57.4 / 2×nproc 飽和
-            //   70.8〜107.1・余裕は最小 2.28×) で安定している。
+            //   経由で検出が残るため素通りする。中央値側の実測: **無負荷 54.8〜57.4 (R1) / 55.1〜55.9
+            //   (本 PR 再測) ・2×nproc 飽和 63.5〜187.3 (本 PR・full-suite 並走 8 run)**。閾値 24 への
+            //   最小余裕は無負荷 **2.28×** / 飽和 **2.65×** (飽和は上振れするので下限が効く)。
+            //   この中央値が**コントロールの検出下限**そのもの (これより下へ閾値を緩める編集しか
+            //   RED にできない — 上の header の被覆帯域を参照)。
             expect(verdictViolates(controlMedian, controlWorst), `positive ${shown}`).toBe(true);
             expect(controlMedian, `positive control median: ${shown}`).toBeGreaterThanOrEqual(
               RATIO_MAX,
             );
           } else {
-            // 陰性: 過剰厳格化 (閾値を下げる / 幾何を壊す) を対で防ぐ。実測 median 無負荷
-            //   8.2〜8.3 / 飽和 9.1〜18.8、worst 飽和 9.2〜19.8 (`RATIO_MAX` 24 への余裕は
-            //   飽和下で 1.28× — 主 it の線形ケースと同じ pre-existing の false RED 面)。
+            // 陰性: 過剰厳格化 (閾値を下げる / 幾何を壊す) を対で防ぐ。**較正後 (内側 ×8) の実測**:
+            //   median 無負荷 8.43〜8.54 / 2×nproc 飽和 8.06〜15.99、worst 飽和 max 18.42
+            //   (full-suite 並走 8 run・load 33〜51)。`RATIO_MAX` 24 への余裕は飽和下で **1.50×**
+            //   (較正前の ×1 は同じ 8 run で median 6.70〜19.71・余裕 **1.22×**)。R1 の記述
+            //   「飽和 9.1〜18.8 / 余裕 1.28×」は較正前の値。
             expect(verdictViolates(controlMedian, controlWorst), `negative ${shown}`).toBe(false);
           }
+          // 実行証跡は callback の**末尾**で立てる (先頭だと「先頭の 1 行後ろに return を挿す」形が
+          //   素通りする)。skip / 早期 return / 途中の例外のどれでも下の afterAll が RED になる。
+          controlCasesExecuted += 1;
         },
         LINEAR_IT_TIMEOUT_MS,
       );
+    });
+    /**
+     * 登録 (`controlCasesMeasured`) と**実行** (`controlCasesExecuted`) の照合 (SEC-HPR2-1)。
+     *
+     * 件数 pin (`TOTAL_CASES_MEASURED` / `controlCasesMeasured`) はいずれも登録時に確定するので、
+     * `it(` → `it.skip(` の 1 site や callback 先頭の早期 return では動かない (SEC-HP-3・base 同値)。
+     * コントロールは「metatest の検出能力そのもの」を担うので、**実行されたこと**を別カウンタで
+     * 照合する。CI 側の二段目は `scripts/ci/assert-inv-ran.mjs` の `sidecar-linear` suite
+     * (skipped/todo を silent green にしない) が担う。
+     *
+     * bound: 本 assertion は LINEAR describe の全 it が走る前提 (`-t` でコントロールだけを除外する
+     * 絞り込み実行では偽 RED になる)。CI / preflight / 既定のファイル実行はいずれも全件実行。
+     */
+    afterAll(() => {
+      expect(
+        controlCasesExecuted,
+        `実行されたコントロール計測数 (登録は ${controlCasesMeasured})`,
+      ).toBe(2);
     });
 
     /**
@@ -1205,9 +1310,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * 折返し許容化のために gap を `[\s\S]*?` にすると、pin head と**別 assertion の tail** を
      * またいで充足しうる (SEC-HP-1 ≡ QA-1 ≡ TDA-1 の実測: `derivedLive` 14,474 字 / `gated`
      * 8,451 字)。gap の綴りに依らず span 自体へ上限を張り、将来の無界 pattern 混入を構造的に
-     * 止める。**実測 (本 PR 時点)**: 全 pin の max span は **144** 字 (pristine 108 /
-     * message を数語伸ばして prettier で折り返した最悪形 144・実装者 probe)。400 は 144 の
-     * 2.7 倍で、折返しの余裕を残しつつ「別文へ跨いだ」span (最小でも 8,451) を確実に切る。
+     * 止める。**実測 (QA-R2-5・単一値でなくレンジで書く)**: pristine の max span は全 pin で **108**
+     * (折返し許容 6 本だけなら **84**)。折返し後の worst は probe が message をどれだけ伸ばすかで
+     * 決まるため単一値にならない — **144** (R1 実装者 probe) / **167** (本 PR 再測: 6 本それぞれの
+     * message を +40 字して prettier に折り返させた最悪形) / **175** (QA R2 probe)。400 はこのレンジの
+     * **2.3〜2.8 倍**で、折返しの余裕を残しつつ「別文へ跨いだ」span (最小でも 8,451) を確実に切る。
      */
     const MAX_PIN_SPAN = 400;
     /**
@@ -1228,6 +1335,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      *     167/181/142 で **SURVIVED (歯を失う)**、`[^;]*?` は **3/3 RED**。距離依存 (現行
      *     corpus の最近接 foreign tail が偶然 8,451 字先である事実) に頼らない方を採る。
      * 文境界クラスと `MAX_PIN_SPAN` は**失敗モードが別**なので二重に効く (構造 + 距離)。
+     *
+     * **代償 (SEC-HPR2-4)**: gap が `;` を跨げないので、**対象 assertion の引数に `;` を書けない**
+     * (message 文字列に `;` を入れると pin が非マッチ = 偽 RED)。歯を失う側でなく落ちる側 = loud。
      *
      * `from` / `to` は「対象の matcher / 値を弱める」書換え。pin の match text の**内側だけ**に
      * 適用して in-memory で歯の保存を assert する (TDA-1 推奨 2 の landing テスト)。綴りは
@@ -1640,12 +1750,15 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           /const t = process\.hrtime\.bigint\(\);\n\s+run\(\);/,
           /out\.push\(Number\(process\.hrtime\.bigint\(\) - t\) \/ 1e6\);/,
           /return minOf\(out\);/,
-          // TDA-5 (実測 bound): この 1 本だけは `=>` 直後の **printWidth 由来の折返し**を綴りに焼き込む
-          //   (`\n\s+`)。1 行に畳んだ長さは 105 字で printWidth 100 との差は **5 字**しかなく、
-          //   引数名 / 型注釈を短くする無害な整形で prettier が結合すると**偽 RED**になる (他の新 pin —
-          //   `minOf` 91 字 / `isLive` 86 字 / `bestOfMs` header / ループ header — は文構造由来の改行なので
-          //   安定)。折返し許容形 (`=>\s+`) への緩和は歯の保存 vector を要するので R2 では見送り、
-          //   注記に留める (sweep 019fd74b)。
+          // TDA-5 (実測 bound・**TDA-R2-4 で訂正**): この pin は `=>` 直後の **printWidth 由来の折返し**を
+          //   綴りに焼き込む (`\n\s+`)。1 行に畳んだ長さは **106 字** (R1 記載の 105 は実測し直して 1 字ずれ)
+          //   で printWidth 100 との差は **6 字**しかなく、引数名 / 型注釈を短くする無害な整形で prettier が
+          //   結合すると**偽 RED**になる。**「この 1 本だけ」ではない**: R2 で足したコントロール pin
+          //   `).toBeGreaterThanOrEqual(\n RATIO_MAX,\n );` も同じクラスで、1 行に畳むと **105 字** =
+          //   printWidth との差 **5 字**。message を数語縮めると prettier が 1 行へ結合して偽 RED になる
+          //   (他の pin — `minOf` / `isLive` / `bestOfMs` header / ループ header / 2 文並置形 — は文構造
+          //   由来の改行なので安定)。折返し許容形 (`=>\s+`) への緩和は歯の保存 vector を要するので
+          //   R2 でも見送り、注記に留める (sweep 019fd74b)。
           /const fill = \(seed: string, n: number\): string =>\n\s+seed\.repeat\(Math\.ceil\(n \/ seed\.length\)\)\.slice\(0, n\);/,
           /const isLive = \(re: RegExp, seed: string\): boolean => !re\.test\(fill\(seed, SMALL\)\);/,
           // 最大の silent lever (R4): ループ header と、**登録した it の実数**で数える件数加算。

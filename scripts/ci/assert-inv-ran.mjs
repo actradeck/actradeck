@@ -61,6 +61,14 @@ export const SUITES = {
       "INV-APPROVAL-RECONCILE",
   },
   "sidecar-egress": { label: "sidecar egress e2e (INV-EGRESS-E2E)", pattern: "INV-EGRESS-E2E" },
+  // SEC-HPR2-1 (裁定 01a0586b): the linear metatest's executable controls ARE the detector's
+  // self-check, and the in-file count pins are registration-time (`it.skip` or an early return
+  // leaves them green). The in-process backstop is an afterAll on an executed-case counter;
+  // this entry is the CI-side second layer, which additionally refuses a skipped/todo suite.
+  "sidecar-linear": {
+    label: "sidecar linear metatest (INV-LITERAL-RULES-LINEAR)",
+    pattern: "INV-LITERAL-RULES-LINEAR",
+  },
 };
 
 function main() {

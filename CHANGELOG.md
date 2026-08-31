@@ -287,35 +287,60 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   characters away, so making the target line vacuous left the pin green. Each of the six now
   carries the weakening that must kill it, and the metatest builds the mutated source in memory and
   asserts the pattern stops matching; every pin must also match within 400 characters, two orders
-  of magnitude below those cross-statement spans and well above the observed maxima (108, or 144
-  after a wrap). The two negative asserts that pin the cut point gained positive pairs on the same
-  literal, because renaming the array type annotation had silently made both vacuous.
+  of magnitude below those cross-statement spans and well above the observed maxima (108 pristine;
+  after a wrap the worst span depends on how far the probe lengthens the message, and three probes
+  measured 144, 167 and 175, so the cap has 2.3x to 2.8x of headroom). The two negative asserts
+  that pin the cut point gained positive pairs on the same literal, because renaming the array type
+  annotation had silently made both vacuous.
 - **The linear metatest now protects itself with executable controls instead of only source-spelling
   pins.** Three fixture rules — a known-quadratic one, a known-linear one that differs only by
   bounding the same gap, and one whose seed matches at the measurement size — run through the same
   seed derivation, vacuity filter, timing helpers, geometry and thresholds as the real rules, and
   assert that the positive control is reported as a violation, the negative one is not, and the
   vacuous seed is excluded from measurement. Because the controls assert behaviour rather than
-  spelling, collapsing a timing helper, shrinking the input geometry, capping `fill`, weakening the
-  vacuity check or relaxing the ratio threshold makes them fail, including future variants nobody
-  has written a pin for. Seven such edits were measured, each with its pin updated in step so the
-  spelling checks stayed green: collapsing `bestOfMs`, pushing a constant duration, constant-folding
-  `minOf`, capping `fill`, shrinking the `isLive` probe, raising the ratio threshold from 24 to 100
-  and shrinking the scale factor from 8 to 2 — all seven now fail on a control. They do not cover
-  everything, and the same coordinated method confirmed what survives: the six statements inside the
-  main test's callback are not shared with the controls, and relaxing only the upper ratio bound, the
-  repeat count or the inner loop count leaves the controls green — those stay on the verbatim pins.
-  Thinning the seed loop is caught, but by the structural floor on the case count rather than by a
-  control. The measured case count stays 110; control cases are counted separately. With
-  the controls in place the pin corpus is frozen: existing pins stay (removal remains forbidden),
-  but new ones are added only to protect the control wiring.
+  spelling, collapsing a timing helper, shrinking the input geometry or capping `fill` makes them
+  fail without anyone having written a pin for that particular spelling. Seven such edits were
+  measured, each with its pin updated in step so the spelling checks stayed green: collapsing
+  `bestOfMs`, pushing a constant duration, constant-folding `minOf`, capping `fill`, shrinking the
+  `isLive` probe, shrinking the scale factor from 8 to 2, and raising the ratio threshold from 24
+  to 100. Six of them fail on a control on their own. The seventh is only *uniquely* a control's
+  catch
+  when both ratio bounds are raised together (24 to 100 and 40 to 200); raising the lower bound
+  alone is already caught by the pre-existing assertion that the upper bound exceeds the lower one,
+  and a modest raise (24 to 39) is caught by nothing.
+  That is the shape of the covered band, and it is bounded by measurement rather than claimed in
+  general: a control fires when the edit pushes the known-quadratic fixture's measured ratio below
+  the threshold. That fixture's median is 55.1-55.9 unloaded and 63.5-187.3 under 2x nproc load, so
+  edits that keep the threshold below it — the 24-to-39 raise, and a scale factor of 6 instead of
+  8 — were measured as surviving. The same coordinated method confirmed what else survives: the six
+  statements inside the main test's callback are not shared with the controls, and relaxing only the
+  upper ratio bound, the repeat count or the inner loop count leaves the controls green — those stay
+  on the verbatim pins, as does making the vacuity guard tautological. Thinning the seed loop is
+  caught, but by the structural floor on the case count rather than by a control. The measured case
+  count stays 110; control cases are counted separately. With the controls in place the pin corpus
+  is frozen: existing pins stay (removal remains forbidden), and a new tooth is added as a
+  behavioural assertion or a CI gate first, with a new verbatim pin only when neither can cover it.
   Still not covered: the pin block itself (including the teeth and span checks added here), an edit
   that rewrites the pins together with the constants or the pinned code lines, a scan marker
   rewritten together with the title it points at, and the census right boundary, which is anchored
   to a neighbouring describe title and reports a false failure if an unrelated describe is inserted
-  in between. The case count is the number of tests registered, not executed: `it.skip` or an early
-  return leaves it at 110. The pins exist to make such an edit deliberate, not to prove the metatest
-  cannot be weakened. Test-only: the classifier and the approval gate are unchanged.
+  in between. The pins exist to make such an edit deliberate, not to prove the metatest cannot be
+  weakened. Test-only: the classifier and the approval gate are unchanged.
+- **The linear metatest's controls are now calibrated for a saturated machine and asserted to have
+  actually run.** The negative control's small-input measurement took 0.33ms, small enough that
+  scheduler jitter dominated the ratio when the whole suite runs against 2x nproc of external load,
+  so its inner loop now repeats eight times. The geometry and thresholds are untouched and both
+  sides of the ratio grow by the same factor, so the expected ratio is unchanged; measured over 24
+  samples per factor in that regime, the uncalibrated control reported a false violation 8 times and
+  the calibrated one 0 times, and the worst median fell from 29.4 to 13.6 against a threshold of 24.
+  Eight saturated full-suite runs produced no false failure from the calibrated control. Separately,
+  the count of control cases was taken at registration time, so replacing `it(` with `it.skip(` at
+  one site, or an early return at the top of the callback, silently ran nothing while the suite
+  stayed green; the callback now records that it reached its end and an `afterAll` requires both
+  control cases to have done so, and `scripts/ci/assert-inv-ran.mjs` gained a `sidecar-linear` suite
+  so CI also refuses a skipped or todo linear metatest. Both mutations, and deleting the recording
+  line itself, were measured as red on this branch and green on its base. The main loop's 110 cases
+  remain a registration-time count.
 
 ## [0.8.1] - 2026-08-26
 

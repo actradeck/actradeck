@@ -333,6 +333,8 @@ run_verify_job() {
   rc=0
   pnpm --filter @actradeck/sidecar exec vitest run --reporter=json --outputFile=/tmp/sidecar-e2e.json || rc=$?
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-egress
+  # SEC-HPR2-1: mirrors ci.yml — same report, second suite (linear metatest controls actually ran).
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-linear
 
   step "verify: Test (webui coverage gate)"
   pnpm --filter @actradeck/webui run test:coverage
