@@ -32,30 +32,45 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
-- **The scan normalisation that every source-reading tripwire shares is now one implementation, and
-  it reads trailing comments.** Nine metatests read source with comment text removed, so that a
-  verbatim copy sitting in a comment cannot satisfy a pin and a forbidden word written in a comment
-  cannot trip one. Five of them carried their own copy of that removal, and the weakest copy decided
-  what any given scan could see: one stripped only comments that begin a line, two stripped a
-  trailing comment only when whitespace preceded it, one stripped every double slash regardless of
-  context - truncating 113 of the 487 scanned files at their first URL - and one tracked strings but
-  not regular expressions, so a regex containing a quote desynchronised it for the rest of the file.
-  There is now a single scanner in the event model, beside the test database guard and for the same
-  reason: four workspaces share it, and a helper under `apps/` could only be reached from a package
-  by importing upwards.
-  Two axes are added over the strongest of the five. Trailing line comments are removed, along with
-  the whitespace before them; across the corpus that is 1687 lines in 249 files, 49049 characters
-  that used to be part of what a tripwire could see. Regular expression literals are skipped as a
-  unit, which matters because the sidecar classifier declares one whose character class contains a
-  backtick. Comments inside string and template literals are kept, so a URL or a shell fragment in
-  a test vector is no longer cut at its first double slash.
-  The claim that no real code is removed is checked by a parser rather than asserted: stripping a
-  file must leave something TypeScript still parses. On the tree before this change the four old
-  implementations broke 1, 1, 113 and 8 files that way; this one breaks none. What it does *not*
-  handle is pinned as behaviour too - a verbatim copy written as a string literal, a comment inside
-  a template interpolation, and a regex in a position the heuristic declines to treat as one are
-  each asserted to survive, so the documentation cannot quietly grow a claim that they are closed.
-  No threshold, count or pin in any consumer changed.
+- **The scan normalisation that source-reading tripwires share is now one implementation, it reads
+  trailing comments, and it no longer loses its place inside template interpolation or a regular
+  expression.** Ten test files read source with comment text removed, so that a verbatim copy
+  sitting in a comment cannot satisfy a pin and a forbidden word written in a comment cannot trip
+  one. Seven places carried their own removal code in six different shapes, and the weakest shape
+  decided what any given scan could see: one stripped only comments that begin a line, two stripped
+  a trailing comment only when whitespace preceded it, one stripped every double slash regardless of
+  context - truncating 133 of the 596 scanned files at their first URL - and one tracked strings but
+  not regular expressions. All ten now call one scanner in the event model, beside the test database
+  guard and for the same reason: four workspaces share it, and a helper under `apps/` could only be
+  reached from a package by importing upwards.
+  Trailing line comments are removed, along with the whitespace before them. Measuring that is only
+  meaningful with the derivation stated, so: counting the comment ranges the TypeScript parser
+  reports as single-line trivia that have non-whitespace before them on their own line, over every
+  `.ts`/`.tsx`/`.mts`/`.cts` path in `git ls-files`, gives 2,088 such comments in
+  299 files, 50,285 characters that were previously part of what a tripwire could
+  see.
+  Two whole classes of desynchronisation are closed rather than disclosed. The contents of a
+  template interpolation are scanned as the code they are, nested templates included; without that,
+  a `// was: …` note parked inside one satisfied a presence pin that a backend invariant relies on,
+  and the same comment on the same line failed to satisfy it on the previous release - the branch
+  was weaker than what it replaced. And a regular expression whose terminating slash is immediately
+  followed by another is no longer read as an expression: `(t) => /^alias\.[^=\s]+=!/i.test(t)`
+  ends in a character that looks like the start of one, so the closing slash swallowed half of the
+  line comment after it. Two guards fail closed: an unterminated block comment is treated as not a
+  comment at all, because a `/*` inside a character class otherwise ate every remaining line of its
+  file, and a slash that cannot close on its own line is never a regular expression.
+  The claim that only comments are removed is now checked two ways on every tracked TypeScript
+  source, not on one package: the text left after deleting exactly the comment ranges the parser
+  reports must match the scanner's output, and the parser's leaf token stream must be identical
+  before and after. The first catches both directions; the second catches lost code. Neither sees a
+  line comment that survives intact, because it is read as a comment again - that limit is stated
+  where the scanner is defined. The suite also counts its own executed cases and refuses to pass if
+  a group was skipped, and CI asserts the same from the outside.
+  What is still not handled is pinned as behaviour, with its direction: leaving a comment in place
+  is the strict side for a scan that forbids a token and the *lax* side for one that requires it, so
+  neither is described as safe. A regular expression in a position the heuristic declines to treat
+  as one, a verbatim copy written as a string literal, and the single-source sweep's dependence on
+  the identifier it looks for are each measured and disclosed.
 
 - **The two gates that metatest applies to the classifier's gap classes no longer depend on how
   those classes are spelled, and a rule spelled in a way the extractor does not understand can no
