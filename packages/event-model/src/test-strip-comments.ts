@@ -64,17 +64,27 @@
  * regex は LineTerminator を跨げないため、同一行内で閉じ `/` が見つからなければ regex とみなさない。
  *
  * ## 実測した非被覆 (残余・「閉じた」とは書かない)
- * **方向は consumer 種別で逆になる**ので全称で「安全側」とは書かない:
- * 落とし残し (コメントが view に残る) は `not.toContain` 系には**厳しい側**だが、
+ * **方向は consumer 種別で逆になる**ので全称で「安全側」「fail-safe 方向」とは書かない:
+ * 落とし残し (MISS・コメントが view に残る) は `not.toContain` 系には**厳しい側**だが、
  * `toContain` の presence pin には**緩い側** (コメント 1 本で pin が自己充足する)。
- * 落とし過ぎ (実コードが view から消える) は逆に `not.toContain` を盲目にする。
+ * 落とし過ぎ (DROP・実コードが view から消える) は逆に `not.toContain` を盲目にする。
+ * どちらも「安全」ではない — どの消費点に当たるかで向きが変わる。
  *
  * - 上のヒューリスティックが除外側に倒れる位置 (識別子 / `}` / 非 arrow の `>` / `<` / quote の直後)
  *   に置かれた regex が未 escape の quote / backtick / `/*` を含むと desync する。
  *   `'` / `"` は改行で resync する (生の改行を含む単引用 / 二重引用文字列は構文エラーゆえ desync が
  *   確定する) ので影響はその行に閉じる。backtick は resync しないため次の backtick まで続く。
  *   `/*` は閉じなければ fail-closed で戻るが、**ファイル後方に `*\/` があればその間を飲む** (DROP 残余)。
- * - JSX text 中の `//` 以降を落とす (base 実装と同値の pre-existing・SEC-CSX-7)。
+ * - **文字列リテラル内の U+2028 / U+2029 では resync しない** (TDA-CSX-R3-1 系の修正で入った新しい前提)。
+ *   ES2019 以降それらは文字列内に生で書けるため resync の根拠にならない。代わりに、regex 内の
+ *   quote で誤って開いた文字列 mode が U+2028 / U+2029 では 1 行に閉じない (LF / CR まで続く)。
+ * - **accepted 位置の除算 + 同一行の開き引用符** (SEC-CSX-R3-1): `const n = (a) / 2; const s = 'x; // note`
+ *   のように、走査が終端を探して引用符を跨ぐと**その行の**コメントが落ち残る (次行は resync で戻る)。
+ * - **`/re/*` (regex 乗算)** (QA-CSX-R3-2): 終端候補の直後が `*` を fail-closed で拒否した結果、
+ *   本物の `/a/*2` も skip されず、後続行のコメントが落ち残る。guard を外すと R2 の H が戻るので
+ *   意図した交換。`/abc/// note` (QA-CSX-R2-5) は逆に regex の閉じ `/` まで行コメントに飲まれる (DROP)。
+ * - JSX text 中の `//` 以降を落とす (base 実装と同値の pre-existing・SEC-CSX-7)。**この形を新たに
+ *   ソースへ導入すると corpus コントロールが RED になる** (現行 620 file には存在しない)。
  * - shebang 行の末尾に行コメントを付けた形は TS の trivia 判定と食い違う (marker 注入でのみ観測)。
  * - 文字列リテラルとして書かれた逐語コピー (`const s = "export function foo()"`) は落とさない
  *   (コメントではないため — lexical 走査の構造的天井であり本 helper の穴ではない)。
@@ -83,8 +93,10 @@
  *   構造 (mode machine / コメント除去 regex 対) の軸へ広げるのは追跡 task。
  *
  * ## corpus 実測 (導出を明記する・TDA-CSX-6)
- * `inv-strip-comments.test.ts` の corpus ケースが CI で機械化する: 走査集合は **`git ls-files` の
- * `.ts` / `.tsx` / `.mts` / `.cts`** (repo 全体・4 workspace)。各ファイルについて
+ * `inv-strip-comments.test.ts` の corpus ケースが CI で機械化する: 走査集合は **`git ls-files` を
+ * `SCAN_SOURCE_EXTENSIONS` (7 拡張子: `.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.mjs` / `.cjs`) で
+ * 絞ったもの** — 2026-09-01 実測で **620 file** (repo 全体・4 workspace + `db/` + `scripts/` +
+ * リポジトリ直下)。各ファイルについて
  *   (1) TS パーサが列挙した**コメント範囲だけ**を除いたテキストと strip 出力が空白無視で一致するか
  *       (落とし過ぎ / 落とし残しの双方向)
  *   (2) leaf token 列が strip 前後で一致するか (実コード喪失)
@@ -262,10 +274,15 @@ export function stripComments(code: string): string {
     }
 
     // 文字列 / テンプレートリテラル内: そのまま残し、エスケープと閉じを追う。
-    // resync: 単引用 / 二重引用文字列は生の改行を含めない (構文エラー) ため、改行に達したら
+    // resync: 単引用 / 二重引用文字列は生の **LF / CR** を含めない (構文エラー) ため、そこに達したら
     // 「skip されなかった regex 内の quote 等で誤って開いた」と判定して code mode へ戻す
     // (desync の影響を 1 行に閉じる)。
-    if ((mode === "sq" || mode === "dq") && isLineTerminator(c)) {
+    // TDA-CSX-R3-1 ≡ QA-CSX-R3-1 ≡ SEC-CSX-R3-2: **U+2028 / U+2029 はここでは使えない**。
+    // ES2019 (proposal "JSON superset") 以降、両者は文字列リテラル内に生で書けるので、
+    // 「生の改行に達した = 誤って開いた」という前提が偽になる。実際、`const s = 'a<U+2028>b'; // note`
+    // で文字列の途中に code mode へ戻り、閉じ引用符が新しい文字列を開いて行末コメントを飲んでいた。
+    // 行コメント終端 (:245) と regex の行境界 (:381) は ES 文法どおり LineTerminator 全体で正しい。
+    if ((mode === "sq" || mode === "dq") && isStringResyncBreak(c)) {
       mode = "code";
       push(c);
       i++;
@@ -311,6 +328,14 @@ export function stripComments(code: string): string {
  */
 const isLineTerminator = (ch: string): boolean =>
   ch === "\n" || ch === "\r" || ch === "\u2028" || ch === "\u2029";
+
+/**
+ * 単引用 / 二重引用文字列を「誤って開いた」と判定してよい改行 = **LF / CR に限る**。
+ * U+2028 / U+2029 は ES2019 以降その中に生で書けるため、resync の根拠にならない
+ * (TDA-CSX-R3-1 ≡ QA-CSX-R3-1 ≡ SEC-CSX-R3-2)。`isLineTerminator` とは**別の述語**として持つ:
+ * 片方へ寄せると、行コメント終端 / regex の行境界のどちらかが ES 文法から外れる。
+ */
+const isStringResyncBreak = (ch: string): boolean => ch === "\n" || ch === "\r";
 
 const IDENT_CHAR_RE = /[A-Za-z0-9_$]/;
 
