@@ -521,7 +521,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         これは「除外集合 ⊆ TAIL_METACHARS」を満たして coupling を素通りする (Z8 NBSP の実測と同型・
   //         NBSP 自体は導出に含まれる)。universe は依然**追加のみ**。
   //     (3') **結合検査と構造ゲートの適用範囲は依然 `QUANTIFIED_CLASS_RE` の抽出結果** (TDA-LN5-1)。ただし
-  //         **クラスを持つ綴りのうち、実測した 6 形については着地自体が塞がれた** (task 01a0574f-521a・
+  //         **クラスを持つ綴りのうち、実測した 7 形については着地自体が塞がれた** (task 01a0574f-521a・
   //         下の class census)。census は「escape されていない `[` の**位置集合** == 抽出 match の
   //         **位置集合**」を要求する (SEC-LSI-2 で本数一致から位置一致へ是正)。**実測で RED になる形**:
   //         群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation `(?:[^|;&\n]|x)*` /
@@ -531,15 +531,23 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         現行 17 は位置集合が一致して緑・escape 済み `\[abc\]` も緑 = false RED 0 (実測)。
   //         **「未知の綴りをすべて塞いだ」とは言わない** — 塞げたのは上に列挙した実測形であって、
   //         census を回避する別の綴りが無いことの証明はしていない。
-  //         残る既知の非被覆は **「除外をクラスの外で表現した綴り」**で、2 系統ある (SEC-LSI-R2-3):
-  //         (a) クラスを持たない量化 shorthand (`\S*` / `\s+` / `s` flag つきの `.`) — census にも
-  //             coupling にも掛からない (実測: `\bfoosql\b\S*\bwipeall\b` は位置集合が両側とも空で一致)。
-  //         (b) **負先読み形** `(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}` — クラス `[\s\S]` は
-  //             量化されているので census は位置一致で**素通り**、`[\s\S]` は何も除外しないので
-  //             coupling も構造ゲートも素通り、しかし**挙動は出荷形 `[^|;&\n]{0,512}` と同一**
-  //             (除外を lookahead 側に出しただけ)。3 ゲートすべてを通る (SEC 実証)。
-  //         **和 (受理集合軸 ∨ 綴り軸) はこの形を止めない** — 和の一意到達寄与は「coupling が
+  //         **残る既知の非被覆の特徴づけ (SEC-LSI-R2-3 → SEC-LSI-R3-2 で列挙をやめた)**:
+  //         **gap の受理集合をクラス以外の構文で表現した綴りには、3 ゲートのいずれも届かない**。
+  //         R2 では「shorthand と負先読みの 2 系統」と**列挙**したが、R3 で class-free alternation gap
+  //         `(?:\w|\s|…){0,512}` が反証した (3 ゲート通過・出荷形と 7 ベクタで挙動一致・SEC 実証) —
+  //         系統を数え上げる書き方は次の綴りで必ず古くなるので、特徴で書く。実測済みの代表例は
+  //         量化 shorthand (`\S*` / `\s+`)・負先読み形
+  //         (`(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}`)・class-free alternation の 3 つだが、
+  //         **これは例示であって網羅ではない**。
+  //         **和 (受理集合軸 ∨ 綴り軸) はこれらを止めない** — 和の一意到達寄与は「coupling が
   //         exemption で迂回された規則」に限る (SEC の honest bound)。現行 17 にこの綴りは無い。
+  //         **走査行そのものは無観測 (TDA-LSI-R3-1 / SEC-S4 / QA-N1・N4・M・base 同値)**: 単一出所化
+  //         (`isSeparatorGapClass` / `censusVerdict`) が守るのは **verdict の中身**であって、
+  //         「走査行が実際にその verdict を照合しているか」ではない。空 verdict への差し替え (S4) /
+  //         走査の恒真化 (N1) / 構造ゲートループ先頭への `if (rule.segmentRe === undefined) return;`
+  //         挿入 (N4) はいずれも**無音で通る** (3 レーンが独立実測・base 同値)。是正 (走査ループの
+  //         hoist + 実列 / 合成列を流す挙動 assert) は**走査範囲の変更**ゆえ本 PR では行わず、
+  //         task 01a058f0-b045 (v0.9・full 監査) へ送る。
   //         構造ゲート側の分離子判定は **受理集合軸 (`spansArbitraryText`) と旧来の綴り軸
   //         (`startsWith("[^")`) の論理和** (TDA-LSI-1 ≡ QA-LSI-2 で置換から和へ是正)。受理集合軸は
   //         正のクラスで綴られた広い gap (`[\w\s-]*`) を新たに拾い、綴り軸は**英数字を 1 つも受理しない
@@ -650,9 +658,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //     - 強 (`quadratic`・無界 gap): median **無負荷 54.8〜61.3 / 2×nproc 飽和 52.5〜187.3**。
   //     - 弱 (`quadratic-weak`・`{0,10000}` gap): median **無負荷 28.64〜30.96 (実装者 + QA 独立実測の
   //       合算・単点の最低は 18.0) / 飽和 28.5〜87.22 (実装者 + QA 合算・上端は QA 実測)**。
-  //       閾値 24 への余裕は無負荷 **1.19×** /
-  //       飽和の下限 **1.18×** (28.3 基準・飽和 20 run で false RED 0)。陰性側の飽和 median は
-  //       上端 **22.8** まで観測されており 24 への余裕は **1.05×** (下の陰性注記が正)。
+  //       閾値 24 への余裕は **1.18〜1.19×** (無負荷 28.64 基準 1.19× / 飽和の下限 28.3 基準 1.18×・
+  //       飽和 20 run で false RED 0)。**陰性 control の余裕は別統計で見る** — 飽和の
+  //       **median 上端 15.99 に対し `RATIO_MAX` 24 への余裕 1.50×**、**worst 上端 22.94 に対し
+  //       `RATIO_MAX_HI` 40 への余裕 1.74×** (QA-LSI-R3-2: R2 で「median 上端 22.8・余裕 1.05×」と
+  //       書いたのは **worst の観測値を median の欄へ入れた誤帰属**だった。下の陰性注記が正)。
   //   よって被覆帯域は「閾値を **弱の中央値 (無負荷 ≈ 30) より上**へ緩める編集」まで下がる。R2 で
   //   非検出だった `RATIO_MAX` 24→39 (∧ `RATIO_MAX_HI` 40→65) と `SCALE` 8→6 は**本 PR で RED**
   //   (probe 実測)。それでも全称ではない: 24→29 のような**弱の中央値より下**の緩和は依然非検出で、
@@ -814,15 +824,16 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * 綴り**に限る。実測で抽出されなかった綴り (いずれも `quantifiedClasses` が `[]` を返す): 群括り
      * `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation `(?:[^|;&\n]|x)*` / 量化 shorthand
      * `\S*` `\s+` / 未量化 `[abc]`。lazy `*?` と `{n,m}` は抽出される (実測)。
-     * **このうちクラスを持つ 4 形は下の class census が着地自体を RED にする** (escape されていない `[` の
+     * **このうちクラスを持つ綴りは下の class census が着地自体を RED にする** (escape されていない `[` の
      * **位置集合**と抽出 match の**位置集合**の一致要求 = 床。SEC-LSI-2 で本数一致から位置一致へ是正 —
      * 本数一致では末尾の inert な phantom `(?:\[\s\S]*)?` で帳尻を合わせて素通りできた)。
-     * **実測で塞げたのはこの 4 形 + CR 幅版 + phantom 形**であって、census を回避する綴りが
-     * 他に無いことの証明ではない。**残る既知の非被覆は「除外をクラスの外で表現した綴り」** —
-     * クラスを持たない shorthand (`\S*` / `\s+`) と、**負先読み形**
-     * `(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}` (クラスは量化済みで census を通り、`[\s\S]` は
-     * 何も除外しないので coupling / 構造ゲートも通るが、挙動は出荷形と同一・SEC-LSI-R2-3 実証)。
-     * そこでは
+     * **実測で塞げたのは 7 形** (群括り / capture / クラス alternation / 未量化 / 群括りの CR 幅版 /
+     * phantom 2 形) であって、census を回避する綴りが他に無いことの証明ではない。
+     * **残る既知の非被覆の特徴づけ (SEC-LSI-R3-2 で列挙をやめた)**: **gap の受理集合をクラス以外の
+     * 構文で表現した綴り**には 3 ゲートのいずれも届かない。実測済みの例は量化 shorthand
+     * (`\S*` / `\s+`)・負先読み形 (`(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}`)・class-free
+     * alternation gap (`(?:\w|\s|…){0,512}`) の 3 つだが**例示であって網羅ではない** (R2 の
+     * 「2 系統」列挙は R3 の class-free alternation で反証された)。そこでは
      * coupling と構造ゲートの**どちらも適用されない** (seed 軸自体は綴りに依らず全スキャン regex を測るので、
      * 失われるのは「TAIL_METACHARS がその規則の区切りを覆っている」保証と segmentRe 要求であって
      * 計測そのものではない)。これは残余 ③' として header / normalize.ts / CHANGELOG に開示する。
@@ -1549,13 +1560,16 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
             );
           } else {
             // 陰性: 過剰厳格化 (閾値を下げる / 幾何を壊す) を対で防ぐ。**較正後 (内側 ×8) の実測**:
-            //   median 無負荷 8.06〜8.54 / 2×nproc 飽和 **8.0〜22.8**、worst 飽和 max **22.8**
-            //   (full-suite 並走 8 run・load 33〜51 と、R2 の LINEAR 単独飽和 6 run・load 43 の合算。
-            //   **上端 22.8 は R2 で新たに観測した値**で、旧記述の 15.99 / 18.42 はそれ以前のレンジ)。
-            //   `RATIO_MAX` 24 への余裕は飽和下で **1.05×** (旧記述の 1.50× は上端 15.99 基準の値)。
-            //   余裕が薄いのは事実として書く — 飽和下で陰性が 24 を超える run はまだ観測していないが、
-            //   「起きない」証明ではない (規模の大きい標本では出うる)。無負荷では余裕 **2.8×**
-            //   。較正前の ×1 は同じ 8 run で median 6.70〜19.71・余裕 **1.22×**。R1 の記述
+            //   median 無負荷 8.06〜8.54 / 2×nproc 飽和 **8.0〜15.99**、worst 飽和 上端 **22.94**
+            //   (full-suite 並走 8 run・load 33〜51 と、LINEAR 単独飽和 run・load 43 の合算。
+            //   **QA-LSI-R3-2 の訂正**: R2 でここに「飽和 median 上端 22.8・余裕 1.05×」と書いたのは
+            //   **worst の観測値を median の欄へ入れた統計の誤帰属**だった。median と worst は別の
+            //   閾値に当たるので混ぜない)。判定は両側なので余裕も 2 つある —
+            //   **median 上端 15.99 に対し `RATIO_MAX` 24 への余裕 1.50×** /
+            //   **worst 上端 22.94 に対し `RATIO_MAX_HI` 40 への余裕 1.74×**。無負荷では
+            //   median 余裕 **2.8×**。どちらも**観測上限であって保証ではない** — 飽和下で陰性が
+            //   閾値を超える run はまだ観測していないが、規模の大きい標本では出うる。
+            //   較正前の ×1 は同じ 8 run で median 6.70〜19.71・余裕 **1.22×**。R1 の記述
             //   「飽和 9.1〜18.8 / 余裕 1.28×」は較正前の値。R3 独立監査の別 regime では median
             //   下側が 4.72 (単発 3.44) まで広がる = 較正は下側テールも広げる (QA-R3-1・安全方向。
             //   「`RATIO_MAX` 引き下げを全 run 検出する帯」は狭まるが、その歯は比 ≈8 の実在
@@ -2113,6 +2127,17 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
             quantified: 1,
             passesCensus: false,
           },
+          // **TDA-LSI-R3-1 (R3 監査 M)**: `censusVerdict` の**長さ連言**の判別行。出荷形の量化クラスを
+          //   残したまま末尾へ phantom を足すと `opens=[10]` / `quantified=[10, 34]` = **opens は
+          //   quantified の真の prefix** になるので、`every((v, k) => v === quantified[k])` だけでは
+          //   true になる。長さ連言 (`opens.length === quantified.length`) を落とす変異は、この行が
+          //   無いと全 fixture が素通りして無音だった (TDA 実証)。追加のみ・置換ではない。
+          {
+            source: String.raw`\bfoosql\b[^|;&\n]*\bwipeall\b(?:\[\s\S]*)?`,
+            opens: 1,
+            quantified: 2,
+            passesCensus: false,
+          },
           // 同じ phantom を CR 幅の gap (合成死角) に載せた形。
           {
             source: String.raw`\bfoosql\b(?:[^|;&\r\n])*\bwipeall\b(?:\[\s\S]*)?`,
@@ -2154,13 +2179,16 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
             `count-only verdict (弱い軸): ${f.source}`,
           ).toBe(f.opens === f.quantified);
         }
-        expect(censusFixturesChecked, "class census の fixture 本数").toBe(11);
+        expect(censusFixturesChecked, "class census の fixture 本数").toBe(12);
         // 本数一致では閉じないが位置一致では閉じる形が実在すること (軸の固有寄与を値で pin)。
         const PHANTOM = String.raw`\bfoosql\b(?:[^|;&\n])*\bwipeall\b(?:\[\s\S]*)?`;
         expect(classOpenCount(PHANTOM)).toBe(quantifiedClasses(PHANTOM).length);
         expect(quantifiedClassIndices(PHANTOM)).not.toEqual(classOpenIndices(PHANTOM));
-        // 合成形は census が閉じるが、**除外をクラスの外で表現した綴り**は掛からない
-        //   (残余・網羅の主張はしない)。2 系統を挙動で pin する。
+        // 合成形は census が閉じるが、**gap の受理集合をクラス以外の構文で表現した綴り**には
+        //   3 ゲートのいずれも届かない (残余・**網羅の主張はしない**)。下は実測例 2 つを挙動で pin
+        //   したもので、系統の数え上げではない — R3 で 3 つ目 (class-free alternation gap
+        //   `(?:\w|\s|…){0,512}`・3 ゲート通過・出荷形と 7 ベクタで挙動一致) が見つかっており、
+        //   走査正規化を変えない範囲で pin を増やすのは task 01a058f0-b045 (v0.9) 側で扱う。
         //   (a) 量化 shorthand — クラスが無いので位置集合が両側とも空で一致 = 素通り。
         expect(classOpenCount(String.raw`\bfoosql\b\S*\bwipeall\b`)).toBe(0);
         expect(quantifiedClasses(String.raw`\bfoosql\b\S*\bwipeall\b`).length).toBe(0);

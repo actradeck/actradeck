@@ -54,15 +54,23 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   spelling only), and two phantom-balanced forms. The seventeen expressions that ship today match
   position-for-position and an escaped `\[abc\]` matches as two empty sets, so nothing that ships
   today turns red. That is a list of what was measured, not a claim that no spelling escapes it.
-  What it does not reach is a rule that expresses the exclusion *outside* the class, and there are
-  two such shapes. One carries no class at all - a quantified shorthand such as `\S*` or `\s+`, or
-  `.` under the `s` flag. The other is a negative-lookahead gap,
-  `(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}`: its class *is* quantified, so the census matches
-  position-for-position; `[\s\S]` excludes nothing, so the coupling and the structural gate have
-  nothing to object to; and yet it behaves exactly like the shipped `[^|;&\n]{0,512}`. All three
-  gates pass it. Uniting the gate's two axes does not help there - what the union uniquely buys is
-  a rule whose coupling check was bypassed by an exemption. Both shapes are disclosed in the test,
-  in the classifier, and here.
+  What none of the three gates reach is a rule that expresses the gap's accepted set in syntax
+  other than a character class. Three such spellings have been measured, and they are examples
+  rather than an enumeration - an earlier revision of this entry did enumerate "two shapes" and a
+  later review falsified it with a third. A quantified shorthand such as `\S*` or `\s+`, or `.`
+  under the `s` flag, carries no class at all. A negative-lookahead gap,
+  `(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}`, does carry a quantified class, so the census
+  matches position-for-position, and `[\s\S]` excludes nothing, so the coupling and the structural
+  gate have nothing to object to. A class-free alternation gap, `(?:\w|\s|…){0,512}`, does the
+  same without either. All three behave like the shipped `[^|;&\n]{0,512}` - the last was checked
+  against it on seven vectors - and all three pass every gate. Uniting the gate's two axes does not
+  help; what the union uniquely buys is a rule whose coupling check was bypassed by an exemption.
+  Separately, the scan lines themselves are unobserved. Single-sourcing the two verdicts protects
+  what each verdict *says*, not that the loop still consults it: substituting an empty verdict,
+  making the scan vacuously true, or returning early from the top of the structural gate's loop all
+  pass silently, on this branch and on main alike. Fixing that means changing what the metatest
+  scans for a fourth time in one branch, so it is tracked as follow-up work rather than done here.
+  All of this is disclosed in the test, in the classifier, and here.
   The structural gate additionally decides what counts as a separator class from what the class
   actually accepts - a class accepting both an alphanumeric character and a non-alphanumeric one
   that is not a separator spans arbitrary text - **in addition to**, not instead of, the older test
@@ -99,8 +107,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   independent measurers (single ratio points reach as low as 18.0, which the median absorbs), which puts the
   detection floor an order of magnitude closer to the threshold and makes both a 24-to-39 relaxation
   and a reduction of the input scale from 8 to 6 fail. It is added, not substituted. Under a
-  2x-nproc load the new fixture's median ranges between 28.5 and 87.2, so the 24-to-39 detection
-  is bounded to the unloaded regime; on eight loaded runs and five unloaded ones neither positive
+  2x-nproc load the new fixture's median ranges between 28.3 and 87.2, so the 24-to-39 detection
+  is bounded to the unloaded regime. The negative control has two margins, one per threshold, and
+  they must not be mixed: under load its median reaches 15.99 against a limit of 24, and its worst
+  single ratio reaches 22.94 against a limit of 40 - 1.50x and 1.74x respectively. An earlier
+  revision reported "median up to 22.8, a margin of 1.05x", which had put a worst-case observation
+  in the median's column. Both figures are observed ceilings, not guarantees.
+  On eight loaded runs and five unloaded ones neither positive
   nor the negative control produced a false red.
 
 - **The metatest that keeps the approval classifier's literal rules linear now derives a fourth
