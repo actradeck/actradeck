@@ -192,10 +192,13 @@ describe("INV-STRIP-COMMENTS-REGEX: regex リテラルで走査が desync しな
     );
   });
 
-  it("位置ヒューリスティックが declined でも escape された `/` は行コメントにならない", () => {
+  it("declined 位置 (識別子直後) でも escape された `/` は行コメントにならない", () => {
     // `)` の直後は regex とみなさない (除算と衝突する) ので、この regex は skip されない。
     // code mode の escape 素通しが無いと `\/` の `/` が次の `/` と組んで行の残りを落とす。
-    const src = "if (x) /a\\//.test(s) && keepDeclinedTail;\n";
+    // `)` は regex 位置として受けるので、ここは **識別子直後** の declined 位置を使う
+    // (有効な JS では識別子の直後の `/` は除算)。escape 素通しが無いと `\\/` の `/` が
+    // 次の `/` と組んで行コメント扱いになり、行の残り (実コード) が落ちる。
+    const src = "const v = x /a\\//.test(s) && keepDeclinedTail;\n";
     expect(stripComments(src)).toContain("keepDeclinedTail");
   });
 
