@@ -32,6 +32,93 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
+- **The two gates that metatest applies to the classifier's gap classes no longer depend on how
+  those classes are spelled, and a rule spelled in a way the extractor does not understand can no
+  longer land at all.** Both gates - the coupling assertion (the characters a rule's quantified
+  class excludes must be a subset of the separators the seed derivation cuts on) and the structural
+  gate (a hand-written separator class requires the canonical segment-scoped expression and a
+  segment-only sample) - read only classes written with a quantifier directly after them. A class
+  wrapped in a group or a capture, one written as an alternation, and an unquantified class were
+  extracted as nothing at all, so a rule spelled that way passed both gates silently; combined with
+  one of the open seed blind spots, such a rule also measured as linear while being quadratic
+  (measured last round: a group-wrapped quadratic gap with a carriage-return-prefixed sample passed
+  the coupling, the gate, and every ratio check).
+  The extractor is not made cleverer - that would be a denylist chasing spellings. Instead the test
+  now requires, for every scanned expression, that the *positions* of the unescaped `[` in its
+  source match the positions where the extractor started its matches. Counting alone was not
+  enough: a review found that appending a semantically inert `(?:\[\s\S]*)?` - whose `[` is
+  escaped, so it is not counted as a class opener, while the extractor still reads a class out of
+  the same text - balanced the totals and walked a group-wrapped quadratic rule straight through.
+  Comparing positions rejects that. Eight spellings are measured as refused: the four above, the
+  carriage-return-widened variant of the group-wrapped one (the widening was measured on that
+  spelling only), and three phantom-balanced forms. (Seven was correct until the third phantom form
+  was added to discriminate the length half of the verdict's conjunction; the figure tracks the
+  number of fixture rows expecting refusal, and a later sweep will derive it rather than restate
+  it.) The seventeen expressions that ship today match
+  position-for-position and an escaped `\[abc\]` matches as two empty sets, so nothing that ships
+  today turns red. That is a list of what was measured, not a claim that no spelling escapes it.
+  What none of the three gates reach is a rule that expresses the gap's accepted set in syntax
+  other than a character class. Three such spellings have been measured, and they are examples
+  rather than an enumeration - an earlier revision of this entry did enumerate "two shapes" and a
+  later review falsified it with a third. A quantified shorthand such as `\S*` or `\s+`, or `.`
+  under the `s` flag, carries no class at all. A negative-lookahead gap,
+  `(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}`, does carry a quantified class, so the census
+  matches position-for-position, and `[\s\S]` excludes nothing, so the coupling and the structural
+  gate have nothing to object to. A class-free alternation gap, `(?:\w|\s|…){0,512}`, does the
+  same without either. All three behave like the shipped `[^|;&\n]{0,512}` - the last was checked
+  against it on seven vectors - and all three pass every gate. Uniting the gate's two axes does not
+  help; what the union uniquely buys is a rule whose coupling check was bypassed by an exemption.
+  Separately, the scan lines themselves are unobserved. Single-sourcing the two verdicts protects
+  what each verdict *says*, not that the loop still consults it: substituting an empty verdict,
+  making the scan vacuously true, or returning early from the top of the structural gate's loop all
+  pass silently, on this branch and on main alike. Fixing that means changing what the metatest
+  scans for a fourth time in one branch, so it is tracked as follow-up work rather than done here.
+  All of this is disclosed in the test, in the classifier, and here.
+  The structural gate additionally decides what counts as a separator class from what the class
+  actually accepts - a class accepting both an alphanumeric character and a non-alphanumeric one
+  that is not a separator spans arbitrary text - **in addition to**, not instead of, the older test
+  on the spelling `[^`. Replacing rather than adding was itself a defect the review caught: a
+  negated class that accepts no alphanumeric at all, such as `[^a-zA-Z0-9|]`, does not span by the
+  new test and was silently dropped from the gate. The union is monotone; a broad gap written as a
+  positive class is now gated where before it was not, the alphanumeric-free negated classes stay
+  gated, and the flag-matching `[a-z]` in the `git clean` rule still is not.
+  Three duplications behind those gates are collapsed into one source each: the class probe (built
+  in three places, with three variants of deriving the excluded set and a pin on only one of them),
+  the exemption predicate (the scan wrote it inline while the value pins tested a local copy, so
+  inserting a one-sided-keyed predicate next to the pinned line passed everything), and the flags a
+  probe inherits from its expression (`i`, `u`, `v` are propagated, `g` and `y` deliberately are
+  not - they make `test` stateful). The finite character set the coupling compares against no
+  longer hand-lists five non-ASCII separators; it derives them by scanning the BMP for `\p{Zs}`,
+  `\p{Zl}` and `\p{Zp}`, which adds the fourteen it was missing. A gap class excluding only a
+  character that is neither a Unicode separator nor in that set still evades the coupling, and the
+  set stays add-only.
+  Two counting gaps close alongside. The case count the metatest pins is the number of tests it
+  registered, not the number it ran, so turning `it(` into `it.skip(` at one site or returning
+  early from the callback left all 110 unmeasured and green; the controls got an executed-case
+  counter last round and the main loop now gets one too, checked in `afterAll` against the same 110. And the declaration census that catches a shadowed helper looked only for `const`, `let` and
+  `var` in a hand-written list of 27 names, so a `function`-form shadow walked through it; the
+  census now extracts the describe's top-level declarations structurally (57 today), covers
+  `class`, plain `function`, `async function` and generator `function*`, and asserts that the
+  hand-written 27 are contained in what it extracted rather than replacing them. Four shadowing
+  shapes still escape every axis and are disclosed rather than claimed closed: destructuring, a
+  shadow introduced by a parameter name, the second and later bindings of a single
+  `const a = 1, b = 2;`, and an IIFE's formal parameters.
+  Finally, the executable control that proves the metatest can still detect a quadratic rule gains
+  a second positive fixture whose gap is bounded at 10000 rather than unbounded. The existing
+  positive separates at a median ratio above 55, so relaxing the threshold from 24 to 39 was
+  measured as undetected; the new fixture sits at a median of 28.6 to 31.0 unloaded across two
+  independent measurers (single ratio points reach as low as 18.0, which the median absorbs), which puts the
+  detection floor an order of magnitude closer to the threshold and makes both a 24-to-39 relaxation
+  and a reduction of the input scale from 8 to 6 fail. It is added, not substituted. Under a
+  2x-nproc load the new fixture's median ranges between 28.3 and 87.2, so the 24-to-39 detection
+  is bounded to the unloaded regime. The negative control has two margins, one per threshold, and
+  they must not be mixed: under load its median reaches 15.99 against a limit of 24, and its worst
+  single ratio reaches 22.94 against a limit of 40 - 1.50x and 1.74x respectively. An earlier
+  revision reported "median up to 22.8, a margin of 1.05x", which had put a worst-case observation
+  in the median's column. Both figures are observed ceilings, not guarantees.
+  On eight loaded runs and five unloaded ones neither positive
+  nor the negative control produced a false red.
+
 - **The metatest that keeps the approval classifier's literal rules linear now derives a fourth
   adversarial seed.** Those rules are scanned on every command the approval gate classifies, and a
   `program … keyword` rule with an unbounded gap between the two words is quadratic in the input
