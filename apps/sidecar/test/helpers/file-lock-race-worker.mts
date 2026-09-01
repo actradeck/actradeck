@@ -3,7 +3,7 @@
  * `withFileLock` の **stale 奪取 TOCTOU** を実プロセス (distinct pid) で決定的に再現するワーカー。
  *
  * 3 役で 1 本のレースを組む (役は env `ROLE`)。順序は sleep でなく **ファイル sentinel + file-lock の
- * テスト用 seam (`isAlive` / `onLockContended` / `onHolderObserved`)** で決定的に作る (bash 由来でない)。
+ * テスト用 seam (`testHooks` の `isAlive` / `onLockContended` / `onHolderObserved`)** で決定的に作る。
  *
  *   holder(A)    : lock を取り critical section に居座る。B の合図で解放する。
  *   contender(B) : A が保持中に取得を試み、**A の pid を stale と判定する寸前で停止**する。
@@ -24,7 +24,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { withFileLock, type FileLockOptions } from "../../src/file-lock.js";
+import { withFileLock, type FileLockTestHooks } from "../../src/file-lock.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -105,7 +105,8 @@ function runContender(): void {
     waitFor("c-inside");
   }
 
-  const opts: FileLockOptions = {
+  // 役ごとに seam を後付けするので readonly を外した mutable 版で組み立てる。
+  const hooks: { -readonly [K in keyof FileLockTestHooks]: FileLockTestHooks[K] } = {
     isAlive: (pid) => {
       if (mode === "dead-pid" && pid === aPid) {
         if (armedIsAlive) {
@@ -124,14 +125,14 @@ function runContender(): void {
 
   if (mode === "absent") {
     // holder 読取りの **前** に A を解放させる → readLockHolder は ENOENT = `absent` を観測する。
-    opts.onLockContended = () => {
+    hooks.onLockContended = () => {
       if (!armedContended) return;
       armedContended = false;
       put("a-may-release");
       waitFor("a-released");
     };
     // 観測 → 奪取判断の間に C を入れる (旧実装はここで C の生きた lock を unlink した)。
-    opts.onHolderObserved = (kind) => {
+    hooks.onHolderObserved = (kind) => {
       if (!armedObserved) return;
       armedObserved = false;
       put("b-observed", kind);
@@ -155,7 +156,7 @@ function runContender(): void {
       }
       put("b-exit", String(Date.now()));
     },
-    opts,
+    { testHooks: hooks },
   );
 }
 

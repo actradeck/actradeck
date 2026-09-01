@@ -213,7 +213,7 @@ describe("INV-ATTACH-WIRE-LOCK: read は critical section 内 (lost-update inter
     mergeAttachHooks({
       ...opts(NEW, ["SessionStart"]),
       lockOptions: {
-        onLockAcquired: () => writeFileSync(settingsPath, JSON.stringify(raced)),
+        testHooks: { onLockAcquired: () => writeFileSync(settingsPath, JSON.stringify(raced)) },
       },
     });
 
@@ -234,7 +234,10 @@ describe("INV-ATTACH-WIRE-LOCK: retry budget は本番呼び出し経路で縛�
     expect(() =>
       mergeAttachHooks({
         ...opts(NEW, ["SessionStart"]),
-        lockOptions: { maxRetries: 3, isAlive: () => true, sleep: () => void (slept += 1) },
+        lockOptions: {
+          maxRetries: 3,
+          testHooks: { isAlive: () => true, sleep: () => void (slept += 1) },
+        },
       }),
     ).toThrow(/failed to acquire .* after 3 retries/);
     expect(slept).toBe(3);
@@ -249,8 +252,7 @@ describe("INV-ATTACH-WIRE-LOCK: retry budget は本番呼び出し経路で縛�
     expect(() =>
       detachAttachHooks(settingsPath, {
         maxRetries: 3,
-        isAlive: () => true,
-        sleep: () => void (slept += 1),
+        testHooks: { isAlive: () => true, sleep: () => void (slept += 1) },
       }),
     ).toThrow(/failed to acquire .* after 3 retries/);
     expect(slept).toBe(3);

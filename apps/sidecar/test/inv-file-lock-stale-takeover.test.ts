@@ -29,50 +29,28 @@
  *
  * 🔴 すべて os.tmpdir() 配下。実 ~/.actradeck / 実 settings 不可侵。
  */
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
-const testDir = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(testDir, "../../..");
-const sidecarRoot = resolve(testDir, "..");
-// pnpm の strict (非 hoist) レイアウトと hoist 済み dev レイアウトの双方で tsx を解決する
-// (inv-approval-allowlist-store.test.ts と同じ骨格)。
-const tsxBin =
-  [join(sidecarRoot, "node_modules/.bin/tsx"), join(repoRoot, "node_modules/.bin/tsx")].find((p) =>
-    existsSync(p),
-  ) ?? join(repoRoot, "node_modules/.bin/tsx");
-const workerPath = join(testDir, "helpers/file-lock-race-worker.mts");
+import {
+  cleanupTempDirs,
+  makeTempDir,
+  spawnWorker,
+  waitForFile,
+  workerScript,
+} from "./helpers/lock-test-support.js";
+
+const workerPath = workerScript("file-lock-race-worker.mts");
+
+afterEach(cleanupTempDirs);
 
 /** レース 1 本の観測結果 (sentinel を temp dir 削除前に吸い上げたもの)。 */
 interface RaceOutcome {
   readonly codes: readonly number[];
   readonly sentinels: Readonly<Record<string, string | undefined>>;
   readonly lockLeftBehind: boolean;
-}
-
-function spawnWorker(env: Record<string, string>): Promise<number> {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(tsxBin, [workerPath], {
-      env: { ...process.env, ...env },
-      stdio: ["ignore", "ignore", "inherit"],
-    });
-    child.on("error", reject);
-    child.on("exit", (code) => resolvePromise(code ?? -1));
-  });
-}
-
-async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline) return false;
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  return true;
 }
 
 const SENTINELS = [
@@ -97,20 +75,20 @@ const SENTINELS = [
  * B が「A の lock を stale と判定した直後・取り外す直前」で止まっている間に A が解放し C が取得する。
  */
 async function runRace(mode: "dead-pid" | "absent"): Promise<RaceOutcome> {
-  const dir = mkdtempSync(join(tmpdir(), "actradeck-filelock-race-"));
+  const dir = makeTempDir("actradeck-filelock-race-");
   const sigDir = join(dir, "sig");
   mkdirSync(sigDir);
   const target = join(dir, "target.json");
   const base = { SIG_DIR: sigDir, TARGET: target, WAIT_MS: "15000" };
   try {
-    const holder = spawnWorker({ ...base, ROLE: "holder" });
+    const holder = spawnWorker(workerPath, { ...base, ROLE: "holder" });
     // A が critical section に入り、自 pid を公示するまで待つ (B はそれを読む)。
     const ready =
       (await waitForFile(join(sigDir, "a-inside"), 15_000)) &&
       (await waitForFile(join(sigDir, "a-pid"), 15_000));
     expect(ready, "holder(A) never entered the critical section").toBe(true);
-    const taker = spawnWorker({ ...base, ROLE: "taker", C_HOLD_MS: "700" });
-    const contender = spawnWorker({ ...base, ROLE: "contender", MODE: mode });
+    const taker = spawnWorker(workerPath, { ...base, ROLE: "taker", C_HOLD_MS: "700" });
+    const contender = spawnWorker(workerPath, { ...base, ROLE: "contender", MODE: mode });
     const codes = await Promise.all([holder, contender, taker]);
     const sentinels: Record<string, string | undefined> = {};
     for (const name of SENTINELS) {
@@ -119,7 +97,7 @@ async function runRace(mode: "dead-pid" | "absent"): Promise<RaceOutcome> {
     }
     return { codes, sentinels, lockLeftBehind: existsSync(`${target}.actradeck-lock`) };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    cleanupTempDirs();
   }
 }
 
