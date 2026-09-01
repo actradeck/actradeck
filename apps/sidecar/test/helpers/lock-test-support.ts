@@ -49,6 +49,34 @@ export function spawnWorker(workerPath: string, env: Record<string, string>): Pr
   });
 }
 
+/**
+ * {@link spawnWorker} と同じだが、**ファイル記述子の上限を `fdLimit` に絞って** worker を起動する
+ * (SEC-FLV2-1 の INV 用)。
+ *
+ * fd 枯渇 (`EMFILE`) は「解放側の内容読取りだけが失敗し、`stat` / `rename` / `link` / `unlink` は
+ * 成功する」状態を作れる唯一の現実的なベクタ。ホストの既定 soft limit は 100 万を超えることがあり
+ * (実測 1048576)、素で焼くと 1M 個の fd を開くことになるため、`sh -c 'ulimit -n N; exec …'` で
+ * **上限そのものを決定的に**下げる (ホストの設定に依存しない)。
+ *
+ * `ulimit` は POSIX sh の組込みで、tsx の起動は実測 96 でも通る (余裕を見て既定 256)。
+ */
+export function spawnWorkerWithFdLimit(
+  workerPath: string,
+  env: Record<string, string>,
+  fdLimit = 256,
+): Promise<number> {
+  const quote = (v: string): string => `'${v.replaceAll("'", `'\\''`)}'`;
+  const command = `ulimit -n ${fdLimit}; exec ${quote(tsxBin)} ${quote(workerPath)}`;
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn("sh", ["-c", command], {
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => resolvePromise(code ?? -1));
+  });
+}
+
 /** ファイルが現れるまで (または timeout まで) 非同期に待つ。 */
 export async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;

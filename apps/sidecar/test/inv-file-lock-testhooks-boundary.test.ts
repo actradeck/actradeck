@@ -8,18 +8,24 @@
  * という**本番の公開面**から seam 全体へ到達できた。本番が `isAlive: () => false` や `sleep: () => {}` を
  * 渡すと **CI 信号ゼロで** stale 判定・backoff が無効化される。
  *
- * 対策は 3 層。綴り走査は最後の 1 層だけで、主役は上の 2 つ (ADR 01a057d0: 検出器の自己保護は
- * 綴り pin の増殖でなく実行可能コントロールで):
- *   1. **実行可能ゲート** — seam を渡せるのは test モードのときだけ。本番モードで `testHooks` を
- *      渡すと `withFileLock` が throw する。挙動 assert は file-lock.test.ts の
+ * **実際に効いているコントロールは 2 つ**で、型はそれ自体がゲートではない
+ * (ADR 01a057d0: 検出器の自己保護は綴り pin の増殖でなく実行可能コントロールで):
+ *   1. **実行可能ゲート (唯一の実行時強制)** — seam を渡せるのは test モードのときだけ。本番モードで
+ *      `testHooks` を渡すと `withFileLock` が throw する。挙動 assert は file-lock.test.ts の
  *      「testHooks は test モード限定」describe (POSITIVE / NEGATIVE 対) が持つ。
- *   2. **型による封じ込め** — seam は `FileLockTestHooks` に集約し、単一の入口 `testHooks` からしか
- *      渡せない。本番向け `FileLockOptions` は 3 フィールドで、seam と**素で交わらない**。
- *      下の census は `Record<keyof T, true>` なので、seam やオプションを増減すると**型エラー**になる
- *      (綴りの手写し census ではない)。
- *   3. **走査** — `apps/sidecar/src/**` の本番コードに入口 `testHooks` が現れない。1・2 により
- *      個々の seam 名は入口を経ずには渡せないので、走査対象は入口 1 語で足りる。
+ *   2. **走査** — `apps/sidecar/src/**` の本番コードに入口 `testHooks` が現れない。
  *      走査器は**既知陽性 / 既知陰性の fixture を同じ関数へ流して**歯を実証する。
+ *
+ * **型がしているのは「入口を 1 語に絞る」ことだけ** (TDA-FLV2-4)。seam は `FileLockTestHooks` に
+ * 集約され `testHooks` からしか渡せないので、走査対象が 1 語で足りる — これは走査の**前提条件**で
+ * あって強制ではない。`FileLockCallOptions` は seam へ到達できる型のままであり (だからこそ
+ * INV テストが本番経路ごしに seam を注入できる)、型検査だけでは本番の注入を止められない。
+ * 下の census は `Record<keyof T, true>` なので seam やオプションの増減で**型エラー**になり、
+ * 「入口が 1 語である」という前提が黙って崩れるのを防ぐ (綴りの手写し census ではない)。
+ *
+ * **走査 universe の正直な開示**: 走査するのは `apps/sidecar/src/**` の `.ts` **のみ**。
+ * `.mts` / `.cts` / `.js`、他 workspace、`dist/`、テスト自身は対象外。本番の lock 呼び出しが
+ * すべてこの universe に居ることが前提で、universe 外へ本番コードが移れば走査は素通りする。
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -29,7 +35,7 @@ import { describe, expect, it } from "vitest";
 
 import { stripComments } from "./util/strip-comments.js";
 
-import type { FileLockOptions, FileLockTestHooks } from "../src/file-lock.js";
+import type { FileLockCallOptions, FileLockOptions, FileLockTestHooks } from "../src/file-lock.js";
 
 const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), "../src");
 
@@ -53,6 +59,18 @@ const PRODUCTION_OPTION_CENSUS: Record<keyof FileLockOptions, true> = {
   lockPath: true,
   maxRetries: true,
   retryDelayMs: true,
+};
+
+/**
+ * `withFileLock` が実際に受け取る型 (本番オプション + seam の入口) の census (TDA-FLV2-1)。
+ * 走査が入口 1 語で足りる根拠は「call 型 − 本番型 = ちょうど入口 1 個」であること。
+ * 2 個目の入口を生やすと、ここが型エラーか下の assert のどちらかで落ちる。
+ */
+const CALL_OPTION_CENSUS: Record<keyof FileLockCallOptions, true> = {
+  lockPath: true,
+  maxRetries: true,
+  retryDelayMs: true,
+  testHooks: true,
 };
 
 /** seam の入口 (本番コードに現れてはならない唯一の語)。 */
@@ -109,6 +127,9 @@ describe("INV-FILELOCK-TESTHOOKS-BOUNDARY: 走査器の歯 (既知陽性 / 既�
       `// testHooks は本番で渡さない`,
       `/* testHooks についての説明 */`,
       `const myTestHooksLike = 1;`, // 部分一致では拾わない (\b で区切る)
+      // QA-FLV2-2: **前方は境界・後方は非境界**の形。後ろの `\b` を外すとここが偽陽性になる
+      // (`myTestHooksLike` は前方も非境界なので、\b 片側だけの劣化を検出できない)。
+      `const testHooksLike = 1;`,
       `const hooks = {};`,
     ];
     for (const src of negatives) {
@@ -157,5 +178,19 @@ describe("INV-FILELOCK-TESTHOOKS-BOUNDARY: 型による封じ込め", () => {
     ).toEqual([]);
     // seam は 1 つ以上ある (census が空になって上の交差検査が恒真化しない)。
     expect(seams.length).toBeGreaterThan(0);
+  });
+
+  it("call 型 − 本番型 = ちょうど入口 1 語 (走査が 1 語で足りる根拠)", () => {
+    // TDA-FLV2-1: 走査は入口 1 語だけを見る。その正当性は「seam へ到達できる経路が
+    // `testHooks` 以外に無い」ことに依存する。2 個目の入口 (別名の seam bag・別 field) を
+    // 生やすと、この差分が [ENTRY_POINT] でなくなって落ちる。
+    const call = Object.keys(CALL_OPTION_CENSUS).sort();
+    const prod = Object.keys(PRODUCTION_OPTION_CENSUS);
+    const extra = call.filter((k) => !prod.includes(k));
+    expect(extra, "the scan watches one entry point; this must be exactly that key").toEqual([
+      ENTRY_POINT,
+    ]);
+    // 本番型が call 型の部分集合であること (本番キーが call から抜けると走査の前提が崩れる)。
+    expect(prod.filter((k) => !call.includes(k))).toEqual([]);
   });
 });

@@ -548,6 +548,43 @@ describe("INV-FILELOCK-STALE-TAKEOVER-IDENTITY: 復元失敗は fail-loud + 退�
     expect(readFileSync(join(dir, debris[0]!), "utf8")).toBe("1\n");
   });
 
+  it("同一プロセスで 2 回復元失敗しても退避パスは distinct で 1 本目が生き残る", () => {
+    // QA-FLV2-1: 退避名 `.stale-<pid>-<seq>` の seq が進まないと、2 回目の `renameSync` が
+    // 1 本目の退避 (= 生きた holder の inode) を**黙って置換**して破棄する。
+    // seq の実値は同一モジュール内の先行テストに依存するので決め打ちせず、
+    // 「2 本あり・名前が distinct・中身が両方残っている」で固定する。
+    const DEAD_LOCAL = 999999;
+    const markers = ["round-1\n", "round-2\n"];
+    for (const marker of markers) {
+      writeFileSync(lockPath, `${DEAD_LOCAL}\n`);
+      expect(() =>
+        withFileLock(target, () => "never", {
+          testHooks: {
+            isAlive: () => false,
+            sleep: () => {},
+            // 判定した lock を in-place で書き換える (同 inode・別バイト) → 復元経路へ入る。
+            onHolderObserved: () => writeFileSync(lockPath, marker),
+            // 取り外し済みの窓を第三者が埋める → 復元 linkSync が EEXIST で失敗する。
+            onDetached: (phase) => {
+              if (phase === "takeover") writeFileSync(lockPath, "occupied\n");
+            },
+          },
+        }),
+      ).toThrow(/restoring the live holder failed \(EEXIST\)/);
+    }
+    const debris = readdirSync(dir)
+      .filter((n) => n.includes(".stale-"))
+      .sort();
+    expect(debris, `debris: ${JSON.stringify(debris)}`).toHaveLength(2);
+    expect(new Set(debris).size, "the two detached locks reused one path").toBe(2);
+    // 1 本目が 2 本目に潰されていない (両方の中身が残っている)。
+    const bodies = debris.map((n) => readFileSync(join(dir, n), "utf8")).sort();
+    expect(bodies).toEqual([...markers].sort());
+    // inode も distinct (同じ inode を 2 つの名前で数えていない)。
+    const inos = debris.map((n) => statSync(join(dir, n)).ino);
+    expect(new Set(inos).size).toBe(2);
+  });
+
   it("解放: 取り外したのが他者の lock でも復元できれば throw しない (相手を消さない)", () => {
     // `onReleaseChecked` の窓で他者の lock へ差し替える → 解放の rename が他者の lock を外す。
     // ただし lockPath は空いたままなので復元 linkSync は成功する = 静かに元へ戻す。
@@ -590,6 +627,15 @@ describe("INV-FILELOCK-STALE-TAKEOVER-IDENTITY: 復元失敗は fail-loud + 退�
         },
       ),
     ).toThrow("boom"); // 解放側の fail-loud で覆い隠さない
+    // POSITIVE 対 (TDA-FLV2-6): 「fn のエラーが出た」だけでは、解放が**そもそも走らなかった**
+    // 場合と区別できない。解放が実際に取り外し → 復元失敗まで進んだ痕跡を固定する。
+    expect(readFileSync(lockPath, "utf8"), "the third party lock was not left in place").toBe(
+      "2\n",
+    );
+    expect(
+      readdirSync(dir).filter((n) => n.includes(".stale-rel-")),
+      "release never detached anything: the swallowed failure was not exercised",
+    ).toHaveLength(1);
   });
 });
 

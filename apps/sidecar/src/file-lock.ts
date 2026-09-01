@@ -262,6 +262,23 @@ function identityOf(path: string): LockIdentity | undefined {
   }
 }
 
+/**
+ * 解放時に「内容が読めなくても `(dev, ino)` 単独で自 lock と判定してよい」読取り失敗の errno クラス
+ * (SEC-FLV2-1)。**permission / 種別**の恒久的な失敗だけを列挙する。
+ *
+ * - `EACCES` / `EPERM`: mode / owner が帯域外で変えられた (SEC-FL-1 の回復経路の本命)。
+ * - `EISDIR`: lock path がディレクトリに差し替えられた。
+ *
+ * ここに **`EMFILE` / `ENFILE` / `EIO` 等の一過性失敗を足さない**。それらは「読めなかった」だけで
+ * 「自分のものだ」を意味しないため、content 軸を捨てると他者の生きた lock を消す方向に倒れる。
+ */
+const IDENTITY_ONLY_READ_ERRNOS: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EISDIR"]);
+
+/** {@link IDENTITY_ONLY_READ_ERRNOS} に属する errno か (未知・欠落は false = 触らない側)。 */
+function isIdentityOnlyReadErrno(code: string | undefined): boolean {
+  return code !== undefined && IDENTITY_ONLY_READ_ERRNOS.has(code);
+}
+
 /** 同一 lock インスタンスか (`(dev, ino)` 一致)。 */
 function sameIdentity(a: LockIdentity, b: LockIdentity): boolean {
   return a.dev === b.dev && a.ino === b.ino;
@@ -408,8 +425,12 @@ function detachStaleLock(
  * 判定の枝 (identity v2 (3)):
  * - identity 不一致 / 既に消えている → 触らない。
  * - identity 一致 + 内容が読めて自分 (`pid===self`) or `corrupt` → 自 lock。
- * - identity 一致 + 内容が**読めない** (EACCES / EISDIR) → identity を信じて自 lock
+ * - identity 一致 + 内容が読めず、その失敗が **permission クラス**
+ *   ({@link IDENTITY_ONLY_READ_ERRNOS}) → identity を信じて自 lock
  *   (= SEC-FL-1 の恒久 wedge の回復経路)。
+ * - identity 一致 + 内容が読めず、失敗が **それ以外** (EMFILE / ENFILE / EIO 等の一過性) →
+ *   **触らない** (SEC-FLV2-1)。一過性の読取り不能で content 軸を捨てると、
+ *   inode 番号が再利用された「他者の生きた lock」を消しうる。base 同等の fail-safe へ倒す。
  * - identity 一致 + 内容が読めて**別 pid** → 第三者が自分の inode を書き換えた → 触らない。
  */
 function detachOwnLockForRelease(
@@ -423,7 +444,12 @@ function detachOwnLockForRelease(
     let holder: LockHolder | undefined;
     try {
       holder = readLockHolder(lockPath);
-    } catch {
+    } catch (err) {
+      // SEC-FLV2-1: 「identity を信じてよい」のは **permission クラス**の読取り不能だけ。
+      // fd 枯渇 (EMFILE/ENFILE) や I/O 障害 (EIO) のような一過性の失敗まで同じ枝へ落とすと、
+      // 「読めなかった」だけで content 軸 (= 別 pid なら触らない) を捨てることになり、
+      // inode 番号が再利用された**他者の生きた lock** を消しうる。判別できないときは触らない。
+      if (!isIdentityOnlyReadErrno((err as NodeJS.ErrnoException).code)) return undefined;
       holder = undefined; // 読めない自 inode → identity を信じる (回復経路)
     }
     if (holder !== undefined && !isOwnLockContent(holder)) return undefined;

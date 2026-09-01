@@ -23,6 +23,10 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * 落ちる。旧値 (50 = 500ms) は、この suite が実プロセス spawn を伴う lock 系 INV と同居して
  * 走るようになってから、切断イベントの観測を稀に取りこぼした (full suite 18 回中 2 回・単独実行や
  * CPU burner 負荷では再現せず)。上限だけを 3s へ伸ばし、判定は据え置く。
+ *
+ * TDA-FLV2-2: **実効上限は enclosing test の timeout** — 3 つの poll が直列に上限まで回ると
+ * 9s になり、vitest 既定 (5s) では poll ではなく test timeout が先に切る。使用側の `it` に
+ * 明示 timeout を置いて「どちらが先に切るか」を暗黙にしない。
  */
 const SETTLE_STEPS = 300;
 
@@ -94,7 +98,7 @@ describe("WsClient: connect / reconnect / backoff", () => {
     for (let i = 0; i < SETTLE_STEPS && !client.connected; i++) await sleep(10);
     expect(client.connected).toBe(true);
     store.close();
-  });
+  }, 20_000);
 
   it("error on a bad URL does not throw; close() stops reconnection", async () => {
     const store = new EventStore(":memory:");

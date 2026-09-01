@@ -19,11 +19,24 @@
  *                 失敗し、B は critical section へ入らず throw する (fail-loud)。
  *                 このとき B が取り外した **V の inode は退避名のまま残る** (破棄しない)。
  *   observer(O) : 一連の決着後に lock を取り、直列化が壊れていない (取得できる) ことを確認する。
+ *   unreadable  : SEC-FLV2-1。自分が保持している間に lock file を **inode 番号ごと再利用**した
+ *                 「他者 (live pid) の lock」へ差し替え、さらに **fd を焼き尽くして** 解放側の
+ *                 内容読取りだけを `EMFILE` で失敗させる。permission クラス (EACCES/EPERM/EISDIR)
+ *                 でない読取り不能で content 軸を捨てると、identity だけを信じて
+ *                 **他者の生きた lock を消す**。呼び元テストが「消していない」ことを assert する。
  *
  * 入出力はすべて env と `SIG_DIR` 配下の sentinel ファイル (呼び元が os.tmpdir 配下を与える)。
  * 実 ~/.actradeck / 実 settings は不可侵。
  */
-import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import { withFileLock, type FileLockTestHooks } from "../../src/file-lock.js";
@@ -183,6 +196,71 @@ function runSniper(): void {
   put("s-done");
 }
 
+/**
+ * SEC-FLV2-1: 解放側の「内容が読めない」枝が **permission クラスに限定**されていることを、
+ * 実プロセスで踏む。`stat` / `rename` / `link` / `unlink` は fd を要さず成功し、
+ * `openSync` だけが `EMFILE` で失敗する状態を作る (呼び元が `ulimit -n` を絞って起動する)。
+ *
+ * sentinel は **fd を閉じてから**書く (焼いている間は writeFileSync も EMFILE になるため)。
+ */
+function runUnreadableRelease(): void {
+  const foreignPid = Number(process.env.FOREIGN_PID ?? 1); // init は常に生存 = 他者の生きた lock
+  const ballast = `${target}.ballast`;
+  writeFileSync(ballast, "x");
+  const fds: number[] = [];
+  let reused = false;
+  let foreignIno = 0;
+  let heldIno = 0;
+  let openErr = "none";
+
+  withFileLock(target, () => {
+    const st0 = statSync(lockPath);
+    heldIno = Number(st0.ino);
+    unlinkSync(lockPath);
+    // ext4 は解放直後の inode 番号を再利用する。再利用されるまで作り直す
+    // (再利用できなければ reused=false のまま → 呼び元の vacuity guard が loud に落ちる)。
+    for (let i = 0; i < 2000; i++) {
+      writeFileSync(lockPath, `${foreignPid}\n`, { mode: 0o600 });
+      const st = statSync(lockPath);
+      if (Number(st.ino) === heldIno && Number(st.dev) === Number(st0.dev)) break;
+      unlinkSync(lockPath);
+    }
+    const stC = statSync(lockPath);
+    foreignIno = Number(stC.ino);
+    reused = foreignIno === heldIno && Number(stC.dev) === Number(st0.dev);
+    if (process.env.EXHAUST !== "0") {
+      // 残りの fd を焼き尽くす → 解放側の openSync が EMFILE になる。
+      for (;;) {
+        try {
+          fds.push(openSync(ballast, "r"));
+        } catch (err) {
+          openErr = (err as NodeJS.ErrnoException).code ?? "unknown";
+          break;
+        }
+      }
+    }
+  });
+
+  for (const fd of fds) {
+    try {
+      closeSync(fd);
+    } catch {
+      /* best-effort */
+    }
+  }
+  put("u-held-ino", String(heldIno));
+  put("u-foreign-ino", String(foreignIno));
+  put("u-reused", String(reused));
+  put("u-open-error", openErr);
+  put("u-fds-burned", String(fds.length));
+  put("u-victim-survived", String(existsSync(lockPath)));
+  if (existsSync(lockPath)) {
+    put("u-victim-body", readFileSync(lockPath, "utf8"));
+    put("u-victim-ino", String(statSync(lockPath).ino));
+  }
+  put("u-done");
+}
+
 function runObserver(): void {
   // 決着後に取得できる = 直列化が wedge していない。
   waitFor("b-done");
@@ -201,6 +279,7 @@ try {
   else if (role === "taker") runTaker();
   else if (role === "sniper") runSniper();
   else if (role === "observer") runObserver();
+  else if (role === "unreadable") runUnreadableRelease();
   else {
     process.stderr.write(`file-lock-identity-worker: unknown ROLE ${role}\n`);
     process.exit(2);

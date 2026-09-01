@@ -35,6 +35,7 @@ import {
   cleanupTempDirs,
   makeTempDir,
   spawnWorker,
+  spawnWorkerWithFdLimit,
   waitForFile,
   workerScript,
 } from "./helpers/lock-test-support.js";
@@ -68,6 +69,16 @@ const SENTINELS = [
   "o-exit",
   "o-done",
   "violation",
+  "u-held-ino",
+  "u-foreign-ino",
+  "u-reused",
+  "u-open-error",
+  "u-fds-burned",
+  "u-victim-survived",
+  "u-victim-body",
+  "u-victim-ino",
+  "u-done",
+  "unreadable-error",
   "victim-error",
   "taker-error",
   "sniper-error",
@@ -219,5 +230,74 @@ describe("INV-FILELOCK-IDENTITY-V2: 奪取の同一性は (dev,ino) 粒度", () 
     expect(overlaps(sn, ob), `sniper and observer overlapped: ${sn} / ${ob}`).toBe(false);
     // victim の解放は他者 (sniper) の lock を消さない → observer が正当に取得できた。
     expect(o.lockLeftBehind).toBe(false);
+  }, 180_000);
+});
+
+/**
+ * SEC-FLV2-1 (H): 解放側の「内容が読めないなら identity を信じる」枝は **permission クラス**
+ * (`EACCES` / `EPERM` / `EISDIR`) の読取り不能に限る。
+ *
+ * 根因: この枝が **すべての** 読取り失敗を受けていると、fd 枯渇 (`EMFILE`) や I/O 障害のような
+ * **一過性**の失敗でも content 軸 (= 内容が別 pid なら触らない) を捨てることになる。inode 番号は
+ * OS が再利用するため、「自分が保持していた inode 番号を他者の生きた lock が占めている」状態で
+ * 内容が読めないと、identity だけを信じて **他者の生きた lock を消す**。
+ *
+ * 検証: 実プロセス (distinct pid) を `ulimit -n` を絞って起動し、critical section の中で
+ * (a) 自分の lock を消して **同じ inode 番号**の「他者 (pid 1 = init・生存) の lock」を作り、
+ * (b) 残りの fd を焼き尽くす。`stat` / `rename` / `link` / `unlink` は fd を要さず成功するので、
+ * 解放側で失敗するのは `openSync` だけ = `EMFILE`。
+ *
+ * POSITIVE 対 (クラス境界の反対側): 「保持中に自分の lock が読めなくなっても (dev,ino) 同一性で
+ * 解放できる」(file-lock.test.ts の EACCES describe) が **permission クラスなら外す**ことを固定する。
+ * 本テストは **permission クラスでなければ外さない**ことを固定し、2 本で errno クラス境界を挟む。
+ *
+ * 🔴 すべて os.tmpdir() 配下。実 ~/.actradeck / 実 settings 不可侵。
+ */
+describe("INV-FILELOCK-IDENTITY-V2: 一過性の読取り不能 (EMFILE) では他者の lock を消さない", () => {
+  it("fd 枯渇で内容が読めなくても、inode 番号を再利用した他者の生きた lock を解放で消さない", async () => {
+    const dir = makeTempDir("actradeck-filelock-unreadable-");
+    const sigDir = join(dir, "sig");
+    mkdirSync(sigDir);
+    const target = join(dir, "target.json");
+    const lockPath = `${target}.actradeck-lock`;
+    const FOREIGN_PID = "1"; // init: 常に生存 = 「他者の生きた lock」
+
+    const code = await spawnWorkerWithFdLimit(
+      workerScript("file-lock-identity-worker.mts"),
+      {
+        SIG_DIR: sigDir,
+        TARGET: target,
+        WAIT_MS: "15000",
+        ROLE: "unreadable",
+        FOREIGN_PID,
+      },
+      256,
+    );
+
+    const s: Record<string, string | undefined> = {};
+    for (const name of SENTINELS) {
+      const p = join(sigDir, name);
+      s[name] = existsSync(p) ? readFileSync(p, "utf8") : undefined;
+    }
+    expect(code, `worker aborted; error: ${s["unreadable-error"]}`).toBe(0);
+    expect(s["u-done"], "worker never finished").toBeDefined();
+
+    // vacuity guard 1: 解放側の読取りが本当に **permission でない** errno で失敗した。
+    expect(s["u-open-error"]?.trim(), "fd exhaustion did not produce EMFILE").toBe("EMFILE");
+    expect(Number(s["u-fds-burned"] ?? "0")).toBeGreaterThan(0);
+    // vacuity guard 2: 他者の lock が本当に **自分が保持していた inode 番号** を占めた
+    // (再利用できていなければ identity 一致の窓が無く、テストは何も検査していない)。
+    expect(s["u-reused"]?.trim(), "the inode number was not reused: the race is vacuous").toBe(
+      "true",
+    );
+    expect(s["u-foreign-ino"]?.trim()).toBe(s["u-held-ino"]?.trim());
+
+    // 本題: 他者の生きた lock は消えていない (blanket catch だとここで消える)。
+    expect(s["u-victim-survived"]?.trim(), "the foreign live lock was destroyed").toBe("true");
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(lockPath, "utf8").trim()).toBe(FOREIGN_PID);
+    expect(s["u-victim-ino"]?.trim()).toBe(s["u-held-ino"]?.trim());
+    // 取り外しにも進んでいない (退避残骸ゼロ)。
+    expect(readdirSync(dir).filter((n) => n.includes(".stale"))).toEqual([]);
   }, 180_000);
 });
