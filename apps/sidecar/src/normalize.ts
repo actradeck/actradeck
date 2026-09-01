@@ -2522,9 +2522,12 @@ const REMOTE_EXEC_RUNNERS = new Set([
  *   切り出しも受けない (NBSP で実測・NBSP 自体は導出に含まれる・universe は追加のみ)、
  *   ③' **結合検査と構造ゲートの適用範囲は依然量化クラス抽出 (`QUANTIFIED_CLASS_RE`) の結果** (TDA-LN5-1)
  *   = **`[...]` の直後に量化子が隣接する綴り**に限る。ただし **クラスを持つ綴りは着地自体が塞がれた**
- *   (task 01a0574f-521a の class census: 「source 中の escape されていない `[` の本数 == 抽出本数」を要求し、
- *   群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation `(?:[^|;&\n]|x)*` / 未量化 `[abc]` を
- *   **床 (fail-closed) で RED** にする。現行 17 は 3==3 で緑・escape 済み `\[abc\]` も緑 = false RED なし)。
+ *   (task 01a0574f-521a の class census: 「source 中の escape されていない `[` の**位置集合** == 抽出 match の
+ *   **位置集合**」を要求し、群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation
+ *   `(?:[^|;&\n]|x)*` / 未量化 `[abc]` / その CR 幅版 / **末尾に inert な phantom `(?:\[\s\S]*)?` を足して
+ *   本数だけ合わせた形** を **床 (fail-closed) で RED** にする (SEC-LSI-2: 本数一致版は phantom 形を
+ *   素通りした)。現行 17 は位置一致で緑・escape 済み `\[abc\]` も緑 = false RED なし。**塞げたのは
+ *   ここに列挙した実測形**であって、census を回避する綴りが他に無いことの証明ではない)。
  *   **残る非被覆はクラスを持たない綴り**: 量化 shorthand `\S*` `\s+` (と `s` flag つきの `.`) は census にも
  *   結合検査にも掛からない (実測)。lazy `*?` と `{n,m}` は抽出される。seed 軸は綴りに依らず全スキャン regex を
  *   測るので、shorthand 綴りで失われるのは 2 ゲートの適用であって計測ではない。現行 17 に該当する綴りは無い。
@@ -2642,11 +2645,13 @@ interface LiteralRule {
  *
  * **強制の範囲 (TDA-LN5-1・実測・task 01a0574f-521a で縮小)**: どちらのゲートも「`[...]` の直後に量化子が
  * 隣接する綴り」しか抽出しない点は変わらない。ただし **クラスを持つ別綴り** (群括り `(?:[^|;&\n])*` /
- * capture `([^|;&\n])*` / クラス alternation / 未量化 `[abc]`) は class census が着地自体を RED にするので、
- * 「ゲートを避けるために綴りを変える」経路は塞がっている。**残るのはクラスを持たない量化 shorthand**
- * (`\S*` `\s+` / `s` flag つきの `.`) で、その綴りには機械的強制が届かない = **規律を人が守る必要がある**。
- * 構造ゲートの分離子判定自体は綴り (`startsWith("[^")`) ではなく**受理集合**で行うので、正のクラスで
- * 綴られた広い gap (`[\w\s-]*`) も分離子として扱う。
+ * capture `([^|;&\n])*` / クラス alternation / 未量化 `[abc]` / phantom で本数を合わせた形) は class census が
+ * 着地自体を RED にするので、**実測したこれらの綴りで**ゲートを避ける経路は塞がっている (網羅の主張はしない)。
+ * **残るのはクラスを持たない量化 shorthand** (`\S*` `\s+` / `s` flag つきの `.`) で、その綴りには機械的強制が
+ * 届かない = **規律を人が守る必要がある**。
+ * 構造ゲートの分離子判定は綴り軸 (`startsWith("[^")`) と**受理集合**軸 (`spansArbitraryText`) の**論理和**で
+ * 行う (TDA-LSI-1: 受理集合軸への置換は「英数字を 1 つも受理しない否定クラス」`[^a-zA-Z0-9|]` を落とした)。
+ * 受理集合軸により正のクラスで綴られた広い gap (`[\w\s-]*`) も分離子として扱う。
  */
 export const LITERAL_RULES: readonly LiteralRule[] = [
   { re: /\bmkfs\b/i, category: "disk-destroy", high: true, labels: ["mkfs"] },

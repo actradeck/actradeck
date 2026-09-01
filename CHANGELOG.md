@@ -44,18 +44,26 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   (measured last round: a group-wrapped quadratic gap with a carriage-return-prefixed sample passed
   the coupling, the gate, and every ratio check).
   The extractor is not made cleverer - that would be a denylist chasing spellings. Instead the test
-  now requires, for every scanned expression, that the number of unescaped `[` in its source equals
-  the number of classes the extractor pulled out. A spelling the extractor does not understand is
-  therefore refused at the floor rather than waved through: the four class-bearing spellings above
-  all fail it, the seventeen expressions that ship today pass it three-for-three, and an escaped
-  `\[abc\]` passes as zero-for-zero, so nothing that ships today turns red. What this does not
-  reach is spellings that carry no class at all - a quantified shorthand such as `\S*` or `\s+`,
-  or `.` under the `s` flag - and that remains disclosed in the test, in the classifier, and here.
-  The structural gate additionally stops deciding what counts as a separator class from the
-  spelling `[^`, and decides it from what the class actually accepts: a class that accepts both an
-  alphanumeric character and a non-alphanumeric one that is not a separator is treated as a gap
-  spanning arbitrary text. A broad gap written as a positive class is now gated where before it was
-  not; the flag-matching `[a-z]` in the `git clean` rule still is not.
+  now requires, for every scanned expression, that the *positions* of the unescaped `[` in its
+  source match the positions where the extractor started its matches. Counting alone was not
+  enough: a review found that appending a semantically inert `(?:\[\s\S]*)?` - whose `[` is
+  escaped, so it is not counted as a class opener, while the extractor still reads a class out of
+  the same text - balanced the totals and walked a group-wrapped quadratic rule straight through.
+  Comparing positions rejects that. The spellings measured as refused are the four above, their
+  carriage-return-widened variants, and the phantom-balanced form; the seventeen expressions that
+  ship today match position-for-position and an escaped `\[abc\]` matches as two empty sets, so
+  nothing that ships today turns red. That is a list of what was measured, not a claim that no
+  spelling escapes it. What it definitely does not reach is spellings that carry no class at all -
+  a quantified shorthand such as `\S*` or `\s+`, or `.` under the `s` flag - and that remains
+  disclosed in the test, in the classifier, and here.
+  The structural gate additionally decides what counts as a separator class from what the class
+  actually accepts - a class accepting both an alphanumeric character and a non-alphanumeric one
+  that is not a separator spans arbitrary text - **in addition to**, not instead of, the older test
+  on the spelling `[^`. Replacing rather than adding was itself a defect the review caught: a
+  negated class that accepts no alphanumeric at all, such as `[^a-zA-Z0-9|]`, does not span by the
+  new test and was silently dropped from the gate. The union is monotone; a broad gap written as a
+  positive class is now gated where before it was not, the alphanumeric-free negated classes stay
+  gated, and the flag-matching `[a-z]` in the `git clean` rule still is not.
   Three duplications behind those gates are collapsed into one source each: the class probe (built
   in three places, with three variants of deriving the excluded set and a pin on only one of them),
   the exemption predicate (the scan wrote it inline while the value pins tested a local copy, so
@@ -72,15 +80,19 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   counter last round and the main loop now gets one too, checked in `afterAll` against the same 110. And the declaration census that catches a shadowed helper looked only for `const`, `let` and
   `var` in a hand-written list of 27 names, so a `function`-form shadow walked through it; the
   census now extracts the describe's top-level declarations structurally (52 today), covers
-  `function` and `class`, and asserts that the hand-written 27 are contained in what it extracted
-  rather than replacing them.
+  `class`, plain `function`, `async function` and generator `function*`, and asserts that the
+  hand-written 27 are contained in what it extracted rather than replacing them. Four shadowing
+  shapes still escape every axis and are disclosed rather than claimed closed: destructuring, a
+  shadow introduced by a parameter name, the second and later bindings of a single
+  `const a = 1, b = 2;`, and an IIFE's formal parameters.
   Finally, the executable control that proves the metatest can still detect a quadratic rule gains
   a second positive fixture whose gap is bounded at 10000 rather than unbounded. The existing
   positive separates at a median ratio above 55, so relaxing the threshold from 24 to 39 was
-  measured as undetected; the new fixture sits at a median of 29.4 to 30.9 unloaded, which puts the
+  measured as undetected; the new fixture sits at a median of 28.6 to 31.0 unloaded across two
+  independent measurers (single ratio points reach as low as 18.0, which the median absorbs), which puts the
   detection floor an order of magnitude closer to the threshold and makes both a 24-to-39 relaxation
   and a reduction of the input scale from 8 to 6 fail. It is added, not substituted. Under a
-  2x-nproc load the new fixture's median rises to between 30.5 and 69.7, so the 24-to-39 detection
+  2x-nproc load the new fixture's median ranges between 28.5 and 69.7, so the 24-to-39 detection
   is bounded to the unloaded regime; on eight loaded runs and five unloaded ones neither positive
   nor the negative control produced a false red.
 
