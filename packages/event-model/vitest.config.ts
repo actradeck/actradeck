@@ -40,6 +40,12 @@ export default defineConfig({
         //   網羅 → floor 95/90/90/95 は worst の下 (per-file-coverage-floor-below-worst-not-best・
         //   erosion tripwire)。PGPORT/境界分岐のテスト削除が global 集約に吸収されるのを防ぐ。
         "src/test-db-guard.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
+        // test-strip-comments.ts (tripwire 走査正規化の単一出所・task 01a059a7-173c) = 小ファイル
+        //   tripwire。INV-STRIP-COMMENTS が被覆軸 / 残余 / corpus / 単一出所を挙動で網羅し
+        //   worst 96.55/97.77/100/97.27 → floor はその下 (per-file-coverage-floor-below-worst-not-best・
+        //   erosion tripwire であって target ではない)。regex skip / 改行 resync / 空白除去のどれかが
+        //   未到達になると trip する (走査の view が黙って緩むのを防ぐ)。
+        "src/test-strip-comments.ts": { statements: 92, branches: 92, functions: 95, lines: 92 },
         // state.ts (T1 状態機械 + ADR 0014 直交軸マップ/helper・コア領域) = 小ファイル tripwire。
         //   純同期関数/写像で決定的。inv-terminal-axes + inv-event-transition が worst 100/100/100/100
         //   まで網羅 → floor 95/90/90/95 は worst の下 (per-file-coverage-floor-below-worst-not-best・
