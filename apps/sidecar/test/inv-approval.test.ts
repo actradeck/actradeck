@@ -3771,7 +3771,10 @@ describe("INV-APPROVAL-R11: EOF-terminated heredocs, command-word substitutions,
     const literal = (name: string): string[] => {
       const m = src().match(new RegExp(`const ${name}[^=]*= new Set\\(\\[([\\s\\S]*?)\\]\\)`));
       expect(m, `${name} literal found`).not.toBeNull();
-      const body = ((m as RegExpMatchArray)[1] as string).replace(/^[ \t]*\/\/.*$/gm, "");
+      // TDA-CSX-1: 行頭限定の手書き strip では**行末**コメントの文字列リテラルが抽出集合へ
+      //   漏れる (`"toybox"` を行末コメントへ退避して配列から消すと本 it が緑のまま通った)。
+      //   正準 stripComments は行末コメントも落とし、文字列リテラルは保つ。
+      const body = stripComments((m as RegExpMatchArray)[1] as string);
       return [...body.matchAll(/"([^"]+)"/g)].map((x) => x[1] as string);
     };
     const wrappers = literal("RUNNER_WRAPPERS");
