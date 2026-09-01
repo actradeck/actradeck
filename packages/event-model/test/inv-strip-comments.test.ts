@@ -62,7 +62,7 @@ const EXPECTED_RUNS = {
   literals: 9, // literals describe の it 本数
   regex: 28, // regex describe の it 本数
   residuals: 11, // residuals describe の it 本数
-  corpus: 2, // corpus describe の it 本数
+  corpus: 3, // corpus describe の it 本数
   singleSource: 2, // singleSource describe の it 本数
 } as const;
 
@@ -804,6 +804,20 @@ function assertScanSetIsWhole(files: readonly string[]): void {
 }
 
 describe("INV-STRIP-COMMENTS-CORPUS: repo 全体で実コードもコメントも取り違えていない", () => {
+  // TDA-CSX-R5-1 ≡ QA-CSX-R5-2: `strippedWithout` は 39 本の negative assert の POSITIVE 対を
+  //   一手に担うが、その helper 自身に歯が無かった (assert を潰しても誰も気付かない)。
+  //   marker 不在の入力を同じ helper へ流して throw を挙動で固定する。
+  it("strippedWithout は marker 不在の入力で throw する (POSITIVE 対そのものの歯)", () => {
+    // 単一 marker が不在 -> throw。marker ループの空化 (`markers.slice(0, 0)`) をここが RED にする。
+    expect(() => strippedWithout("const qaOk = 1;\n", "qaAbsentMarker")).toThrow();
+    // **2 marker で後ろだけ不在** -> throw。全 marker を見ずに先頭だけ assert する 1 式へ潰す変異を
+    //   ここが RED にする (単一 marker の行だけでは先頭 1 つを見る形が生き残る)。
+    expect(() => strippedWithout("const qaOk = 1;\n", "qaOk", "qaAbsentMarker2")).toThrow();
+    // 陰性対: marker が実在すれば throw しない (偽 RED 0)。
+    expect(() => strippedWithout("const qaOk = 1;\n", "qaOk")).not.toThrow();
+    RAN.corpus++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
   it("判定器の歯: 落とし過ぎ / 落とし残し / parse 破壊を検出し、健全な strip は検出しない", () => {
     const sample = 'const a = 1; // note\nconst s = "x"; /* block */\n';
     // 既知陰性 (正準そのもの) — 同じ判定器へ流す。
