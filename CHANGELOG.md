@@ -43,10 +43,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   `inv-action-modal-allowlist`; the state machine in `inv-i18n`; and an inline copy in
   `inv-semantic-first.test.ts`. Six shapes because the backend's two are the same code. What each
   one got wrong: two stripped only comments that begin a line, two stripped a trailing comment only
-  when whitespace preceded it, one stripped every double slash regardless of context, and one
-  tracked strings but not regular expressions.
-  The cost of the third of those, measured over the 597 tracked `.ts`/`.tsx`/`.mts`/`.cts` files by
-  running each old shape and comparing against the comment ranges the TypeScript parser reports:
+  when whitespace preceded it, two stripped every double slash regardless of context, and one
+  tracked strings but not regular expressions. Two, two, two and one is the seven.
+  The cost of the third of those, measured at commit 217ce23 over the 597 tracked
+  `.ts`/`.tsx`/`.mts`/`.cts` files by running each old shape and comparing against the comment
+  ranges the TypeScript parser reports:
   133 files no longer parsed after it ran, and 146 files lost code - the scanner's output was a
   strict subsequence of the correct one. Those are two different statistics over the same files, not
   one number: a file can lose code and still parse. All ten call sites now use one scanner in the
@@ -56,8 +57,9 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   meaningful with the derivation stated, so: counting the comment ranges the TypeScript parser
   reports as single-line trivia that have non-whitespace before them on their own line, over every
   path in `git ls-files` matching the scanner's exported extension set - seven extensions, 620 files
-  - gives 2,248 such comments in 306 files, 56,166 characters that were previously part of what a
-  tripwire could see. The earlier figures in this entry covered four extensions and were re-derived
+  - gives, measured at commit 7014618, 2,248 such comments in 306 files, 56,166 characters that were
+  previously part of what a tripwire could see. Figures like this one move with the tree, so the
+  commit they were taken at is part of the number. The earlier figures in this entry covered four extensions and were re-derived
   when the set was shared; the derivation is the number, not the other way round.
   Two ways of losing the scanner's place were root-caused rather than disclosed - which is a claim
   about the shapes that were measured, not about the class. The contents of a
@@ -72,8 +74,9 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   file, and a slash that cannot close on its own line is never a regular expression.
   Accepting a slash after a closing bracket as the start of an expression has a cost that only shows
   up outside the span it consumes. Injecting a block comment at the end of every line of every
-  tracked source - 620 files, 147,697 probes - and comparing against the parser's own idea of what a
-  comment is, found fifteen lines where the comment survived into the scanned view. All fifteen are
+  tracked source - 620 files, 147,697 probes, measured at commit de5250c - and comparing against the
+  parser's own idea of what a comment is, found fifteen lines where the comment survived into the
+  scanned view. All fifteen are
   ordinary division, `(a ?? 0) / 1000` and its kin, where the scan walked from the division slash to
   the one that opens the comment behind it. Refusing a terminator followed by `*` as well as by `/`
   takes that measurement to zero, in the frozen linear metatest's own file among the rest. And the
@@ -103,6 +106,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   neither is described as safe. A regular expression in a position the heuristic declines to treat
   as one, a verbatim copy written as a string literal, and the single-source sweep's dependence on
   the identifier it looks for are each measured and disclosed.
+  Refusing a terminator followed by a star also means a genuine `/a/*2` is not skipped, which leaves
+  the next line's comment in view. That has a second side: when a `*/` appears later in the file the
+  block closes and the code between is dropped instead. Both directions behave as they did before
+  this work - the star refusal changed which shapes reach them, not the shapes themselves - and both
+  are pinned as measured behaviour and tracked together under the follow-up that revisits the
+  position heuristic.
 
 - **The two gates that metatest applies to the classifier's gap classes no longer depend on how
   those classes are spelled, and a rule spelled in a way the extractor does not understand can no
