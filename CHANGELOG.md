@@ -11,6 +11,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-01
+
 ### Added
 
 - **Two degradation counters that nothing could read are now on `GET /realtime/readiness`.** The
@@ -1222,7 +1224,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/actradeck/actradeck/releases/tag/v0.9.0
 [0.8.1]: https://github.com/actradeck/actradeck/releases/tag/v0.8.1
 [0.8.0]: https://github.com/actradeck/actradeck/releases/tag/v0.8.0
 [0.7.0]: https://github.com/actradeck/actradeck/releases/tag/v0.7.0
