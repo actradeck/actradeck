@@ -435,6 +435,13 @@ const REQUIRED_SCAN_MEMBERS = [
 
 const SCAN_EXTENSION_RE = /\.(?:ts|tsx|mts|cts)$/;
 
+/**
+ * repo 全体 (約 600 ファイル) を 2 回 parse するため、既定の 5s では coverage 計測下で足りない
+ * (実測: 素の run で 3.8s / `--coverage` で 12.5s)。LINEAR の `LINEAR_IT_TIMEOUT_MS` と同じ規範で
+ * 明示する。timeout はそれ自体が失敗なので、RED の歯は失われない (失うのは診断だけ)。
+ */
+const CORPUS_IT_TIMEOUT_MS = 120_000;
+
 const trackedSources = (): string[] =>
   execFileSync("git", ["ls-files"], {
     cwd: REPO_ROOT,
@@ -477,22 +484,26 @@ describe("INV-STRIP-COMMENTS-CORPUS: repo 全体で実コードもコメント�
     ).toContain("token_leaked");
   });
 
-  it("git 管理下の全 TS ソースで strip がコメント範囲と一致する", () => {
-    const files = trackedSources();
-    assertScanSetIsWhole(files);
-    const offenders: string[] = [];
-    for (const rel of files) {
-      let src: string;
-      try {
-        src = readFileSync(join(REPO_ROOT, rel), "utf8");
-      } catch {
-        continue; // symlink / 削除途中は無視 (非空虚性は上で固定済み)
+  it(
+    "git 管理下の全 TS ソースで strip がコメント範囲と一致する",
+    () => {
+      const files = trackedSources();
+      assertScanSetIsWhole(files);
+      const offenders: string[] = [];
+      for (const rel of files) {
+        let src: string;
+        try {
+          src = readFileSync(join(REPO_ROOT, rel), "utf8");
+        } catch {
+          continue; // symlink / 削除途中は無視 (非空虚性は上で固定済み)
+        }
+        const findings = analyze(src, rel, stripComments);
+        if (findings.length > 0) offenders.push(`${rel}: ${findings.join(",")}`);
       }
-      const findings = analyze(src, rel, stripComments);
-      if (findings.length > 0) offenders.push(`${rel}: ${findings.join(",")}`);
-    }
-    expect(offenders, "strip はコメントだけを過不足なく落とす").toEqual([]);
-  });
+      expect(offenders, "strip はコメントだけを過不足なく落とす").toEqual([]);
+    },
+    CORPUS_IT_TIMEOUT_MS,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -516,20 +527,24 @@ describe("INV-STRIP-COMMENTS-SINGLE-SOURCE: 未移行コピーが repo に残っ
     expect(LOCAL_DEFINITION_RE.test(stripComments(consumerShape))).toBe(false);
   });
 
-  it("正準以外のどのファイルも comment-strip をローカル定義しない", () => {
-    const files = trackedSources().filter((f) => f !== CANONICAL_REL && f !== SELF_REL);
-    assertScanSetIsWhole(files);
-    const offenders = files.filter((f) => {
-      let src: string;
-      try {
-        src = readFileSync(join(REPO_ROOT, f), "utf8");
-      } catch {
-        return false;
-      }
-      return LOCAL_DEFINITION_RE.test(stripComments(src));
-    });
-    expect(offenders, "comment-strip は正準 1 本のみ").toEqual([]);
-  });
+  it(
+    "正準以外のどのファイルも comment-strip をローカル定義しない",
+    () => {
+      const files = trackedSources().filter((f) => f !== CANONICAL_REL && f !== SELF_REL);
+      assertScanSetIsWhole(files);
+      const offenders = files.filter((f) => {
+        let src: string;
+        try {
+          src = readFileSync(join(REPO_ROOT, f), "utf8");
+        } catch {
+          return false;
+        }
+        return LOCAL_DEFINITION_RE.test(stripComments(src));
+      });
+      expect(offenders, "comment-strip は正準 1 本のみ").toEqual([]);
+    },
+    CORPUS_IT_TIMEOUT_MS,
+  );
 });
 
 // ---------------------------------------------------------------------------

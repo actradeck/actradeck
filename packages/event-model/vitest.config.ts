@@ -42,10 +42,12 @@ export default defineConfig({
         "src/test-db-guard.ts": { statements: 95, branches: 90, functions: 90, lines: 95 },
         // test-strip-comments.ts (tripwire 走査正規化の単一出所・task 01a059a7-173c) = 小ファイル
         //   tripwire。INV-STRIP-COMMENTS が被覆軸 / 残余 / corpus / 単一出所を挙動で網羅し
-        //   worst 96.55/97.77/100/97.27 → floor はその下 (per-file-coverage-floor-below-worst-not-best・
-        //   erosion tripwire であって target ではない)。regex skip / 改行 resync / 空白除去のどれかが
-        //   未到達になると trip する (走査の view が黙って緩むのを防ぐ)。
-        "src/test-strip-comments.ts": { statements: 92, branches: 92, functions: 95, lines: 92 },
+        //   3 regime の worst-observed は 96.55/97.77/100/97.27 (実装時 / QA レーン 97.41/98.88/100/97.27 /
+        //   R2 後 98.03/98.29/100/97.90) → floor はその **3-5pt 下**
+        //   (per-file-coverage-floor-below-worst-not-best・erosion tripwire であって target ではない。
+        //   QA-CSX-4: 旧 92/92/95/92 は branch で 5.8pt 空いており規律より広かった)。regex skip /
+        //   補間追跡 / 改行 resync / fail-closed 2 種 / 空白除去のどれかが未到達になると trip する。
+        "src/test-strip-comments.ts": { statements: 93, branches: 93, functions: 95, lines: 93 },
         // state.ts (T1 状態機械 + ADR 0014 直交軸マップ/helper・コア領域) = 小ファイル tripwire。
         //   純同期関数/写像で決定的。inv-terminal-axes + inv-event-transition が worst 100/100/100/100
         //   まで網羅 → floor 95/90/90/95 は worst の下 (per-file-coverage-floor-below-worst-not-best・
