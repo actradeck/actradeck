@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { SYNTHETIC_RETIRE_ORIGIN } from "@actradeck/event-model";
+import { SYNTHETIC_RETIRE_ORIGIN, stripComments } from "@actradeck/event-model";
 
 const SRC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
 
@@ -38,42 +38,23 @@ function listSrcFiles(dir: string): string[] {
   return out;
 }
 
-/**
- * コメントを除去する (SEC-R5-3・SEC-R6-2・SEC-R8-2)。コメント文面が SQL 抽出の非空虚ガードを
- * 偽充足したり比較形スキャンを誤 trip したりしないための正規化。
- *  - 行頭コメント行 (`//` / `/*` / docstring 継続 `*`) は行ごと除去。`/* ... *\/ code` 形は
- *    `*\/` 以降のコードを保持 (行ごと落とすと禁止形を隠しうる)。
- *  - SEC-R8-2: **インライン block comment** (`code /* was: ... *\/`) と **トレイリング行コメント**
- *    (空白 + `//` 以降) も除去 — 「実 SQL を同一行のコメントへ退避して presence 検査を偽充足」
- *    する形を閉塞する。トレイリング `//` は空白先行のみ対象 (文字列内 URL `://` は `:` 先行ゆえ
- *    非該当)。限界の正直な開示: 文字列リテラル内に ` // ` や `/*` を含むコードは以降が
- *    落ちうる (現 backend src に該当なし・禁止形スキャンには「隠す」方向の理論穴だが、
- *    そのようなコードを書く時点で本 metatest の走査対象追随が必要)。
- *
- * SEC-R9-3 (残渣の正直な開示): (a) `code;//comment` (空白なし `//`) は除去されないが、
- * prettier (CI blocking) が `; //` へ正規化するため非永続。(b) コメントでない素の文字列定数が
- * pattern を含む形は lexical ガードの構造的天井 — 本 metatest はリテラル値の defense-in-depth
- * であり、実 SQL 除外句の削除は real-PG の意味論テスト (inv-liveness-parity の
- * aggregateObservationSql parity / inv-audit-coverage の providerCoverage / inv-audit の
- * fold・いずれも positive control 付き) が直接殺す。それら DB テストは describe.skipIf ゆえ
- * CI (DATABASE_URL 供給) 条件付き backstop である点も含めて開示する。
+/*
+ * コメント除去 (SEC-R5-3・SEC-R6-2・SEC-R8-2) は @actradeck/event-model の正準 `stripComments`
+ * (packages/event-model/src/test-strip-comments.ts) を使う。コメント文面が SQL 抽出の非空虚ガードを
+ * 偽充足したり比較形スキャンを誤 trip したりしないための正規化で、本 metatest が依拠するのは:
+ *  - 行頭コメント行 (`//` / ブロックコメント / docstring 継続 `*`) の除去。
+ *  - インライン block comment と **トレイリング行コメント** の除去 — 「実 SQL を同一行のコメントへ
+ *    退避して presence 検査を偽充足」する形を閉塞する。正準は空白先行の有無に依らず `//` を落とす
+ *    (旧ローカル実装は空白先行のみ対象で `code;//comment` を残していた — SEC-R9-3(a) の残余は解消)。
+ *  - 文字列リテラル内の `://` `/*` を **落とさない**: 旧ローカル実装は文字列内に ` // ` や `/*` を
+ *    含むコードの以降を落としうる「隠す」方向の理論穴を持っていた。正準は string / template を
+ *    mode 追跡するためこの穴を持たない (残余は正準の doc に実測で開示)。
+ * SEC-R9-3(b) (コメントでない素の文字列定数が pattern を含む形) は lexical ガードの構造的天井として
+ * 残る。本 metatest はリテラル値の defense-in-depth であり、実 SQL 除外句の削除は real-PG の意味論
+ * テスト (inv-liveness-parity の aggregateObservationSql parity / inv-audit-coverage の
+ * providerCoverage / inv-audit の fold・いずれも positive control 付き) が直接殺す。それら DB テストは
+ * describe.skipIf ゆえ CI (DATABASE_URL 供給) 条件付き backstop である点も含めて開示する。
  */
-function stripComments(src: string): string {
-  return src
-    .split("\n")
-    .map((line) => {
-      let out = line;
-      if (/^\s*\/\*/.test(out)) {
-        const close = out.indexOf("*/");
-        out = close >= 0 ? out.slice(close + 2) : "";
-      }
-      if (/^\s*(\/\/|\*)/.test(out)) return "";
-      out = out.replace(/\/\*[^*]*(?:\*(?!\/)[^*]*)*\*\//g, ""); // インライン /* ... */
-      out = out.replace(/\s\/\/.*$/, ""); // トレイリング // (空白先行のみ)
-      return out;
-    })
-    .join("\n");
-}
 
 const FILES = listSrcFiles(SRC_DIR);
 const SOURCES = new Map(

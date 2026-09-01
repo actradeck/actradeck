@@ -19,6 +19,7 @@ import {
   DEFAULT_GATED_CATEGORIES,
   type PolicyCategory,
   type RiskLevel,
+  stripComments,
 } from "@actradeck/event-model";
 
 import { ApprovalBridge, encodeOperationSignature } from "../src/approval-bridge.js";
@@ -39,7 +40,6 @@ import {
 } from "../src/normalize.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
-import { stripComments } from "./util/strip-comments.js";
 
 function preToolUse(toolName: string, toolInput: Record<string, unknown>): HookCommonInput {
   return {
@@ -3340,7 +3340,7 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
       .map(String)
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
       .sort();
-  /** コメントを落としたコード本文 (走査正規化は test/util/strip-comments.ts の単一出所)。 */
+  /** コメントを落としたコード本文 (走査正規化は @actradeck/event-model の stripComments が単一出所)。 */
   const codeOf = (file: string): string => stripComments(readFileSync(`${srcDir}${file}`, "utf8"));
   const identifierRe = (name: string): RegExp => new RegExp(`\\b${name}\\b`, "g");
   /**
@@ -3771,7 +3771,10 @@ describe("INV-APPROVAL-R11: EOF-terminated heredocs, command-word substitutions,
     const literal = (name: string): string[] => {
       const m = src().match(new RegExp(`const ${name}[^=]*= new Set\\(\\[([\\s\\S]*?)\\]\\)`));
       expect(m, `${name} literal found`).not.toBeNull();
-      const body = ((m as RegExpMatchArray)[1] as string).replace(/^[ \t]*\/\/.*$/gm, "");
+      // TDA-CSX-1: 行頭限定の手書き strip では**行末**コメントの文字列リテラルが抽出集合へ
+      //   漏れる (`"toybox"` を行末コメントへ退避して配列から消すと本 it が緑のまま通った)。
+      //   正準 stripComments は行末コメントも落とし、文字列リテラルは保つ。
+      const body = stripComments((m as RegExpMatchArray)[1] as string);
       return [...body.matchAll(/"([^"]+)"/g)].map((x) => x[1] as string);
     };
     const wrappers = literal("RUNNER_WRAPPERS");

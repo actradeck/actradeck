@@ -280,5 +280,14 @@ export type {
 // TDA-1・裁定 019fcd5f)。
 export { applyDotenvForTests, applyTestDatabaseGuard } from "./test-db-guard.js";
 
+// tripwire / metatest の走査正規化 (コメント除去) の単一出所 (task 01a059a7-173c)。
+// sidecar / backend / webui / event-model の 4 harness が共有する (test-db-guard.ts と同じ規範・
+// packages -> apps の禁止方向 import を作らないための共有位置。runtime コードからは import しない)。
+export {
+  stripComments,
+  isScannedSourcePath,
+  SCAN_SOURCE_EXTENSIONS,
+} from "./test-strip-comments.js";
+
 /** package メタ。 */
 export const EVENT_MODEL_PACKAGE = "@actradeck/event-model" as const;

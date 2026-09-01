@@ -14,9 +14,11 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { stripComments } from "./util/strip-comments.js";
-
-import { DEFAULT_GATED_CATEGORIES, type PolicyCategory } from "@actradeck/event-model";
+import {
+  DEFAULT_GATED_CATEGORIES,
+  type PolicyCategory,
+  stripComments,
+} from "@actradeck/event-model";
 
 import {
   classifyCommandCategories,

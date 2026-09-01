@@ -28,7 +28,7 @@ import {
   hookTimeoutSecondsFor,
 } from "../src/index.js";
 // 走査正規化の単一出所 (sidecar の exclusivity / source-coupling metatest と共有・TDA-V9-2)。
-import { stripComments } from "../../../apps/sidecar/test/util/strip-comments.js";
+import { stripComments } from "../src/test-strip-comments.js";
 
 /** CC の `http` フック既定 timeout (秒)。docs に上限記載は無く、既定は安全に使えると分かっている値。 */
 const CC_HTTP_HOOK_DEFAULT_TIMEOUT_SECONDS = 600;

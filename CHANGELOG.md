@@ -32,6 +32,91 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
+- **The scan normalisation that source-reading tripwires share is now one implementation, it reads
+  trailing comments, and it no longer loses its place inside template interpolation or a regular
+  expression.** Ten test files read source with comment text removed, so that a verbatim copy
+  sitting in a comment cannot satisfy a pin and a forbidden word written in a comment cannot trip
+  one. Seven places carried their own removal code in six different shapes, and the weakest shape
+  decided what any given scan could see. The seven, so the count and the list agree: the shared
+  helper under `apps/sidecar/test/util`; an inline copy in `inv-approval.test.ts`; the two identical
+  copies in the backend's `inv-agent-readiness` and `inv-synthetic-retire-sentinel`; the one in
+  `inv-action-modal-allowlist`; the state machine in `inv-i18n`; and an inline copy in
+  `inv-semantic-first.test.ts`. Six shapes because the backend's two are the same code. What each
+  one got wrong: two stripped only comments that begin a line, two stripped a trailing comment only
+  when whitespace preceded it, two stripped every double slash regardless of context, and one
+  tracked strings but not regular expressions. Two, two, two and one is the seven.
+  The cost of the third of those, measured at commit 217ce23 over the 597 tracked
+  `.ts`/`.tsx`/`.mts`/`.cts` files by running each old shape and comparing against the comment
+  ranges the TypeScript parser reports:
+  133 files no longer parsed after it ran, and 146 files lost code - the scanner's output was a
+  strict subsequence of the correct one. Those are two different statistics over the same files, not
+  one number: a file can lose code and still parse. All ten call sites now use one scanner in the
+  event model, beside the test database guard and for the same reason: four workspaces share it, and
+  a helper under `apps/` could only be reached from a package by importing upwards.
+  Trailing line comments are removed, along with the whitespace before them. Measuring that is only
+  meaningful with the derivation stated, and figures like it move with the tree, so both the
+  derivation and the commit they were taken at live in one place: the census section of the
+  scanner's own doc comment. This entry deliberately does not copy the numbers, because the two
+  copies of the coverage counts that did exist had already drifted apart by the time anyone
+  compared them.
+  Two ways of losing the scanner's place were root-caused rather than disclosed - which is a claim
+  about the shapes that were measured, not about the class. The contents of a
+  template interpolation are scanned as the code they are, nested templates included; without that,
+  a `// was: …` note parked inside one satisfied a presence pin that a backend invariant relies on,
+  and the same comment on the same line failed to satisfy it on the previous release - the branch
+  was weaker than what it replaced. And a regular expression whose terminating slash is immediately
+  followed by another is no longer read as an expression: `(t) => /^alias\.[^=\s]+=!/i.test(t)`
+  ends in a character that looks like the start of one, so the closing slash swallowed half of the
+  line comment after it. Two guards fail closed: an unterminated block comment is treated as not a
+  comment at all, because a `/*` inside a character class otherwise ate every remaining line of its
+  file, and a slash that cannot close on its own line is never a regular expression.
+  Accepting a slash after a closing bracket as the start of an expression has a cost that only shows
+  up outside the span it consumes. Injecting a block comment at the end of every line of every
+  tracked source - 620 files, 147,697 probes, measured at commit de5250c - and comparing against the
+  parser's own idea of what a comment is, found fifteen lines where the comment survived into the
+  scanned view. All fifteen are
+  ordinary division, `(a ?? 0) / 1000` and its kin, where the scan walked from the division slash to
+  the one that opens the comment behind it. Refusing a terminator followed by `*` as well as by `/`
+  takes that measurement to zero, in the frozen linear metatest's own file among the rest. And the
+  line terminators are no longer just the newline: U+2028 and U+2029 end a line comment and cannot be
+  crossed by a regular expression, and are now treated as one, from a single predicate.
+  That predicate was applied in one place too many. Resynchronising a quoted string on reaching a
+  line break rests on a quoted string not being able to contain one, and since ES2019 those two
+  characters may appear raw inside a string - so `const s = 'a<U+2028>b'; // note` returned to code
+  in the middle of the string, the closing quote opened a new one, and the trailing comment survived
+  into the scanned view. The resynchronisation has its own predicate now, covering the newline and
+  the carriage return only, kept separate from the line-terminator one because collapsing them in
+  either direction puts one of the other two uses outside the grammar. The cost of the separation is
+  stated where the residuals are: a string opened by mistake inside an expression the position
+  heuristic declined no longer closes at U+2028, only at a real newline.
+  The claim that only comments are removed is now checked two ways on every tracked TypeScript
+  source, not on one package: the text left after deleting exactly the comment ranges the parser
+  reports must match the scanner's output, and the parser's leaf token stream must be identical
+  before and after, and over `.js`, `.mjs` and `.cjs` as well - the extension set the scan runs on is
+  exported from the scanner now, because the corpus check and the single-source sweep had each
+  written their own and both had left the JavaScript paths out. The first catches both directions;
+  the second catches lost code. A third check runs before either: the corpus invariant now requires
+  every file in the scan set to parse as TypeScript or TSX _before_ it is stripped, and fails closed
+  when one does not, because a parser that cannot read the original produces a truth the other two
+  comparisons would satisfy vacuously. For `.js`, `.mjs` and `.cjs` this is the only parse gate in
+  the repository, so a fixture that is meant not to parse belongs under an extension the scan does
+  not cover, or outside version control. A file that cannot be _read_ is still skipped silently.
+  Neither of the first two checks sees a
+  line comment that survives intact, because it is read as a comment again - that limit is stated
+  where the scanner is defined. The suite also counts its own executed cases and refuses to pass if
+  a group was skipped, and CI asserts the same from the outside.
+  What is still not handled is pinned as behaviour, with its direction: leaving a comment in place
+  is the strict side for a scan that forbids a token and the _lax_ side for one that requires it, so
+  neither is described as safe. A regular expression in a position the heuristic declines to treat
+  as one, a verbatim copy written as a string literal, and the single-source sweep's dependence on
+  the identifier it looks for are each measured and disclosed.
+  Refusing a terminator followed by a star also means a genuine `/a/*2` is not skipped, which leaves
+  the next line's comment in view. That has a second side: when a `*/` appears later in the file the
+  block closes and the code between is dropped instead. Both directions behave as they did before
+  this work - the star refusal changed which shapes reach them, not the shapes themselves - and both
+  are pinned as measured behaviour and tracked together under the follow-up that revisits the
+  position heuristic.
+
 - **The two gates that metatest applies to the classifier's gap classes no longer depend on how
   those classes are spelled, and a rule spelled in a way the extractor does not understand can no
   longer land at all.** Both gates - the coupling assertion (the characters a rule's quantified
@@ -44,7 +129,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   (measured last round: a group-wrapped quadratic gap with a carriage-return-prefixed sample passed
   the coupling, the gate, and every ratio check).
   The extractor is not made cleverer - that would be a denylist chasing spellings. Instead the test
-  now requires, for every scanned expression, that the *positions* of the unescaped `[` in its
+  now requires, for every scanned expression, that the _positions_ of the unescaped `[` in its
   source match the positions where the extractor started its matches. Counting alone was not
   enough: a review found that appending a semantically inert `(?:\[\s\S]*)?` - whose `[` is
   escaped, so it is not counted as a class opener, while the extractor still reads a class out of
@@ -69,7 +154,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   against it on seven vectors - and all three pass every gate. Uniting the gate's two axes does not
   help; what the union uniquely buys is a rule whose coupling check was bypassed by an exemption.
   Separately, the scan lines themselves are unobserved. Single-sourcing the two verdicts protects
-  what each verdict *says*, not that the loop still consults it: substituting an empty verdict,
+  what each verdict _says_, not that the loop still consults it: substituting an empty verdict,
   making the scan vacuously true, or returning early from the top of the structural gate's loop all
   pass silently, on this branch and on main alike. Fixing that means changing what the metatest
   scans for a fourth time in one branch, so it is tracked as follow-up work rather than done here.
@@ -445,7 +530,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   green, and now fails. Every pin pattern is additionally checked against a view of the file with
   the pin block cut out, which fails a pattern that has no target outside the pin block.
   Six pins that tolerate a prettier wrap are bounded to a single statement (`[^;]*?`): the earlier
-  unbounded form let a pin head reach the tail of a *different* assertion 8,451 and 14,474
+  unbounded form let a pin head reach the tail of a _different_ assertion 8,451 and 14,474
   characters away, so making the target line vacuous left the pin green. Each of the six now
   carries the weakening that must kill it, and the metatest builds the mutated source in memory and
   asserts the pattern stops matching; every pin must also match within 400 characters, two orders
@@ -465,7 +550,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   measured, each with its pin updated in step so the spelling checks stayed green: collapsing
   `bestOfMs`, pushing a constant duration, constant-folding `minOf`, capping `fill`, shrinking the
   `isLive` probe, shrinking the scale factor from 8 to 2, and raising the ratio threshold from 24
-  to 100. Six of them fail on a control on their own. The seventh is only *uniquely* a control's
+  to 100. Six of them fail on a control on their own. The seventh is only _uniquely_ a control's
   catch
   when both ratio bounds are raised together (24 to 100 and 40 to 200); raising the lower bound
   alone is already caught by the pre-existing assertion that the upper bound exceeds the lower one,

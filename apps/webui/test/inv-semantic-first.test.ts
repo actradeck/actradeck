@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { stripComments } from "@actradeck/event-model";
+
 const webuiRoot = fileURLToPath(new URL("..", import.meta.url));
 const globals = readFileSync(`${webuiRoot}/app/globals.scss`, "utf8");
 
@@ -29,7 +31,10 @@ describe("INV-SEMANTIC-FIRST: globals は直値色でなくトークンを使う
   it("宣言値に生 hex 色を持たない（コメント除く）", () => {
     const offenders = globals
       .split("\n")
-      .map((line, i) => ({ line: line.replace(/\/\/.*$/, ""), no: i + 1 }))
+      // TDA-CSX-1: 無条件の `//` 除去は URL 文字列の背後を隠す (`url("https://cdn/x.png") #ff0000`
+      //   の生 hex が走査から消えた)。正準 stripComments は文字列内の `//` を残す。行番号を
+      //   offender メッセージに載せるため **行単位**で通す (SCSS の文字列は行を跨がない)。
+      .map((line, i) => ({ line: stripComments(line), no: i + 1 }))
       .filter((l) => /#[0-9a-fA-F]{3,6}\b/.test(l.line));
     expect(
       offenders.map((o) => `globals.scss:${o.no}: ${o.line.trim()}`),
