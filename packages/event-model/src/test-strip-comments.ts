@@ -33,9 +33,18 @@
  *   (1) regex の終端候補の直後が `/` (= 直後が行コメント) の形は regex と認めない。これを欠くと
  *       終端 `/` が新しい regex の開始と誤認され、直後の `//` の片方を飲んで行末コメントが
  *       view に残る (SEC-CSX-1(b)・sidecar normalize.ts で実測)。
+ *   (1b) 終端候補の直後が `*` の形も同様に拒否する (SEC-CSX-R2-1)。`/` だけを拒否していたとき、
+ *       除算 + 同一行ブロックコメント (`const ms = (a ?? 0) / 1000;` の後ろにブロックコメント) で
+ *       コメント本文が code として view に残った (620 ファイルの marker oracle で 15 site → 0)。
  *   (2) 閉じないブロックコメントはコメントとみなさず逐語で戻す。これを欠くと、regex の文字クラス内の
  *       `/*` (`/[^/*]/` の綴り) がファイル残り全体を飲み、当該ファイルが全 tripwire の view から
  *       空になる (SEC-CSX-2)。
+ * - **LineTerminator は LF だけではない** (SEC-CSX-R2-2): CR / U+2028 (LINE SEPARATOR) /
+ *   U+2029 (PARAGRAPH SEPARATOR) も行コメントを終わらせ、regex リテラルを跨げず、単引用 /
+ *   二重引用の resync を起こす。判定は `isLineTerminator` の単一出所。
+ * - 走査対象の拡張子は `SCAN_SOURCE_EXTENSIONS` / `isScannedSourcePath` を export して
+ *   corpus コントロールと単一出所 sweep が共有する (SEC-CSX-R2-3)。以前は消費側が
+ *   `.ts/.tsx/.mts/.cts` を手書きしており `.js` / `.mjs` / `.cjs` の経路が両方の外にあった。
  * - 行継続 (`"abc\` + 改行 + `def"`) は escape 分岐が `\` と改行を**対で**消費するため、
  *   改行 resync は発火せず文字列として正しく継続する (TDA-CSX-5 の訂正: 以前この機構の説明が逆だった)。
  *
@@ -45,9 +54,14 @@
  * `return / typeof / case / in / of / do / else / yield / await / new / delete / void /
  * instanceof / throw` のときだけ。`}` と裸の `>` と `<` と識別子文字は **除外**する
  * (JSX の `{...p} />` / `<Foo>` と衝突し、JSX コメント `{/* … *\/}` を飲む方向へ倒れるため)。
- * `)` `]` の直後は有効な JS では除算だが、`if (x) /re/.test(s)` の形が実在するので受ける —
- * 除算を誤って regex とみなしても span は**逐語で出力**されるのでコードは失われない。
- * regex は改行を跨げないため、同一行内で閉じ `/` が見つからなければ regex とみなさない。
+ * `)` `]` の直後は有効な JS では除算だが、`if (x) /re/.test(s)` の形が実在するので受ける。
+ * **この判断の実測されたコスト (SEC-CSX-R2-1)**: 誤判定された span 自体は逐語で出力されるので
+ * *その span 内の*コードは失われないが、実害は span **の外**に出た — `const ms = (a ?? 0) / 1000;`
+ * のような除算で、走査が終端候補を探して同一行のコメント開始まで歩き、続くコメント本文を
+ * code として view に残していた (repo 620 ファイル / 147,697 probe の marker oracle で **15 site**)。
+ * fail-closed guard (終端候補の直後が `//` / `/*`) でこの 2 形を拒否し 15 → 0 にしたが、これは
+ * **実測した 2 形についての主張**であって「このクラスを閉じた」という全称ではない。
+ * regex は LineTerminator を跨げないため、同一行内で閉じ `/` が見つからなければ regex とみなさない。
  *
  * ## 実測した非被覆 (残余・「閉じた」とは書かない)
  * **方向は consumer 種別で逆になる**ので全称で「安全側」とは書かない:
@@ -80,6 +94,27 @@
  *
  * tripwire 用途 (逐語コピー・改名の検出) には十分で、**証明ではない**。
  */
+/**
+ * 本 scanner が定義されている走査対象の拡張子 (SEC-CSX-R2-3 の単一出所)。
+ * corpus コントロールと単一出所 sweep が **同じ集合**を使う — 別々に書くと、片方だけが
+ * `.js` / `.mjs` / `.cjs` を落として「その経路のコピーも desync も見えない」状態になる
+ * (R2 で実際に corpus / sweep から js 系が落ちていた)。
+ */
+export const SCAN_SOURCE_EXTENSIONS = [
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".mjs",
+  ".cjs",
+] as const;
+
+/** `SCAN_SOURCE_EXTENSIONS` にマッチするパスかどうか (走査集合の唯一の述語)。 */
+export function isScannedSourcePath(path: string): boolean {
+  return SCAN_SOURCE_EXTENSIONS.some((ext) => path.endsWith(ext));
+}
+
 export function stripComments(code: string): string {
   type Mode = "code" | "line" | "block" | "sq" | "dq" | "tpl";
 
@@ -97,7 +132,7 @@ export function stripComments(code: string): string {
     buf.push(s);
     for (const ch of s) {
       wsRun = ch === " " || ch === "\t" ? wsRun + 1 : 0;
-      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") continue;
+      if (ch === " " || ch === "\t" || isLineTerminator(ch)) continue;
       prevSig = lastSig;
       lastSig = ch;
       // 末尾 16 文字で十分 (判定するキーワードは最長 10 文字)。長い識別子で連結が伸び続けない。
@@ -207,7 +242,7 @@ export function stripComments(code: string): string {
     }
 
     if (mode === "line") {
-      if (c === "\n") {
+      if (isLineTerminator(c)) {
         mode = "code";
         push(c);
       }
@@ -230,7 +265,7 @@ export function stripComments(code: string): string {
     // resync: 単引用 / 二重引用文字列は生の改行を含めない (構文エラー) ため、改行に達したら
     // 「skip されなかった regex 内の quote 等で誤って開いた」と判定して code mode へ戻す
     // (desync の影響を 1 行に閉じる)。
-    if ((mode === "sq" || mode === "dq") && c === "\n") {
+    if ((mode === "sq" || mode === "dq") && isLineTerminator(c)) {
       mode = "code";
       push(c);
       i++;
@@ -268,12 +303,23 @@ export function stripComments(code: string): string {
   return buf.join("");
 }
 
+/**
+ * ECMAScript の LineTerminator (LF / CR / U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR)。
+ * SEC-CSX-R2-2: U+2028 / U+2029 も行コメントを終わらせ regex リテラルを跨げないので、`\n` と
+ * **同格**に扱う。これを欠くと、行コメント中の U+2028 以降が code として view に残り
+ * (presence pin にとって緩い側)、regex 走査が行を跨いで走る。
+ */
+const isLineTerminator = (ch: string): boolean =>
+  ch === "\n" || ch === "\r" || ch === "\u2028" || ch === "\u2029";
+
 const IDENT_CHAR_RE = /[A-Za-z0-9_$]/;
 
 /**
  * この文字の直後の `/` は regex 開始とみなす (被演算子が来る位置)。
- * `)` と `]` は有効な JS では除算だが、`if (x) /re/.test(s)` の形が実在するため入れる —
- * 誤って regex とみなしても span は**逐語で出力**されるのでコードは失われない。
+ * `)` と `]` は有効な JS では除算だが、`if (x) /re/.test(s)` の形が実在するため入れる。
+ * 誤判定しても span 自体は逐語で出力されるが、**それは span 内の話**で、実測された実害は
+ * span の外にあるコメントを認識し損ねることだった (SEC-CSX-R2-1)。`scanRegexLiteral` の
+ * fail-closed guard がその 2 形 (`//` / `/*` が終端候補の直後) を拒否する。
  * `}` と裸の `>` と `<` は **入れない**: JSX の `{...p} />` / `<Foo>` と衝突し、JSX コメント
  * `{/* … *\/}` を飲む方向へ倒れるため。arrow `=>` だけは 2 文字判定で別途受ける。
  */
@@ -332,7 +378,7 @@ function scanRegexLiteral(src: string, start: number): number {
   let inClass = false;
   while (k < src.length) {
     const ch = src[k] as string;
-    if (ch === "\n") return -1;
+    if (isLineTerminator(ch)) return -1;
     if (ch === "\\") {
       k += 2;
       continue;
@@ -348,7 +394,12 @@ function scanRegexLiteral(src: string, start: number): number {
       continue;
     }
     if (ch === "/") {
-      if (src[k + 1] === "/") return -1;
+      // fail-closed (SEC-CSX-1(b) → SEC-CSX-R2-1): 終端候補の直後がコメント開始 (`//` または `/*`)
+      // の形は regex と認めない。`*` を落としていたため `const ms = (a ?? 0) / 1000; /* PIN *\/`
+      // のような **除算 + 同一行ブロックコメント**で、除算の `/` から `/*` の `/` までが regex と
+      // 誤認され、続く `*` 以降が code として view に残っていた (実測 15 site)。
+      const next = src[k + 1];
+      if (next === "/" || next === "*") return -1;
       k++;
       while (k < src.length && IDENT_CHAR_RE.test(src[k] as string)) k++;
       return k;
