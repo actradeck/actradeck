@@ -147,17 +147,23 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   bytes to match before discarding anything (the byte check is kept, not replaced), so a same-bytes
   different-inode swap is restored and backed off instead of destroyed.
   What this narrows rather than eliminates: the pair is still a number the operating system may
-  recycle. Reaching the ambiguous case now needs the same pid _and_ a recycled inode number, where
-  before the same pid alone sufficed. `INV-FILELOCK-IDENTITY-V2` reproduces the race with real
-  processes, and had to allocate decoy files to stop ext4 handing the freed inode number straight
-  back — measured, not assumed.
+  recycle. **On the takeover side**, where the acquirer always has both the pair and the bytes,
+  reaching the ambiguous case now needs the same pid _and_ a recycled inode number, where before
+  the same pid alone sufficed. That conjunction does not describe the release side, which has the
+  bytes only while the lock is readable — see the release entries below.
+  `INV-FILELOCK-IDENTITY-V2` reproduces the race with real processes, and had to allocate decoy
+  files to stop ext4 handing the freed inode number straight back — measured, not assumed.
 - **Releasing a lock is now atomic the same way taking one over is.** Release read the lock,
   decided it was ours, then unlinked it; a third party could swap the lock in between, and the
   unlink then removed theirs. Release now detaches with `rename`, re-checks `(dev, ino)`, and only
   then unlinks — and if what it detached turns out to be someone else's, it links it back and, when
   even that fails, aborts loudly rather than silently leaving the serialization broken. That abort
-  is raised only when the guarded function itself succeeded; if the function threw, its error is the
-  one that propagates.
+  is the only loud path on the release side, and it is narrow: it needs a detach, a mismatch, a
+  failed restore _and_ a guarded function that returned normally. If the function threw, its error
+  is the one that propagates. Every other release outcome is **silent** — an identity mismatch, a
+  readable lock naming somebody else, a transient read failure, a failed `stat` or a lost `rename`
+  all just return, with no throw, counter or log line. A lock that is consequently never released
+  shows up only indirectly, when the next acquirer treats it as a stale remnant.
 - **A lock that becomes unreadable while you hold it no longer wedges the approval allowlist.**
   Because release now identifies its own lock by `(dev, ino)` — which `stat` reports without read
   permission — a lock whose mode or ownership changes out from under a running daemon is still
@@ -169,6 +175,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   might belong to somebody else. A lock file that is unreadable _and_ not the inode this process
   linked into place is still left alone, and one that cannot even be `stat`ed still needs the
   operator.
+  Release still reads whenever it can, and it is the errno that decides what "unreadable" means.
+  Only a **permission-class** failure (`EACCES`, `EPERM`, `EISDIR`) — a lock this process can no
+  longer read — lets the `(dev, ino)` match settle ownership by itself. Anything else (`EMFILE`,
+  `ENFILE`, `EIO`, …) is transient and says nothing about who owns the file, so release leaves it
+  alone; without that split, running out of file descriptors would have been enough to delete a
+  third party's live lock sitting on the same recycled inode number, which
+  `INV-FILELOCK-IDENTITY-V2` now reproduces with a real process under a lowered `ulimit -n`.
+  The residual that stays: a lock that is unreadable **for a permission reason** _and_ happens to
+  occupy the inode number this process linked is deleted on release even if it belongs to a live
+  third party. Producing that needs an out-of-band mode or ownership change plus inode-number
+  reuse, both inside the trust boundary.
 - **A takeover that cannot restore what it detached now keeps that file instead of deleting it.**
   When a third process grabs the lock path in the window between the `rename` that detaches a lock
   and the `link` that would put it back, the restore fails and the acquirer aborts without entering
@@ -176,6 +193,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   the lock of a holder that was still running. The detached inode is now kept under its
   `.stale-<pid>-<seq>` name and the error message names the path. The exposure this does not remove:
   the evicted holder and the third party can still overlap, which is why the abort is loud.
+- **Three hardenings in this work are defensive rather than pinned.** Reverting any of them leaves
+  the suite green, because making them observable would have meant adding further injection points:
+  reading the holder's identity from the **open descriptor** rather than by path (closing a swap
+  between the `open` and the `stat`); the **`dev`** half of the identity pair, which only matters
+  once a lock path can move between filesystems; and taking the held identity from the **temp file**
+  rather than from the lock path after the link (closing a swap between the `link` and the `stat`).
+  They are recorded here so nobody mistakes them for behaviour a test is holding in place.
 - **The daily public-metrics snapshot lands on a dedicated `metrics` branch instead of `main`.**
   The `main` ruleset requires a pull request and the `verify` check, so every scheduled run from
   2026-08-26 to 2026-08-28 was rejected with GH013 and no snapshot was recorded. The workflow now

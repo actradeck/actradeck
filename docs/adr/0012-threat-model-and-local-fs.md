@@ -31,34 +31,64 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
   decline: if the lock is readable and names a different live pid, a third party overwrote
   the inode in place and release leaves it alone.
 
-  On acquisition, a lock whose content cannot be read at all (`EACCES`, `EISDIR`) is **not**
-  taken over, because it might belong to somebody else and its identity cannot be re-verified
-  against what the staleness check saw. Previously that made an unreadable lock permanent:
-  release went through the same read, so the file stayed on disk and the approval allowlist's
+  On acquisition, a lock whose content cannot be read **for any reason** is **not** taken over,
+  because it might belong to somebody else and its identity cannot be re-verified against what
+  the staleness check saw. Previously that made an unreadable lock permanent: release went
+  through the same read, so the file stayed on disk and the approval allowlist's
   add/revoke/clear, the approval-policy persist and the attach-settings merge/detach all
   failed until an operator removed it by hand, while an auto-allow already persisted kept
-  allowing without a UI approval until its TTL (7 days by default) expired. Release no longer
-  reads: `stat` needs no read permission, so a process still releases a lock that became
-  unreadable while it held it. A lock file that is unreadable _and_ not the inode this process
-  linked is still left alone; one that cannot even be `stat`ed still needs the operator.
+  allowing without a UI approval until its TTL (7 days by default) expired. Release does not
+  need the read: `stat` needs no read permission, so a process still releases a lock that
+  became unreadable while it held it.
+
+  Release does still read when it can, and the errno decides what an unreadable lock means to
+  it. A **permission-class** failure (`EACCES`, `EPERM`, `EISDIR`) describes a lock this
+  process can no longer read, so the `(dev, ino)` match is allowed to settle ownership on its
+  own — that is the recovery path. Any **other** failure (`EMFILE`, `ENFILE`, `EIO`, …) is
+  transient and says nothing about who owns the file, so release declines to touch it rather
+  than trusting identity alone; without that distinction, running out of file descriptors
+  would be enough to delete a third party's live lock that happens to sit on the same recycled
+  inode number. A lock file that is unreadable _and_ not the inode this process linked is left
+  alone either way; one that cannot even be `stat`ed still needs the operator.
 
   Limits of this mechanism, stated honestly:
   1. **`(dev, ino)` is an OS-recycled pair, not a globally unique lock id.** It is
      lock-instance granular in the ordinary case — the previous byte-for-byte check was
      effectively pid granular, because the content is only ever `${pid}\n`, so a holder that
-     released and re-acquired produced an indistinguishable lock. Reaching the ambiguous case
-     now requires the same pid _and_ a recycled inode number. Both are benign OS behaviours
-     that stay _inside_ the trust boundary (only pid _spoofing_ is out of scope below); inode
-     numbers are recycled eagerly, which the real-process regression had to work around with
-     decoy allocations to make the distinct-inode race reproducible at all.
-  2. **The restore-failure abort is reachable under third-party contention**, not dead code.
+     released and re-acquired produced an indistinguishable lock. **On the takeover side**,
+     where both axes are always available, reaching the ambiguous case now requires the same
+     pid _and_ a recycled inode number. Both are benign OS behaviours that stay _inside_ the
+     trust boundary (only pid _spoofing_ is out of scope below); inode numbers are recycled
+     eagerly, which the real-process regression had to work around with decoy allocations to
+     make the distinct-inode race reproducible at all.
+  2. **The release side does not always have both axes, so that conjunction does not describe
+     it.** Release consults the content only to _decline_, and it can only do so while the
+     content is readable: a readable lock naming a different live pid is left alone, which is
+     the axis that makes a recycled inode number harmless there. When the content cannot be
+     read at all, the decision falls back to `(dev, ino)` **alone** — and that fallback is
+     restricted to a permission class (`EACCES`, `EPERM`, `EISDIR`), because those describe a
+     lock this process can no longer read rather than a lock it does not own. Any other read
+     failure (`EMFILE`, `ENFILE`, `EIO`, …) is transient and says nothing about ownership, so
+     release declines to touch the file at all. The residual that remains: a lock that is
+     **unreadable for a permission reason _and_ happens to sit on the inode number this
+     process linked** is deleted on release even if it is a third party's live lock. Producing
+     it needs an out-of-band mode/owner change plus inode-number reuse, both inside the trust
+     boundary. `INV-FILELOCK-IDENTITY-V2` pins the transient case (fd exhaustion under a
+     lowered `ulimit -n`, with a live foreign lock on the reused inode number) as
+     "not touched".
+  3. **The release side declines silently.** Every path where release decides not to act — the
+     identity mismatch, the readable-but-foreign content, a transient read failure, a failed
+     `stat`, a `rename` that loses the race — simply returns. There is no throw, no counter and
+     no log line, so a lock that is never released is observed only indirectly, through the
+     next acquirer treating it as a stale remnant. Only the restore-failure path below is loud.
+  4. **The restore-failure abort is reachable under third-party contention**, not dead code.
      A concurrent acquirer can take the lock path between the `rename` that detaches it and
      the `linkSync` that would restore it. The process that fails to restore throws and never
      enters the critical section, so it is not itself a double-holder; the residual exposure is
      that the evicted live holder and the third party can overlap. The detached inode is
      **kept** under its `.stale-<pid>-<seq>` name (it is a live holder's lock) and the error
      message names the path; earlier the cleanup deleted it.
-  3. **`<lockPath>.stale-<pid>-<seq>` remnants can survive a crash** between the detach and
+  5. **`<lockPath>.stale-<pid>-<seq>` remnants can survive a crash** between the detach and
      the cleanup that follows it, and a failed restore leaves one deliberately. There is no
      reaper. The sequence number is monotonic within a process, so a name is never reused by
      the same process; across processes (a restart, or pid reuse) the same name can recur, in
@@ -66,16 +96,29 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
      leftover directory makes the takeover abort loudly. Release detaches into a distinct
      `.stale-rel-<pid>-<seq>` series so it does not consume the takeover sequence.
      No code path ever reads a remnant as a lock.
-  4. **Release aborts loudly only when the guarded function succeeded.** If release detaches a
-     lock that turns out not to be ours and cannot link it back, it throws — but when the
-     guarded function itself threw, that error is the one that propagates and the release
-     failure is swallowed, so a lock problem never masks the caller's error. Every other
-     release failure (`stat`, `rename`, `unlink`) stays best-effort.
-  5. **The test seams are gated at runtime, not just by type.** The injection points used by
+  6. **The one loud release path is narrow.** Release throws in exactly one situation: it
+     detached a file, that file turned out not to be ours, linking it back failed, _and_ the
+     guarded function had returned normally. If the guarded function threw, its error is the
+     one that propagates and the release failure is swallowed, so a lock problem never masks
+     the caller's error. Every other release failure (`stat`, `rename`, `unlink`) stays
+     best-effort and silent, per limit 3 above.
+  7. **The test seams are gated at runtime, not just by type.** The injection points used by
      the invariant tests live behind a single `testHooks` field and `withFileLock` **throws**
      when it is passed outside a test run (`NODE_ENV=test` / `VITEST`), so a production call
      site cannot silently disable staleness detection or backoff. The production option
-     surface is `lockPath` / `maxRetries` / `retryDelayMs`.
+     surface is `lockPath` / `maxRetries` / `retryDelayMs`. What the type system contributes is
+     narrower than "containment": it keeps the injection surface down to a single entry point
+     so the accompanying source scan only has to watch one word. The scan itself covers
+     `apps/sidecar/src/**/*.ts` and nothing else.
+  8. **Three hardenings here are defensive, not pinned by a falsifying test.** Each was
+     verified by reasoning and left without a regression that would go red if it were undone,
+     because making them observable would have meant adding further injection points:
+     (a) reading the holder's identity from the **open descriptor** (`fstat`) rather than by
+     path, which closes a swap between the `open` and the `stat`; (b) the **`dev`** half of the
+     identity pair, which only matters when a lock path can move across filesystems; and
+     (c) taking the held identity from the **temp file** rather than from the lock path after
+     the link, which closes a swap between the `link` and the `stat`. Reverting any of them
+     leaves the suite green.
 
 - **At-rest secrecy.** Secret/token-bearing state files are written **`0600`** via a
   single shared atomic helper — `writeJson0600` (temp-write → `rename`) — so all
