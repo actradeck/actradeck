@@ -37,19 +37,29 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   expression.** Ten test files read source with comment text removed, so that a verbatim copy
   sitting in a comment cannot satisfy a pin and a forbidden word written in a comment cannot trip
   one. Seven places carried their own removal code in six different shapes, and the weakest shape
-  decided what any given scan could see: one stripped only comments that begin a line, two stripped
-  a trailing comment only when whitespace preceded it, one stripped every double slash regardless of
-  context - truncating 133 of the 596 scanned files at their first URL - and one tracked strings but
-  not regular expressions. All ten now call one scanner in the event model, beside the test database
-  guard and for the same reason: four workspaces share it, and a helper under `apps/` could only be
-  reached from a package by importing upwards.
+  decided what any given scan could see. The seven, so the count and the list agree: the shared
+  helper under `apps/sidecar/test/util`; an inline copy in `inv-approval.test.ts`; the two identical
+  copies in the backend's `inv-agent-readiness` and `inv-synthetic-retire-sentinel`; the one in
+  `inv-action-modal-allowlist`; the state machine in `inv-i18n`; and an inline copy in
+  `inv-semantic-first.test.ts`. Six shapes because the backend's two are the same code. What each
+  one got wrong: two stripped only comments that begin a line, two stripped a trailing comment only
+  when whitespace preceded it, one stripped every double slash regardless of context, and one
+  tracked strings but not regular expressions.
+  The cost of the third of those, measured over the 597 tracked `.ts`/`.tsx`/`.mts`/`.cts` files by
+  running each old shape and comparing against the comment ranges the TypeScript parser reports:
+  133 files no longer parsed after it ran, and 146 files lost code - the scanner's output was a
+  strict subsequence of the correct one. Those are two different statistics over the same files, not
+  one number: a file can lose code and still parse. All ten call sites now use one scanner in the
+  event model, beside the test database guard and for the same reason: four workspaces share it, and
+  a helper under `apps/` could only be reached from a package by importing upwards.
   Trailing line comments are removed, along with the whitespace before them. Measuring that is only
   meaningful with the derivation stated, so: counting the comment ranges the TypeScript parser
   reports as single-line trivia that have non-whitespace before them on their own line, over every
   `.ts`/`.tsx`/`.mts`/`.cts` path in `git ls-files`, gives 2,088 such comments in
   299 files, 50,285 characters that were previously part of what a tripwire could
   see.
-  Two whole classes of desynchronisation are closed rather than disclosed. The contents of a
+  Two ways of losing the scanner's place were root-caused rather than disclosed - which is a claim
+  about the shapes that were measured, not about the class. The contents of a
   template interpolation are scanned as the code they are, nested templates included; without that,
   a `// was: …` note parked inside one satisfied a presence pin that a backend invariant relies on,
   and the same comment on the same line failed to satisfy it on the previous release - the branch
@@ -59,10 +69,22 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   line comment after it. Two guards fail closed: an unterminated block comment is treated as not a
   comment at all, because a `/*` inside a character class otherwise ate every remaining line of its
   file, and a slash that cannot close on its own line is never a regular expression.
+  Accepting a slash after a closing bracket as the start of an expression has a cost that only shows
+  up outside the span it consumes. Injecting a block comment at the end of every line of every
+  tracked source - 620 files, 147,697 probes - and comparing against the parser's own idea of what a
+  comment is, found fifteen lines where the comment survived into the scanned view. All fifteen are
+  ordinary division, `(a ?? 0) / 1000` and its kin, where the scan walked from the division slash to
+  the one that opens the comment behind it. Refusing a terminator followed by `*` as well as by `/`
+  takes that measurement to zero, in the frozen linear metatest's own file among the rest. And the
+  line terminators are no longer just the newline: U+2028 and U+2029 end a line comment and cannot be
+  crossed by a regular expression, and are now treated as one, from a single predicate.
   The claim that only comments are removed is now checked two ways on every tracked TypeScript
   source, not on one package: the text left after deleting exactly the comment ranges the parser
   reports must match the scanner's output, and the parser's leaf token stream must be identical
-  before and after. The first catches both directions; the second catches lost code. Neither sees a
+  before and after, and over `.js`, `.mjs` and `.cjs` as well - the extension set the scan runs on is
+  exported from the scanner now, because the corpus check and the single-source sweep had each
+  written their own and both had left the JavaScript paths out. The first catches both directions;
+  the second catches lost code. Neither sees a
   line comment that survives intact, because it is read as a comment again - that limit is stated
   where the scanner is defined. The suite also counts its own executed cases and refuses to pass if
   a group was skipped, and CI asserts the same from the outside.
