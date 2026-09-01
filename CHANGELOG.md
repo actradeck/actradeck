@@ -49,13 +49,20 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   enough: a review found that appending a semantically inert `(?:\[\s\S]*)?` - whose `[` is
   escaped, so it is not counted as a class opener, while the extractor still reads a class out of
   the same text - balanced the totals and walked a group-wrapped quadratic rule straight through.
-  Comparing positions rejects that. The spellings measured as refused are the four above, their
-  carriage-return-widened variants, and the phantom-balanced form; the seventeen expressions that
-  ship today match position-for-position and an escaped `\[abc\]` matches as two empty sets, so
-  nothing that ships today turns red. That is a list of what was measured, not a claim that no
-  spelling escapes it. What it definitely does not reach is spellings that carry no class at all -
-  a quantified shorthand such as `\S*` or `\s+`, or `.` under the `s` flag - and that remains
-  disclosed in the test, in the classifier, and here.
+  Comparing positions rejects that. Seven spellings are measured as refused: the four above, the
+  carriage-return-widened variant of the group-wrapped one (the widening was measured on that
+  spelling only), and two phantom-balanced forms. The seventeen expressions that ship today match
+  position-for-position and an escaped `\[abc\]` matches as two empty sets, so nothing that ships
+  today turns red. That is a list of what was measured, not a claim that no spelling escapes it.
+  What it does not reach is a rule that expresses the exclusion *outside* the class, and there are
+  two such shapes. One carries no class at all - a quantified shorthand such as `\S*` or `\s+`, or
+  `.` under the `s` flag. The other is a negative-lookahead gap,
+  `(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}`: its class *is* quantified, so the census matches
+  position-for-position; `[\s\S]` excludes nothing, so the coupling and the structural gate have
+  nothing to object to; and yet it behaves exactly like the shipped `[^|;&\n]{0,512}`. All three
+  gates pass it. Uniting the gate's two axes does not help there - what the union uniquely buys is
+  a rule whose coupling check was bypassed by an exemption. Both shapes are disclosed in the test,
+  in the classifier, and here.
   The structural gate additionally decides what counts as a separator class from what the class
   actually accepts - a class accepting both an alphanumeric character and a non-alphanumeric one
   that is not a separator spans arbitrary text - **in addition to**, not instead of, the older test
@@ -79,7 +86,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   early from the callback left all 110 unmeasured and green; the controls got an executed-case
   counter last round and the main loop now gets one too, checked in `afterAll` against the same 110. And the declaration census that catches a shadowed helper looked only for `const`, `let` and
   `var` in a hand-written list of 27 names, so a `function`-form shadow walked through it; the
-  census now extracts the describe's top-level declarations structurally (52 today), covers
+  census now extracts the describe's top-level declarations structurally (57 today), covers
   `class`, plain `function`, `async function` and generator `function*`, and asserts that the
   hand-written 27 are contained in what it extracted rather than replacing them. Four shadowing
   shapes still escape every axis and are disclosed rather than claimed closed: destructuring, a
@@ -92,7 +99,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   independent measurers (single ratio points reach as low as 18.0, which the median absorbs), which puts the
   detection floor an order of magnitude closer to the threshold and makes both a 24-to-39 relaxation
   and a reduction of the input scale from 8 to 6 fail. It is added, not substituted. Under a
-  2x-nproc load the new fixture's median ranges between 28.5 and 69.7, so the 24-to-39 detection
+  2x-nproc load the new fixture's median ranges between 28.5 and 87.2, so the 24-to-39 detection
   is bounded to the unloaded regime; on eight loaded runs and five unloaded ones neither positive
   nor the negative control produced a false red.
 

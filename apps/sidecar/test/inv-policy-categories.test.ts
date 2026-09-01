@@ -525,14 +525,21 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         下の class census)。census は「escape されていない `[` の**位置集合** == 抽出 match の
   //         **位置集合**」を要求する (SEC-LSI-2 で本数一致から位置一致へ是正)。**実測で RED になる形**:
   //         群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation `(?:[^|;&\n]|x)*` /
-  //         未量化 `[abc]` / 上 4 形の CR 幅版 / **末尾に inert な phantom `(?:\[\s\S]*)?` を足して
+  //         未量化 `[abc]` / **群括りの CR 幅版** (CR 幅は群括り 1 形でのみ計測・他 3 形の CR 版は未計測) /
+  //         **末尾に inert な phantom `(?:\[\s\S]*)?` を足して
   //         本数だけ帳尻を合わせた形** (SEC-LSI-2 の反証 vector — 本数一致版はこれを素通りした)。
   //         現行 17 は位置集合が一致して緑・escape 済み `\[abc\]` も緑 = false RED 0 (実測)。
   //         **「未知の綴りをすべて塞いだ」とは言わない** — 塞げたのは上に列挙した実測形であって、
   //         census を回避する別の綴りが無いことの証明はしていない。
-  //         残る既知の非被覆は **クラスを持たない綴り**: 量化 shorthand (`\S*` / `\s+` / `s` flag つきの `.`)
-  //         は census にも coupling にも掛からない (実測: `\bfoosql\b\S*\bwipeall\b` は
-  //         位置集合が両側とも空で一致 = 素通り)。
+  //         残る既知の非被覆は **「除外をクラスの外で表現した綴り」**で、2 系統ある (SEC-LSI-R2-3):
+  //         (a) クラスを持たない量化 shorthand (`\S*` / `\s+` / `s` flag つきの `.`) — census にも
+  //             coupling にも掛からない (実測: `\bfoosql\b\S*\bwipeall\b` は位置集合が両側とも空で一致)。
+  //         (b) **負先読み形** `(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}` — クラス `[\s\S]` は
+  //             量化されているので census は位置一致で**素通り**、`[\s\S]` は何も除外しないので
+  //             coupling も構造ゲートも素通り、しかし**挙動は出荷形 `[^|;&\n]{0,512}` と同一**
+  //             (除外を lookahead 側に出しただけ)。3 ゲートすべてを通る (SEC 実証)。
+  //         **和 (受理集合軸 ∨ 綴り軸) はこの形を止めない** — 和の一意到達寄与は「coupling が
+  //         exemption で迂回された規則」に限る (SEC の honest bound)。現行 17 にこの綴りは無い。
   //         構造ゲート側の分離子判定は **受理集合軸 (`spansArbitraryText`) と旧来の綴り軸
   //         (`startsWith("[^")`) の論理和** (TDA-LSI-1 ≡ QA-LSI-2 で置換から和へ是正)。受理集合軸は
   //         正のクラスで綴られた広い gap (`[\w\s-]*`) を新たに拾い、綴り軸は**英数字を 1 つも受理しない
@@ -642,8 +649,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   閾値寄りの弱い 2 乗を**追加**・強い方は削除しない):
   //     - 強 (`quadratic`・無界 gap): median **無負荷 54.8〜61.3 / 2×nproc 飽和 52.5〜187.3**。
   //     - 弱 (`quadratic-weak`・`{0,10000}` gap): median **無負荷 28.64〜30.96 (実装者 + QA 独立実測の
-  //       合算・単点の最低は 18.0) / 飽和 28.5〜69.7**。閾値 24 への余裕は無負荷 **1.19×** /
-  //       飽和の下限 **1.19×** (28.5 基準・飽和 14 run で false RED 0)。
+  //       合算・単点の最低は 18.0) / 飽和 28.5〜87.22 (実装者 + QA 合算・上端は QA 実測)**。
+  //       閾値 24 への余裕は無負荷 **1.19×** /
+  //       飽和の下限 **1.18×** (28.3 基準・飽和 20 run で false RED 0)。陰性側の飽和 median は
+  //       上端 **22.8** まで観測されており 24 への余裕は **1.05×** (下の陰性注記が正)。
   //   よって被覆帯域は「閾値を **弱の中央値 (無負荷 ≈ 30) より上**へ緩める編集」まで下がる。R2 で
   //   非検出だった `RATIO_MAX` 24→39 (∧ `RATIO_MAX_HI` 40→65) と `SCALE` 8→6 は**本 PR で RED**
   //   (probe 実測)。それでも全称ではない: 24→29 のような**弱の中央値より下**の緩和は依然非検出で、
@@ -809,7 +818,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * **位置集合**と抽出 match の**位置集合**の一致要求 = 床。SEC-LSI-2 で本数一致から位置一致へ是正 —
      * 本数一致では末尾の inert な phantom `(?:\[\s\S]*)?` で帳尻を合わせて素通りできた)。
      * **実測で塞げたのはこの 4 形 + CR 幅版 + phantom 形**であって、census を回避する綴りが
-     * 他に無いことの証明ではない。**残る既知の非被覆はクラスを持たない shorthand 綴り**で、そこでは
+     * 他に無いことの証明ではない。**残る既知の非被覆は「除外をクラスの外で表現した綴り」** —
+     * クラスを持たない shorthand (`\S*` / `\s+`) と、**負先読み形**
+     * `(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}` (クラスは量化済みで census を通り、`[\s\S]` は
+     * 何も除外しないので coupling / 構造ゲートも通るが、挙動は出荷形と同一・SEC-LSI-R2-3 実証)。
+     * そこでは
      * coupling と構造ゲートの**どちらも適用されない** (seed 軸自体は綴りに依らず全スキャン regex を測るので、
      * 失われるのは「TAIL_METACHARS がその規則の区切りを覆っている」保証と segmentRe 要求であって
      * 計測そのものではない)。これは残余 ③' として header / normalize.ts / CHANGELOG に開示する。
@@ -1019,6 +1032,36 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      */
     const exemptionApplies = (reSource: string, cls: string): boolean =>
       NON_GAP_CLASS_EXEMPTIONS.some((e) => e.reSource === reSource && e.classSource === cls);
+    /**
+     * 構造ゲートの「手書き分離子クラスか」判定の**単一出所** (R2 監査 SEC/QA/TDA 統合 M)。
+     *
+     * R1 unblock は和 (`spansArbitraryText || startsWith("[^")`) を**走査行に直書き**し、fixture 側は
+     * 2 軸の値を別々に pin していた = R1 の H と同じ「verdict の 2 コピー」構造で、走査行の片項を
+     * 落とす編集 (QA U1 / U2) が fixture を素通りした。走査行と fixture が**この関数**を呼ぶ。
+     *
+     * 判定は 2 段: ①任意テキストを跨げる gap か (受理集合軸 `spansArbitraryText` **または**
+     * 旧来の綴り軸 `startsWith("[^")`) ②実際に gap metachar を除外するか。
+     */
+    const isSeparatorGapClass = (cls: string, flags: string): boolean =>
+      (spansArbitraryText(cls, flags) || cls.startsWith("[^")) &&
+      excludedByClass(cls, flags).some((c) => TAIL_METACHARS.test(c));
+    /**
+     * class census の verdict の**単一出所** (R2 監査・同上)。走査行と fixture が同じ関数を呼ぶ。
+     * 位置集合の一致だけが verdict で、本数一致は下の fixture が**弱い軸**として別に持つ。
+     */
+    const censusVerdict = (
+      source: string,
+    ): { opens: number[]; quantified: number[]; passes: boolean } => {
+      const opens = classOpenIndices(source);
+      const quantified = quantifiedClassIndices(source);
+      return {
+        opens,
+        quantified,
+        passes: opens.length === quantified.length && opens.every((v, k) => v === quantified[k]),
+      };
+    };
+    /** 構造ゲートの軸 fixture が実際に回った回数 (afterAll で照合・空化を RED にする)。 */
+    let gateAxisChecked = 0;
     /** cmd の**最後の** gap クラス metachar 以降の後尾 (metachar が無ければ cmd 全体)。 */
     const tailAfterLastMetachar = (cmd: string): string => {
       let cut = -1;
@@ -1490,8 +1533,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
             //   **弱い 2 乗 (`quadratic-weak`・項目 8) の実測 (実装者 + QA の独立実測を合算・
             //   レンジ表記・単一値を書かない)**: median **無負荷 28.64〜30.96** (実装者 5 run +
             //   QA 独立 run。実装者側 15 ratio 点は 29.1〜31.4)、**単点の最低は 18.0** (QA 実測・
-            //   中央値側が拾うので verdict は反転しない) / **2×nproc 飽和 28.5〜69.7**
-            //   (ファイル単独 8+6 run・load 36〜43・42 ratio 点の min 27.6 / max 90.7)。閾値 24 への余裕は
+            //   中央値側が拾うので verdict は反転しない) / **2×nproc 飽和 28.5〜87.22**
+            //   (実装者 8+6 run + QA 独立実測・load 36〜49・実装者 42 ratio 点の min 27.6 / max 90.7。
+            //   上端 87.22 は QA レーンの飽和 regime の median 実測)。閾値 24 への余裕は
             //   **無負荷 1.19×** (28.64 基準・実装者単独レンジなら 1.23×) / **飽和の下限 1.27×**、
             //   false RED は無負荷 0/5・飽和 0/8 (実装者) + QA レーン独立 run でも 0。
             //   検出下限が強い 2 乗の 55 超から**この中央値**まで下がるので、
@@ -1505,9 +1549,13 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
             );
           } else {
             // 陰性: 過剰厳格化 (閾値を下げる / 幾何を壊す) を対で防ぐ。**較正後 (内側 ×8) の実測**:
-            //   median 無負荷 8.43〜8.54 / 2×nproc 飽和 8.06〜15.99、worst 飽和 max 18.42
-            //   (full-suite 並走 8 run・load 33〜51)。`RATIO_MAX` 24 への余裕は飽和下で **1.50×**
-            //   (較正前の ×1 は同じ 8 run で median 6.70〜19.71・余裕 **1.22×**)。R1 の記述
+            //   median 無負荷 8.06〜8.54 / 2×nproc 飽和 **8.0〜22.8**、worst 飽和 max **22.8**
+            //   (full-suite 並走 8 run・load 33〜51 と、R2 の LINEAR 単独飽和 6 run・load 43 の合算。
+            //   **上端 22.8 は R2 で新たに観測した値**で、旧記述の 15.99 / 18.42 はそれ以前のレンジ)。
+            //   `RATIO_MAX` 24 への余裕は飽和下で **1.05×** (旧記述の 1.50× は上端 15.99 基準の値)。
+            //   余裕が薄いのは事実として書く — 飽和下で陰性が 24 を超える run はまだ観測していないが、
+            //   「起きない」証明ではない (規模の大きい標本では出うる)。無負荷では余裕 **2.8×**
+            //   。較正前の ×1 は同じ 8 run で median 6.70〜19.71・余裕 **1.22×**。R1 の記述
             //   「飽和 9.1〜18.8 / 余裕 1.28×」は較正前の値。R3 独立監査の別 regime では median
             //   下側が 4.72 (単発 3.44) まで広がる = 較正は下側テールも広げる (QA-R3-1・安全方向。
             //   「`RATIO_MAX` 引き下げを全 run 検出する帯」は狭まるが、その歯は比 ≈8 の実在
@@ -1543,6 +1591,15 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     //   afterAll を分けるのは、片方が RED でももう片方の診断が出るようにするため。
     afterAll(() => {
       expect(casesExecuted, `実行された主計測数 (登録は ${totalCases})`).toBe(TOTAL_CASES_MEASURED);
+    });
+    /**
+     * 構造ゲートの軸 fixture の**実行証跡** (R2 監査)。fixture ループを空化する 1 行編集
+     * (`for (const f of [] as typeof GATE_AXIS_FIXTURES)`) は it 内の assertion を 1 本も
+     * 走らせないまま緑になるので、実行回数を afterAll で照合する (登録時 count では捕まらない
+     * = `casesExecuted` / `controlCasesExecuted` と同じ規律)。
+     */
+    afterAll(() => {
+      expect(gateAxisChecked, "構造ゲートの軸 fixture を実行した本数").toBe(6);
     });
     /**
      * bundle H-1 (sweep 019fd74b): 軸 (4)(5) の**条件つき** assertion アームの実行回数。
@@ -1898,19 +1955,38 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(spansArbitraryText("[\\w\\s-]", "")).toBe(true);
         //   フラグ token 内の `[a-z]` は英数字しか受理しないので gap ではない (免除と同じ判断)。
         expect(spansArbitraryText("[a-z]", "i")).toBe(false);
-        // **TDA-LSI-1 ≡ QA-LSI-2 (R1 監査 M・置換で失われかけた族)**: 英数字を 1 つも受理しない
-        //   **否定**クラスは受理集合軸では gap と見なされない (`spansArbitraryText=false`) が、
-        //   旧来の綴り軸 (`startsWith("[^")`) では手書き分離子として拾えていた。構造ゲートは
-        //   両軸の**論理和**で判定する (置換でなく和 = 単調強化)。ここでは 2 軸の値を別々に pin し、
-        //   和のどちらの項を落としても RED になるようにする。
-        for (const cls of ["[^a-zA-Z0-9|]", "[^\\w|]"]) {
-          expect(spansArbitraryText(cls, "i"), `受理集合軸では gap でない: ${cls}`).toBe(false);
-          expect(cls.startsWith("[^"), `綴り軸では手書き分離子: ${cls}`).toBe(true);
-          // 実際に gap metachar を除外する = 構造ゲートの第 2 項も満たす。
-          expect(
-            excludedByClass(cls, "i").some((c) => TAIL_METACHARS.test(c)),
-            `gap metachar を除外する: ${cls}`,
-          ).toBe(true);
+        // **TDA-LSI-1 ≡ QA-LSI-2 (R1 監査 M・置換で失われかけた族) + R2 監査 (単一出所化)**:
+        //   構造ゲートは受理集合軸 (`spansArbitraryText`) と綴り軸 (`startsWith("[^")`) の**論理和**で
+        //   判定する (置換でなく和 = 単調強化)。R1 unblock はここで 2 軸の値を別々に pin しただけで
+        //   **和の合成そのもの**は走査行にしか無かったため、片項を落とす編集 (QA U1: `|| startsWith`
+        //   削除 / U2: `spansArbitraryText` 側削除) が fixture を素通りした。下の表は走査行と
+        //   **同一の `isSeparatorGapClass`** を呼び、各軸の値と**合成後の verdict** を同時に pin する。
+        //   片項だけで true になる行 (`spelling` のみ / `spans` のみ) を両方置くので、U1 は
+        //   `[^a-zA-Z0-9|]` / `[^\w|]` を、U2 は `[\w\s-]` を落として RED になる (実測)。
+        const GATE_AXIS_FIXTURES: ReadonlyArray<{
+          cls: string;
+          spans: boolean;
+          spelling: boolean;
+          gated: boolean;
+        }> = [
+          // 両軸 true (現行 17 が持つ唯一の分離子クラス)。
+          { cls: "[^|;&\\n]", spans: true, spelling: true, gated: true },
+          // 綴り軸のみ true: 英数字を 1 つも受理しない否定クラス (R1 が置換で落とした族)。
+          { cls: "[^a-zA-Z0-9|]", spans: false, spelling: true, gated: true },
+          { cls: "[^\\w|]", spans: false, spelling: true, gated: true },
+          // 受理集合軸のみ true: 正のクラスで綴られた広い gap (旧綴り軸では非該当だった族)。
+          { cls: "[\\w\\s-]", spans: true, spelling: false, gated: true },
+          // 両軸 false: フラグ token 内のクラス (gap ではない)。
+          { cls: "[a-z]", spans: false, spelling: false, gated: false },
+          // 受理集合軸 true だが gap metachar を 1 つも除外しない = 第 2 項で落ちる。
+          { cls: "[\\s\\S]", spans: true, spelling: false, gated: false },
+        ];
+        for (const f of GATE_AXIS_FIXTURES) {
+          gateAxisChecked += 1;
+          expect(spansArbitraryText(f.cls, "i"), `受理集合軸: ${f.cls}`).toBe(f.spans);
+          expect(f.cls.startsWith("[^"), `綴り軸: ${f.cls}`).toBe(f.spelling);
+          // 走査行と同一 helper。和の合成に歯が付くのはこの 1 行 (2 軸の値 pin だけでは付かない)。
+          expect(isSeparatorGapClass(f.cls, "i"), `構造ゲートの verdict: ${f.cls}`).toBe(f.gated);
         }
         expect(new Set(CHAR_UNIVERSE).size).toBe(CHAR_UNIVERSE.length);
         // POSITIVE 対: 旧 universe に無かった分離子が実際に載り、それだけを除外する gap クラスが
@@ -1979,13 +2055,16 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         //   phantom (`(?:\[\s\S]*)?` = 意味的に inert・escape 済み `\[` ゆえ unescaped `[` としては
         //   数えられないが `QUANTIFIED_CLASS_RE` は source テキスト上の `[` から拾う) で帳尻を合わせ、
         //   群括り gap の 2 乗規則が census を素通りできた (SEC 反証実測)。位置集合で比べる。
+        // **R2 監査**: verdict は `censusVerdict` の**単一出所**で、下の fixture も同じ関数を呼ぶ
+        //   (R1 unblock は走査行に比較を直書きし fixture 側で別途組み立てていた = 2 コピー)。
         let censusChecked = 0;
         for (const target of SCAN_TARGETS) {
           censusChecked += 1;
+          const verdict = censusVerdict(target.re.source);
           expect(
-            quantifiedClassIndices(target.re.source),
-            `${target.re.source}: escape されていない '[' の位置と量化クラス抽出の位置が一致しない綴り (群括り / capture / クラス alternation / 未量化 / 別位置の phantom で本数だけ合わせた形) は coupling と構造ゲートを素通りする。remedy: 分離子 gap なら量化クラスを直書きする (量化子をクラスの直後に置く)。未量化クラスや flag token 内のクラスは正当な線形綴りなので、gap でない理由を添えて NON_GAP_CLASS_EXEMPTIONS へ (reSource, classSource) の対で登録するか、量化して直書きへ寄せる`,
-          ).toEqual(classOpenIndices(target.re.source));
+            verdict.passes,
+            `${target.re.source}: escape されていない '[' の位置 ${JSON.stringify(verdict.opens)} と量化クラス抽出の位置 ${JSON.stringify(verdict.quantified)} が一致しない綴り (群括り / capture / クラス alternation / 未量化 / 別位置の phantom で本数だけ合わせた形) は coupling と構造ゲートを素通りする。remedy: 量化子をクラスの直後に置いて直書きする。**census には例外経路が無い** — NON_GAP_CLASS_EXEMPTIONS は coupling 専用で census には効かない (QA-LSI-R2-3 実測)。未量化クラスや flag token 内のクラスも census では位置が一致しないので、量化して直書きへ寄せるか、そもそもクラスを使わない綴りにする`,
+          ).toBe(true);
         }
         // 走査が実際に回ったこと (regex を 1 本も見ずに緑になる恒真を防ぐ・coupling の checked と同型)。
         expect(censusChecked, "class census を適用したスキャン regex の本数").toBe(17);
@@ -2063,11 +2142,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           censusFixturesChecked += 1;
           expect(classOpenCount(f.source), `opens: ${f.source}`).toBe(f.opens);
           expect(quantifiedClasses(f.source).length, `quantified: ${f.source}`).toBe(f.quantified);
-          // 位置一致の verdict を挙動として assert する (一致 = 素通り / 不一致 = RED)。
-          const positional =
-            JSON.stringify(quantifiedClassIndices(f.source)) ===
-            JSON.stringify(classOpenIndices(f.source));
-          expect(positional, `census verdict: ${f.source}`).toBe(f.passesCensus);
+          // 位置一致の verdict は**走査行と同一の `censusVerdict`** を呼ぶ (R2 監査: 2 コピー解消)。
+          //   自己比較への恒真化 (SEC C1) と本数一致への差し戻し (SEC C3) はここが RED にする。
+          expect(censusVerdict(f.source).passes, `census verdict: ${f.source}`).toBe(
+            f.passesCensus,
+          );
           // 本数一致 (R1 の弱い軸) は**削除せず**残す。phantom 2 形はここが `true` = 素通ることが
           //   「位置一致でなければ閉じない」ことの歯 (軸は追加のみ・置換禁止)。
           expect(
@@ -2080,10 +2159,25 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         const PHANTOM = String.raw`\bfoosql\b(?:[^|;&\n])*\bwipeall\b(?:\[\s\S]*)?`;
         expect(classOpenCount(PHANTOM)).toBe(quantifiedClasses(PHANTOM).length);
         expect(quantifiedClassIndices(PHANTOM)).not.toEqual(classOpenIndices(PHANTOM));
-        // 合成形は census が閉じるが、**量化 shorthand** (`\S*` / `\s+` / `.` + `s` flag) は
-        //   クラスを持たないので census にも coupling にも掛からない (残余・網羅の主張はしない)。
+        // 合成形は census が閉じるが、**除外をクラスの外で表現した綴り**は掛からない
+        //   (残余・網羅の主張はしない)。2 系統を挙動で pin する。
+        //   (a) 量化 shorthand — クラスが無いので位置集合が両側とも空で一致 = 素通り。
         expect(classOpenCount(String.raw`\bfoosql\b\S*\bwipeall\b`)).toBe(0);
         expect(quantifiedClasses(String.raw`\bfoosql\b\S*\bwipeall\b`).length).toBe(0);
+        expect(censusVerdict(String.raw`\bfoosql\b\S*\bwipeall\b`).passes).toBe(true);
+        //   (b) **負先読み形** (SEC-LSI-R2-3): 除外を lookahead 側に出すと、クラス `[\s\S]` は
+        //       量化済みなので census は位置一致で素通り、`[\s\S]` は何も除外しないので coupling も
+        //       構造ゲートも素通りする。**挙動は出荷形 `[^|;&\n]{0,512}` と同一**。
+        const LOOKAHEAD_GAP = String.raw`\bfoosql\b(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}\bwipeall\b`;
+        expect(censusVerdict(LOOKAHEAD_GAP).passes, "census は素通りする (残余)").toBe(true);
+        expect(quantifiedClasses(LOOKAHEAD_GAP)).toEqual(["[\\s\\S]"]);
+        expect(excludedByClass("[\\s\\S]", "i"), "coupling も素通りする (除外集合が空)").toEqual(
+          [],
+        );
+        expect(isSeparatorGapClass("[\\s\\S]", "i"), "構造ゲートも素通りする").toBe(false);
+        // 挙動が出荷形と同じであること (= 残余が実在の危険であることの根拠)。
+        expect(new RegExp(LOOKAHEAD_GAP, "i").test("foosql aaa wipeall")).toBe(true);
+        expect(new RegExp(LOOKAHEAD_GAP, "i").test("foosql a|a wipeall")).toBe(false);
       });
       it("構造ゲート (TDA-MA-1): 手書き分離子クラスを持つ行は segmentRe と segment sample を要求する", () => {
         // .claude/rules/security.md「手書き分離子クラスを新規行に書かない (segment 単位が要るなら
@@ -2097,10 +2191,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           //   「英数字を 1 つも受理しない否定クラス」族 (`[^a-zA-Z0-9|]` / `[^\w|]`) が
           //   `spansArbitraryText=false` になって旧軸が拾えていた行を落とした (SEC probe E11 実測)。
           //   和にすれば単調強化で、現行 17 規則の false RED は 0 (TDA 実測・`gated` は 1 のまま)。
-          const separatorClasses = quantifiedClasses(rule.re.source).filter(
-            (cls) =>
-              (spansArbitraryText(cls, rule.re.flags) || cls.startsWith("[^")) &&
-              excludedByClass(cls, rule.re.flags).some((c) => TAIL_METACHARS.test(c)),
+          // **R2 監査**: 和の式を走査行へ直書きすると fixture 側と 2 コピーになる (R1 の H と同型)。
+          //   判定は `isSeparatorGapClass` の**単一出所**で、下の軸 fixture も同じ関数を呼ぶ。
+          const separatorClasses = quantifiedClasses(rule.re.source).filter((cls) =>
+            isSeparatorGapClass(cls, rule.re.flags),
           );
           if (separatorClasses.length === 0) return;
           gated += 1;
