@@ -76,11 +76,22 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
      boundary. `INV-FILELOCK-IDENTITY-V2` pins the transient case (fd exhaustion under a
      lowered `ulimit -n`, with a live foreign lock on the reused inode number) as
      "not touched".
-  3. **The release side declines silently.** Every path where release decides not to act — the
-     identity mismatch, the readable-but-foreign content, a transient read failure, a failed
-     `stat`, a `rename` that loses the race — simply returns. There is no throw, no counter and
-     no log line, so a lock that is never released is observed only indirectly, through the
-     next acquirer treating it as a stale remnant. Only the restore-failure path below is loud.
+  3. **The release side declines silently, and what happens next depends on the errno.** Every
+     path where release decides not to act — the identity mismatch, the readable-but-foreign
+     content, a read failure outside the permission class, a failed `stat`, a `rename` that
+     loses the race — simply returns. There is no throw, no counter and no log line. What the
+     _next_ acquirer then does splits in two, and only one half is the benign story:
+     - If the content is readable, the leftover is treated as a stale remnant and taken over,
+       so the lock recovers on its own.
+     - If the content stays unreadable for a reason outside the permission class, acquisition
+       **rethrows** — it refuses to take over a lock whose identity it cannot re-verify — so
+       the file wedges the lock until an operator removes it, exactly as an `EACCES` lock did
+       before release learned to identify itself by `(dev, ino)`. A lock file large enough that
+       decoding it overflows the maximum string length (`ERR_STRING_TOO_LONG`, measured)
+       reaches this state and stays there. This is unchanged from before identity v2 — the
+       previous code rethrew the same failures on acquisition — so it is a carried-over
+       residual rather than something this work introduced.
+     Only the restore-failure path below is loud.
   4. **The restore-failure abort is reachable under third-party contention**, not dead code.
      A concurrent acquirer can take the lock path between the `rename` that detaches it and
      the `linkSync` that would restore it. The process that fails to restore throws and never

@@ -161,9 +161,15 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   is the only loud path on the release side, and it is narrow: it needs a detach, a mismatch, a
   failed restore _and_ a guarded function that returned normally. If the function threw, its error
   is the one that propagates. Every other release outcome is **silent** — an identity mismatch, a
-  readable lock naming somebody else, a transient read failure, a failed `stat` or a lost `rename`
-  all just return, with no throw, counter or log line. A lock that is consequently never released
-  shows up only indirectly, when the next acquirer treats it as a stale remnant.
+  readable lock naming somebody else, a read failure outside the permission class, a failed `stat`
+  or a lost `rename` all just return, with no throw, counter or log line. What the next acquirer
+  does with the leftover then splits in two. If its content is readable, it is treated as a stale
+  remnant and taken over, so the lock recovers by itself. If it stays unreadable for a reason
+  outside the permission class, acquisition **rethrows** rather than take over a lock it cannot
+  re-verify, so the file wedges the lock until an operator removes it — a lock large enough that
+  decoding it overflows the maximum string length (`ERR_STRING_TOO_LONG`, measured) lands there and
+  stays. That half is carried over rather than introduced here: the pre-identity code rethrew the
+  same failures on acquisition.
 - **A lock that becomes unreadable while you hold it no longer wedges the approval allowlist.**
   Because release now identifies its own lock by `(dev, ino)` — which `stat` reports without read
   permission — a lock whose mode or ownership changes out from under a running daemon is still
@@ -176,10 +182,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   linked into place is still left alone, and one that cannot even be `stat`ed still needs the
   operator.
   Release still reads whenever it can, and it is the errno that decides what "unreadable" means.
-  Only a **permission-class** failure (`EACCES`, `EPERM`, `EISDIR`) — a lock this process can no
-  longer read — lets the `(dev, ino)` match settle ownership by itself. Anything else (`EMFILE`,
-  `ENFILE`, `EIO`, …) is transient and says nothing about who owns the file, so release leaves it
-  alone; without that split, running out of file descriptors would have been enough to delete a
+  Only a failure that can actually **describe a lock this process can no longer read** — `EACCES`
+  or `EPERM` — lets the `(dev, ino)` match settle ownership by itself. Everything else declines.
+  That includes the transient failures (`EMFILE`, `ENFILE`, `EIO`, …), which say nothing about who
+  owns the file, and `EISDIR`, which cannot describe our own lock at all: a lock is a regular file
+  put in place with `link`, so a directory on the lock path with a matching identity can only be a
+  third party's directory sitting on a recycled inode number — trusting it would let release
+  quietly carry that directory off to a detached name; without that split, running out of file descriptors would have been enough to delete a
   third party's live lock sitting on the same recycled inode number, which
   `INV-FILELOCK-IDENTITY-V2` now reproduces with a real process under a lowered `ulimit -n`.
   The residual that stays: a lock that is unreadable **for a permission reason** _and_ happens to
