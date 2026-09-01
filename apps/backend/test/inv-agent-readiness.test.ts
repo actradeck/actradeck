@@ -18,27 +18,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { stripComments } from "@actradeck/event-model";
+
 import { SidecarRegistry, type SidecarLink } from "../src/sidecar-registry.js";
 
 const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-
-/** 行コメント / ブロックコメントを落とす (source-coupling pin をコメント文言で自己充足させない)。 */
-function stripComments(src: string): string {
-  return src
-    .split("\n")
-    .map((line) => {
-      let out = line;
-      if (/^\s*\/\*/.test(out)) {
-        const close = out.indexOf("*/");
-        out = close >= 0 ? out.slice(close + 2) : "";
-      }
-      if (/^\s*(\/\/|\*)/.test(out)) return "";
-      out = out.replace(/\/\*[^*]*(?:\*(?!\/)[^*]*)*\*\//g, "");
-      out = out.replace(/\s\/\/.*$/, "");
-      return out;
-    })
-    .join("\n");
-}
 
 /** 指定メソッドの本体を波括弧対応で切り出す (comment-strip 済 source 前提)。 */
 function methodBody(src: string, signature: string): string {

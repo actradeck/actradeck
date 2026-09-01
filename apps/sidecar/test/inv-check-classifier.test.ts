@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { stripComments } from "./util/strip-comments.js";
+import { stripComments } from "@actradeck/event-model";
 
 import { classifyCheck } from "../src/check-classifier.js";
 import {

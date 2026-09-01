@@ -19,6 +19,7 @@ import {
   DEFAULT_GATED_CATEGORIES,
   type PolicyCategory,
   type RiskLevel,
+  stripComments,
 } from "@actradeck/event-model";
 
 import { ApprovalBridge, encodeOperationSignature } from "../src/approval-bridge.js";
@@ -39,7 +40,6 @@ import {
 } from "../src/normalize.js";
 import type { HookCommonInput } from "../src/normalize.js";
 import { Sidecar } from "../src/sidecar.js";
-import { stripComments } from "./util/strip-comments.js";
 
 function preToolUse(toolName: string, toolInput: Record<string, unknown>): HookCommonInput {
   return {
@@ -3340,7 +3340,7 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
       .map(String)
       .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
       .sort();
-  /** コメントを落としたコード本文 (走査正規化は test/util/strip-comments.ts の単一出所)。 */
+  /** コメントを落としたコード本文 (走査正規化は @actradeck/event-model の stripComments が単一出所)。 */
   const codeOf = (file: string): string => stripComments(readFileSync(`${srcDir}${file}`, "utf8"));
   const identifierRe = (name: string): RegExp => new RegExp(`\\b${name}\\b`, "g");
   /**

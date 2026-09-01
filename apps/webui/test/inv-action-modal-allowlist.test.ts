@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { stripComments } from "@actradeck/event-model";
+
 /** ReplayEventDTO allow-list (backend replay-contract.ts と一致させる)。 */
 const ALLOWED_FIELDS = new Set([
   "event_id",
@@ -56,11 +58,6 @@ const FILES = [
 
 function readSrc(rel: string): string {
   return readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
-}
-
-/** 行コメントとブロックコメントを除いたコードのみを返す (コメント文言の誤検出を避ける)。 */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 
 describe("INV-ACTION-MODAL-ALLOWLIST: 生 payload 経路を作らない", () => {

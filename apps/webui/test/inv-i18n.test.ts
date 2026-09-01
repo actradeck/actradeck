@@ -11,6 +11,8 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { stripComments } from "@actradeck/event-model";
+
 import { CATALOGS_FOR_TEST, LOCALES, t, type Locale } from "../src/ui/i18n/messages.js";
 import { BROWSER_SOURCES } from "./_support/browser-graph.js";
 
@@ -24,89 +26,6 @@ function placeholders(template: string): Set<string> {
 }
 
 const CJK_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿]/;
-
-/**
- * ソースから行コメントとブロックコメントを除去する。文字列/テンプレート/
- * 正規表現リテラル内の `//` を誤ってコメント開始扱いしないよう、状態機械で走査する。
- * 除去後のソースに CJK が残れば「ユーザー可視文字列のハードコード」とみなす。
- */
-function stripComments(src: string): string {
-  let out = "";
-  let i = 0;
-  const n = src.length;
-  type Mode = "code" | "line" | "block" | "sq" | "dq" | "tpl";
-  let mode: Mode = "code";
-  while (i < n) {
-    const c = src[i]!;
-    const c2 = i + 1 < n ? src[i + 1]! : "";
-    if (mode === "code") {
-      if (c === "/" && c2 === "/") {
-        mode = "line";
-        i += 2;
-        continue;
-      }
-      if (c === "/" && c2 === "*") {
-        mode = "block";
-        i += 2;
-        continue;
-      }
-      if (c === "'") {
-        mode = "sq";
-        out += c;
-        i++;
-        continue;
-      }
-      if (c === '"') {
-        mode = "dq";
-        out += c;
-        i++;
-        continue;
-      }
-      if (c === "`") {
-        mode = "tpl";
-        out += c;
-        i++;
-        continue;
-      }
-      out += c;
-      i++;
-      continue;
-    }
-    if (mode === "line") {
-      if (c === "\n") {
-        mode = "code";
-        out += c;
-      }
-      i++;
-      continue;
-    }
-    if (mode === "block") {
-      if (c === "*" && c2 === "/") {
-        mode = "code";
-        i += 2;
-      } else {
-        i++;
-      }
-      continue;
-    }
-    // 文字列/テンプレートリテラル内: そのまま残し、エスケープと閉じを追う。
-    if (c === "\\") {
-      out += c + c2;
-      i += 2;
-      continue;
-    }
-    if (
-      (mode === "sq" && c === "'") ||
-      (mode === "dq" && c === '"') ||
-      (mode === "tpl" && c === "`")
-    ) {
-      mode = "code";
-    }
-    out += c;
-    i++;
-  }
-  return out;
-}
 
 const MESSAGES_REL = "src/ui/i18n/messages.ts";
 

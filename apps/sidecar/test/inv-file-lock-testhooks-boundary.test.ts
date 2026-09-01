@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { stripComments } from "./util/strip-comments.js";
+import { stripComments } from "@actradeck/event-model";
 
 import type { FileLockCallOptions, FileLockOptions, FileLockTestHooks } from "../src/file-lock.js";
 
