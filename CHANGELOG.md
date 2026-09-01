@@ -55,9 +55,10 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   Trailing line comments are removed, along with the whitespace before them. Measuring that is only
   meaningful with the derivation stated, so: counting the comment ranges the TypeScript parser
   reports as single-line trivia that have non-whitespace before them on their own line, over every
-  `.ts`/`.tsx`/`.mts`/`.cts` path in `git ls-files`, gives 2,088 such comments in
-  299 files, 50,285 characters that were previously part of what a tripwire could
-  see.
+  path in `git ls-files` matching the scanner's exported extension set - seven extensions, 620 files
+  - gives 2,248 such comments in 306 files, 56,166 characters that were previously part of what a
+  tripwire could see. The earlier figures in this entry covered four extensions and were re-derived
+  when the set was shared; the derivation is the number, not the other way round.
   Two ways of losing the scanner's place were root-caused rather than disclosed - which is a claim
   about the shapes that were measured, not about the class. The contents of a
   template interpolation are scanned as the code they are, nested templates included; without that,
@@ -78,6 +79,15 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   takes that measurement to zero, in the frozen linear metatest's own file among the rest. And the
   line terminators are no longer just the newline: U+2028 and U+2029 end a line comment and cannot be
   crossed by a regular expression, and are now treated as one, from a single predicate.
+  That predicate was applied in one place too many. Resynchronising a quoted string on reaching a
+  line break rests on a quoted string not being able to contain one, and since ES2019 those two
+  characters may appear raw inside a string - so `const s = 'a<U+2028>b'; // note` returned to code
+  in the middle of the string, the closing quote opened a new one, and the trailing comment survived
+  into the scanned view. The resynchronisation has its own predicate now, covering the newline and
+  the carriage return only, kept separate from the line-terminator one because collapsing them in
+  either direction puts one of the other two uses outside the grammar. The cost of the separation is
+  stated where the residuals are: a string opened by mistake inside an expression the position
+  heuristic declined no longer closes at U+2028, only at a real newline.
   The claim that only comments are removed is now checked two ways on every tracked TypeScript
   source, not on one package: the text left after deleting exactly the comment ranges the parser
   reports must match the scanner's output, and the parser's leaf token stream must be identical
