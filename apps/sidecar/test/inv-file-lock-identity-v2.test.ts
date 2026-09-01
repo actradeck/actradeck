@@ -247,6 +247,12 @@ describe("INV-FILELOCK-IDENTITY-V2: 奪取の同一性は (dev,ino) 粒度", () 
  * (b) 残りの fd を焼き尽くす。`stat` / `rename` / `link` / `unlink` は fd を要さず成功するので、
  * 解放側で失敗するのは `openSync` だけ = `EMFILE`。
  *
+ * **fs 前提 (QA-FLV2-R2-1)**: (a) は「解放された inode 番号を直後の作成が再利用する」ことに依存する
+ * (**ext4 で実測**・`os.tmpdir()` が既定の `/tmp` を指す前提)。**tmpfs は再利用しない**ため、
+ * `TMPDIR=/dev/shm` で走らせるとレースが組めず、その場合は緑にならず
+ * 「the inode number was not reused: the race is vacuous」で **loud に落ちる** (実測)。
+ * 前提が崩れたことを緑で見逃さないための設計であって、tmpfs 対応の欠落ではない。
+ *
  * POSITIVE 対 (クラス境界の反対側): 「保持中に自分の lock が読めなくなっても (dev,ino) 同一性で
  * 解放できる」(file-lock.test.ts の EACCES describe) が **permission クラスなら外す**ことを固定する。
  * 本テストは **permission クラスでなければ外さない**ことを固定し、2 本で errno クラス境界を挟む。

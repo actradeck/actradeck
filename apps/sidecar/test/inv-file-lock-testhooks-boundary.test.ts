@@ -126,10 +126,14 @@ describe("INV-FILELOCK-TESTHOOKS-BOUNDARY: 走査器の歯 (既知陽性 / 既�
       `withFileLock(p, fn, { maxRetries: 3, retryDelayMs: 20 });`,
       `// testHooks は本番で渡さない`,
       `/* testHooks についての説明 */`,
-      `const myTestHooksLike = 1;`, // 部分一致では拾わない (\b で区切る)
-      // QA-FLV2-2: **前方は境界・後方は非境界**の形。後ろの `\b` を外すとここが偽陽性になる
-      // (`myTestHooksLike` は前方も非境界なので、\b 片側だけの劣化を検出できない)。
+      // QA-FLV2-R2-2 訂正: これは大文字始まり (`TestHooks`) なので、そもそも入口の綴りを
+      // 含まない。`\b` の有無とは無関係に非マッチであり、境界軸を検証していない。
+      `const myTestHooksLike = 1;`,
+      // QA-FLV2-2: **前方は境界・後方は非境界**の形。後ろの `\b` を外すとここが偽陽性になる。
       `const testHooksLike = 1;`,
+      // QA-FLV2-R2-2: **前方は非境界・後方は境界**の形 (小文字始まりで入口の綴りを実際に含む)。
+      // 前の `\b` を外すとここが偽陽性になる。上の 2 本と合わせて両側の境界軸を挟む。
+      `const mytestHooks = 1;`,
       `const hooks = {};`,
     ];
     for (const src of negatives) {

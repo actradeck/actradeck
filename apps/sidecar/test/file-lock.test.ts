@@ -30,6 +30,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -38,7 +39,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { withFileLock } from "../src/file-lock.js";
+import { isIdentityOnlyReadErrno, withFileLock } from "../src/file-lock.js";
 import { cleanupTempDirs, makeTempDir } from "./helpers/lock-test-support.js";
 
 let dir: string;
@@ -820,5 +821,113 @@ describe("INV-ATTACH-WIRE-LOCK: SEC-1 acquire-delay env は test モード時の
     const sleeps: number[] = [];
     withFileLock(target, () => "ok", { testHooks: { sleep: (ms) => sleeps.push(ms) } });
     expect(sleeps).toEqual([]);
+  });
+});
+
+/**
+ * SEC-FLV2-R2-3: 「解放が `(dev, ino)` 単独で自 lock と判定してよい」errno クラスを **表駆動**で固定する。
+ *
+ * 収録の基準は「その errno が **『自分が立てた lock file を、自分が今は読めない』を記述しうるか**」。
+ * docstring だけではこの規則を守れない (一過性 errno を 1 語足すのは 1 行の編集で、
+ * 綴りを走査する pin はいたちごっこになる) ので、述語そのものへ in / out を流す
+ * **実行可能なコントロール**にする。
+ *
+ * - **in**: `EACCES` / `EPERM` — 自 lock はそのまま在り、mode / owner の帯域外変更で読めなくなった形。
+ * - **out**: 一過性・資源枯渇 (`EMFILE` / `ENFILE` / `EIO` / `ENOMEM` / `EAGAIN`)、
+ *   **自 lock を記述しえない**もの (`EISDIR` — 自 lock は linkSync で立てた通常ファイル)、
+ *   および errno の欠落。
+ */
+describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す errno クラス", () => {
+  // 「自分の lock が読めなくなった」を記述しうる errno (= identity 単独で判定してよい)。
+  const IDENTITY_ONLY: readonly string[] = ["EACCES", "EPERM"];
+  // 記述しえない errno。**一過性 (資源枯渇 / I/O) と、自 lock ではありえない種別**の両方を並べる。
+  const MUST_DECLINE: readonly (string | undefined)[] = [
+    "EMFILE", // fd 枯渇 (SEC-FLV2-1 の実プロセス再現ベクタ)
+    "ENFILE", // system-wide fd 枯渇
+    "EIO", // I/O 障害
+    "ENOMEM", // メモリ枯渇
+    "EAGAIN", // 一時的に利用不可
+    "EBUSY",
+    "EBADF",
+    "ELOOP",
+    "ENAMETOOLONG",
+    "ENOENT", // 消えている = 自 lock の identity 判定より前に弾かれるべき形
+    "EISDIR", // SEC-FLV2-R2-1: 自 lock は通常ファイル。ディレクトリは第三者のもの
+    "ERR_STRING_TOO_LONG", // 恒久だが permission でない (読取り不能が続く形)
+    undefined, // errno が取れない失敗は識別できない
+  ];
+
+  it("in: 自 lock が読めなくなったことを記述しうる errno だけ true", () => {
+    for (const code of IDENTITY_ONLY) {
+      expect(isIdentityOnlyReadErrno(code), `${code} must let identity settle ownership`).toBe(
+        true,
+      );
+    }
+    expect(IDENTITY_ONLY.length).toBeGreaterThan(0); // 表が空になって恒真化しない
+  });
+
+  it("out: 一過性・資源・自 lock を記述しえない errno と欠落は false", () => {
+    for (const code of MUST_DECLINE) {
+      expect(isIdentityOnlyReadErrno(code), `${String(code)} must NOT settle ownership`).toBe(
+        false,
+      );
+    }
+    // in と out が交わらない (どちらかを書き換えて両立させる編集を loud にする)。
+    expect(IDENTITY_ONLY.filter((c) => MUST_DECLINE.includes(c))).toEqual([]);
+    expect(MUST_DECLINE.length).toBeGreaterThan(IDENTITY_ONLY.length);
+  });
+});
+
+/**
+ * SEC-FLV2-R2-1: `EISDIR` は「自分の lock が読めない」を**記述しえない**。自 lock は `linkSync` で
+ * 立てた通常ファイルなので、lockPath がディレクトリで、しかも `(dev, ino)` が一致する唯一の到達形は
+ * **inode 番号を再利用した第三者のディレクトリ**。これを identity 単独で自 lock とみなすと、解放が
+ * `rename` で退避名へ**黙って持ち去る** (`unlink` は EISDIR で失敗するので消えはしないが、
+ * lockPath からは消える = silent eviction)。
+ *
+ * **fs 前提**: この再現は「解放された inode 番号を直後の `mkdir` が再利用する」ことに依存する
+ * (ext4 で実測・iteration 0 で命中)。tmpfs (`/dev/shm`) は再利用しないため構成できず、その場合は
+ * 前提が満たせなかったこととして skip する (偽 RED にしない)。
+ */
+describe("INV-FILELOCK-IDENTITY-V2: EISDIR は自 lock を記述しえない", () => {
+  it("inode 番号を再利用した第三者のディレクトリを解放で持ち去らない", (ctx) => {
+    let heldIno = 0;
+    let dirIno = 0;
+    let reused = false;
+    const ATTEMPTS = 200;
+    const detachedPhases: string[] = [];
+    withFileLock(
+      target,
+      () => {
+        heldIno = statSync(lockPath).ino;
+        unlinkSync(lockPath);
+        for (let i = 0; i < ATTEMPTS; i++) {
+          mkdirSync(lockPath);
+          dirIno = statSync(lockPath).ino;
+          if (dirIno === heldIno) {
+            reused = true;
+            break;
+          }
+          // 最後の周回では消さずに抜ける (lockPath 不在で解放が別枝へ落ちないように)。
+          if (i === ATTEMPTS - 1) break;
+          rmSync(lockPath, { recursive: true });
+        }
+      },
+      { testHooks: { onDetached: (phase) => detachedPhases.push(phase) } },
+    );
+
+    if (!reused) {
+      ctx.skip(
+        `this filesystem did not reuse the freed inode number for a directory ` +
+          `(held ${heldIno}, got ${dirIno}); the EISDIR-with-matching-identity case cannot be built here`,
+      );
+      return;
+    }
+    // 第三者のディレクトリは lockPath にそのまま残る (取り外しにも進まない)。
+    expect(existsSync(lockPath), "the third party directory was carried off").toBe(true);
+    expect(statSync(lockPath).isDirectory()).toBe(true);
+    expect(detachedPhases, "release detached a directory it does not own").toEqual([]);
+    expect(readdirSync(dir).filter((n) => n.includes(".stale"))).toEqual([]);
+    rmSync(lockPath, { recursive: true, force: true }); // afterEach の掃除用
   });
 });

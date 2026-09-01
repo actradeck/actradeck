@@ -19,6 +19,11 @@
  *                 失敗し、B は critical section へ入らず throw する (fail-loud)。
  *                 このとき B が取り外した **V の inode は退避名のまま残る** (破棄しない)。
  *   observer(O) : 一連の決着後に lock を取り、直列化が壊れていない (取得できる) ことを確認する。
+ * **fs 前提 (QA-FLV2-R2-1)**: `unreadable` 役は「解放された inode 番号を直後の `writeFileSync` が
+ * 再利用する」ことに依存する (ext4 で実測)。tmpfs (`/dev/shm`) は再利用しないため、その場合は
+ * `u-reused=false` の sentinel を書いて正常終了し、呼び元の vacuity guard
+ * (「the inode number was not reused: the race is vacuous」) が loud に落ちる。
+ *
  *   unreadable  : SEC-FLV2-1。自分が保持している間に lock file を **inode 番号ごと再利用**した
  *                 「他者 (live pid) の lock」へ差し替え、さらに **fd を焼き尽くして** 解放側の
  *                 内容読取りだけを `EMFILE` で失敗させる。permission クラス (EACCES/EPERM/EISDIR)
@@ -217,17 +222,26 @@ function runUnreadableRelease(): void {
     const st0 = statSync(lockPath);
     heldIno = Number(st0.ino);
     unlinkSync(lockPath);
-    // ext4 は解放直後の inode 番号を再利用する。再利用されるまで作り直す
-    // (再利用できなければ reused=false のまま → 呼び元の vacuity guard が loud に落ちる)。
-    for (let i = 0; i < 2000; i++) {
+    // ext4 は解放直後の inode 番号を再利用する。再利用されるまで作り直す。
+    //
+    // QA-FLV2-R2-1: 再利用**されなかった**場合も lockPath を残したまま抜けること。
+    //   以前は最終周回でも `unlinkSync` してから抜けたため、直後の `statSync` が ENOENT で throw し、
+    //   worker が abort して「レースが組めなかった」ことを伝える sentinel を書けなかった
+    //   (呼び元は exit code で落ちるだけで、vacuity guard の逐語メッセージへ到達しなかった)。
+    //   再利用しない fs (tmpfs = `/dev/shm` で実測) では reused=false の sentinel を書いて抜ける。
+    const ATTEMPTS = 2000;
+    for (let i = 0; i < ATTEMPTS; i++) {
       writeFileSync(lockPath, `${foreignPid}\n`, { mode: 0o600 });
       const st = statSync(lockPath);
-      if (Number(st.ino) === heldIno && Number(st.dev) === Number(st0.dev)) break;
+      if (Number(st.ino) === heldIno && Number(st.dev) === Number(st0.dev)) {
+        reused = true;
+        break;
+      }
+      if (i === ATTEMPTS - 1) break; // 最終周回は消さない (lockPath を残して sentinel を書く)
       unlinkSync(lockPath);
     }
     const stC = statSync(lockPath);
     foreignIno = Number(stC.ino);
-    reused = foreignIno === heldIno && Number(stC.dev) === Number(st0.dev);
     if (process.env.EXHAUST !== "0") {
       // 残りの fd を焼き尽くす → 解放側の openSync が EMFILE になる。
       for (;;) {

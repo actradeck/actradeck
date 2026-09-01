@@ -264,15 +264,27 @@ function identityOf(path: string): LockIdentity | undefined {
 
 /**
  * 解放時に「内容が読めなくても `(dev, ino)` 単独で自 lock と判定してよい」読取り失敗の errno クラス
- * (SEC-FLV2-1)。**permission / 種別**の恒久的な失敗だけを列挙する。
+ * (SEC-FLV2-1 / SEC-FLV2-R2-1)。
  *
- * - `EACCES` / `EPERM`: mode / owner が帯域外で変えられた (SEC-FL-1 の回復経路の本命)。
- * - `EISDIR`: lock path がディレクトリに差し替えられた。
+ * 収録の基準は **「その errno が『自分が立てた lock file を、自分が今は読めない』を記述しうるか」**
+ * であって「恒久的か」ではない:
+ * - `EACCES` / `EPERM`: mode / owner が帯域外で変えられた。自 lock はそのまま在り、読めなくなっただけ
+ *   (SEC-FL-1 の回復経路の本命)。
  *
- * ここに **`EMFILE` / `ENFILE` / `EIO` 等の一過性失敗を足さない**。それらは「読めなかった」だけで
- * 「自分のものだ」を意味しないため、content 軸を捨てると他者の生きた lock を消す方向に倒れる。
+ * **意図的に除外しているもの**:
+ * - `EISDIR` (SEC-FLV2-R2-1 で除去): 自 lock は `linkSync` で立てた**通常ファイル**なので、
+ *   lockPath がディレクトリであることは「自分の lock が読めない」を記述しえない。identity が一致する
+ *   唯一の到達形は **inode 番号を再利用した第三者のディレクトリ**で、収録すると解放が
+ *   それを `rename` で退避名へ**黙って持ち去る** (unlink は EISDIR で失敗するので消えはしないが、
+ *   lockPath からは消える = silent eviction)。
+ * - `EMFILE` / `ENFILE` / `EIO` / `ENOMEM` などの**一過性・資源**失敗: 「読めなかった」だけで
+ *   「自分のものだ」を意味しない。content 軸を捨てると他者の生きた lock を消す方向に倒れる。
+ *
+ * **この集合へ errno を足すときは、上の基準を満たすことを示すこと。**
+ * 表駆動の unit test (`INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す errno クラス`) が
+ * in / out の両側を固定しており、一過性 errno の追加はそこで落ちる。
  */
-const IDENTITY_ONLY_READ_ERRNOS: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EISDIR"]);
+const IDENTITY_ONLY_READ_ERRNOS: ReadonlySet<string> = new Set(["EACCES", "EPERM"]);
 
 /**
  * {@link IDENTITY_ONLY_READ_ERRNOS} に属する errno か。
@@ -281,8 +293,13 @@ const IDENTITY_ONLY_READ_ERRNOS: ReadonlySet<string> = new Set(["EACCES", "EPERM
  * **到達しない防御** であって pin されていない: `readLockHolder` が投げるのは
  * `openSync` / `fstatSync` / `readFileSync` / `closeSync` の fs エラーだけで、いずれも `code` を持つ。
  * `undefined` を許容側へ反転させても落ちるテストは無い (実測 SURVIVED)。
+ *
+ * **export の理由 (SEC-FLV2-R2-3)**: 「一過性 errno を足さない」という規則を、docstring だけでなく
+ * **実行可能なコントロール**で守るため。テストがこの述語そのものへ in / out の errno を流して
+ * 表駆動で固定する (集合の綴りを走査するのではなく、判定の挙動を検査する)。本番コードから
+ * 呼ぶ想定は無い。
  */
-function isIdentityOnlyReadErrno(code: string | undefined): boolean {
+export function isIdentityOnlyReadErrno(code: string | undefined): boolean {
   return code !== undefined && IDENTITY_ONLY_READ_ERRNOS.has(code);
 }
 
@@ -433,11 +450,12 @@ function detachStaleLock(
  * - identity 不一致 / 既に消えている → 触らない。
  * - identity 一致 + 内容が読めて自分 (`pid===self`) or `corrupt` → 自 lock。
  * - identity 一致 + 内容が読めず、その失敗が **permission クラス**
- *   ({@link IDENTITY_ONLY_READ_ERRNOS}) → identity を信じて自 lock
+ *   ({@link IDENTITY_ONLY_READ_ERRNOS} = `EACCES` / `EPERM`) → identity を信じて自 lock
  *   (= SEC-FL-1 の恒久 wedge の回復経路)。
- * - identity 一致 + 内容が読めず、失敗が **それ以外** (EMFILE / ENFILE / EIO 等の一過性) →
- *   **触らない** (SEC-FLV2-1)。一過性の読取り不能で content 軸を捨てると、
- *   inode 番号が再利用された「他者の生きた lock」を消しうる。base 同等の fail-safe へ倒す。
+ * - identity 一致 + 内容が読めず、失敗が **それ以外** (`EMFILE` / `ENFILE` / `EIO` の一過性、
+ *   `EISDIR` のように自 lock を記述しえないもの) → **触らない** (SEC-FLV2-1 / SEC-FLV2-R2-1)。
+ *   content 軸を捨てると、inode 番号が再利用された「他者の生きた lock / ディレクトリ」を
+ *   消す・持ち去る方向に倒れる。base 同等の fail-safe へ倒す。
  * - identity 一致 + 内容が読めて**別 pid** → 第三者が自分の inode を書き換えた → 触らない。
  */
 function detachOwnLockForRelease(
@@ -452,10 +470,12 @@ function detachOwnLockForRelease(
     try {
       holder = readLockHolder(lockPath);
     } catch (err) {
-      // SEC-FLV2-1: 「identity を信じてよい」のは **permission クラス**の読取り不能だけ。
-      // fd 枯渇 (EMFILE/ENFILE) や I/O 障害 (EIO) のような一過性の失敗まで同じ枝へ落とすと、
-      // 「読めなかった」だけで content 軸 (= 別 pid なら触らない) を捨てることになり、
-      // inode 番号が再利用された**他者の生きた lock** を消しうる。判別できないときは触らない。
+      // SEC-FLV2-1 / SEC-FLV2-R2-1: 「identity を信じてよい」のは
+      // **「自分の lock が読めなくなった」を記述しうる errno** だけ (EACCES / EPERM)。
+      // fd 枯渇 (EMFILE/ENFILE) や I/O 障害 (EIO) のような一過性の失敗、あるいは自 lock を
+      // 記述しえない EISDIR まで同じ枝へ落とすと、「読めなかった」だけで content 軸
+      // (= 別 pid なら触らない) を捨てることになり、inode 番号が再利用された**他者の生きた
+      // lock / ディレクトリ**を消す・持ち去る。判別できないときは触らない。
       if (!isIdentityOnlyReadErrno((err as NodeJS.ErrnoException).code)) return undefined;
       holder = undefined; // 読めない自 inode → identity を信じる (回復経路)
     }
