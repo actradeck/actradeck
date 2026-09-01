@@ -69,6 +69,15 @@ export const SUITES = {
     label: "sidecar linear metatest (INV-LITERAL-RULES-LINEAR)",
     pattern: "INV-LITERAL-RULES-LINEAR",
   },
+  // QA-CSX-2 / TDA-CSX-4: INV-STRIP-COMMENTS owns the scan view that nine tripwires share
+  // (the comment-strip normalisation). Its in-file counters are registration-time for the
+  // file as a whole: a `describe.skip` inside is caught by the top-level afterAll, but
+  // skipping or deleting the whole file is not. This is the CI-side second layer, which
+  // additionally refuses a skipped/todo suite. Same two-layer shape as sidecar-linear.
+  "strip-comments": {
+    label: "comment-strip scan normalisation (INV-STRIP-COMMENTS)",
+    pattern: "INV-STRIP-COMMENTS",
+  },
 };
 
 function main() {

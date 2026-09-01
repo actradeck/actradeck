@@ -243,6 +243,18 @@ jobs:
       - name: Test (event-model coverage gate)
         run: pnpm --filter @actradeck/event-model run test:coverage
 
+      # QA-CSX-2 / TDA-CSX-4: INV-STRIP-COMMENTS is the comment-strip scan view that nine
+      #   tripwires share; the per-file coverage floor only trips when EVERY describe is
+      #   skipped (measured: a single skipped describe left the floor untouched). The suite
+      #   carries an in-process afterAll counter for that case; this step is the second layer
+      #   and refuses a skipped/todo suite outright.
+      - name: Assert comment-strip INV actually RAN (not skipped)
+        run: |
+          rm -f /tmp/event-model-test.json
+          rc=0
+          pnpm --filter @actradeck/event-model exec vitest run --reporter=json --outputFile=/tmp/event-model-test.json || rc=$?
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/event-model-test.json --suite strip-comments
+
       # QA-7 (2026-08-13 audit): the telemetry wire contract is the single NO-RAW closed-schema
       #   source shared by sender and collector — a dormant floor here would let its canonical
       #   helpers erode silently. Dedicated gate step, same pattern as event-model above.

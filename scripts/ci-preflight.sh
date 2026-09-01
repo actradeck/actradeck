@@ -68,6 +68,7 @@ verify:Assert backend real-DB INV actually RAN (not skipped)
 verify:Test (backend coverage gate)
 verify:Test (redaction coverage gate)
 verify:Test (event-model coverage gate)
+verify:Assert comment-strip INV actually RAN (not skipped)
 verify:Test (telemetry-contract coverage gate)
 verify:Test (telemetry collector, workerd)
 verify:Build backend (provide dist for sidecar e2e import)
@@ -314,6 +315,12 @@ run_verify_job() {
 
   step "verify: Test (event-model coverage gate)"
   pnpm --filter @actradeck/event-model run test:coverage
+
+  step "verify: Assert comment-strip INV actually RAN (not skipped)"
+  rm -f /tmp/event-model-test.json
+  rc=0
+  pnpm --filter @actradeck/event-model exec vitest run --reporter=json --outputFile=/tmp/event-model-test.json || rc=$?
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/event-model-test.json --suite strip-comments
 
   step "verify: Test (telemetry-contract coverage gate)"
   pnpm --filter @actradeck/telemetry-contract run test:coverage
