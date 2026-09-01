@@ -524,6 +524,9 @@ const REQUIRED_SCAN_MEMBERS = [
   "apps/backend/src/sidecar-registry.ts",
   "apps/webui/test/inv-i18n.test.ts",
   "packages/event-model/src/index.ts",
+  // SEC-CSX-R2-3: JavaScript 経路の代表。これが無いと、拡張子集合を `.ts` 系へ狭める編集が
+  //   両方の走査 (corpus / sweep) から js/mjs/cjs を落としても緑のまま通る。
+  "scripts/ci/assert-inv-ran.mjs",
 ] as const;
 
 // SEC-CSX-R2-3: 走査集合の拡張子は正準 (`SCAN_SOURCE_EXTENSIONS` / `isScannedSourcePath`) を
