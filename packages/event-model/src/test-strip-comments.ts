@@ -40,8 +40,12 @@
  *       `/*` (`/[^/*]/` の綴り) がファイル残り全体を飲み、当該ファイルが全 tripwire の view から
  *       空になる (SEC-CSX-2)。
  * - **LineTerminator は LF だけではない** (SEC-CSX-R2-2): CR / U+2028 (LINE SEPARATOR) /
- *   U+2029 (PARAGRAPH SEPARATOR) も行コメントを終わらせ、regex リテラルを跨げず、単引用 /
- *   二重引用の resync を起こす。判定は `isLineTerminator` の単一出所。
+ *   U+2029 (PARAGRAPH SEPARATOR) も行コメントを終わらせ、regex リテラルを跨げない。
+ *   **ただし単引用 / 二重引用の resync は起こさない** (TDA-CSX-R3-1: ES2019 以降それらは文字列内に
+ *   生で書けるため resync の根拠にならない)。判定は **2 述語に分かれている** — 行コメント終端と
+ *   regex 行境界は `isLineTerminator` (LF / CR / U+2028 / U+2029)、文字列 resync は
+ *   `isStringResyncBreak` (LF / CR のみ)。片方へ寄せるとどちらかが ES 文法から外れる
+ *   (QA-CSX-R4-2 ≡ TDA-CSX-R4-6: 旧記述はこの 2 点とも偽だった)。
  * - 走査対象の拡張子は `SCAN_SOURCE_EXTENSIONS` / `isScannedSourcePath` を export して
  *   corpus コントロールと単一出所 sweep が共有する (SEC-CSX-R2-3)。以前は消費側が
  *   `.ts/.tsx/.mts/.cts` を手書きしており `.js` / `.mjs` / `.cjs` の経路が両方の外にあった。
@@ -72,17 +76,23 @@
  *
  * - 上のヒューリスティックが除外側に倒れる位置 (識別子 / `}` / 非 arrow の `>` / `<` / quote の直後)
  *   に置かれた regex が未 escape の quote / backtick / `/*` を含むと desync する。
- *   `'` / `"` は改行で resync する (生の改行を含む単引用 / 二重引用文字列は構文エラーゆえ desync が
- *   確定する) ので影響はその行に閉じる。backtick は resync しないため次の backtick まで続く。
+ *   `'` / `"` は **LF / CR** で resync する (生の LF / CR を含む単引用 / 二重引用文字列は構文エラー
+ *   ゆえ desync が確定する) ので影響は**次の LF / CR まで**に閉じる。**U+2028 / U+2029 では resync
+ *   しない**ので、行が U+2028 で終わる形では「その行に閉じる」は成り立たない (valid-TS の逐語 pin:
+ *   `function qaW1() {} /['"]/.test(String(1));<U+2028>const qaW1b = 1; // note`)。
+ *   backtick は resync しないため次の backtick まで続く。
  *   `/*` は閉じなければ fail-closed で戻るが、**ファイル後方に `*\/` があればその間を飲む** (DROP 残余)。
  * - **文字列リテラル内の U+2028 / U+2029 では resync しない** (TDA-CSX-R3-1 系の修正で入った新しい前提)。
  *   ES2019 以降それらは文字列内に生で書けるため resync の根拠にならない。代わりに、regex 内の
  *   quote で誤って開いた文字列 mode が U+2028 / U+2029 では 1 行に閉じない (LF / CR まで続く)。
  * - **accepted 位置の除算 + 同一行の開き引用符** (SEC-CSX-R3-1): `const n = (a) / 2; const s = 'x; // note`
- *   のように、走査が終端を探して引用符を跨ぐと**その行の**コメントが落ち残る (次行は resync で戻る)。
+ *   のように、走査が終端を探して引用符を跨ぐとコメントが落ち残る (**次の LF / CR** で resync して
+ *   戻る。行が U+2028 / U+2029 で終わる形では戻らない — 上記の 2 述語分離の帰結)。
  * - **`/re/*` (regex 乗算)** (QA-CSX-R3-2): 終端候補の直後が `*` を fail-closed で拒否した結果、
  *   本物の `/a/*2` も skip されず、後続行のコメントが落ち残る。guard を外すと R2 の H が戻るので
- *   意図した交換。`/abc/// note` (QA-CSX-R2-5) は逆に regex の閉じ `/` まで行コメントに飲まれる (DROP)。
+ *   意図した交換。**DROP 側**もある: `/a/*2` の**後方に `*\/` があるとブロックが閉じ、間の実コードが
+ *   落ちる** (base 同値)。`/abc/// note` (QA-CSX-R2-5) は regex の閉じ `/` まで行コメントに飲まれる (DROP)。
+ *   MISS / DROP の両方向とも task 01a05d34 項目 2 の対象。
  * - JSX text 中の `//` 以降を落とす (base 実装と同値の pre-existing・SEC-CSX-7)。**この形を新たに
  *   ソースへ導入すると corpus コントロールが RED になる** (現行 620 file には存在しない)。
  * - shebang 行の末尾に行コメントを付けた形は TS の trivia 判定と食い違う (marker 注入でのみ観測)。
