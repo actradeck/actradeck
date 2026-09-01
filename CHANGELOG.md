@@ -32,6 +32,31 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
+- **The scan normalisation that every source-reading tripwire shares is now one implementation, and
+  it reads trailing comments.** Nine metatests read source with comment text removed, so that a
+  verbatim copy sitting in a comment cannot satisfy a pin and a forbidden word written in a comment
+  cannot trip one. Five of them carried their own copy of that removal, and the weakest copy decided
+  what any given scan could see: one stripped only comments that begin a line, two stripped a
+  trailing comment only when whitespace preceded it, one stripped every double slash regardless of
+  context - truncating 113 of the 487 scanned files at their first URL - and one tracked strings but
+  not regular expressions, so a regex containing a quote desynchronised it for the rest of the file.
+  There is now a single scanner in the event model, beside the test database guard and for the same
+  reason: four workspaces share it, and a helper under `apps/` could only be reached from a package
+  by importing upwards.
+  Two axes are added over the strongest of the five. Trailing line comments are removed, along with
+  the whitespace before them; across the corpus that is 1687 lines in 249 files, 49049 characters
+  that used to be part of what a tripwire could see. Regular expression literals are skipped as a
+  unit, which matters because the sidecar classifier declares one whose character class contains a
+  backtick. Comments inside string and template literals are kept, so a URL or a shell fragment in
+  a test vector is no longer cut at its first double slash.
+  The claim that no real code is removed is checked by a parser rather than asserted: stripping a
+  file must leave something TypeScript still parses. On the tree before this change the four old
+  implementations broke 1, 1, 113 and 8 files that way; this one breaks none. What it does *not*
+  handle is pinned as behaviour too - a verbatim copy written as a string literal, a comment inside
+  a template interpolation, and a regex in a position the heuristic declines to treat as one are
+  each asserted to survive, so the documentation cannot quietly grow a claim that they are closed.
+  No threshold, count or pin in any consumer changed.
+
 - **The two gates that metatest applies to the classifier's gap classes no longer depend on how
   those classes are spelled, and a rule spelled in a way the extractor does not understand can no
   longer land at all.** Both gates - the coupling assertion (the characters a rule's quantified
