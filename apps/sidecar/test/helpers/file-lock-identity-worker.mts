@@ -23,12 +23,16 @@
  * 再利用する」ことに依存する (ext4 で実測)。tmpfs (`/dev/shm`) は再利用しないため、その場合は
  * `u-reused=false` の sentinel を書いて正常終了し、呼び元の vacuity guard
  * (「the inode number was not reused: the race is vacuous」) が loud に落ちる。
+ * この「最終周回で消さずに抜ける」修正は **再利用する fs では挙動を変えない** — 復帰させる変異は
+ * ext4 では SURVIVED する (実測)。価値は再利用しない fs での**診断性**、すなわち失敗理由が
+ * 「worker が ENOENT で abort」ではなく「レースを組めなかった」と読めることにある (QA-FLV2-R3-2)。
  *
  *   unreadable  : SEC-FLV2-1。自分が保持している間に lock file を **inode 番号ごと再利用**した
  *                 「他者 (live pid) の lock」へ差し替え、さらに **fd を焼き尽くして** 解放側の
- *                 内容読取りだけを `EMFILE` で失敗させる。permission クラス (EACCES/EPERM/EISDIR)
- *                 でない読取り不能で content 軸を捨てると、identity だけを信じて
- *                 **他者の生きた lock を消す**。呼び元テストが「消していない」ことを assert する。
+ *                 内容読取りだけを `EMFILE` で失敗させる。「自分の lock が読めなくなった」を
+ *                 記述しうる errno (`EACCES` / `EPERM`) でない読取り不能で content 軸を捨てると、
+ *                 identity だけを信じて **他者の生きた lock を消す**。呼び元テストが
+ *                 「消していない」ことを assert する。
  *
  * 入出力はすべて env と `SIG_DIR` 配下の sentinel ファイル (呼び元が os.tmpdir 配下を与える)。
  * 実 ~/.actradeck / 実 settings は不可侵。

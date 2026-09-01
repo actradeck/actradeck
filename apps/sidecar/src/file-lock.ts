@@ -40,7 +40,10 @@
  *   3. 解放も `renameSync` → `(dev, ino)` 再検証 → `unlink` で原子化する (旧: read → 判定 → unlink の
  *      非原子・SEC-FL-3)。自 lock 判定は identity を主・内容を補助にする:
  *      identity 不一致なら触らない / identity 一致かつ内容が自分 (or corrupt) なら外す /
- *      identity 一致だが**内容が読めない** (EACCES / EISDIR) なら **identity を信じて外す**。
+ *      identity 一致だが**内容が読めない**うえ、その失敗が「自分の lock が読めなくなった」を
+ *      記述しうる errno (`EACCES` / `EPERM`) なら **identity を信じて外す**。
+ *      `EISDIR` はここに含めない (自 lock は通常ファイルゆえディレクトリは自 lock を記述しえない・
+ *      SEC-FLV2-R2-1)。それ以外の読取り失敗も含めて**触らない**。
  *      最後の枝が SEC-FL-1 の恒久 wedge の回復経路 — `statSync` は読み権限を要さないため、
  *      自分が保持中に lock が読めなくなっても解放できる (取得側は従来どおり読めない lock を
  *      奪取せず即 fail-loud のまま = 他人の lock を盲目的に奪わない)。
@@ -495,8 +498,11 @@ function detachOwnLockForRelease(
  *
  * 1. `(dev, ino)` で自 lock か判定する (**読み権限不要**)。他者の inode なら何もしない。
  *    identity が一致した上で内容が読めて別 pid なら「第三者が自分の inode を書き換えた」
- *    とみなし触らない (既存軸の保存)。内容が読めない (EACCES / EISDIR) なら identity を信じて外す
+ *    とみなし触らない (既存軸の保存)。内容が読めず、その失敗が「自分の lock が読めなくなった」を
+ *    記述しうる errno ({@link IDENTITY_ONLY_READ_ERRNOS} = `EACCES` / `EPERM`) なら identity を信じて外す
  *    (= 保持中に読めなくなった自 lock の回復経路。旧実装はここで rethrow して恒久 wedge した)。
+ *    `EISDIR` やそれ以外の読取り失敗は自 lock を記述しえない / 所有権を語らないので触らない
+ *    (SEC-FLV2-R2-1 / SEC-FLV2-1)。
  * 2. `renameSync` で原子的に取り外し、`(dev, ino)` を再検証してから unlink する
  *    (旧実装の read → 判定 → unlink は非原子で、その窓に他者が差し替えると他者の lock を消した)。
  * 3. 取り外したものが自分のでなければ復元する。復元できなければ **fail-loud**。

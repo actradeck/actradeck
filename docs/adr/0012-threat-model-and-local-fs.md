@@ -42,11 +42,12 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
   became unreadable while it held it.
 
   Release does still read when it can, and the errno decides what an unreadable lock means to
-  it. A **permission-class** failure (`EACCES`, `EPERM`, `EISDIR`) describes a lock this
-  process can no longer read, so the `(dev, ino)` match is allowed to settle ownership on its
-  own — that is the recovery path. Any **other** failure (`EMFILE`, `ENFILE`, `EIO`, …) is
-  transient and says nothing about who owns the file, so release declines to touch it rather
-  than trusting identity alone; without that distinction, running out of file descriptors
+  it. Only a failure that can actually describe **our own lock, which we can no longer read** —
+  `EACCES` or `EPERM` — lets the `(dev, ino)` match settle ownership on its own; that is the
+  recovery path. Everything else declines. `EISDIR` is not in the class: a lock is a regular
+  file put in place with `link`, so a directory on the lock path cannot be the lock this
+  process took. And a transient failure (`EMFILE`, `ENFILE`, `EIO`, …) says nothing about who
+  owns the file, so release declines to touch it rather than trusting identity alone; without that distinction, running out of file descriptors
   would be enough to delete a third party's live lock that happens to sit on the same recycled
   inode number. A lock file that is unreadable _and_ not the inode this process linked is left
   alone either way; one that cannot even be `stat`ed still needs the operator.
@@ -66,10 +67,11 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
      content is readable: a readable lock naming a different live pid is left alone, which is
      the axis that makes a recycled inode number harmless there. When the content cannot be
      read at all, the decision falls back to `(dev, ino)` **alone** — and that fallback is
-     restricted to a permission class (`EACCES`, `EPERM`, `EISDIR`), because those describe a
-     lock this process can no longer read rather than a lock it does not own. Any other read
-     failure (`EMFILE`, `ENFILE`, `EIO`, …) is transient and says nothing about ownership, so
-     release declines to touch the file at all. The residual that remains: a lock that is
+     restricted to `EACCES` and `EPERM`, the failures that can describe a lock this process
+     can no longer read rather than a lock it does not own. Every other read failure declines:
+     the transient ones (`EMFILE`, `ENFILE`, `EIO`, …) say nothing about ownership, and
+     `EISDIR` cannot describe our own lock at all, since a lock is a regular file put in place
+     with `link`. The residual that remains: a lock that is
      **unreadable for a permission reason _and_ happens to sit on the inode number this
      process linked** is deleted on release even if it is a third party's live lock. Producing
      it needs an out-of-band mode/owner change plus inode-number reuse, both inside the trust
@@ -81,16 +83,22 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
      content, a read failure outside the permission class, a failed `stat`, a `rename` that
      loses the race — simply returns. There is no throw, no counter and no log line. What the
      _next_ acquirer then does splits in two, and only one half is the benign story:
-     - If the content is readable, the leftover is treated as a stale remnant and taken over,
-       so the lock recovers on its own.
+     - If the content is readable **and** names a dead pid, or is corrupt, or names this
+       process, the leftover is a stale remnant: it is taken over and the lock recovers on its
+       own.
+     - If the content is readable but names **a live pid other than the acquirer's**, it is not
+       stale, so acquisition does not take it over. It backs off and then **throws** once
+       `maxRetries` is spent (measured). The lock stays until that pid exits, at which point
+       the previous case applies. This is the ordinary contended path, not a fault, but it is
+       not "recovers on its own" either.
      - If the content stays unreadable for a reason outside the permission class, acquisition
-       **rethrows** — it refuses to take over a lock whose identity it cannot re-verify — so
-       the file wedges the lock until an operator removes it, exactly as an `EACCES` lock did
-       before release learned to identify itself by `(dev, ino)`. A lock file large enough that
-       decoding it overflows the maximum string length (`ERR_STRING_TOO_LONG`, measured)
-       reaches this state and stays there. This is unchanged from before identity v2 — the
-       previous code rethrew the same failures on acquisition — so it is a carried-over
-       residual rather than something this work introduced.
+       **rethrows immediately** — it refuses to take over a lock whose identity it cannot
+       re-verify — so the file wedges the lock until an operator removes it, exactly as an
+       `EACCES` lock did before release learned to identify itself by `(dev, ino)`. A lock file
+       large enough that decoding it overflows the maximum string length
+       (`ERR_STRING_TOO_LONG`, measured) reaches this state and stays there. This is unchanged
+       from before identity v2 — the previous code rethrew the same failures on acquisition —
+       so it is a carried-over residual rather than something this work introduced.
      Only the restore-failure path below is loud.
   4. **The restore-failure abort is reachable under third-party contention**, not dead code.
      A concurrent acquirer can take the lock path between the `rename` that detaches it and

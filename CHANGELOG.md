@@ -163,13 +163,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   is the one that propagates. Every other release outcome is **silent** — an identity mismatch, a
   readable lock naming somebody else, a read failure outside the permission class, a failed `stat`
   or a lost `rename` all just return, with no throw, counter or log line. What the next acquirer
-  does with the leftover then splits in two. If its content is readable, it is treated as a stale
-  remnant and taken over, so the lock recovers by itself. If it stays unreadable for a reason
-  outside the permission class, acquisition **rethrows** rather than take over a lock it cannot
-  re-verify, so the file wedges the lock until an operator removes it — a lock large enough that
-  decoding it overflows the maximum string length (`ERR_STRING_TOO_LONG`, measured) lands there and
-  stays. That half is carried over rather than introduced here: the pre-identity code rethrew the
-  same failures on acquisition.
+  does with the leftover then splits three ways. If its content is readable and names a dead pid,
+  or is corrupt, or names the acquirer itself, it is a stale remnant: taken over, and the lock
+  recovers by itself. If the content is readable but names **a live pid other than the acquirer's**
+  it is not stale at all, so it is not taken over — the acquirer backs off and then throws once
+  `maxRetries` is spent (measured), and the lock stays put until that holder exits. If it stays
+  unreadable for a reason outside the permission class, acquisition **rethrows immediately** rather
+  than take over a lock it cannot re-verify, so the file wedges the lock until an operator removes
+  it — a lock large enough that decoding it overflows the maximum string length
+  (`ERR_STRING_TOO_LONG`, measured) lands there and stays. Only the first of the three recovers on
+  its own; the last is carried over rather than introduced here, since the pre-identity code
+  rethrew the same failures on acquisition.
 - **A lock that becomes unreadable while you hold it no longer wedges the approval allowlist.**
   Because release now identifies its own lock by `(dev, ino)` — which `stat` reports without read
   permission — a lock whose mode or ownership changes out from under a running daemon is still

@@ -885,9 +885,18 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す err
  * `rename` で退避名へ**黙って持ち去る** (`unlink` は EISDIR で失敗するので消えはしないが、
  * lockPath からは消える = silent eviction)。
  *
- * **fs 前提**: この再現は「解放された inode 番号を直後の `mkdir` が再利用する」ことに依存する
- * (ext4 で実測・iteration 0 で命中)。tmpfs (`/dev/shm`) は再利用しないため構成できず、その場合は
- * 前提が満たせなかったこととして skip する (偽 RED にしない)。
+ * **この it は前提が揃ったときだけ走る (SEC-FLV2-R3-4)**。再現は「解放された inode 番号を直後の
+ * `mkdir` が再利用する」ことに依存し、**再利用するかどうかは fs とアロケータの状態で変わる**:
+ * - 本 worktree の既定 `TMPDIR` (ext4 `/tmp`) では 30/30 で再利用され、この it は走った (実測)。
+ * - tmpfs (`TMPDIR=/dev/shm`) では再利用されず skip した (実測)。
+ * - 別環境の SEC probe は ext4 でも再利用を観測できず (0/30・0/1000)、常に skip したと報告している。
+ * よって **「この fs なら必ず再現する」とは書けない**。前提が揃わない環境では skip して偽 RED を
+ * 避ける (RED にすると再現できない環境で gate が壊れる)。
+ *
+ * **gate の主装置はこの it ではない**: errno クラスの歯は上の表駆動 test が持ち、
+ * 「EISDIR を集合へ戻す」変異はどの環境でもそこで KILLED になる。この it が固定するのは
+ * **呼び出し側の結線** (集合の内容ではなく、解放が実際にその判定を通ること) で、走ったときだけ
+ * 捕捉できる残余。決定的に踏ませる手段は task 01a05a63 へ委譲する。
  */
 describe("INV-FILELOCK-IDENTITY-V2: EISDIR は自 lock を記述しえない", () => {
   it("inode 番号を再利用した第三者のディレクトリを解放で持ち去らない", (ctx) => {

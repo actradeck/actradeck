@@ -235,7 +235,7 @@ describe("INV-FILELOCK-IDENTITY-V2: 奪取の同一性は (dev,ino) 粒度", () 
 
 /**
  * SEC-FLV2-1 (H): 解放側の「内容が読めないなら identity を信じる」枝は **permission クラス**
- * (`EACCES` / `EPERM` / `EISDIR`) の読取り不能に限る。
+ * (`EACCES` / `EPERM`) の読取り不能に限る。`EISDIR` は自 lock を記述しえないため R2-1 で除いた。
  *
  * 根因: この枝が **すべての** 読取り失敗を受けていると、fd 枯渇 (`EMFILE`) や I/O 障害のような
  * **一過性**の失敗でも content 軸 (= 内容が別 pid なら触らない) を捨てることになる。inode 番号は
