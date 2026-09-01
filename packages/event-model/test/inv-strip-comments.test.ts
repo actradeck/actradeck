@@ -5,12 +5,10 @@
  * 走査の view そのもので、緩めると全消費点の歯が同時に鈍る。よって pin は綴りでなく挙動に置く:
  *  (a) 被覆軸 (行頭 / 行末 / block / 文字列保存 / regex skip) を POSITIVE-NEGATIVE 対で固定。
  *  (b) 非被覆 (残余) も**実測値として**固定する — 「閉じた」と書かないための逐語の証拠。
- *  (c) corpus コントロール: git 管理下の走査集合 (`SCAN_SOURCE_EXTENSIONS` の 7 拡張子・
- *      2026-09-01 実測 620 file) について、TS パーサの leaf token 列が
- *      strip 前後で一致すること (落とし過ぎ = 実コード喪失 / 落とし残し = コメント混入 の
- *      **双方向**) を実走し、その判定器自身に既知陽性 **4 方向** (落とし残し / 実コード脱落 /
- *      parse 破壊 / token 混入) と既知陰性を流す。走査集合は正準の `SCAN_SOURCE_EXTENSIONS`
- *      (7 拡張子・2026-09-01 実測 620 file) を共有する。
+ *  (c) corpus コントロール: git 管理下の走査集合 (正準の `SCAN_SOURCE_EXTENSIONS`) 全体について
+ *      TS パーサ由来の truth と strip 出力を照合し、その判定器自身へ既知陽性と既知陰性を流す。
+ *      **軸の本数・内訳・走査集合の実測値・census は `test-strip-comments.ts` の docstring
+ *      (「corpus 実測」節) が単一出所** — ここへ複写しない (2 コピーが R5 でドリフトした)。
  *  (d) consolidation 不変条件: repo 全体で comment-strip の実装が 1 本しか無いこと。
  *  (e) 実行証跡: 各 it の**最後の文**で実走本数を加算し、トップレベル afterAll で照合する
  *      (describe 単体の skip も、it 先頭の早期 return も in-process で RED になる。

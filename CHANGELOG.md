@@ -54,13 +54,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   event model, beside the test database guard and for the same reason: four workspaces share it, and
   a helper under `apps/` could only be reached from a package by importing upwards.
   Trailing line comments are removed, along with the whitespace before them. Measuring that is only
-  meaningful with the derivation stated, so: counting the comment ranges the TypeScript parser
-  reports as single-line trivia that have non-whitespace before them on their own line, over every
-  path in `git ls-files` matching the scanner's exported extension set - seven extensions, 620 files
-  - gives, measured at commit 7014618, 2,248 such comments in 306 files, 56,166 characters that were
-  previously part of what a tripwire could see. Figures like this one move with the tree, so the
-  commit they were taken at is part of the number. The earlier figures in this entry covered four extensions and were re-derived
-  when the set was shared; the derivation is the number, not the other way round.
+  meaningful with the derivation stated, and figures like it move with the tree, so both the
+  derivation and the commit they were taken at live in one place: the census section of the
+  scanner's own doc comment. This entry deliberately does not copy the numbers, because the two
+  copies of the coverage counts that did exist had already drifted apart by the time anyone
+  compared them.
   Two ways of losing the scanner's place were root-caused rather than disclosed - which is a claim
   about the shapes that were measured, not about the class. The contents of a
   template interpolation are scanned as the code they are, nested templates included; without that,
@@ -97,12 +95,18 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   before and after, and over `.js`, `.mjs` and `.cjs` as well - the extension set the scan runs on is
   exported from the scanner now, because the corpus check and the single-source sweep had each
   written their own and both had left the JavaScript paths out. The first catches both directions;
-  the second catches lost code. Neither sees a
+  the second catches lost code. A third check runs before either: the corpus invariant now requires
+  every file in the scan set to parse as TypeScript or TSX _before_ it is stripped, and fails closed
+  when one does not, because a parser that cannot read the original produces a truth the other two
+  comparisons would satisfy vacuously. For `.js`, `.mjs` and `.cjs` this is the only parse gate in
+  the repository, so a fixture that is meant not to parse belongs under an extension the scan does
+  not cover, or outside version control. A file that cannot be _read_ is still skipped silently.
+  Neither of the first two checks sees a
   line comment that survives intact, because it is read as a comment again - that limit is stated
   where the scanner is defined. The suite also counts its own executed cases and refuses to pass if
   a group was skipped, and CI asserts the same from the outside.
   What is still not handled is pinned as behaviour, with its direction: leaving a comment in place
-  is the strict side for a scan that forbids a token and the *lax* side for one that requires it, so
+  is the strict side for a scan that forbids a token and the _lax_ side for one that requires it, so
   neither is described as safe. A regular expression in a position the heuristic declines to treat
   as one, a verbatim copy written as a string literal, and the single-source sweep's dependence on
   the identifier it looks for are each measured and disclosed.
@@ -125,7 +129,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   (measured last round: a group-wrapped quadratic gap with a carriage-return-prefixed sample passed
   the coupling, the gate, and every ratio check).
   The extractor is not made cleverer - that would be a denylist chasing spellings. Instead the test
-  now requires, for every scanned expression, that the *positions* of the unescaped `[` in its
+  now requires, for every scanned expression, that the _positions_ of the unescaped `[` in its
   source match the positions where the extractor started its matches. Counting alone was not
   enough: a review found that appending a semantically inert `(?:\[\s\S]*)?` - whose `[` is
   escaped, so it is not counted as a class opener, while the extractor still reads a class out of
@@ -150,7 +154,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   against it on seven vectors - and all three pass every gate. Uniting the gate's two axes does not
   help; what the union uniquely buys is a rule whose coupling check was bypassed by an exemption.
   Separately, the scan lines themselves are unobserved. Single-sourcing the two verdicts protects
-  what each verdict *says*, not that the loop still consults it: substituting an empty verdict,
+  what each verdict _says_, not that the loop still consults it: substituting an empty verdict,
   making the scan vacuously true, or returning early from the top of the structural gate's loop all
   pass silently, on this branch and on main alike. Fixing that means changing what the metatest
   scans for a fourth time in one branch, so it is tracked as follow-up work rather than done here.
@@ -526,7 +530,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   green, and now fails. Every pin pattern is additionally checked against a view of the file with
   the pin block cut out, which fails a pattern that has no target outside the pin block.
   Six pins that tolerate a prettier wrap are bounded to a single statement (`[^;]*?`): the earlier
-  unbounded form let a pin head reach the tail of a *different* assertion 8,451 and 14,474
+  unbounded form let a pin head reach the tail of a _different_ assertion 8,451 and 14,474
   characters away, so making the target line vacuous left the pin green. Each of the six now
   carries the weakening that must kill it, and the metatest builds the mutated source in memory and
   asserts the pattern stops matching; every pin must also match within 400 characters, two orders
@@ -546,7 +550,7 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   measured, each with its pin updated in step so the spelling checks stayed green: collapsing
   `bestOfMs`, pushing a constant duration, constant-folding `minOf`, capping `fill`, shrinking the
   `isLive` probe, shrinking the scale factor from 8 to 2, and raising the ratio threshold from 24
-  to 100. Six of them fail on a control on their own. The seventh is only *uniquely* a control's
+  to 100. Six of them fail on a control on their own. The seventh is only _uniquely_ a control's
   catch
   when both ratio bounds are raised together (24 to 100 and 40 to 200); raising the lower bound
   alone is already caught by the pre-existing assertion that the upper bound exceeds the lower one,

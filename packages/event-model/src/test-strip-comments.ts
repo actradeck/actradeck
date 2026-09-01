@@ -62,7 +62,8 @@
  * **この判断の実測されたコスト (SEC-CSX-R2-1)**: 誤判定された span 自体は逐語で出力されるので
  * *その span 内の*コードは失われないが、実害は span **の外**に出た — `const ms = (a ?? 0) / 1000;`
  * のような除算で、走査が終端候補を探して同一行のコメント開始まで歩き、続くコメント本文を
- * code として view に残していた (repo 620 ファイル / 147,697 probe の marker oracle で **15 site**)。
+ * code として view に残していた (**commit de5250c の tree** で測った 620 ファイル / 147,697 probe の
+ * marker oracle で **15 site**。数値はその tree に bound された実測で、現行 tree の値は下の census 節)。
  * fail-closed guard (終端候補の直後が `//` / `/*`) でこの 2 形を拒否し 15 → 0 にしたが、これは
  * **実測した 2 形についての主張**であって「このクラスを閉じた」という全称ではない。
  * regex は LineTerminator を跨げないため、同一行内で閉じ `/` が見つからなければ regex とみなさない。
@@ -96,6 +97,9 @@
  * - JSX text 中の `//` 以降を落とす (base 実装と同値の pre-existing・SEC-CSX-7)。**この形を新たに
  *   ソースへ導入すると corpus コントロールが RED になる** (現行 620 file には存在しない)。
  * - shebang 行の末尾に行コメントを付けた形は TS の trivia 判定と食い違う (marker 注入でのみ観測)。
+ *   これは**パーサの error recovery に依存した挙動ではない**: 本 INV の truth は TS の
+ *   **字句解釈そのもの** (列挙されたコメント範囲と leaf token 列) で、本行はその truth からの
+ *   逐語の乖離を残余として開示しているだけ (QA-CSX-R5-4 の文言訂正)。
  * - 文字列リテラルとして書かれた逐語コピー (`const s = "export function foo()"`) は落とさない
  *   (コメントではないため — lexical 走査の構造的天井であり本 helper の穴ではない)。
  * - `INV-STRIP-COMMENTS-SINGLE-SOURCE` の検出器は識別子 `stripComments` の綴りに束縛されている。
@@ -103,16 +107,35 @@
  *   構造 (mode machine / コメント除去 regex 対) の軸へ広げるのは追跡 task。
  *
  * ## corpus 実測 (導出を明記する・TDA-CSX-6)
+ * **本節が走査集合・軸の本数・census の単一出所**。テスト側ヘッダはここを参照するだけで複写しない
+ * (R5 で 2 コピーが「既知陽性 4 方向」のままドリフトしていた・QA-CSX-R5-1 = TDA-CSX-R5-2)。
  * `inv-strip-comments.test.ts` の corpus ケースが CI で機械化する: 走査集合は **`git ls-files` を
  * `SCAN_SOURCE_EXTENSIONS` (7 拡張子: `.ts` / `.tsx` / `.mts` / `.cts` / `.js` / `.mjs` / `.cjs`) で
- * 絞ったもの** — 2026-09-01 実測で **620 file** (repo 全体・4 workspace + `db/` + `scripts/` +
- * リポジトリ直下)。各ファイルについて
+ * 絞ったもの** (repo 全体・4 workspace + `db/` + `scripts/` + リポジトリ直下)。ファイル数は
+ * tree ごとに動くので、実測値は下の census 節が測定 tree つきで持つ。各ファイルについて
  *   (1) TS パーサが列挙した**コメント範囲だけ**を除いたテキストと strip 出力が空白無視で一致するか
  *       (落とし過ぎ / 落とし残しの双方向)
  *   (2) leaf token 列が strip 前後で一致するか (実コード喪失)
- * を照合し、判定器自身へ既知陽性 4 方向 + 既知陰性を流す。
+ *   (3) **strip の前に**原本が parse できるか (`unparseable_before_strip`)。できないなら (1)(2) の
+ *       truth 自体が信用できず比較が vacuous に成立するので、**fail-closed で findings に積む**。
+ * を照合し、判定器自身へ既知陽性 **5 方向** (落とし残し / 実コード脱落 / parse 破壊 / token 混入 /
+ * strip 前 parse 不能) + 既知陰性を流す。
  * **正直な限界**: 落とし残した行コメントは strip 出力を再 parse したときもコメントとして読まれるので
  * (2) では見えない — MISS 方向を担うのは (1)。
+ * **(3) の偽 RED 面 (開示)**: `.js` / `.mjs` / `.cjs` は tsc の型検査対象ではないので、これらについて
+ *   本 INV が repo 内で**唯一の parse ゲート**になる。意図的に parse 不能な fixture を置きたい場合は
+ *   **走査拡張子を避ける** (例: `.txt` / `.fixture`) か **untracked に置く**こと。tracked かつ走査
+ *   拡張子だと (3) が RED になる。
+ * **fs 読取り失敗は fail-open のまま (開示)**: corpus ループの `catch { continue; }` は
+ *   `readFileSync` が失敗したファイルを**黙って飛ばす**。fail-closed にしたのは「読めたが parse
+ *   できない」方だけで、「読めない」方ではない (commit subject の "unreadable" は実装上
+ *   "unparseable" を指す — 語が実装より広い)。
+ *
+ * ## 走査集合の census (測定 tree を明記する)
+ * 末尾行コメントの除去量は導出を書かないと意味を持たないので明記する: TS パーサが列挙した
+ * SingleLineCommentTrivia のうち**その行で最初の非空白でない**もの (= 末尾コメント) を数えると、
+ * 実測値は**測定 tree (commit hash) とともに**本節に記す。いずれも走査集合が変われば動く値で、
+ * **測定した tree を離れては意味を持たない** — CHANGELOG は数値を複写せず本節を参照する。
  *
  * tripwire 用途 (逐語コピー・改名の検出) には十分で、**証明ではない**。
  */
