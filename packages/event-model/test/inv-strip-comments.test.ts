@@ -7,10 +7,13 @@
  *  (b) 非被覆 (残余) も**実測値として**固定する — 「閉じた」と書かないための逐語の証拠。
  *  (c) corpus コントロール: git 管理下の全 TS ソースについて、TS パーサの leaf token 列が
  *      strip 前後で一致すること (落とし過ぎ = 実コード喪失 / 落とし残し = コメント混入 の
- *      **双方向**) を実走し、その判定器自身に既知陽性 3 方向と既知陰性を流す。
+ *      **双方向**) を実走し、その判定器自身に既知陽性 **4 方向** (落とし残し / 実コード脱落 /
+ *      parse 破壊 / token 混入) と既知陰性を流す。走査集合は正準の `SCAN_SOURCE_EXTENSIONS`
+ *      (7 拡張子・2026-09-01 実測 620 file) を共有する。
  *  (d) consolidation 不変条件: repo 全体で comment-strip の実装が 1 本しか無いこと。
- *  (e) 実行証跡: 各 describe の実走本数を afterEach で数え、トップレベル afterAll で照合する
- *      (describe 単体の skip を in-process で RED にする)。CI 側は assert-inv-ran が受ける。
+ *  (e) 実行証跡: 各 it の**最後の文**で実走本数を加算し、トップレベル afterAll で照合する
+ *      (describe 単体の skip も、it 先頭の早期 return も in-process で RED になる。
+ *      `afterEach` 方式は早期 return でも発火するので使わない)。CI 側は assert-inv-ran が受ける。
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -41,9 +44,9 @@ const RAN = { axes: 0, literals: 0, regex: 0, residuals: 0, corpus: 0, singleSou
 /** 実走本数の literal pin。it を消す / skip する / 早期 return させるとここで RED。 */
 const EXPECTED_RUNS = {
   axes: 11, // axes describe の it 本数
-  literals: 4, // literals describe の it 本数
-  regex: 21, // regex describe の it 本数
-  residuals: 5, // residuals describe の it 本数
+  literals: 9, // literals describe の it 本数
+  regex: 28, // regex describe の it 本数
+  residuals: 8, // residuals describe の it 本数
   corpus: 2, // corpus describe の it 本数
   singleSource: 2, // singleSource describe の it 本数
 } as const;
@@ -167,6 +170,52 @@ describe("INV-STRIP-COMMENTS-LITERALS: 文字列 / テンプレートの中は�
     expect(out).not.toContain("dropMe"); // NEGATIVE 対
     RAN.literals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
   });
+
+  // TDA-CSX-R3-1 ≡ QA-CSX-R3-1 ≡ SEC-CSX-R3-2: ES2019 (proposal "JSON superset") 以降、
+  //   U+2028 / U+2029 は**文字列リテラル内に生で書ける**。行コメント終端と regex の行境界では
+  //   LineTerminator として扱いつつ、単引用 / 二重引用の resync だけは LF / CR に限定しないと、
+  //   文字列の途中で code mode へ戻り、閉じ引用符が新しい文字列を開いて後続の行コメントを飲む。
+  it("単引用文字列内の生 U+2028 で resync しない (後続の行コメントは落ちる)", () => {
+    const out = stripComments("const s = 'a\u2028b'; // dropAfterSqLs\n");
+    expect(out).not.toContain("dropAfterSqLs"); // NEGATIVE
+    expect(out).toContain("'a\u2028b'"); // POSITIVE 対 (文字列は逐語で残る)
+    RAN.literals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  it("二重引用文字列内の生 U+2028 で resync しない", () => {
+    const out = stripComments('const s = "a\u2028b"; // dropAfterDqLs\n');
+    expect(out).not.toContain("dropAfterDqLs"); // NEGATIVE
+    expect(out).toContain('"a\u2028b"'); // POSITIVE 対
+    RAN.literals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  it("単引用文字列内の生 U+2029 で resync しない", () => {
+    const out = stripComments("const s = 'a\u2029b'; // dropAfterSqPs\n");
+    expect(out).not.toContain("dropAfterSqPs"); // NEGATIVE
+    expect(out).toContain("'a\u2029b'"); // POSITIVE 対
+    RAN.literals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  it("二重引用文字列内の生 U+2029 で resync しない", () => {
+    const out = stripComments('const s = "a\u2029b"; // dropAfterDqPs\n');
+    expect(out).not.toContain("dropAfterDqPs"); // NEGATIVE
+    expect(out).toContain('"a\u2029b"'); // POSITIVE 対
+    RAN.literals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  it("生の LF / CR は依然 resync する (分離が過剰でないことの対照)", () => {
+    // 単引用 / 二重引用は生の LF / CR を含めない (構文エラー) ので、そこに達したら
+    //   「skip されなかった regex 内の quote 等で誤って開いた」と判定してよい。
+    const lf = stripComments(
+      "const v = x /['\"]/.test(s);\nconst b = 2; // droppedAfterLfResync\n",
+    );
+    expect(lf).not.toContain("droppedAfterLfResync"); // NEGATIVE
+    const cr = stripComments(
+      "const v = x /['\"]/.test(s);\rconst b = 2; // droppedAfterCrResync\n",
+    );
+    expect(cr).not.toContain("droppedAfterCrResync"); // NEGATIVE 対
+    RAN.literals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
 });
 
 describe("INV-STRIP-COMMENTS-REGEX: regex リテラルで走査が desync しない", () => {
@@ -254,6 +303,9 @@ describe("INV-STRIP-COMMENTS-REGEX: regex リテラルで走査が desync しな
     RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
   });
 
+  // 注: この vector と直下の `=>` 版は quote を含まない regex なので、当該位置を
+  //   REGEX_PRECEDERS から外しても出力は変わらない (軸としては非 load-bearing)。
+  //   軸そのものの load-bearing 性は下の「軸は load-bearing」群が担う (QA-CSX-R3-4)。
   it("`)` 直後の regex を skip する (行末コメントが落ちる)", () => {
     const out = stripComments("if (x) /[a-z]/.test(s); // dropAfterParenRegex\n");
     expect(out).not.toContain("dropAfterParenRegex"); // NEGATIVE
@@ -344,6 +396,73 @@ describe("INV-STRIP-COMMENTS-REGEX: regex リテラルで走査が desync しな
     expect(out).not.toContain("dropMe"); // NEGATIVE 対 (次の行コメントは落ちる)
     RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
   });
+
+  // QA-CSX-R3-3 (S1・:135): preceder 追跡は LineTerminator を「意味のある文字」に数えない。
+  //   数えてしまうと、次の行頭に置かれた regex が declined になり (直前が改行)、その中の
+  //   backtick がテンプレートを開いて後続のコメントを飲む。
+  it("行を跨いだ preceder の直後の regex も skip される (改行は意味のある文字に数えない)", () => {
+    const src = "const re =\n  /[" + BACKTICK + "]/;\nconst keep = 1; // dropAfterWrappedRegex\n";
+    const out = stripComments(src);
+    expect(out).not.toContain("dropAfterWrappedRegex"); // NEGATIVE
+    expect(out).toContain("/[" + BACKTICK + "]/;"); // POSITIVE 対 (regex は逐語で残る)
+    RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  // QA-CSX-R3-3 (S4・:381): regex 走査の行境界。既存の it (`const a = [ / ];` 形) は
+  //   fail-closed guard (終端候補の直後が `//` / `*`) に吸収されて空虚だったので、**guard が
+  //   発火しない**形 — 終端が普通の除算スラッシュ — を追加する。既存 it は削除していない。
+  //   ここで pin するのは現挙動 (stray backtick がテンプレートを開いて落ち残る) であり、
+  //   走査が行を跨ぐと **span に飲まれてコメントが落ちる = この pin が RED になる**。
+  it("regex 走査は LF を跨がない (跨ぐと stray backtick が span へ飲まれ挙動が変わる)", () => {
+    const src = "const v = x = /a" + BACKTICK + "b;\nconst c = 1 / 2; // keptByStrayTplLf\n";
+    const out = stripComments(src);
+    expect(out).toContain("keptByStrayTplLf"); // 現挙動の pin (落ち残り = 既知残余)
+    expect(out).toContain("const c = 1 / 2;"); // POSITIVE 対 (実コードは消えない)
+    RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  it("regex 走査は U+2028 も跨がない (LineTerminator 全体で境界を取る)", () => {
+    const src = "const v = x = /a" + BACKTICK + "b;\u2028const c = 1 / 2; // keptByStrayTplLs\n";
+    const out = stripComments(src);
+    expect(out).toContain("keptByStrayTplLs"); // 現挙動の pin
+    expect(out).toContain("const c = 1 / 2;"); // POSITIVE 対
+    RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  // QA-CSX-R3-4 ≡ SEC-CSX-R2-5 + TDA-CSX-R3-2: R2/R3 で足した軸 vector は quote を含まない
+  //   regex だったため、その位置を `REGEX_PRECEDERS` から外しても出力が変わらなかった
+  //   (非 load-bearing)。**quote を含む regex** にすると、skip されない場合に単引用が開いて
+  //   同一行のコメントが落ち残るので、軸そのものが出力に効く。既存 vector は削除していない。
+  it("`]` 軸は load-bearing (外すと同一行のコメントが落ち残る形)", () => {
+    const out = stripComments("const ok = arr[i] /['\"]/.test(s); // dropAfterBracketRegexQuote\n");
+    expect(out).not.toContain("dropAfterBracketRegexQuote"); // NEGATIVE
+    expect(out).toContain("arr[i] /['\"]/.test(s);"); // POSITIVE 対
+    RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  it("`)` 軸は load-bearing (同上)", () => {
+    const out = stripComments("if (x) /['\"]/.test(s); // dropAfterParenRegexQuote\n");
+    expect(out).not.toContain("dropAfterParenRegexQuote"); // NEGATIVE
+    expect(out).toContain("if (x) /['\"]/.test(s);"); // POSITIVE 対
+    RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  it("`=>` 軸は load-bearing (同上)", () => {
+    const out = stripComments("const f2 = (x) => /['\"]/.test(x); // dropAfterArrowRegexQuote\n");
+    expect(out).not.toContain("dropAfterArrowRegexQuote"); // NEGATIVE
+    expect(out).toContain("=> /['\"]/.test(x);"); // POSITIVE 対
+    RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  it("過剰拒否でない対照も load-bearing (regex skip を止めると出力が変わる形)", () => {
+    // R3 の対照 vector は quote を含まない regex だったので skip の有無で出力が変わらなかった。
+    const out = stripComments(
+      "const re2 = /a['\"]b/; /* dropAfterRealRegexQuote */\nconst keepRR = 1;\n",
+    );
+    expect(out).not.toContain("dropAfterRealRegexQuote"); // NEGATIVE
+    expect(out).toContain("/a['\"]b/;"); // POSITIVE 対 (regex は逐語で残る)
+    RAN.regex++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -360,8 +479,9 @@ describe("INV-STRIP-COMMENTS-RESIDUALS: 落とさない形を実測で固定す�
   it("残る declined 位置 (識別子 / `}` / 非 arrow の `>` 直後) の regex は skip されない", () => {
     // 有効な JS では識別子 / `}` / `>` の直後の `/` は除算であり、JSX の `{...p} />` とも
     // 衝突するため regex 位置に入れていない。ここに quote / backtick を含む regex を書くと
-    // string / template mode を誤って開く。単引用 / 二重引用は改行で resync するので影響は
-    // その行に閉じるが、backtick は resync しない。**方向は consumer 依存**: negative assert
+    // string / template mode を誤って開く。単引用 / 二重引用は **LF / CR** で resync するので
+    // 影響はその行に閉じる (U+2028 / U+2029 では resync しない — ES2019 以降文字列内に生で
+    // 書けるため)。backtick は resync しない。**方向は consumer 依存**: negative assert
     // (not.toContain) には厳しい側、presence pin (toContain) には**緩い側**に倒れる。
     const src =
       "const v = x /['\"]/.test(s); // residualSameLine\nconst b = 2; // droppedNextLine\n";
@@ -396,6 +516,39 @@ describe("INV-STRIP-COMMENTS-RESIDUALS: 落とさない形を実測で固定す�
     const src = "const v = x /['\"]/.test(s);\nconst b = 2; // droppedNextLineReal\n";
     const out = stripComments(src);
     expect(out).not.toContain("droppedNextLineReal"); // POSITIVE 対 (resync 後なので落ちる)
+    RAN.residuals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  // SEC-CSX-R3-1 (quote carrier): accepted 位置の除算と同一行に開き引用符があると、
+  //   走査が終端を探して引用符を跨ぎ、その行のコメントが落ち残る。是正は追跡 task
+  //   (01a05d34-e82b・v0.10)。ここでは**現挙動を既知残余として固定**する — 変わったら気付く。
+  it("accepted 位置の除算 + 同一行の開き引用符はその行のコメントを落とし残す", () => {
+    const src =
+      "const n = (a) / 2; const s = 'x; // quoteCarrierNote\nconst after = 1; // afterQuoteCarrier\n";
+    const out = stripComments(src);
+    expect(out).toContain("quoteCarrierNote"); // 現挙動の pin (同一行は落ち残る)
+    expect(out).not.toContain("afterQuoteCarrier"); // POSITIVE 対 (次行は resync 後なので落ちる)
+    RAN.residuals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  // QA-CSX-R3-2: 終端候補の直後が `*` の形を fail-closed で拒否した結果、**本物の**
+  //   `/a/*2` (regex 乗算) も regex として skip されなくなり、その後の行のコメントが落ち残る。
+  //   guard を外すと R2 の H が戻るので、これは意図した交換であり既知残余として固定する。
+  it("`/re/*` (regex 乗算) は skip されず、後続行のコメントが落ち残る", () => {
+    const out = stripComments("const y = /a/*2;\nconst keepRS = 1; // regexStarNote\n");
+    expect(out).toContain("regexStarNote"); // 現挙動の pin
+    expect(out).toContain("const keepRS = 1;"); // POSITIVE 対 (実コードは消えない)
+    RAN.residuals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
+  });
+
+  // QA-CSX-R2-5: flag 無し regex の直後に空白なしで行コメントが続く `/abc/// note` は、
+  //   guard が regex を拒否した結果 regex の閉じ `/` まで行コメントに飲まれる (実コード脱落)。
+  //   corpus コントロールがこの形の**導入**を RED にするので、既知残余として固定する。
+  it("`/abc/// note` は regex の閉じスラッシュまで行コメントに飲まれる (実コード脱落)", () => {
+    const out = stripComments("const r = /abc/// slashSlashNote\nconst keepSL = 1;\n");
+    expect(out).not.toContain("slashSlashNote"); // コメントは落ちる
+    expect(out).toContain("const r = /abc"); // 現挙動の pin: 閉じ `/` が失われる
+    expect(out).not.toContain("/abc/"); // NEGATIVE 対 (脱落を逐語で固定)
     RAN.residuals++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
   });
 });
@@ -527,6 +680,13 @@ const REQUIRED_SCAN_MEMBERS = [
   // SEC-CSX-R2-3: JavaScript 経路の代表。これが無いと、拡張子集合を `.ts` 系へ狭める編集が
   //   両方の走査 (corpus / sweep) から js/mjs/cjs を落としても緑のまま通る。
   "scripts/ci/assert-inv-ran.mjs",
+  // TDA-CSX-R3-3 + QA-CSX-R2-7: 拡張子ごと / ルートごとの実在 member。`.mjs` だけだと
+  //   `.js` / `.cjs` を落とす縮小や、`db/` ・リポジトリ直下を走査集合から外す縮小が
+  //   緑のまま通る (member はすべて apps/ packages/ scripts/ 配下だった)。
+  "docs/examples/opencode-adapter/adapter.js",
+  ".pnpmfile.cjs",
+  "db/migrations/1717459200000_init-event-store.ts",
+  "vitest.config.ts",
 ] as const;
 
 // SEC-CSX-R2-3: 走査集合の拡張子は正準 (`SCAN_SOURCE_EXTENSIONS` / `isScannedSourcePath`) を
@@ -602,6 +762,8 @@ describe("INV-STRIP-COMMENTS-CORPUS: repo 全体で実コードもコメント�
         const findings = analyze(src, rel, stripComments);
         if (findings.length > 0) offenders.push(`${rel}: ${findings.join(",")}`);
       }
+      // 開示: JSX text 中の `//` 以降を落とす残余 (SEC-CSX-7) は base 同値の pre-existing だが、
+      //   その形を**新たにソースへ導入すると**この assertion が RED になる (現行 620 file には無い)。
       expect(offenders, "strip はコメントだけを過不足なく落とす").toEqual([]);
       RAN.corpus++; // 実行証跡は **計測 callback 末尾**で加算する (早期 return を RED にする)
     },
@@ -651,9 +813,10 @@ describe("INV-STRIP-COMMENTS-SINGLE-SOURCE: 未移行コピーが repo に残っ
 // ---------------------------------------------------------------------------
 // (e) 実行証跡 (QA-CSX-2 / TDA-CSX-4): describe 単体 skip を in-process で RED にする
 // ---------------------------------------------------------------------------
-// registration-time の件数 pin は `describe.skip` / 早期 return で緑のまま通る。各 describe の
-// `afterEach` で実行本数を数え、**トップレベルの** afterAll で literal と照合する
-// (skip された describe の hook は登録されないので、その group の数が 0 のまま残り RED になる)。
+// registration-time の件数 pin は `describe.skip` / 早期 return で緑のまま通る。各 it の
+// **最後の文**で実行本数を加算し、**トップレベルの** afterAll で literal と照合する
+// (skip された describe の it は加算に到達せず、it 先頭の早期 return も同様に到達しない。
+//  `afterEach` は早期 return でも発火するため、QA-CSX-R2-2 ≡ TDA-CSX-R2-3 で置き換えた)。
 // ファイル丸ごとの skip はこの afterAll も走らないため、CI 側 `assert-inv-ran --suite strip-comments`
 // が第 2 層として受ける (PR #55 の sidecar-linear と同形の二段)。
 afterAll(() => {
