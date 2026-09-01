@@ -232,10 +232,13 @@ describe("INV-STRIP-COMMENTS-REGEX: regex リテラルで走査が desync しな
   //   regex 開始位置に見えるため終端 `/` が新しい regex の開始と誤認され、直後の `//` の片方を
   //   飲んで行末コメントが view に残っていた。
   it("regex の終端候補直後が `/` の形は regex と認めない (行末コメントを飲まない)", () => {
-    const src = "xs.filter((t) => /^a\\.[^=\\s]+=!/i.test(t)); // dropAfterBangRegex\n";
+    // arrow 位置は skip 側なので、ここは **識別子直後** の declined 位置で組む。終端直前の `!` が
+    // regex 開始位置に見えるため、guard が無いと終端 `/` が新しい regex の開始と誤認され、
+    // 直後の `//` の片方を飲んで行末コメントが view に残る。
+    const src = "const v = x /^a\\.[^=\\s]+=!/i.test(t); // dropAfterBangRegex\n";
     const out = stripComments(src);
     expect(out).not.toContain("dropAfterBangRegex"); // NEGATIVE
-    expect(out).toContain("xs.filter"); // POSITIVE 対
+    expect(out).toContain("const v = x /^a"); // POSITIVE 対
   });
 
   it("`)` 直後の regex を skip する (行末コメントが落ちる)", () => {
