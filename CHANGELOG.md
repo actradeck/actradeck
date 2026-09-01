@@ -199,6 +199,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   between the `open` and the `stat`); the **`dev`** half of the identity pair, which only matters
   once a lock path can move between filesystems; and taking the held identity from the **temp file**
   rather than from the lock path after the link (closing a swap between the `link` and the `stat`).
+  A fourth is unreachable rather than merely unobserved: the release-side errno gate refuses to
+  trust a read failure that carries no `errno`, and every failure that path can raise carries one.
   They are recorded here so nobody mistakes them for behaviour a test is holding in place.
 - **The daily public-metrics snapshot lands on a dedicated `metrics` branch instead of `main`.**
   The `main` ruleset requires a pull request and the `verify` check, so every scheduled run from

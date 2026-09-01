@@ -117,8 +117,11 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
      path, which closes a swap between the `open` and the `stat`; (b) the **`dev`** half of the
      identity pair, which only matters when a lock path can move across filesystems; and
      (c) taking the held identity from the **temp file** rather than from the lock path after
-     the link, which closes a swap between the `link` and the `stat`. Reverting any of them
-     leaves the suite green.
+     the link, which closes a swap between the `link` and the `stat`. A fourth is unreachable
+     rather than merely unobserved: the release-side errno gate treats a read failure carrying
+     **no** `errno` as untrustworthy, but every failure `readLockHolder` can raise comes from
+     `open`/`fstat`/`read`/`close` and carries one. Reverting any of the four leaves the suite
+     green.
 
 - **At-rest secrecy.** Secret/token-bearing state files are written **`0600`** via a
   single shared atomic helper — `writeJson0600` (temp-write → `rename`) — so all

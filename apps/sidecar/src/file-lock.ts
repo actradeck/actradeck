@@ -274,7 +274,14 @@ function identityOf(path: string): LockIdentity | undefined {
  */
 const IDENTITY_ONLY_READ_ERRNOS: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EISDIR"]);
 
-/** {@link IDENTITY_ONLY_READ_ERRNOS} に属する errno か (未知・欠落は false = 触らない側)。 */
+/**
+ * {@link IDENTITY_ONLY_READ_ERRNOS} に属する errno か。
+ *
+ * `code` が欠落した失敗は「識別できない」= **触らない側**へ倒す。ただしこの枝は
+ * **到達しない防御** であって pin されていない: `readLockHolder` が投げるのは
+ * `openSync` / `fstatSync` / `readFileSync` / `closeSync` の fs エラーだけで、いずれも `code` を持つ。
+ * `undefined` を許容側へ反転させても落ちるテストは無い (実測 SURVIVED)。
+ */
 function isIdentityOnlyReadErrno(code: string | undefined): boolean {
   return code !== undefined && IDENTITY_ONLY_READ_ERRNOS.has(code);
 }
