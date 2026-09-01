@@ -49,9 +49,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   enough: a review found that appending a semantically inert `(?:\[\s\S]*)?` - whose `[` is
   escaped, so it is not counted as a class opener, while the extractor still reads a class out of
   the same text - balanced the totals and walked a group-wrapped quadratic rule straight through.
-  Comparing positions rejects that. Seven spellings are measured as refused: the four above, the
+  Comparing positions rejects that. Eight spellings are measured as refused: the four above, the
   carriage-return-widened variant of the group-wrapped one (the widening was measured on that
-  spelling only), and two phantom-balanced forms. The seventeen expressions that ship today match
+  spelling only), and three phantom-balanced forms. (Seven was correct until the third phantom form
+  was added to discriminate the length half of the verdict's conjunction; the figure tracks the
+  number of fixture rows expecting refusal, and a later sweep will derive it rather than restate
+  it.) The seventeen expressions that ship today match
   position-for-position and an escaped `\[abc\]` matches as two empty sets, so nothing that ships
   today turns red. That is a list of what was measured, not a claim that no spelling escapes it.
   What none of the three gates reach is a rule that expresses the gap's accepted set in syntax

@@ -521,13 +521,14 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         これは「除外集合 ⊆ TAIL_METACHARS」を満たして coupling を素通りする (Z8 NBSP の実測と同型・
   //         NBSP 自体は導出に含まれる)。universe は依然**追加のみ**。
   //     (3') **結合検査と構造ゲートの適用範囲は依然 `QUANTIFIED_CLASS_RE` の抽出結果** (TDA-LN5-1)。ただし
-  //         **クラスを持つ綴りのうち、実測した 7 形については着地自体が塞がれた** (task 01a0574f-521a・
+  //         **クラスを持つ綴りのうち、実測した 8 形については着地自体が塞がれた** (task 01a0574f-521a・
   //         下の class census)。census は「escape されていない `[` の**位置集合** == 抽出 match の
   //         **位置集合**」を要求する (SEC-LSI-2 で本数一致から位置一致へ是正)。**実測で RED になる形**:
   //         群括り `(?:[^|;&\n])*` / capture `([^|;&\n])*` / クラス alternation `(?:[^|;&\n]|x)*` /
   //         未量化 `[abc]` / **群括りの CR 幅版** (CR 幅は群括り 1 形でのみ計測・他 3 形の CR 版は未計測) /
-  //         **末尾に inert な phantom `(?:\[\s\S]*)?` を足して
-  //         本数だけ帳尻を合わせた形** (SEC-LSI-2 の反証 vector — 本数一致版はこれを素通りした)。
+  //         **末尾に inert な phantom `(?:\[\s\S]*)?` を足して本数だけ帳尻を合わせた形 3 種**
+  //         (SEC-LSI-2 の反証 vector 2 形 — 本数一致版はこれを素通りした — と、R3 で足した
+  //         長さ連言の判別形 = 出荷形の量化クラスを残したまま phantom を継ぎ足す形)。
   //         現行 17 は位置集合が一致して緑・escape 済み `\[abc\]` も緑 = false RED 0 (実測)。
   //         **「未知の綴りをすべて塞いだ」とは言わない** — 塞げたのは上に列挙した実測形であって、
   //         census を回避する別の綴りが無いことの証明はしていない。
@@ -657,7 +658,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //   閾値寄りの弱い 2 乗を**追加**・強い方は削除しない):
   //     - 強 (`quadratic`・無界 gap): median **無負荷 54.8〜61.3 / 2×nproc 飽和 52.5〜187.3**。
   //     - 弱 (`quadratic-weak`・`{0,10000}` gap): median **無負荷 28.64〜30.96 (実装者 + QA 独立実測の
-  //       合算・単点の最低は 18.0) / 飽和 28.5〜87.22 (実装者 + QA 合算・上端は QA 実測)**。
+  //       合算・単点の最低は 18.0) / 飽和 28.3〜87.22 (実装者 + QA 合算・上端は QA 実測)**。
   //       閾値 24 への余裕は **1.18〜1.19×** (無負荷 28.64 基準 1.19× / 飽和の下限 28.3 基準 1.18×・
   //       飽和 20 run で false RED 0)。**陰性 control の余裕は別統計で見る** — 飽和の
   //       **median 上端 15.99 に対し `RATIO_MAX` 24 への余裕 1.50×**、**worst 上端 22.94 に対し
@@ -827,8 +828,9 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * **このうちクラスを持つ綴りは下の class census が着地自体を RED にする** (escape されていない `[` の
      * **位置集合**と抽出 match の**位置集合**の一致要求 = 床。SEC-LSI-2 で本数一致から位置一致へ是正 —
      * 本数一致では末尾の inert な phantom `(?:\[\s\S]*)?` で帳尻を合わせて素通りできた)。
-     * **実測で塞げたのは 7 形** (群括り / capture / クラス alternation / 未量化 / 群括りの CR 幅版 /
-     * phantom 2 形) であって、census を回避する綴りが他に無いことの証明ではない。
+     * **実測で塞げたのは 8 形** (群括り / capture / クラス alternation / 未量化 / 群括りの CR 幅版 /
+     * phantom 3 形) であって、census を回避する綴りが他に無いことの証明ではない。
+     * 数値は fixture 表の `passesCensus: false` の実数と一致させる (R3 unblock で 7 → 8 になった)。
      * **残る既知の非被覆の特徴づけ (SEC-LSI-R3-2 で列挙をやめた)**: **gap の受理集合をクラス以外の
      * 構文で表現した綴り**には 3 ゲートのいずれも届かない。実測済みの例は量化 shorthand
      * (`\S*` / `\s+`)・負先読み形 (`(?:(?!\|)(?!;)(?!&)(?!\n)[\s\S]{1}){0,512}`)・class-free
@@ -1544,10 +1546,11 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
             //   **弱い 2 乗 (`quadratic-weak`・項目 8) の実測 (実装者 + QA の独立実測を合算・
             //   レンジ表記・単一値を書かない)**: median **無負荷 28.64〜30.96** (実装者 5 run +
             //   QA 独立 run。実装者側 15 ratio 点は 29.1〜31.4)、**単点の最低は 18.0** (QA 実測・
-            //   中央値側が拾うので verdict は反転しない) / **2×nproc 飽和 28.5〜87.22**
+            //   中央値側が拾うので verdict は反転しない) / **2×nproc 飽和 28.3〜87.22**
             //   (実装者 8+6 run + QA 独立実測・load 36〜49・実装者 42 ratio 点の min 27.6 / max 90.7。
             //   上端 87.22 は QA レーンの飽和 regime の median 実測)。閾値 24 への余裕は
-            //   **無負荷 1.19×** (28.64 基準・実装者単独レンジなら 1.23×) / **飽和の下限 1.27×**、
+            //   **1.18〜1.19×** (無負荷 28.64 基準 1.19× / 飽和の下限 28.3 基準 1.18×・実装者単独の
+            //   無負荷レンジだけなら 1.23×)、
             //   false RED は無負荷 0/5・飽和 0/8 (実装者) + QA レーン独立 run でも 0。
             //   検出下限が強い 2 乗の 55 超から**この中央値**まで下がるので、
             //   `RATIO_MAX` 24→39 ∧ `RATIO_MAX_HI` 40→65 の緩和が RED になる (強い方だけでは非検出・
@@ -2082,7 +2085,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         }
         // 走査が実際に回ったこと (regex を 1 本も見ずに緑になる恒真を防ぐ・coupling の checked と同型)。
         expect(censusChecked, "class census を適用したスキャン regex の本数").toBe(17);
-        // 綴り非依存の歯 (fixture): 既知陽性 4 形は不一致で検出され、既知陰性 2 形は一致して素通る。
+        // 綴り非依存の歯 (fixture): 既知陽性 8 形は不一致で検出され、既知陰性 4 形は一致して素通る
+        //   (数は下の表の `passesCensus` の実数。導出 pin 化は sweep 送り)。
         //   陰性 (`false RED 0`) の側も同じ配列で assert する (negative assert には POSITIVE 対を置く)。
         const CENSUS_FIXTURES: ReadonlyArray<{
           source: string;
@@ -2172,7 +2176,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
           expect(censusVerdict(f.source).passes, `census verdict: ${f.source}`).toBe(
             f.passesCensus,
           );
-          // 本数一致 (R1 の弱い軸) は**削除せず**残す。phantom 2 形はここが `true` = 素通ることが
+          // 本数一致 (R1 の弱い軸) は**削除せず**残す。phantom 3 形はここが `true` = 素通ることが
           //   「位置一致でなければ閉じない」ことの歯 (軸は追加のみ・置換禁止)。
           expect(
             classOpenCount(f.source) === quantifiedClasses(f.source).length,
