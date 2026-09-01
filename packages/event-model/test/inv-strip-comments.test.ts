@@ -129,6 +129,33 @@ describe("INV-STRIP-COMMENTS-REGEX: regex リテラルで走査が desync しな
     );
   });
 
+  it("位置ヒューリスティックが declined でも escape された `/` は行コメントにならない", () => {
+    // `)` の直後は regex とみなさない (除算と衝突する) ので、この regex は skip されない。
+    // code mode の escape 素通しが無いと `\/` の `/` が次の `/` と組んで行の残りを落とす。
+    const src = "if (x) /a\\//.test(s) && keepDeclinedTail;\n";
+    expect(stripComments(src)).toContain("keepDeclinedTail");
+  });
+
+  it("regex の文字クラス内の quote は string mode を開かない (クラス追跡の歯)", () => {
+    // クラス追跡が無いと regex が `[` の中の `/` で閉じたことにされ、続く `"` が dq mode を開き、
+    // 後段の文字列内 `//` が行コメント扱いになって実コードが落ちる。
+    const src = 'const S = /[/"]/; const t = "a // b keepInClass";\n';
+    expect(stripComments(src)).toContain("keepInClass");
+  });
+
+  it("行を跨ぐ regex は認めない (閉じない `/` が後続行を飲み込まない)", () => {
+    // 不正形入力のガード: regex 位置に閉じない `/` があっても、次行以降の走査を壊さない。
+    const src = "const a = [ / ];\nconst b = 1; // dropMe\nconst keepAfterBogusSlash = 2;\n";
+    const out = stripComments(src);
+    expect(out).not.toContain("dropMe"); // NEGATIVE (次行のコメントは通常どおり落ちる)
+    expect(out).toContain("keepAfterBogusSlash"); // POSITIVE 対
+  });
+
+  it("ファイル先頭の regex も skip される (直前の意味のある文字が無い位置)", () => {
+    const src = '/["]/.test(x); const k = "a // b keepStart";\n';
+    expect(stripComments(src)).toContain("keepStart");
+  });
+
   it("除算は regex と誤認しない (JSX の自己閉じ `/>` を壊さない対照)", () => {
     expect(stripComments("const q = total / count; const keepDiv = 1;\n")).toContain("keepDiv");
     expect(stripComments("const el = <Foo bar={x} />;\nconst keepJsx = 1;\n")).toContain("keepJsx");
