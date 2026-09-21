@@ -17,10 +17,10 @@
     "@actradeck/telemetry-contract": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.21.2",
+    "@cloudflare/vitest-pool-workers": "0.22.0",
     "@cloudflare/workers-types": "5.20260813.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.8",
+    "vitest": "4.1.11",
     "wrangler": "4.122.0"
   }
 }
