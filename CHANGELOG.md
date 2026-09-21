@@ -11,6 +11,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Security
+
+- **Dependency updates clearing every open Dependabot alert (30 at the time of the
+  change).** Direct bumps: Next.js 16.2.11 → 16.3.3 (critical advisory), Fastify
+  5.8.5 → 5.12.1, Vitest and `@vitest/coverage-v8` 4.1.8 → 4.1.11,
+  `@cloudflare/vitest-pool-workers` 0.21.2 → 0.22.0. Transitive fixes through the
+  lockfile and scoped `pnpm.overrides`: `js-yaml`, `fast-uri`,
+  `baseline-browser-mapping`, `@vitest/mocker`, and `sharp` (override window moved
+  from `>=0.35.0 <0.36` to `>=0.35.4 <0.36`). `pnpm audit` is clean at the
+  `moderate` level and the CI dependency-audit gate (INV-DEP-AUDIT) passes again.
+
 ## [0.9.0] - 2026-09-01
 
 ### Added
