@@ -12,7 +12,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | (BSD-2-Clause OR MIT OR Apache-2.0) | rc | 1.2.8 |
 | (MIT OR WTFPL) | expand-template | 2.0.3 |
 | 0BSD | tslib | 2.8.1 |
-| Apache-2.0 | @cloudflare/workerd-linux-64 | 1.20260811.1 |
+| Apache-2.0 | @cloudflare/workerd-linux-64 | 1.20260811.1, 1.20260815.1 |
 | Apache-2.0 | @electric-sql/pglite | 0.5.3 |
 | Apache-2.0 | @electric-sql/pglite-socket | 0.2.6 |
 | Apache-2.0 | @eslint/config-array | 0.21.2 |
@@ -25,16 +25,16 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | Apache-2.0 | @humanfs/types | 0.15.0 |
 | Apache-2.0 | @humanwhocodes/module-importer | 1.0.1 |
 | Apache-2.0 | @humanwhocodes/retry | 0.4.3 |
-| Apache-2.0 | @img/sharp-linux-x64 | 0.35.2, 0.35.3 |
-| Apache-2.0 | @swc/helpers | 0.5.15 |
-| Apache-2.0 | baseline-browser-mapping | 2.10.33 |
+| Apache-2.0 | @img/sharp-linux-x64 | 0.35.4 |
+| Apache-2.0 | @swc/helpers | 0.5.23 |
+| Apache-2.0 | baseline-browser-mapping | 2.11.25 |
 | Apache-2.0 | detect-libc | 2.1.2 |
 | Apache-2.0 | eslint-visitor-keys | 3.4.3, 4.2.1, 5.0.1 |
 | Apache-2.0 | expect-type | 1.3.0 |
-| Apache-2.0 | sharp | 0.35.2, 0.35.3 |
+| Apache-2.0 | sharp | 0.35.4 |
 | Apache-2.0 | tunnel-agent | 0.6.0 |
 | Apache-2.0 | typescript | 6.0.3 |
-| Apache-2.0 | workerd | 1.20260811.1 |
+| Apache-2.0 | workerd | 1.20260811.1, 1.20260815.1 |
 | Apache-2.0 | xml-name-validator | 5.0.0 |
 | BSD-2-Clause | entities | 6.0.1, 8.0.0 |
 | BSD-2-Clause | eslint-scope | 8.4.0 |
@@ -45,7 +45,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | BSD-2-Clause | uri-js | 4.4.1 |
 | BSD-2-Clause | webidl-conversions | 8.0.1 |
 | BSD-3-Clause | esquery | 1.7.0 |
-| BSD-3-Clause | fast-uri | 3.1.5 |
+| BSD-3-Clause | fast-uri | 3.1.8, 4.2.1 |
 | BSD-3-Clause | ieee754 | 1.2.1 |
 | BSD-3-Clause | istanbul-lib-coverage | 3.2.2 |
 | BSD-3-Clause | istanbul-lib-report | 3.0.1 |
@@ -88,7 +88,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | ISC | wrappy | 1.0.2 |
 | ISC | y18n | 5.0.8 |
 | ISC | yargs-parser | 21.1.1 |
-| LGPL-3.0-or-later | @img/sharp-libvips-linux-x64 | 1.3.1, 1.3.2 |
+| LGPL-3.0-or-later | @img/sharp-libvips-linux-x64 | 1.3.3 |
 | MIT | @acemir/cssom | 0.9.31 |
 | MIT | @asamuzakjp/css-color | 4.1.2 |
 | MIT | @asamuzakjp/dom-selector | 6.8.1 |
@@ -98,7 +98,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | @babel/parser | 7.29.7 |
 | MIT | @babel/types | 7.29.7 |
 | MIT | @bcoe/v8-coverage | 1.0.2 |
-| MIT | @cloudflare/vitest-pool-workers | 0.21.2 |
+| MIT | @cloudflare/vitest-pool-workers | 0.22.0 |
 | MIT | @cspotcode/source-map-support | 0.8.1 |
 | MIT | @csstools/css-calc | 3.2.1 |
 | MIT | @csstools/css-color-parser | 4.1.1 |
@@ -123,8 +123,8 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | @jridgewell/sourcemap-codec | 1.5.5 |
 | MIT | @jridgewell/trace-mapping | 0.3.9, 0.3.31 |
 | MIT | @lukeed/ms | 2.0.2 |
-| MIT | @next/env | 16.2.11 |
-| MIT | @next/swc-linux-x64-gnu | 16.2.11 |
+| MIT | @next/env | 16.3.3 |
+| MIT | @next/swc-linux-x64-gnu | 16.3.3 |
 | MIT | @oxc-project/types | 0.133.0 |
 | MIT | @parcel/watcher | 2.5.6 |
 | MIT | @parcel/watcher-linux-x64-glibc | 2.5.6 |
@@ -159,14 +159,14 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | @typescript-eslint/typescript-estree | 8.60.1 |
 | MIT | @typescript-eslint/utils | 8.60.1 |
 | MIT | @typescript-eslint/visitor-keys | 8.60.1 |
-| MIT | @vitest/coverage-v8 | 4.1.8 |
-| MIT | @vitest/expect | 4.1.8 |
-| MIT | @vitest/mocker | 4.1.8 |
-| MIT | @vitest/pretty-format | 4.1.8 |
-| MIT | @vitest/runner | 4.1.8 |
-| MIT | @vitest/snapshot | 4.1.8 |
-| MIT | @vitest/spy | 4.1.8 |
-| MIT | @vitest/utils | 4.1.8 |
+| MIT | @vitest/coverage-v8 | 4.1.11 |
+| MIT | @vitest/expect | 4.1.11 |
+| MIT | @vitest/mocker | 4.1.11 |
+| MIT | @vitest/pretty-format | 4.1.11 |
+| MIT | @vitest/runner | 4.1.11 |
+| MIT | @vitest/snapshot | 4.1.11 |
+| MIT | @vitest/spy | 4.1.11 |
+| MIT | @vitest/utils | 4.1.11 |
 | MIT | abstract-logging | 2.0.1 |
 | MIT | acorn | 8.16.0 |
 | MIT | acorn-jsx | 5.3.2 |
@@ -224,10 +224,10 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | fast-decode-uri-component | 1.0.1 |
 | MIT | fast-deep-equal | 3.1.3 |
 | MIT | fast-json-stable-stringify | 2.1.0 |
-| MIT | fast-json-stringify | 6.4.0 |
+| MIT | fast-json-stringify | 6.4.0, 7.0.1 |
 | MIT | fast-levenshtein | 2.0.6 |
 | MIT | fast-querystring | 1.1.2 |
-| MIT | fastify | 5.8.5 |
+| MIT | fastify | 5.12.1 |
 | MIT | fastify-plugin | 5.1.0, 6.0.0 |
 | MIT | fdir | 6.5.0 |
 | MIT | file-entry-cache | 8.0.0 |
@@ -254,7 +254,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | is-glob | 4.0.3 |
 | MIT | is-potential-custom-element-name | 1.0.1 |
 | MIT | js-tokens | 10.0.0 |
-| MIT | js-yaml | 4.3.1 |
+| MIT | js-yaml | 4.3.2 |
 | MIT | jsdom | 27.4.0 |
 | MIT | json-buffer | 3.0.1 |
 | MIT | json-schema-ref-resolver | 3.0.0 |
@@ -269,14 +269,14 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | magicast | 0.5.3 |
 | MIT | make-dir | 4.0.0 |
 | MIT | mimic-response | 3.1.0 |
-| MIT | miniflare | 5.20260811.0-alpha |
+| MIT | miniflare | 5.20260811.0-alpha, 5.20260815.0-alpha |
 | MIT | minimist | 1.2.8 |
 | MIT | mkdirp-classic | 0.5.3 |
 | MIT | ms | 2.1.3 |
-| MIT | nanoid | 3.3.18 |
+| MIT | nanoid | 3.3.18, 3.3.19 |
 | MIT | napi-build-utils | 2.0.0 |
 | MIT | natural-compare | 1.4.0 |
-| MIT | next | 16.2.11 |
+| MIT | next | 16.3.3 |
 | MIT | node-abi | 3.92.0 |
 | MIT | node-addon-api | 7.1.1 |
 | MIT | node-pg-migrate | 8.0.4 |
@@ -299,12 +299,12 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | pg-protocol | 1.14.0 |
 | MIT | pg-types | 2.2.0 |
 | MIT | pgpass | 1.0.5 |
-| MIT | picomatch | 4.0.4 |
+| MIT | picomatch | 4.0.4, 4.0.7 |
 | MIT | pidusage | 4.0.1 |
 | MIT | pino | 10.3.1 |
 | MIT | pino-abstract-transport | 3.0.0 |
 | MIT | pino-std-serializers | 7.1.0 |
-| MIT | postcss | 8.5.24 |
+| MIT | postcss | 8.5.23, 8.5.28 |
 | MIT | postgres-array | 2.0.0 |
 | MIT | postgres-bytea | 1.0.1 |
 | MIT | postgres-date | 1.0.7 |
@@ -312,7 +312,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | prebuild-install | 7.1.3 |
 | MIT | prelude-ls | 1.2.1 |
 | MIT | prettier | 3.8.3 |
-| MIT | process-warning | 4.0.1, 5.0.0 |
+| MIT | process-warning | 4.0.1, 5.1.0 |
 | MIT | pump | 3.0.4 |
 | MIT | punycode | 2.3.1 |
 | MIT | quick-format-unescaped | 4.0.4 |
@@ -371,7 +371,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | util-deprecate | 1.0.2 |
 | MIT | uuid | 11.1.1 |
 | MIT | vite | 8.0.16 |
-| MIT | vitest | 4.1.8 |
+| MIT | vitest | 4.1.11 |
 | MIT | w3c-xmlserializer | 5.0.0 |
 | MIT | whatwg-mimetype | 4.0.0, 5.0.0 |
 | MIT | whatwg-url | 15.1.0 |
@@ -389,9 +389,9 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT OR Apache-2.0 | @cloudflare/kv-asset-handler | 0.5.0 |
 | MIT OR Apache-2.0 | @cloudflare/unenv-preset | 2.16.1 |
 | MIT OR Apache-2.0 | @cloudflare/workers-types | 5.20260813.1 |
-| MIT OR Apache-2.0 | wrangler | 4.122.0 |
+| MIT OR Apache-2.0 | wrangler | 4.122.0, 4.124.0 |
 | MIT-0 | @csstools/color-helpers | 6.0.2 |
 | MIT-0 | @csstools/css-syntax-patches-for-csstree | 1.1.5 |
-| MPL-2.0 | lightningcss | 1.32.0 |
-| MPL-2.0 | lightningcss-linux-x64-gnu | 1.32.0 |
+| MPL-2.0 | lightningcss | 1.33.0 |
+| MPL-2.0 | lightningcss-linux-x64-gnu | 1.33.0 |
 | Python-2.0 | argparse | 2.0.1 |
