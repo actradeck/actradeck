@@ -282,6 +282,48 @@ else
   bad "unknown suite mishandled (rc=$rc): $out"
 fi
 
+# minTests (task 01a058f0): a suite that declares a floor fails when fewer matching tests ran.
+# The floor is read from SUITES (not restated here) and the report is generated to that size,
+# so the three cases stay aligned when the floor is raised.
+MIN_FL="$(SUITES_MODULE="$REPO_ROOT/scripts/ci/assert-inv-ran.mjs" node --input-type=module -e '
+  const m = await import(process.env.SUITES_MODULE);
+  console.log(m.SUITES["sidecar-filelock"]?.minTests ?? "");
+')"
+fl_fixture() { # n passed tests whose names match the sidecar-filelock pattern
+  node -e '
+    const n = Number(process.argv[1]);
+    const rs = Array.from({ length: n }, (_, i) => ({
+      fullName: `INV-FILELOCK-TESTHOOKS-BOUNDARY: probe ${i}`, status: "passed" }));
+    process.stdout.write(JSON.stringify({ testResults: [{ name: "f.test.ts", assertionResults: rs }] }));
+  ' "$1" > "$TMPDIR_TCP/report.json"
+}
+if ! [ "$MIN_FL" -gt 1 ] 2>/dev/null; then
+  bad "sidecar-filelock should declare an integer minTests > 1 (got '$MIN_FL')"
+else
+  fl_fixture "$MIN_FL"
+  out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" --suite sidecar-filelock 2>&1)"; rc=$?
+  if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "ran for real — $MIN_FL assertions"; then
+    ok "minTests: exactly minTests ($MIN_FL) matching tests -> exit 0"
+  else
+    bad "minTests boundary (== floor) should pass (rc=$rc): $out"
+  fi
+  fl_fixture "$((MIN_FL - 1))"
+  out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" --suite sidecar-filelock 2>&1)"; rc=$?
+  if [ $rc -eq 1 ] && printf '%s' "$out" | grep -q "only $((MIN_FL - 1)) matching test(s) ran, fewer than minTests=$MIN_FL"; then
+    ok "minTests: one below the floor -> exit 1 naming the count and the floor"
+  else
+    bad "minTests shortfall should fail (rc=$rc): $out"
+  fi
+fi
+# A suite WITHOUT minTests keeps its old contract: a single matching test still passes.
+fixture '{"testResults":[{"name":"f.test.ts","assertionResults":[{"fullName":"INV-EGRESS-E2E holds","status":"passed"}]}]}'
+out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" --suite sidecar-egress 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "ran for real — 1 assertions"; then
+  ok "suite without minTests (sidecar-egress) -> 1 matching test still exits 0"
+else
+  bad "suite without minTests changed behaviour (rc=$rc): $out"
+fi
+
 # unreadable report -> exit 1 + "missing/unparseable" (a lost report must never pass).
 out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/absent.json" "probe" "INV-PROBE-X" 2>&1)"; rc=$?
 if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "missing/unparseable"; then

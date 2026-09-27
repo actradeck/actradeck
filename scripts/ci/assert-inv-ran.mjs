@@ -15,6 +15,7 @@
  *   - RC != 0                -> list the failed tests from the report + exit RC
  *   - pattern matches 0 test -> error ("did not appear — test file missing?") + exit 1
  *   - any match skipped/todo -> error ("SKIPPED in CI — DATABASE_URL not reaching the test") + exit 1
+ *   - --suite with minTests  -> fewer matching tests ran than minTests -> error + exit 1
  *   - otherwise              -> log the ran-for-real count + exit 0
  *
  * --suite form (what ci.yml and ci-preflight.sh use): the semantic core of each gate —
@@ -90,14 +91,17 @@ export const SUITES = {
   // and the INV-FILELOCK-NO-EMPTY-WINDOW it (inside INV-APPROVAL-PERSIST-CONCURRENT) are outside
   // these prefixes and are not asserted here.
   // What this entry catches (measured, task 01a058f0): a skipped/todo test in any matched
-  // describe, and every matched describe disappearing at once. It does NOT catch one describe
-  // renamed out of the prefixes while others still match (the gate has no expected count;
-  // measured: 27 -> 25 assertions, rc=0).
+  // describe, every matched describe disappearing at once, and — through `minTests` — one
+  // describe renamed out of the prefixes while the others still match (measured 27 -> 25 before
+  // `minTests` existed: rc=0; with it: rc=1). `minTests` is a floor, not an exact count: adding
+  // tests does not trip it, and it must be raised by hand when tests are added (it cannot see a
+  // rename that is offset by an equal number of new matching tests).
   "sidecar-filelock": {
     label: "sidecar advisory file-lock INV (INV-FILELOCK-*)",
     pattern:
       "INV-FILELOCK-STALE-TAKEOVER-IDENTITY|INV-FILELOCK-TESTHOOKS-BOUNDARY|" +
       "INV-FILELOCK-IDENTITY-V2: (?!EISDIR)",
+    minTests: 27,
   },
 };
 
@@ -116,6 +120,9 @@ function main() {
   //               substring instead. Behaviour-preserving: every raw-form caller (the metatest
   //               in scripts/test-ci-preflight.sh) passes a literal test-name fragment.
   let reportPath, label, patternSource, matches;
+  // Optional per-suite floor (task 01a058f0). undefined = no count check (every suite without
+  // `minTests`, and the raw 3-arg form, behave exactly as before).
+  let minTests;
   if (argv[1] === "--suite") {
     reportPath = argv[0];
     const suite = SUITES[argv[2]];
@@ -124,7 +131,7 @@ function main() {
       if (argv[2] !== undefined && !SUITES[argv[2]]) console.error(`unknown suite: ${argv[2]}`);
       process.exit(1);
     }
-    ({ label, pattern: patternSource } = suite);
+    ({ label, pattern: patternSource, minTests } = suite);
     const suiteRe = new RegExp(patternSource);
     matches = (name) => suiteRe.test(name);
   } else {
@@ -183,6 +190,17 @@ function main() {
     console.error(
       `${label}: was SKIPPED in CI (DATABASE_URL not reaching the test):`,
       skipped.map((s) => s.name),
+    );
+    process.exit(1);
+  }
+  // minTests (task 01a058f0): a describe renamed out of the pattern leaves the others matching,
+  // so "did not appear" never fires. Suites that declare a floor also fail when fewer matched
+  // tests ran than the floor. Reached only after the skip check, so every counted test ran.
+  const ran = inv.length - skipped.length;
+  if (minTests !== undefined && ran < minTests) {
+    console.error(
+      `${label}: only ${ran} matching test(s) ran, fewer than minTests=${minTests} ` +
+        `(a describe renamed out of the pattern, or tests deleted?)`,
     );
     process.exit(1);
   }
