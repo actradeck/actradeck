@@ -73,3 +73,35 @@ describe("INV-ATTACH-WIRE-LOCK: stale 取り外しの rename 失敗", () => {
     expect(names.filter((n) => n.includes(".stale-")).sort()).toEqual([...occupied].sort());
   });
 });
+
+/**
+ * 解放側の対 (task 01a05a63・変異 M8 の着地): 解放の `renameSync` が ENOENT 以外で失敗しても
+ * **throw しない** (best-effort・ADR 0012 limit 3 / 6)。奪取と解放は同じ `detachVerified` を通り、
+ * 違いは `detachPolicy` の `strict` だけなので、解放を `strict: true` にする変異はこの it でしか落ちない
+ * (fn の結果が解放の失敗で壊れる)。
+ *
+ * 踏み方は奪取側と同じ: 解放の退避名 `<lockPath>.stale-rel-<pid>-<seq>` を先頭から非空ディレクトリで
+ * 占有する。解放は判定を通った後に rename で失敗するので、lock は lockPath に**自分の pid のまま残る**
+ * (次の取得が自 pid の残骸として奪取する = 自力回復する形)。
+ */
+describe("INV-ATTACH-WIRE-LOCK: 解放の rename 失敗は best-effort", () => {
+  it("解放の rename が ENOENT 以外 (EISDIR) で失敗しても fn の結果を返し、lock を自 pid のまま残す", () => {
+    const occupied: string[] = [];
+    for (let seq = 0; seq < OCCUPIED_SEQ_COUNT; seq++) {
+      const releasePath = `${lockPath}.stale-rel-${process.pid}-${seq}`;
+      mkdirSync(releasePath);
+      writeFileSync(join(releasePath, "occupied"), "x");
+      occupied.push(basename(releasePath));
+    }
+
+    expect(withFileLock(target, () => "ok")).toBe("ok");
+
+    // 取り外せていない = 自分の lock は lockPath に逐語で残る (解放は黙って断念した)。
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(lockPath, "utf8")).toBe(`${process.pid}\n`);
+    // 占有したディレクトリ以外に退避名は作られていない・tmp 残骸なし。
+    const names = readdirSync(dir);
+    expect(names.filter((n) => n.endsWith(".acquire"))).toEqual([]);
+    expect(names.filter((n) => n.includes(".stale-")).sort()).toEqual([...occupied].sort());
+  });
+});
