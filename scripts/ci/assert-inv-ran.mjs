@@ -89,6 +89,10 @@ export const SUITES = {
   // 01a05a63 makes the EISDIR case deterministic. INV-ATTACH-WIRE-LOCK (skipIf running as root)
   // and the INV-FILELOCK-NO-EMPTY-WINDOW it (inside INV-APPROVAL-PERSIST-CONCURRENT) are outside
   // these prefixes and are not asserted here.
+  // What this entry catches (measured, task 01a058f0): a skipped/todo test in any matched
+  // describe, and every matched describe disappearing at once. It does NOT catch one describe
+  // renamed out of the prefixes while others still match (the gate has no expected count;
+  // measured: 27 -> 25 assertions, rc=0).
   "sidecar-filelock": {
     label: "sidecar advisory file-lock INV (INV-FILELOCK-*)",
     pattern:
