@@ -83,6 +83,101 @@ EOF_GATES
   fi
 fi
 
+echo "[test-ci-preflight] 1c. --suite call-set parity (SEC-R3-4, task 01a058f0)"
+
+# The step-name tripwire above cannot see a `--suite` line deleted from one side only (both
+# steps keep their names), and nothing tied the SUITES table to its callers: a suite added to
+# assert-inv-ran.mjs but never invoked would read as a gate while asserting nothing. One
+# extractor serves both files so the two sides cannot be parsed differently. It reads only
+# non-comment lines that invoke assert-inv-ran.mjs (prose such as "--suite preset" in comments
+# is not a call) and keeps duplicates (multiset), so dropping one of two identical calls on one
+# side is also a mismatch.
+suite_calls() {
+  grep -vE '^[[:space:]]*#' "$1" | grep -F 'assert-inv-ran.mjs' \
+    | grep -oE -- '--suite [A-Za-z0-9_-]+' | sed 's/^--suite //' | sort
+}
+suites_declared() {
+  # The module path goes through the environment, not argv: the script's CLI entry guard
+  # compares process.argv[1] with its own URL, so passing the path as argv[1] would run the gate.
+  SUITES_MODULE="$REPO_ROOT/scripts/ci/assert-inv-ran.mjs" node --input-type=module -e '
+    const m = await import(process.env.SUITES_MODULE);
+    console.log(Object.keys(m.SUITES).sort().join("\n"));
+  '
+}
+# suite_parity <ci.yml> <preflight.sh> <declared-keys-file>: rc 0 iff
+#   (a) the two call multisets are equal and non-empty, and
+#   (b) the distinct called keys equal the SUITES keys (every suite is invoked; no unknown call).
+suite_parity() {
+  local ci pf declared called
+  ci="$(suite_calls "$1")"
+  pf="$(suite_calls "$2")"
+  declared="$(cat "$3")"
+  if [ -z "$ci" ]; then
+    echo "suite parity: no --suite call extracted from $1 (extraction went vacuous)"
+    return 1
+  fi
+  if [ "$ci" != "$pf" ]; then
+    echo "suite parity: --suite calls differ between $1 and $2"
+    diff <(printf '%s\n' "$ci") <(printf '%s\n' "$pf") | sed 's/^/  /'
+    return 1
+  fi
+  called="$(printf '%s\n' "$ci" | sort -u)"
+  if [ "$called" != "$declared" ]; then
+    echo "suite parity: SUITES keys and invoked suites differ (< SUITES / > invoked)"
+    diff <(printf '%s\n' "$declared") <(printf '%s\n' "$called") | sed 's/^/  /'
+    return 1
+  fi
+  echo "suite parity: $(printf '%s\n' "$ci" | wc -l) --suite calls match on both sides and cover every SUITES key"
+}
+
+suites_declared > "$TMPDIR_TCP/suites.txt"
+if [ ! -s "$TMPDIR_TCP/suites.txt" ]; then
+  bad "SUITES key extraction from assert-inv-ran.mjs went vacuous"
+fi
+
+out="$(suite_parity .github/workflows/ci.yml scripts/ci-preflight.sh "$TMPDIR_TCP/suites.txt" 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "cover every SUITES key"; then
+  ok "--suite calls match between ci.yml and ci-preflight.sh and cover every SUITES key"
+else
+  bad "--suite parity should hold on the real files (rc=$rc): $out"
+fi
+
+# Falsifiability A: delete one --suite call from ONE side only -> RED naming the suite.
+grep -v -- '--suite sidecar-linear$' scripts/ci-preflight.sh > "$TMPDIR_TCP/preflight-dropped.sh"
+out="$(suite_parity .github/workflows/ci.yml "$TMPDIR_TCP/preflight-dropped.sh" "$TMPDIR_TCP/suites.txt" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "sidecar-linear"; then
+  ok "parity RED when one side drops a --suite call (named in the output)"
+else
+  bad "parity missed a one-sided --suite deletion (rc=$rc): $out"
+fi
+
+# Falsifiability B: add a --suite call on ONE side only -> RED.
+{ cat .github/workflows/ci.yml; printf '          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/x.json --suite db\n'; } > "$TMPDIR_TCP/ci-extra-suite.yml"
+out="$(suite_parity "$TMPDIR_TCP/ci-extra-suite.yml" scripts/ci-preflight.sh "$TMPDIR_TCP/suites.txt" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "differ between"; then
+  ok "parity RED when one side gains an extra --suite call"
+else
+  bad "parity missed a one-sided --suite addition (rc=$rc): $out"
+fi
+
+# Falsifiability C: a SUITES key that neither side invokes -> RED naming the key.
+{ cat "$TMPDIR_TCP/suites.txt"; echo "zz-uncalled-probe"; } | sort > "$TMPDIR_TCP/suites-extra.txt"
+out="$(suite_parity .github/workflows/ci.yml scripts/ci-preflight.sh "$TMPDIR_TCP/suites-extra.txt" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "zz-uncalled-probe"; then
+  ok "parity RED when a SUITES key is never invoked (named in the output)"
+else
+  bad "parity missed an uninvoked SUITES key (rc=$rc): $out"
+fi
+
+# Negative control for the comment filter: a commented-out call must not count as a call.
+{ cat .github/workflows/ci.yml; printf '          # RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/x.json --suite db\n'; } > "$TMPDIR_TCP/ci-comment-suite.yml"
+out="$(suite_parity "$TMPDIR_TCP/ci-comment-suite.yml" scripts/ci-preflight.sh "$TMPDIR_TCP/suites.txt" 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then
+  ok "a commented-out --suite line is not counted as a call"
+else
+  bad "comment filter counted a commented-out call (rc=$rc): $out"
+fi
+
 echo "[test-ci-preflight] 2. assert-inv-ran.mjs fixtures"
 
 fixture() { printf '%s' "$1" > "$TMPDIR_TCP/report.json"; }
