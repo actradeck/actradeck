@@ -544,13 +544,20 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         **これは例示であって網羅ではない**。
   //         **和 (受理集合軸 ∨ 綴り軸) はこれらを止めない** — 和の一意到達寄与は「coupling が
   //         exemption で迂回された規則」に限る (SEC の honest bound)。現行 17 にこの綴りは無い。
-  //         **走査行そのものは無観測 (TDA-LSI-R3-1 / SEC-S4 / QA-N1・N4・M・base 同値)**: 単一出所化
+  //         **走査行の観測 (TDA-LSI-R3-1 / SEC-S4 / QA-N1・N4 → task 01a058f0 で着地)**: 単一出所化
   //         (`isSeparatorGapClass` / `censusVerdict`) が守るのは **verdict の中身**であって、
-  //         「走査行が実際にその verdict を照合しているか」ではない。空 verdict への差し替え (S4) /
+  //         「走査行が実際にその verdict を照合しているか」ではなかった。空 verdict への差し替え (S4) /
   //         走査の恒真化 (N1) / 構造ゲートループ先頭への `if (rule.segmentRe === undefined) return;`
-  //         挿入 (N4) はいずれも**無音で通る** (3 レーンが独立実測・base 同値)。是正 (走査ループの
-  //         hoist + 実列 / 合成列を流す挙動 assert) は**走査範囲の変更**ゆえ本 PR では行わず、
-  //         task 01a058f0-b045 (v0.9・full 監査) へ送る。
+  //         挿入 (N4) はいずれも無音で通った (3 レーンが独立実測・base 同値)。task 01a058f0 で 3 走査の
+  //         ループ本体を target 列を引数に取る helper (`scanCoupling` / `scanCensus` /
+  //         `scanStructureGate`) へ**逐語で移設**し、各 it が同じ helper に既知陽性の合成列を流して
+  //         当該 assertion の throw を assert する (実行証跡は `scanControlsExecuted` の afterAll)。
+  //         **捕まえる形は実装者 probe で実走した変異に bound する** (一覧と base 対照は task 01a058f0
+  //         の実装報告): 各走査の S4 / N1 / N4、構造ゲート走査行の和の片項落とし (両アーム)、
+  //         exemption 走査行の片側 (class) keyed 化。**残余**: helper と合成列コントロールを**同時に**
+  //         書き換える coordinated 編集 (例: 合成列を空にしてから走査行を弱める) は通る。合成列側の
+  //         `toThrow` 断片・件数・afterAll の期待値は綴りの一部であり、それらを追随更新する編集は
+  //         ここでは止まらない (コントロール配線の残余・ADR 01a057d0 と同型)。
   //         構造ゲート側の分離子判定は **受理集合軸 (`spansArbitraryText`) と旧来の綴り軸
   //         (`startsWith("[^")`) の論理和** (TDA-LSI-1 ≡ QA-LSI-2 で置換から和へ是正)。受理集合軸は
   //         正のクラスで綴られた広い gap (`[\w\s-]*`) を新たに拾い、綴り軸は**英数字を 1 つも受理しない
@@ -1075,6 +1082,96 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         passes: opens.length === quantified.length && opens.every((v, k) => v === quantified[k]),
       };
     };
+    /**
+     * **走査ループの単一出所 (task 01a058f0・SEC-LSI-R3-1 ≡ QA-LSI-R3-1 ≡ TDA-LSI-R3-2)**。
+     *
+     * coupling / class census / 構造ゲートの 3 走査は、以前は各 `it` の中にループを直書きしていた。
+     * verdict の中身 (`exemptionApplies` / `censusVerdict` / `isSeparatorGapClass`) は単一出所化
+     * 済みだったが、**走査行がその verdict を実際に照合しているか**は無観測で、verdict の定数化 (S4)・
+     * 比較の恒真化 (N1)・ループ先頭への早期 return / continue (N4)・構造ゲート走査行での和の片項
+     * 落とし (arm-drop) は現行 17 規則が緑のままなので無音で通った (3 レーン独立実測・base 同値)。
+     *
+     * ここではループ本体を **target 列を引数に取る helper** へ移し、各 `it` は同じ helper に
+     * ①実 `SCAN_TARGETS` / `LITERAL_RULES` を流して緑 ②**既知陽性の合成列**を流して assertion が
+     * throw する、を**挙動で** assert する (ADR 01a057d0 の実行可能コントロールを走査行へ 1 段上げた形)。
+     * 走査行は**逐語のまま移設**しているので、既存の使用側 pin (exemption 走査行・`excluded` 導出行・
+     * 各 assertion 本体) は同じ行を指し続ける (pin の re-point はしていない)。
+     *
+     * 失敗は vitest の `expect` の throw で表す (違反を配列で返す形にすると既存 assertion 行の綴りが
+     * 変わり pin の re-point になるため)。合成列側は `toThrow(<message 断片>)` で**当該 assertion**
+     * が落ちたことまで確認する。
+     */
+    const scanCoupling = (
+      targets: ReadonlyArray<{ re: RegExp }>,
+    ): { checked: number; asserted: number } => {
+      let checked = 0;
+      let asserted = 0;
+      for (const target of targets) {
+        for (const cls of quantifiedClasses(target.re.source)) {
+          checked += 1;
+          // QA-LN5R2-1 (項目 4): 走査は **hoist 済みの単一出所** `exemptionApplies` を呼ぶ。
+          //   下の値 pin は同じ関数を検証するので、対 keyed の意味論が load-bearing になる
+          //   (旧: 走査はインライン predicate・値 pin はローカル複製 helper の 2 コピー)。
+          if (exemptionApplies(target.re.source, cls)) continue;
+          asserted += 1;
+          // TDA-LN5-7 / TDA-LN5-8 (項目 2/3): probe 構築と除外集合の導出も単一出所 (flags 伝播つき)。
+          const excluded = excludedByClass(cls, target.re.flags);
+          expect(
+            excluded.filter((c) => !TAIL_METACHARS.test(c)),
+            `${target.re.source} の量化クラス ${cls} が TAIL_METACHARS 外の文字を除外する (軸 4/5 の切り出しが取り残される)`,
+          ).toEqual([]);
+        }
+      }
+      return { checked, asserted };
+    };
+    /** class census の走査ループ (上の `scanCoupling` と同じ規律・走査行は逐語で移設)。 */
+    const scanCensus = (targets: ReadonlyArray<{ re: RegExp }>): number => {
+      let censusChecked = 0;
+      for (const target of targets) {
+        censusChecked += 1;
+        const verdict = censusVerdict(target.re.source);
+        expect(
+          verdict.passes,
+          `${target.re.source}: escape されていない '[' の位置 ${JSON.stringify(verdict.opens)} と量化クラス抽出の位置 ${JSON.stringify(verdict.quantified)} が一致しない綴り (群括り / capture / クラス alternation / 未量化 / 別位置の phantom で本数だけ合わせた形) は coupling と構造ゲートを素通りする。remedy: 量化子をクラスの直後に置いて直書きする。**census には例外経路が無い** — NON_GAP_CLASS_EXEMPTIONS は coupling 専用で census には効かない (QA-LSI-R2-3 実測)。未量化クラスや flag token 内のクラスも census では位置が一致しないので、量化して直書きへ寄せるか、そもそもクラスを使わない綴りにする`,
+        ).toBe(true);
+      }
+      return censusChecked;
+    };
+    /**
+     * 構造ゲートの走査ループ (同上)。第 2 引数は sample 列 (index で規則と対応)。引数名を
+     * `samples` にしているのは、assertion 本体 (`samples[i]?.segmentCmd`) を逐語のまま移すため。
+     */
+    const scanStructureGate = (
+      rules: ReadonlyArray<{ re: RegExp; segmentRe?: RegExp }>,
+      samples: ReadonlyArray<{ segmentCmd?: string } | undefined>,
+    ): number => {
+      let gated = 0;
+      rules.forEach((rule, i) => {
+        // TDA-LN5-2 (項目 2) + **TDA-LSI-1 ≡ QA-LSI-2 (R1 監査 M・和へ是正)**: 判定は
+        //   受理集合ベース (`spansArbitraryText`) と**旧来の綴り軸** (`startsWith("[^")`) の
+        //   **論理和**。判定は `isSeparatorGapClass` の**単一出所**で、軸 fixture も同じ関数を呼ぶ。
+        const separatorClasses = quantifiedClasses(rule.re.source).filter((cls) =>
+          isSeparatorGapClass(cls, rule.re.flags),
+        );
+        if (separatorClasses.length === 0) return;
+        gated += 1;
+        expect(
+          rule.segmentRe,
+          `#${i} ${rule.re.source}: 手書き分離子クラス ${separatorClasses.join(",")} を持つ行は正準 splitter の segment スコープ (segmentRe) を併記する`,
+        ).toBeDefined();
+        expect(
+          samples[i]?.segmentCmd,
+          `#${i}: segmentRe を持つ行は segment スコープでしか踏めない sample (segmentCmd) を持つ`,
+        ).toBeDefined();
+      });
+      return gated;
+    };
+    /**
+     * 上の 3 走査の**合成列コントロール**が実際に走った回数 (afterAll で照合)。各 `it` の末尾で
+     * 加算するので、コントロールの手前への早期 return / `it.skip` / 途中の例外で RED になる
+     * (`gateAxisChecked` / `controlCasesExecuted` と同じ規律)。
+     */
+    let scanControlsExecuted = 0;
     /** 構造ゲートの軸 fixture が実際に回った回数 (afterAll で照合・空化を RED にする)。 */
     let gateAxisChecked = 0;
     /** cmd の**最後の** gap クラス metachar 以降の後尾 (metachar が無ければ cmd 全体)。 */
@@ -1621,6 +1718,14 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       expect(gateAxisChecked, "構造ゲートの軸 fixture を実行した本数").toBe(6);
     });
     /**
+     * 走査行の合成列コントロール (coupling / class census / 構造ゲートの 3 it) の**実行証跡**
+     * (task 01a058f0)。各 it の末尾で加算する。bound は `controlCasesExecuted` と同じ
+     * (`-t` で当該 it を除外する絞り込み実行では偽 RED)。
+     */
+    afterAll(() => {
+      expect(scanControlsExecuted, "走査行コントロールを実行した it の本数").toBe(3);
+    });
+    /**
      * bundle H-1 (sweep 019fd74b): 軸 (4)(5) の**条件つき** assertion アームの実行回数。
      *
      * 3 本のうち 2 本は現行 corpus で非 vacuous (15 / 34)、1 本は **vacuous (0)**。
@@ -2021,24 +2126,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         //   (4)(5) の切り出しが取り残されて 2 乗形が SURVIVED する (3 形とも実測)。ここで結合する。
         const tailChars = CHAR_UNIVERSE.filter((c) => TAIL_METACHARS.test(c));
         expect([...tailChars].sort()).toEqual(["\n", "&", ";", "|"].sort());
-        let checked = 0;
-        let asserted = 0;
-        for (const target of SCAN_TARGETS) {
-          for (const cls of quantifiedClasses(target.re.source)) {
-            checked += 1;
-            // QA-LN5R2-1 (項目 4): 走査は **hoist 済みの単一出所** `exemptionApplies` を呼ぶ。
-            //   下の値 pin は同じ関数を検証するので、対 keyed の意味論が load-bearing になる
-            //   (旧: 走査はインライン predicate・値 pin はローカル複製 helper の 2 コピー)。
-            if (exemptionApplies(target.re.source, cls)) continue;
-            asserted += 1;
-            // TDA-LN5-7 / TDA-LN5-8 (項目 2/3): probe 構築と除外集合の導出も単一出所 (flags 伝播つき)。
-            const excluded = excludedByClass(cls, target.re.flags);
-            expect(
-              excluded.filter((c) => !TAIL_METACHARS.test(c)),
-              `${target.re.source} の量化クラス ${cls} が TAIL_METACHARS 外の文字を除外する (軸 4/5 の切り出しが取り残される)`,
-            ).toEqual([]);
-          }
-        }
+        // 走査ループは `scanCoupling` (describe top-level・走査行は逐語で移設) の単一出所。
+        const { checked, asserted } = scanCoupling(SCAN_TARGETS);
         // 走査が実際に回ったこと (regex を 1 本も見ずに緑になる恒真を防ぐ)。`asserted` は exemption を
         //   広げて全クラスを素通しさせる編集 (checked は変わらない) を RED にする。
         expect(checked, "量化クラスの本数 (mysqladmin whole + segment + git clean)").toBe(3);
@@ -2061,6 +2150,27 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         expect(exemptionApplies("\\bgit\\s+clean\\s+-[a-z]*f", "[^|;&\\n]")).toBe(false);
         // classSource は一致するが reSource が違う (対称側: 規則を跨いだ免除の波及を禁じる)。
         expect(exemptionApplies("\\bmysqladmin\\b[^|;&\\n]{0,512}\\bdrop\\b", "[a-z]")).toBe(false);
+        // **走査行の挙動コントロール (task 01a058f0・SEC-LSI-R3-1 系)**: 上の件数 pin と値 pin は
+        //   「走査が回った」「verdict の中身が正しい」までで、**走査行が照合したか**は見ない。同じ
+        //   `scanCoupling` に既知陽性の合成列を流し、当該 assertion が throw することを assert する。
+        //   陽性 (a) CR 綴りの gap: `\r` を除外する = TAIL_METACHARS 外 (旧死角 ③ の形)。
+        //   陽性 (b) exemption と**クラスだけ**一致する別規則: 対 keyed を片側 (class) keyed へ弱めた
+        //       走査行はこれを免除して素通す。
+        const COUPLING_VIOLATION = "TAIL_METACHARS 外の文字を除外する";
+        expect(() => scanCoupling([{ re: /\bfoosql\b[^|;&\r\n]*\bwipeall\b/i }])).toThrow(
+          COUPLING_VIOLATION,
+        );
+        expect(() => scanCoupling([{ re: /\bfoo\s+-[a-z]*x/i }])).toThrow(COUPLING_VIOLATION);
+        //   陰性 (POSITIVE 対・false RED を作らない側): 出荷形の gap と、対 keyed で免除される規則。
+        expect(scanCoupling([{ re: /\bfoosql\b[^|;&\n]*\bwipeall\b/i }])).toEqual({
+          checked: 1,
+          asserted: 1,
+        });
+        expect(scanCoupling([{ re: new RegExp("\\bgit\\s+clean\\s+-[a-z]*f", "i") }])).toEqual({
+          checked: 1,
+          asserted: 0,
+        });
+        scanControlsExecuted += 1;
       });
       it("class census (task 01a0574f-521a): 各スキャン regex の全クラスが量化クラスとして抽出される", () => {
         // SEC-LN5-1 ≡ QA-LN5-2 ≡ TDA-LN5-2 (残余 ③'): coupling と構造ゲートは `QUANTIFIED_CLASS_RE` が
@@ -2076,15 +2186,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         //   群括り gap の 2 乗規則が census を素通りできた (SEC 反証実測)。位置集合で比べる。
         // **R2 監査**: verdict は `censusVerdict` の**単一出所**で、下の fixture も同じ関数を呼ぶ
         //   (R1 unblock は走査行に比較を直書きし fixture 側で別途組み立てていた = 2 コピー)。
-        let censusChecked = 0;
-        for (const target of SCAN_TARGETS) {
-          censusChecked += 1;
-          const verdict = censusVerdict(target.re.source);
-          expect(
-            verdict.passes,
-            `${target.re.source}: escape されていない '[' の位置 ${JSON.stringify(verdict.opens)} と量化クラス抽出の位置 ${JSON.stringify(verdict.quantified)} が一致しない綴り (群括り / capture / クラス alternation / 未量化 / 別位置の phantom で本数だけ合わせた形) は coupling と構造ゲートを素通りする。remedy: 量化子をクラスの直後に置いて直書きする。**census には例外経路が無い** — NON_GAP_CLASS_EXEMPTIONS は coupling 専用で census には効かない (QA-LSI-R2-3 実測)。未量化クラスや flag token 内のクラスも census では位置が一致しないので、量化して直書きへ寄せるか、そもそもクラスを使わない綴りにする`,
-          ).toBe(true);
-        }
+        // 走査ループは `scanCensus` (describe top-level・走査行は逐語で移設) の単一出所。
+        const censusChecked = scanCensus(SCAN_TARGETS);
         // 走査が実際に回ったこと (regex を 1 本も見ずに緑になる恒真を防ぐ・coupling の checked と同型)。
         expect(censusChecked, "class census を適用したスキャン regex の本数").toBe(17);
         // 綴り非依存の歯 (fixture): 既知陽性 8 形は不一致で検出され、既知陰性 4 形は一致して素通る
@@ -2212,36 +2315,62 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         // 挙動が出荷形と同じであること (= 残余が実在の危険であることの根拠)。
         expect(new RegExp(LOOKAHEAD_GAP, "i").test("foosql aaa wipeall")).toBe(true);
         expect(new RegExp(LOOKAHEAD_GAP, "i").test("foosql a|a wipeall")).toBe(false);
+        // **走査行の挙動コントロール (task 01a058f0・SEC-LSI-R3-1 系)**: 上の fixture は verdict の
+        //   中身を pin するが、走査行 (`scanCensus`) がそれを照合したかは見ない。同じ helper に既知陽性を
+        //   流して当該 assertion が throw することを assert する。陽性は群括り gap (本数も位置も不一致) と
+        //   長さ連言の判別形 (出荷形 + 末尾 phantom・opens が quantified の真の prefix)。
+        const CENSUS_VIOLATION = "escape されていない '[' の位置";
+        expect(() => scanCensus([{ re: /\bfoosql\b(?:[^|;&\n])*\bwipeall\b/i }])).toThrow(
+          CENSUS_VIOLATION,
+        );
+        expect(() =>
+          scanCensus([{ re: new RegExp(String.raw`\bfoosql\b[^|;&\n]*\bwipeall\b(?:\[\s\S]*)?`) }]),
+        ).toThrow(CENSUS_VIOLATION);
+        //   陰性 (POSITIVE 対): 出荷形は throw せず 1 本数える。
+        expect(scanCensus([{ re: /\bfoosql\b[^|;&\n]*\bwipeall\b/i }])).toBe(1);
+        scanControlsExecuted += 1;
       });
       it("構造ゲート (TDA-MA-1): 手書き分離子クラスを持つ行は segmentRe と segment sample を要求する", () => {
         // .claude/rules/security.md「手書き分離子クラスを新規行に書かない (segment 単位が要るなら
         //   segmentRe)」の構造化。`segmentRe` 無しで `[^|;&\n]` 様のクラスを足すと、SEC-DB2-2 と同じ
         //   defect (引用内 metachar で境界が分断され high が low へ落ちる) が無警告で着地する。
-        let gated = 0;
-        LITERAL_RULES.forEach((rule, i) => {
-          // TDA-LN5-2 (項目 2) + **TDA-LSI-1 ≡ QA-LSI-2 (R1 監査 M・和へ是正)**: 判定は
-          //   受理集合ベース (`spansArbitraryText`) と**旧来の綴り軸** (`startsWith("[^")`) の
-          //   **論理和**。R1 実装は綴り軸を受理集合軸で**置換**したが、置換は削除と同じで、
-          //   「英数字を 1 つも受理しない否定クラス」族 (`[^a-zA-Z0-9|]` / `[^\w|]`) が
-          //   `spansArbitraryText=false` になって旧軸が拾えていた行を落とした (SEC probe E11 実測)。
-          //   和にすれば単調強化で、現行 17 規則の false RED は 0 (TDA 実測・`gated` は 1 のまま)。
-          // **R2 監査**: 和の式を走査行へ直書きすると fixture 側と 2 コピーになる (R1 の H と同型)。
-          //   判定は `isSeparatorGapClass` の**単一出所**で、下の軸 fixture も同じ関数を呼ぶ。
-          const separatorClasses = quantifiedClasses(rule.re.source).filter((cls) =>
-            isSeparatorGapClass(cls, rule.re.flags),
-          );
-          if (separatorClasses.length === 0) return;
-          gated += 1;
-          expect(
-            rule.segmentRe,
-            `#${i} ${rule.re.source}: 手書き分離子クラス ${separatorClasses.join(",")} を持つ行は正準 splitter の segment スコープ (segmentRe) を併記する`,
-          ).toBeDefined();
-          expect(
-            samples[i]?.segmentCmd,
-            `#${i}: segmentRe を持つ行は segment スコープでしか踏めない sample (segmentCmd) を持つ`,
-          ).toBeDefined();
-        });
+        // 走査ループは `scanStructureGate` (describe top-level・走査行は逐語で移設) の単一出所。
+        //   R1 実装は綴り軸を受理集合軸で**置換**したが、置換は削除と同じで、「英数字を 1 つも受理
+        //   しない否定クラス」族 (`[^a-zA-Z0-9|]` / `[^\w|]`) が `spansArbitraryText=false` になって
+        //   旧軸が拾えていた行を落とした (SEC probe E11 実測)。和にすれば単調強化で、現行 17 規則の
+        //   false RED は 0 (TDA 実測・`gated` は 1 のまま)。**R2 監査**: 和の式を走査行へ直書きすると
+        //   fixture 側と 2 コピーになる (R1 の H と同型) ので判定は `isSeparatorGapClass` の単一出所。
+        const gated = scanStructureGate(LITERAL_RULES, samples);
         expect(gated, "分離子クラスを持つ行の本数 (現行は mysqladmin の 1 本)").toBe(1);
+        // **走査行の挙動コントロール (task 01a058f0・SEC-LSI-R3-1 系)**: 軸 fixture は
+        //   `isSeparatorGapClass` の中身を pin するが、走査行がそれを呼んでいるかは見ない (走査行で和の
+        //   片項を落とす arm-drop が無音だった)。segmentRe を持たない合成規則を 1 本ずつ流し、当該
+        //   assertion が throw することを assert する。和の**各アームだけ**が拾う綴りを 1 本ずつ置く:
+        //   両軸 `[^|;&\n]` / 綴り軸のみ `[^\w|]` / 受理集合軸のみ `[\w\s-]`。
+        const STRUCTURE_VIOLATION = "segment スコープ (segmentRe) を併記する";
+        const STRUCTURE_POSITIVES: readonly RegExp[] = [
+          /\bfoosql\b[^|;&\n]*\bwipeall\b/i,
+          /\bfoosql\b[^\w|]*\bwipeall\b/i,
+          /\bfoosql\b[\w\s-]*\bwipeall\b/i,
+        ];
+        let structurePositivesChecked = 0;
+        for (const re of STRUCTURE_POSITIVES) {
+          structurePositivesChecked += 1;
+          expect(() => scanStructureGate([{ re }], [undefined]), String(re)).toThrow(
+            STRUCTURE_VIOLATION,
+          );
+        }
+        expect(structurePositivesChecked).toBe(3);
+        //   陰性 (POSITIVE 対): flag token 内の `[a-z]` は分離子でない (0 本) / segmentRe と segment
+        //   sample を併記した分離子規則は throw せず 1 本数える。
+        expect(scanStructureGate([{ re: /\bgit\s+clean\s+-[a-z]*f/i }], [undefined])).toBe(0);
+        expect(
+          scanStructureGate(
+            [{ re: /\bfoosql\b[^|;&\n]*\bwipeall\b/i, segmentRe: /\bfoosql\b[\s\S]*\bwipeall\b/i }],
+            [{ segmentCmd: "foosql 'a;b' wipeall" }],
+          ),
+        ).toBe(1);
+        scanControlsExecuted += 1;
       });
       it("prefixSeed: 2 語連鎖 / alternation サブコマンド / wrapper 形の sample にも届く (R4 Z2/Z4/Z6 の形)", () => {
         expect(
