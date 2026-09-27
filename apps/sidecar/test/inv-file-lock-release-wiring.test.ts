@@ -42,7 +42,14 @@ const inject = vi.hoisted(() => ({
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   const openSync = ((p: unknown, ...rest: unknown[]) => {
-    if (inject.path !== null && p === inject.path) {
+    // 差し替えるのは「何に差し替えるか」(errno か実ディレクトリ) が指定されているときだけ。指定の無い
+    // 注入は本物の open へ素通しし hits も数えない (errno 欠落の合成エラーが「触らない」と判定されて
+    // 検査が空振りするのを防ぐ・R2 main ループ変異 W8)。
+    if (
+      inject.path !== null &&
+      p === inject.path &&
+      (inject.dir !== null || inject.code !== null)
+    ) {
       inject.hits += 1;
       if (inject.dir !== null) {
         return (actual.openSync as (...a: unknown[]) => number)(inject.dir, ...rest);
