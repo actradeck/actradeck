@@ -26,8 +26,10 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 - **CI gate hardening (test-support only; no runtime change).** The advisory file-lock
   invariants now have their own "actually ran, not skipped" assertion (`sidecar-filelock`
-  suite; which describes it covers and the one it deliberately leaves out are documented on
-  the `SUITES` entry in `scripts/ci/assert-inv-ran.mjs`). The preflight metatest
+  suite, which also enforces a minimum number of matching tests through the new optional
+  `minTests` field; which describes it covers, the one it deliberately leaves out, and what
+  the floor does not catch are documented on the `SUITES` entry in
+  `scripts/ci/assert-inv-ran.mjs`). The preflight metatest
   (`scripts/test-ci-preflight.sh`) now checks that `ci.yml` and `scripts/ci-preflight.sh`
   invoke the same `--suite` calls and that every declared suite is invoked, and `ci.yml` names
   `bash` as its run shell instead of inheriting the runner default (the reasoning, including
