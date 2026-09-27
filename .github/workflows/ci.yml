@@ -15,6 +15,19 @@ concurrency:
 env:
   ACTRADECK_TELEMETRY_DISABLED: "1"
 
+# SEC-R3-5 (task 01a058f0): the fail-closed `rc=0; cmd || rc=$?` + `RC=$rc node ...` gate steps
+#   rely on the run shell exiting on the first failing command. Without this block that came
+#   from the runner's implicit default (`bash -e {0}` when no shell is named), so it was
+#   unstated. Naming `bash` makes it explicit and pins it for every job in this file; GitHub
+#   expands it to `bash --noprofile --norc -eo pipefail {0}`, i.e. one notch stricter than the
+#   implicit default (adds `-o pipefail`). At the time of this change no `run:` block in this
+#   file contains a pipeline (`|` outside `||`), so pipefail changes no existing step; a future
+#   `heavy-cmd | grep -q` gate must capture output into a variable instead (memory
+#   bash-gate-pipefail-sigpipe-inverts-on-match), or set its own step-level `shell:`.
+defaults:
+  run:
+    shell: bash
+
 # SEC-1 (監査): least-privilege GITHUB_TOKEN。verify/e2e/migrations は repo を read するだけ
 #   (checkout/install/build/test/migrate を CI-local Postgres に対して実行・write/upload なし)。
 #   read に固定し、compromised な依存 lifecycle script が write スコープ token を得る経路を断つ。
@@ -301,6 +314,9 @@ jobs:
           #   rather than in a separate step (a new step name would also have to be mirrored in
           #   scripts/ci-preflight.sh for the drift tripwire).
           RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-linear
+          # QA-FLV2-R2-4 (task 01a058f0): same report, third suite (advisory file-lock INV ran).
+          #   The environment-dependent EISDIR describe is excluded inside the SUITES entry.
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-filelock
 
       # 再#QA-4 (再監査 a547b9f2): webui の coverage 閾値 (vitest.config.ts: realtime core +
       #   liveness-display) を CI で実評価する。plain `vitest run` は閾値を見ないため dormant

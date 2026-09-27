@@ -83,6 +83,133 @@ EOF_GATES
   fi
 fi
 
+echo "[test-ci-preflight] 1c. --suite call-set parity (SEC-R3-4, task 01a058f0)"
+
+# The step-name tripwire above cannot see a `--suite` line deleted from one side only (both
+# steps keep their names), and nothing tied the SUITES table to its callers: a suite added to
+# assert-inv-ran.mjs but never invoked would read as a gate while asserting nothing. One
+# extractor serves both files so the two sides cannot be parsed differently. It reads only
+# non-comment lines that invoke assert-inv-ran.mjs (prose such as "--suite preset" in comments
+# is not a call) and keeps duplicates (multiset), so dropping one of two identical calls on one
+# side is also a mismatch.
+suite_calls() {
+  grep -vE '^[[:space:]]*#' "$1" | grep -F 'assert-inv-ran.mjs' \
+    | grep -oE -- '--suite [A-Za-z0-9_-]+' | sed 's/^--suite //' | sort
+}
+suites_declared() {
+  # The module path goes through the environment, not argv: the script's CLI entry guard
+  # compares process.argv[1] with its own URL, so passing the path as argv[1] would run the gate.
+  SUITES_MODULE="$REPO_ROOT/scripts/ci/assert-inv-ran.mjs" node --input-type=module -e '
+    const m = await import(process.env.SUITES_MODULE);
+    console.log(Object.keys(m.SUITES).sort().join("\n"));
+  '
+}
+# suite_parity <ci.yml> <preflight.sh> <declared-keys-file>: rc 0 iff
+#   (a) the two call multisets are equal and non-empty, and
+#   (b) the distinct called keys equal the SUITES keys (every suite is invoked; no unknown call).
+suite_parity() {
+  local ci pf declared called
+  ci="$(suite_calls "$1")"
+  pf="$(suite_calls "$2")"
+  declared="$(cat "$3")"
+  if [ -z "$ci" ]; then
+    echo "suite parity: no --suite call extracted from $1 (extraction went vacuous)"
+    return 1
+  fi
+  if [ "$ci" != "$pf" ]; then
+    echo "suite parity: --suite calls differ between $1 and $2"
+    diff <(printf '%s\n' "$ci") <(printf '%s\n' "$pf") | sed 's/^/  /'
+    return 1
+  fi
+  called="$(printf '%s\n' "$ci" | sort -u)"
+  if [ "$called" != "$declared" ]; then
+    echo "suite parity: SUITES keys and invoked suites differ (< SUITES / > invoked)"
+    diff <(printf '%s\n' "$declared") <(printf '%s\n' "$called") | sed 's/^/  /'
+    return 1
+  fi
+  echo "suite parity: $(printf '%s\n' "$ci" | wc -l) --suite calls match on both sides and cover every SUITES key"
+}
+
+suites_declared > "$TMPDIR_TCP/suites.txt"
+if [ ! -s "$TMPDIR_TCP/suites.txt" ]; then
+  bad "SUITES key extraction from assert-inv-ran.mjs went vacuous"
+fi
+
+out="$(suite_parity .github/workflows/ci.yml scripts/ci-preflight.sh "$TMPDIR_TCP/suites.txt" 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "cover every SUITES key"; then
+  ok "--suite calls match between ci.yml and ci-preflight.sh and cover every SUITES key"
+else
+  bad "--suite parity should hold on the real files (rc=$rc): $out"
+fi
+
+# Falsifiability A: delete one --suite call from ONE side only -> RED naming the suite.
+grep -v -- '--suite sidecar-linear$' scripts/ci-preflight.sh > "$TMPDIR_TCP/preflight-dropped.sh"
+out="$(suite_parity .github/workflows/ci.yml "$TMPDIR_TCP/preflight-dropped.sh" "$TMPDIR_TCP/suites.txt" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "sidecar-linear"; then
+  ok "parity RED when one side drops a --suite call (named in the output)"
+else
+  bad "parity missed a one-sided --suite deletion (rc=$rc): $out"
+fi
+
+# Falsifiability B: add a --suite call on ONE side only -> RED.
+{ cat .github/workflows/ci.yml; printf '          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/x.json --suite db\n'; } > "$TMPDIR_TCP/ci-extra-suite.yml"
+out="$(suite_parity "$TMPDIR_TCP/ci-extra-suite.yml" scripts/ci-preflight.sh "$TMPDIR_TCP/suites.txt" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "differ between"; then
+  ok "parity RED when one side gains an extra --suite call"
+else
+  bad "parity missed a one-sided --suite addition (rc=$rc): $out"
+fi
+
+# Falsifiability C: a SUITES key that neither side invokes -> RED naming the key.
+{ cat "$TMPDIR_TCP/suites.txt"; echo "zz-uncalled-probe"; } | sort > "$TMPDIR_TCP/suites-extra.txt"
+out="$(suite_parity .github/workflows/ci.yml scripts/ci-preflight.sh "$TMPDIR_TCP/suites-extra.txt" 2>&1)"; rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "zz-uncalled-probe"; then
+  ok "parity RED when a SUITES key is never invoked (named in the output)"
+else
+  bad "parity missed an uninvoked SUITES key (rc=$rc): $out"
+fi
+
+# Negative control for the comment filter: a commented-out call must not count as a call.
+{ cat .github/workflows/ci.yml; printf '          # RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/x.json --suite db\n'; } > "$TMPDIR_TCP/ci-comment-suite.yml"
+out="$(suite_parity "$TMPDIR_TCP/ci-comment-suite.yml" scripts/ci-preflight.sh "$TMPDIR_TCP/suites.txt" 2>&1)"; rc=$?
+if [ $rc -eq 0 ]; then
+  ok "a commented-out --suite line is not counted as a call"
+else
+  bad "comment filter counted a commented-out call (rc=$rc): $out"
+fi
+
+echo "[test-ci-preflight] 1d. explicit run shell (SEC-R3-5, task 01a058f0)"
+
+# The fail-closed `rc=0; cmd || rc=$?` gate steps assume the run shell exits on error. ci.yml
+# names `bash` at the workflow level so that assumption is stated, not inherited from the
+# runner's implicit default. Read the top-level `defaults:` block only (a step-level `shell:`
+# does not satisfy this).
+workflow_default_shell() {
+  awk '
+    /^defaults:[[:space:]]*$/ { in_def = 1; next }
+    /^[^[:space:]#]/          { in_def = 0 }
+    in_def && /^  run:[[:space:]]*$/ { in_run = 1; next }
+    in_def && /^  [^[:space:]]/      { in_run = 0 }
+    in_def && in_run && /^    shell:[[:space:]]*/ {
+      v = $0; sub(/^    shell:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); print v
+    }
+  ' "$1"
+}
+shell_val="$(workflow_default_shell .github/workflows/ci.yml)"
+if [ "$shell_val" = "bash" ]; then
+  ok "ci.yml declares defaults.run.shell: bash at the workflow level"
+else
+  bad "ci.yml workflow-level defaults.run.shell should be 'bash' (got '$shell_val')"
+fi
+awk '/^defaults:[[:space:]]*$/ { skip = 1; next } skip && /^[^[:space:]#]/ { skip = 0 } !skip' \
+  .github/workflows/ci.yml > "$TMPDIR_TCP/ci-no-defaults.yml"
+shell_val="$(workflow_default_shell "$TMPDIR_TCP/ci-no-defaults.yml")"
+if [ -z "$shell_val" ]; then
+  ok "run-shell check RED-able: removing the defaults block leaves no workflow-level shell"
+else
+  bad "defaults removal probe still found a shell ('$shell_val')"
+fi
+
 echo "[test-ci-preflight] 2. assert-inv-ran.mjs fixtures"
 
 fixture() { printf '%s' "$1" > "$TMPDIR_TCP/report.json"; }
@@ -153,6 +280,48 @@ if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "unknown suite"; then
   ok "--suite nonsense -> non-zero + unknown-suite error"
 else
   bad "unknown suite mishandled (rc=$rc): $out"
+fi
+
+# minTests (task 01a058f0): a suite that declares a floor fails when fewer matching tests ran.
+# The floor is read from SUITES (not restated here) and the report is generated to that size,
+# so the three cases stay aligned when the floor is raised.
+MIN_FL="$(SUITES_MODULE="$REPO_ROOT/scripts/ci/assert-inv-ran.mjs" node --input-type=module -e '
+  const m = await import(process.env.SUITES_MODULE);
+  console.log(m.SUITES["sidecar-filelock"]?.minTests ?? "");
+')"
+fl_fixture() { # n passed tests whose names match the sidecar-filelock pattern
+  node -e '
+    const n = Number(process.argv[1]);
+    const rs = Array.from({ length: n }, (_, i) => ({
+      fullName: `INV-FILELOCK-TESTHOOKS-BOUNDARY: probe ${i}`, status: "passed" }));
+    process.stdout.write(JSON.stringify({ testResults: [{ name: "f.test.ts", assertionResults: rs }] }));
+  ' "$1" > "$TMPDIR_TCP/report.json"
+}
+if ! [ "$MIN_FL" -gt 1 ] 2>/dev/null; then
+  bad "sidecar-filelock should declare an integer minTests > 1 (got '$MIN_FL')"
+else
+  fl_fixture "$MIN_FL"
+  out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" --suite sidecar-filelock 2>&1)"; rc=$?
+  if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "ran for real — $MIN_FL assertions"; then
+    ok "minTests: exactly minTests ($MIN_FL) matching tests -> exit 0"
+  else
+    bad "minTests boundary (== floor) should pass (rc=$rc): $out"
+  fi
+  fl_fixture "$((MIN_FL - 1))"
+  out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" --suite sidecar-filelock 2>&1)"; rc=$?
+  if [ $rc -eq 1 ] && printf '%s' "$out" | grep -q "only $((MIN_FL - 1)) matching test(s) ran, fewer than minTests=$MIN_FL"; then
+    ok "minTests: one below the floor -> exit 1 naming the count and the floor"
+  else
+    bad "minTests shortfall should fail (rc=$rc): $out"
+  fi
+fi
+# A suite WITHOUT minTests keeps its old contract: a single matching test still passes.
+fixture '{"testResults":[{"name":"f.test.ts","assertionResults":[{"fullName":"INV-EGRESS-E2E holds","status":"passed"}]}]}'
+out="$(RC=0 node scripts/ci/assert-inv-ran.mjs "$TMPDIR_TCP/report.json" --suite sidecar-egress 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "ran for real — 1 assertions"; then
+  ok "suite without minTests (sidecar-egress) -> 1 matching test still exits 0"
+else
+  bad "suite without minTests changed behaviour (rc=$rc): $out"
 fi
 
 # unreadable report -> exit 1 + "missing/unparseable" (a lost report must never pass).
