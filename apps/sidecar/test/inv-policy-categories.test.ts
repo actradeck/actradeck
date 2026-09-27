@@ -558,6 +558,13 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
   //         書き換える coordinated 編集 (例: 合成列を空にしてから走査行を弱める) は通る。合成列側の
   //         `toThrow` 断片・件数・afterAll の期待値は綴りの一部であり、それらを追随更新する編集は
   //         ここでは止まらない (コントロール配線の残余・ADR 01a057d0 と同型)。
+  //         **実コーパス呼び出し行 (QA-CIG-1・R1 で着地)**: helper の呼び出し 3 行
+  //         (`scanCoupling(SCAN_TARGETS)` / `scanCensus(SCAN_TARGETS)` /
+  //         `scanStructureGate(LITERAL_RULES, samples)`) は、件数の定数への差し替え・部分配列の
+  //         受け渡しが無音だった (QA Q2〜Q5 実測)。各 helper が走査した列の参照を `lastScanned` に
+  //         記録し、実コーパス it が呼び出し直後に参照同一性を照合する (Q2〜Q5 は RED へ反転・実測)。
+  //         **残余**: 呼び出し行と参照 assert の **2 行 coordinated 編集**は通る (上の coordinated
+  //         残余クラスへ収束しただけで、閉じたわけではない)。
   //         構造ゲート側の分離子判定は **受理集合軸 (`spansArbitraryText`) と旧来の綴り軸
   //         (`startsWith("[^")`) の論理和** (TDA-LSI-1 ≡ QA-LSI-2 で置換から和へ是正)。受理集合軸は
   //         正のクラスで綴られた広い gap (`[\w\s-]*`) を新たに拾い、綴り軸は**英数字を 1 つも受理しない
@@ -1101,9 +1108,24 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
      * 変わり pin の re-point になるため)。合成列側は `toThrow(<message 断片>)` で**当該 assertion**
      * が落ちたことまで確認する。
      */
+    /**
+     * **各 helper が最後に走査した列の参照** (QA-CIG-1・task 01a058f0 R1)。合成列コントロールは
+     * helper の走査行を守るが、**実コーパス呼び出し行**そのもの (`scanCensus(SCAN_TARGETS)` 等) は
+     * 守らない — 呼び出しを件数の定数へ差し替える (`const censusChecked = 17;`) / 部分配列を渡す
+     * (`.slice(0, 16)`) 1 行編集が 304 全緑で通った (QA Q2〜Q5 実測)。各実コーパス it は呼び出しの
+     * **直前に**当該スロットを消し、**直後に**参照同一性 (`toBe`) を照合する。合成陽性の呼び出しは
+     * その後なので、上書きしても実コーパス側の判定に影響しない。
+     */
+    const lastScanned: {
+      coupling?: unknown;
+      census?: unknown;
+      structureRules?: unknown;
+      structureSamples?: unknown;
+    } = {};
     const scanCoupling = (
       targets: ReadonlyArray<{ re: RegExp }>,
     ): { checked: number; asserted: number } => {
+      lastScanned.coupling = targets;
       let checked = 0;
       let asserted = 0;
       for (const target of targets) {
@@ -1126,6 +1148,7 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
     };
     /** class census の走査ループ (上の `scanCoupling` と同じ規律・走査行は逐語で移設)。 */
     const scanCensus = (targets: ReadonlyArray<{ re: RegExp }>): number => {
+      lastScanned.census = targets;
       let censusChecked = 0;
       for (const target of targets) {
         censusChecked += 1;
@@ -1145,6 +1168,8 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
       rules: ReadonlyArray<{ re: RegExp; segmentRe?: RegExp }>,
       samples: ReadonlyArray<{ segmentCmd?: string } | undefined>,
     ): number => {
+      lastScanned.structureRules = rules;
+      lastScanned.structureSamples = samples;
       let gated = 0;
       rules.forEach((rule, i) => {
         // TDA-LN5-2 (項目 2) + **TDA-LSI-1 ≡ QA-LSI-2 (R1 監査 M・和へ是正)**: 判定は
@@ -2127,7 +2152,10 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         const tailChars = CHAR_UNIVERSE.filter((c) => TAIL_METACHARS.test(c));
         expect([...tailChars].sort()).toEqual(["\n", "&", ";", "|"].sort());
         // 走査ループは `scanCoupling` (describe top-level・走査行は逐語で移設) の単一出所。
+        lastScanned.coupling = undefined;
         const { checked, asserted } = scanCoupling(SCAN_TARGETS);
+        // QA-CIG-1: 実コーパス呼び出し行の観測 (件数の定数化・部分配列を RED に)。
+        expect(lastScanned.coupling, "coupling は SCAN_TARGETS 全体を走査した").toBe(SCAN_TARGETS);
         // 走査が実際に回ったこと (regex を 1 本も見ずに緑になる恒真を防ぐ)。`asserted` は exemption を
         //   広げて全クラスを素通しさせる編集 (checked は変わらない) を RED にする。
         expect(checked, "量化クラスの本数 (mysqladmin whole + segment + git clean)").toBe(3);
@@ -2187,7 +2215,12 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         // **R2 監査**: verdict は `censusVerdict` の**単一出所**で、下の fixture も同じ関数を呼ぶ
         //   (R1 unblock は走査行に比較を直書きし fixture 側で別途組み立てていた = 2 コピー)。
         // 走査ループは `scanCensus` (describe top-level・走査行は逐語で移設) の単一出所。
+        lastScanned.census = undefined;
         const censusChecked = scanCensus(SCAN_TARGETS);
+        // QA-CIG-1: 実コーパス呼び出し行の観測 (件数の定数化・部分配列を RED に)。
+        expect(lastScanned.census, "class census は SCAN_TARGETS 全体を走査した").toBe(
+          SCAN_TARGETS,
+        );
         // 走査が実際に回ったこと (regex を 1 本も見ずに緑になる恒真を防ぐ・coupling の checked と同型)。
         expect(censusChecked, "class census を適用したスキャン regex の本数").toBe(17);
         // 綴り非依存の歯 (fixture): 既知陽性 8 形は不一致で検出され、既知陰性 4 形は一致して素通る
@@ -2340,7 +2373,14 @@ describe("INV-LITERAL-RULES-SINGLE-SOURCE (TDA-1): risk と category を同一�
         //   旧軸が拾えていた行を落とした (SEC probe E11 実測)。和にすれば単調強化で、現行 17 規則の
         //   false RED は 0 (TDA 実測・`gated` は 1 のまま)。**R2 監査**: 和の式を走査行へ直書きすると
         //   fixture 側と 2 コピーになる (R1 の H と同型) ので判定は `isSeparatorGapClass` の単一出所。
+        lastScanned.structureRules = undefined;
+        lastScanned.structureSamples = undefined;
         const gated = scanStructureGate(LITERAL_RULES, samples);
+        // QA-CIG-1: 実コーパス呼び出し行の観測 (件数の定数化・部分配列を RED に)。
+        expect(lastScanned.structureRules, "構造ゲートは LITERAL_RULES 全体を走査した").toBe(
+          LITERAL_RULES,
+        );
+        expect(lastScanned.structureSamples, "構造ゲートは samples 全体を参照した").toBe(samples);
         expect(gated, "分離子クラスを持つ行の本数 (現行は mysqladmin の 1 本)").toBe(1);
         // **走査行の挙動コントロール (task 01a058f0・SEC-LSI-R3-1 系)**: 軸 fixture は
         //   `isSeparatorGapClass` の中身を pin するが、走査行がそれを呼んでいるかは見ない (走査行で和の
