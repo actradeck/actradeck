@@ -22,6 +22,20 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   from `>=0.35.0 <0.36` to `>=0.35.4 <0.36`). `pnpm audit` is clean at the
   `moderate` level and the CI dependency-audit gate (INV-DEP-AUDIT) passes again.
 
+### Changed
+
+- **CI gate hardening (test-support only; no runtime change).** The advisory file-lock
+  invariants now have their own "actually ran, not skipped" assertion (`sidecar-filelock`
+  suite; which describes it covers and the one it deliberately leaves out are documented on
+  the `SUITES` entry in `scripts/ci/assert-inv-ran.mjs`). The preflight metatest
+  (`scripts/test-ci-preflight.sh`) now checks that `ci.yml` and `scripts/ci-preflight.sh`
+  invoke the same `--suite` calls and that every declared suite is invoked, and `ci.yml` names
+  `bash` as its run shell instead of inheriting the runner default (the reasoning, including
+  the added `pipefail`, is in the comment above `defaults:` in `ci.yml`). The linear-time
+  metatest's three scan loops (coupling, class census, structure gate) moved into helpers that
+  each test also feeds known-bad inputs, so a scan line that stops checking now fails; scope
+  and remaining gaps are in the header of `apps/sidecar/test/inv-policy-categories.test.ts`.
+
 ## [0.9.0] - 2026-09-01
 
 ### Added
