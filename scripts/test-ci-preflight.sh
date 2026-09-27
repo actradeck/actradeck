@@ -178,6 +178,38 @@ else
   bad "comment filter counted a commented-out call (rc=$rc): $out"
 fi
 
+echo "[test-ci-preflight] 1d. explicit run shell (SEC-R3-5, task 01a058f0)"
+
+# The fail-closed `rc=0; cmd || rc=$?` gate steps assume the run shell exits on error. ci.yml
+# names `bash` at the workflow level so that assumption is stated, not inherited from the
+# runner's implicit default. Read the top-level `defaults:` block only (a step-level `shell:`
+# does not satisfy this).
+workflow_default_shell() {
+  awk '
+    /^defaults:[[:space:]]*$/ { in_def = 1; next }
+    /^[^[:space:]#]/          { in_def = 0 }
+    in_def && /^  run:[[:space:]]*$/ { in_run = 1; next }
+    in_def && /^  [^[:space:]]/      { in_run = 0 }
+    in_def && in_run && /^    shell:[[:space:]]*/ {
+      v = $0; sub(/^    shell:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); print v
+    }
+  ' "$1"
+}
+shell_val="$(workflow_default_shell .github/workflows/ci.yml)"
+if [ "$shell_val" = "bash" ]; then
+  ok "ci.yml declares defaults.run.shell: bash at the workflow level"
+else
+  bad "ci.yml workflow-level defaults.run.shell should be 'bash' (got '$shell_val')"
+fi
+awk '/^defaults:[[:space:]]*$/ { skip = 1; next } skip && /^[^[:space:]#]/ { skip = 0 } !skip' \
+  .github/workflows/ci.yml > "$TMPDIR_TCP/ci-no-defaults.yml"
+shell_val="$(workflow_default_shell "$TMPDIR_TCP/ci-no-defaults.yml")"
+if [ -z "$shell_val" ]; then
+  ok "run-shell check RED-able: removing the defaults block leaves no workflow-level shell"
+else
+  bad "defaults removal probe still found a shell ('$shell_val')"
+fi
+
 echo "[test-ci-preflight] 2. assert-inv-ran.mjs fixtures"
 
 fixture() { printf '%s' "$1" > "$TMPDIR_TCP/report.json"; }

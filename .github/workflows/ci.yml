@@ -15,6 +15,19 @@ concurrency:
 env:
   ACTRADECK_TELEMETRY_DISABLED: "1"
 
+# SEC-R3-5 (task 01a058f0): the fail-closed `rc=0; cmd || rc=$?` + `RC=$rc node ...` gate steps
+#   rely on the run shell exiting on the first failing command. Without this block that came
+#   from the runner's implicit default (`bash -e {0}` when no shell is named), so it was
+#   unstated. Naming `bash` makes it explicit and pins it for every job in this file; GitHub
+#   expands it to `bash --noprofile --norc -eo pipefail {0}`, i.e. one notch stricter than the
+#   implicit default (adds `-o pipefail`). At the time of this change no `run:` block in this
+#   file contains a pipeline (`|` outside `||`), so pipefail changes no existing step; a future
+#   `heavy-cmd | grep -q` gate must capture output into a variable instead (memory
+#   bash-gate-pipefail-sigpipe-inverts-on-match), or set its own step-level `shell:`.
+defaults:
+  run:
+    shell: bash
+
 # SEC-1 (監査): least-privilege GITHUB_TOKEN。verify/e2e/migrations は repo を read するだけ
 #   (checkout/install/build/test/migrate を CI-local Postgres に対して実行・write/upload なし)。
 #   read に固定し、compromised な依存 lifecycle script が write スコープ token を得る経路を断つ。
