@@ -37,9 +37,9 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { isIdentityOnlyReadErrno, withFileLock } from "../src/file-lock.js";
+import { isIdentityOnlyReadErrno, isOwnLockForRelease, withFileLock } from "../src/file-lock.js";
 import { cleanupTempDirs, makeTempDir } from "./helpers/lock-test-support.js";
 
 let dir: string;
@@ -837,26 +837,27 @@ describe("INV-ATTACH-WIRE-LOCK: SEC-1 acquire-delay env は test モード時の
  *   **自 lock を記述しえない**もの (`EISDIR` — 自 lock は linkSync で立てた通常ファイル)、
  *   および errno の欠落。
  */
-describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す errno クラス", () => {
-  // 「自分の lock が読めなくなった」を記述しうる errno (= identity 単独で判定してよい)。
-  const IDENTITY_ONLY: readonly string[] = ["EACCES", "EPERM"];
-  // 記述しえない errno。**一過性 (資源枯渇 / I/O) と、自 lock ではありえない種別**の両方を並べる。
-  const MUST_DECLINE: readonly (string | undefined)[] = [
-    "EMFILE", // fd 枯渇 (SEC-FLV2-1 の実プロセス再現ベクタ)
-    "ENFILE", // system-wide fd 枯渇
-    "EIO", // I/O 障害
-    "ENOMEM", // メモリ枯渇
-    "EAGAIN", // 一時的に利用不可
-    "EBUSY",
-    "EBADF",
-    "ELOOP",
-    "ENAMETOOLONG",
-    "ENOENT", // 消えている = 自 lock の identity 判定より前に弾かれるべき形
-    "EISDIR", // SEC-FLV2-R2-1: 自 lock は通常ファイル。ディレクトリは第三者のもの
-    "ERR_STRING_TOO_LONG", // 恒久だが permission でない (読取り不能が続く形)
-    undefined, // errno が取れない失敗は識別できない
-  ];
+// 「自分の lock が読めなくなった」を記述しうる errno (= identity 単独で判定してよい)。
+// 述語 (isIdentityOnlyReadErrno) と解放の所有判定 (isOwnLockForRelease) の両 describe が同じ表を流す。
+const IDENTITY_ONLY: readonly string[] = ["EACCES", "EPERM"];
+// 記述しえない errno。**一過性 (資源枯渇 / I/O) と、自 lock ではありえない種別**の両方を並べる。
+const MUST_DECLINE: readonly (string | undefined)[] = [
+  "EMFILE", // fd 枯渇 (SEC-FLV2-1 の実プロセス再現ベクタ)
+  "ENFILE", // system-wide fd 枯渇
+  "EIO", // I/O 障害
+  "ENOMEM", // メモリ枯渇
+  "EAGAIN", // 一時的に利用不可
+  "EBUSY",
+  "EBADF",
+  "ELOOP",
+  "ENAMETOOLONG",
+  "ENOENT", // 消えている = 自 lock の identity 判定より前に弾かれるべき形
+  "EISDIR", // SEC-FLV2-R2-1: 自 lock は通常ファイル。ディレクトリは第三者のもの
+  "ERR_STRING_TOO_LONG", // 恒久だが permission でない (読取り不能が続く形)
+  undefined, // errno が取れない失敗は識別できない
+];
 
+describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す errno クラス", () => {
   it("in: 自 lock が読めなくなったことを記述しうる errno だけ true", () => {
     for (const code of IDENTITY_ONLY) {
       expect(isIdentityOnlyReadErrno(code), `${code} must let identity settle ownership`).toBe(
@@ -875,6 +876,62 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す err
     // in と out が交わらない (どちらかを書き換えて両立させる編集を loud にする)。
     expect(IDENTITY_ONLY.filter((c) => MUST_DECLINE.includes(c))).toEqual([]);
     expect(MUST_DECLINE.length).toBeGreaterThan(IDENTITY_ONLY.length);
+  });
+});
+
+/**
+ * SEC-FLV2-R3-4 ≡ QA-FLV2-R3-1 (task 01a05a63・TDA-FLV2-3): 解放の**所有判定そのもの**を表駆動で固定する。
+ *
+ * 上の表は errno クラスの述語 `isIdentityOnlyReadErrno` を固定するが、それだけでは「解放路が実際に
+ * その述語を通る」結線は落とせなかった (解放の call site を inline errno リストへ差し替える変異 N1 は、
+ * 下の実 fs EISDIR it が走る環境でしか捕捉できない)。判定を I/O から切り出した純関数
+ * `isOwnLockForRelease` に同じ表を流し、**どの環境でも** EISDIR / 一過性 errno で identity を信じる
+ * 変異を落とす。解放路 (`ownsLockForRelease`) はこの関数を呼ぶだけ。
+ *
+ * 前提: この関数が受けるのは `(dev, ino)` が自 inode と一致した**後**の読取り結果。identity 不一致・
+ * stat 失敗は I/O 側で先に「触らない」へ倒れる (ここには来ない)。
+ */
+describe("INV-FILELOCK-IDENTITY-V2: 解放の所有判定 (identity 一致後の読取り結果)", () => {
+  const identity = { dev: 1, ino: 2 };
+  let rowsChecked = 0;
+  afterAll(() => {
+    // 表の行がすべて実際に判定へ流れたこと (ループの空化・早期 return を loud にする)。
+    expect(rowsChecked).toBe(IDENTITY_ONLY.length + MUST_DECLINE.length + 4);
+  });
+
+  it("読めない: permission クラスの errno だけ identity を信じて自 lock とする", () => {
+    for (const code of IDENTITY_ONLY) {
+      expect(isOwnLockForRelease({ errno: code }), `${code} is our own unreadable lock`).toBe(true);
+      rowsChecked += 1;
+    }
+  });
+
+  it("読めない: 一過性・自 lock を記述しえない errno (EISDIR を含む) と欠落は触らない", () => {
+    for (const code of MUST_DECLINE) {
+      expect(isOwnLockForRelease({ errno: code }), `${String(code)} must NOT release`).toBe(false);
+      rowsChecked += 1;
+    }
+    // SEC-FLV2-R2-1 の指名ベクタを表とは別に逐語で持つ (表から EISDIR を抜く編集を loud にする)。
+    expect(MUST_DECLINE).toContain("EISDIR");
+    expect(isOwnLockForRelease({ errno: "EISDIR" })).toBe(false);
+  });
+
+  it("読めた: 自 pid / corrupt は自 lock、別 pid / 消えている は触らない", () => {
+    const self = String(process.pid);
+    const cases: readonly [string, Parameters<typeof isOwnLockForRelease>[0], boolean][] = [
+      ["own pid", { holder: { kind: "pid", pid: process.pid, raw: `${self}\n`, identity } }, true],
+      ["corrupt", { holder: { kind: "corrupt", raw: "garbage", identity } }, true],
+      [
+        "foreign pid (third party overwrote our inode)",
+        { holder: { kind: "pid", pid: process.pid + 1, raw: `${process.pid + 1}\n`, identity } },
+        false,
+      ],
+      ["absent (vanished between stat and read)", { holder: { kind: "absent" } }, false],
+    ];
+    for (const [label, read, want] of cases) {
+      expect(isOwnLockForRelease(read), label).toBe(want);
+      rowsChecked += 1;
+    }
   });
 });
 

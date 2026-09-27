@@ -31,6 +31,13 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
   decline: if the lock is readable and names a different live pid, a third party overwrote
   the inode in place and release leaves it alone.
 
+  Takeover and release run **one shared detach procedure** (`detachVerified` in
+  `apps/sidecar/src/file-lock.ts`: `rename` → re-verify → `unlink`, or link back and throw if
+  that fails). The two differ in exactly two places, both declared in one table
+  (`detachPolicy`): the re-verification predicate (pair _and_ bytes for takeover, pair alone
+  for release) and strictness (takeover lets an unexpected `rename` or `unlink` failure
+  propagate; release treats them as best-effort, per limits 3 and 6 below).
+
   On acquisition, a lock whose content cannot be read **for any reason** is **not** taken over,
   because it might belong to somebody else and its identity cannot be re-verified against what
   the staleness check saw. Previously that made an unreadable lock permanent: release went
@@ -99,7 +106,7 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
        (`ERR_STRING_TOO_LONG`, measured) reaches this state and stays there. This is unchanged
        from before identity v2 — the previous code rethrew the same failures on acquisition —
        so it is a carried-over residual rather than something this work introduced.
-     Only the restore-failure path below is loud.
+       Only the restore-failure path below is loud.
   4. **The restore-failure abort is reachable under third-party contention**, not dead code.
      A concurrent acquirer can take the lock path between the `rename` that detaches it and
      the `linkSync` that would restore it. The process that fails to restore throws and never

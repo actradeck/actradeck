@@ -82,12 +82,15 @@ export const SUITES = {
   // QA-FLV2-R2-4 (task 01a058f0): the advisory file-lock invariants guard the persistent
   // allowlist / per-repo policy / attach settings writers (security.md "advisory file lock").
   // They ride the same sidecar JSON report as sidecar-egress / sidecar-linear. Matched by the
-  // three describe-title prefixes below (10 describes in 4 files at registration time).
+  // three describe-title prefixes below (11 describes in 4 files as of task 01a05a63).
   // EXCLUDED on purpose: the describe "INV-FILELOCK-IDENTITY-V2: EISDIR ..." calls ctx.skip when
   // the filesystem does not reuse the freed inode number for a directory, so whether it runs
   // depends on the runner; this gate turns any skip into rc=1, which would make that one
-  // environment-dependent. The negative lookahead keeps it out; it is registered once task
-  // 01a05a63 makes the EISDIR case deterministic. INV-ATTACH-WIRE-LOCK (skipIf running as root)
+  // environment-dependent. The negative lookahead keeps it out. Task 01a05a63 did not make that
+  // real-filesystem case deterministic; it moved the release ownership decision into a pure
+  // function and pinned EISDIR there instead ("INV-FILELOCK-IDENTITY-V2: 解放の所有判定 ...",
+  // matched here and runs everywhere). The EISDIR describe is kept as an extra real-fs axis and
+  // stays excluded for the same reason as before. INV-ATTACH-WIRE-LOCK (skipIf running as root)
   // and the INV-FILELOCK-NO-EMPTY-WINDOW it (inside INV-APPROVAL-PERSIST-CONCURRENT) are outside
   // these prefixes and are not asserted here.
   // What this entry catches (measured, task 01a058f0): a skipped/todo test in any matched
@@ -101,7 +104,7 @@ export const SUITES = {
     pattern:
       "INV-FILELOCK-STALE-TAKEOVER-IDENTITY|INV-FILELOCK-TESTHOOKS-BOUNDARY|" +
       "INV-FILELOCK-IDENTITY-V2: (?!EISDIR)",
-    minTests: 27,
+    minTests: 30,
   },
 };
 
