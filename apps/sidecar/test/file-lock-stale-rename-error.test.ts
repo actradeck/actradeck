@@ -84,7 +84,7 @@ describe("INV-ATTACH-WIRE-LOCK: stale 取り外しの rename 失敗", () => {
  * 占有する。解放は判定を通った後に rename で失敗するので、lock は lockPath に**自分の pid のまま残る**
  * (次の取得が自 pid の残骸として奪取する = 自力回復する形)。
  */
-describe("INV-ATTACH-WIRE-LOCK: 解放の rename 失敗は best-effort", () => {
+describe("INV-FILELOCK-IDENTITY-V2: 解放の rename 失敗は best-effort", () => {
   it("解放の rename が ENOENT 以外 (EISDIR) で失敗しても fn の結果を返し、lock を自 pid のまま残す", () => {
     const occupied: string[] = [];
     for (let seq = 0; seq < OCCUPIED_SEQ_COUNT; seq++) {

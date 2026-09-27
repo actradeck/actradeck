@@ -24,13 +24,16 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
-- **Advisory file lock: takeover and release share one detach procedure (no behaviour change
-  intended).** The rename → re-verify → unlink-or-restore steps were written out twice; they now
-  live in a single helper, with the two phase differences (verification predicate and
-  strictness) in one table. The release ownership decision is a pure function with its own
-  table-driven test, so the `EISDIR` case is now checked on every runner rather than only where
-  the filesystem happens to reuse inode numbers. Details are in the docstrings of
-  `detachVerified` / `isOwnLockForRelease` in `apps/sidecar/src/file-lock.ts` and in ADR 0012.
+- **Advisory file lock: takeover and release share one detach procedure.** The rename →
+  re-verify → unlink-or-restore steps were written out twice; they now live in a single helper,
+  and what differs between the two phases is declared in one table. Production behaviour is
+  unchanged except that a failed `unlink` after a verified takeover is no longer retried once
+  before the error propagates; the `onReleaseChecked` test hook's exceptions now propagate
+  instead of being swallowed. The release ownership decision is a pure function, and both its
+  contents and the release path's use of it are now pinned by tests that do not depend on the
+  filesystem reusing inode numbers. What each test covers, and what it does not, is in the
+  docstring of `isOwnLockForRelease` in `apps/sidecar/src/file-lock.ts`; the procedure is
+  described in ADR 0012.
 - **CI gate hardening (test-support only; no runtime change).** The advisory file-lock
   invariants now have their own "actually ran, not skipped" assertion (`sidecar-filelock`
   suite, which also enforces a minimum number of matching tests through the new optional

@@ -295,10 +295,10 @@ const IDENTITY_ONLY_READ_ERRNOS: ReadonlySet<string> = new Set(["EACCES", "EPERM
 /**
  * {@link IDENTITY_ONLY_READ_ERRNOS} に属する errno か。
  *
- * `code` が欠落した失敗は「識別できない」= **触らない側**へ倒す。ただしこの枝は
- * **到達しない防御** であって pin されていない: `readLockHolder` が投げるのは
- * `openSync` / `fstatSync` / `readFileSync` / `closeSync` の fs エラーだけで、いずれも `code` を持つ。
- * `undefined` を許容側へ反転させても落ちるテストは無い (実測 SURVIVED)。
+ * `code` が欠落した失敗は「識別できない」= **触らない側**へ倒す。この枝は本番経路からは
+ * **到達しない防御**: `readLockHolder` が投げるのは `openSync` / `fstatSync` / `readFileSync` /
+ * `closeSync` の fs エラーだけで、いずれも `code` を持つ。述語としての挙動は表駆動 test の
+ * `undefined` 行が固定している (TDA-FLD-2(c): 旧記述「落ちるテストは無い」は表の導入後は誤り)。
  *
  * **export の理由 (SEC-FLV2-R2-3)**: 「一過性 errno を足さない」という規則を、docstring だけでなく
  * **実行可能なコントロール**で守るため。テストがこの述語そのものへ in / out の errno を流して
@@ -523,15 +523,21 @@ export type ReleaseRead = { readonly holder: LockHolder } | { readonly errno: st
  *   記述しえないもの、errno 欠落) → **触らない** (SEC-FLV2-1 / SEC-FLV2-R2-1)。content 軸を捨てると、
  *   inode 番号が再利用された「他者の生きた lock / ディレクトリ」を消す・持ち去る方向に倒れる。
  *
- * **export の理由 (SEC-FLV2-R3-4 ≡ QA-FLV2-R3-1 の着地)**: 「解放路が errno クラスの述語を実際に通る」
- * 結線は、実 fs の EISDIR 再現 (inode 番号の再利用) が環境依存で決定的に踏めない。判定を I/O から
- * 切り出して純関数にし、解放路 ({@link ownsLockForRelease}) はこれを呼ぶだけにすることで、
- * 「EISDIR で identity を信じる」変異を**どの環境でも**表駆動 test で落とせるようにする。本番コードから
- * 解放路以外が呼ぶ想定は無い。
+ * **export の理由と被覆の範囲 (SEC-FLV2-R3-4 ≡ QA-FLV2-R3-1 / SEC-FLD-1 ≡ TDA-FLD-1)**: 判定を I/O から
+ * 切り出した純関数にし、表駆動 test (`INV-FILELOCK-IDENTITY-V2: 解放の所有判定 …`) がこの関数の**中身**を
+ * 固定する。ただしそれだけでは解放路 ({@link ownsLockForRelease}) の**呼び出し側**で errno を写し替える
+ * 変異 (例: EISDIR を EACCES へ写してから呼ぶ) は落ちない (監査 R1 実測)。呼び出し側の結線は別の
+ * describe (`INV-FILELOCK-IDENTITY-V2: 解放路の所有判定の結線 …`) が `openSync(lockPath)` へ errno を
+ * 注入して固定する。どちらも inode 番号の再利用に依存しない。本番コードから解放路以外が呼ぶ想定は無い。
+ *
+ * 枝の選択は **own property** の `errno` だけを見る (SEC-FLD-5: `in` は prototype chain を辿るので、
+ * `Object.prototype.errno` が汚染されていると読めた holder の判定が errno 枝へ化ける)。
  */
 export function isOwnLockForRelease(read: ReleaseRead): boolean {
-  if ("errno" in read) return isIdentityOnlyReadErrno(read.errno);
-  return isOwnLockContent(read.holder);
+  if (Object.hasOwn(read, "errno")) {
+    return isIdentityOnlyReadErrno((read as Extract<ReleaseRead, { errno: unknown }>).errno);
+  }
+  return isOwnLockContent((read as Extract<ReleaseRead, { holder: unknown }>).holder);
 }
 
 /**
