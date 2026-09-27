@@ -526,9 +526,9 @@ export type ReleaseRead = { readonly holder: LockHolder } | { readonly errno: st
  * **export の理由と被覆の範囲 (SEC-FLV2-R3-4 ≡ QA-FLV2-R3-1 / SEC-FLD-1 ≡ TDA-FLD-1)**: 判定を I/O から
  * 切り出した純関数にし、表駆動 test (`INV-FILELOCK-IDENTITY-V2: 解放の所有判定 …`) がこの関数の**中身**を
  * 固定する。ただしそれだけでは解放路 ({@link ownsLockForRelease}) の**呼び出し側**で errno を写し替える
- * 変異 (例: EISDIR を EACCES へ写してから呼ぶ) は落ちない (監査 R1 実測)。呼び出し側の結線は別の
- * describe (`INV-FILELOCK-IDENTITY-V2: 解放路の所有判定の結線 …`) が `openSync(lockPath)` へ errno を
- * 注入して固定する。どちらも inode 番号の再利用に依存しない。本番コードから解放路以外が呼ぶ想定は無い。
+ * 変異 (例: EISDIR を EACCES へ写してから呼ぶ) は落ちない (監査 R1 実測)。呼び出し側の結線は
+ * `apps/sidecar/test/inv-file-lock-release-wiring.test.ts` が固定する。**被覆の範囲と固定しないものは
+ * 同 file の header が正** (ここに 2 コピー目を書かない)。本番コードから解放路以外が呼ぶ想定は無い。
  *
  * 枝の選択は **own property** の `errno` だけを見る (SEC-FLD-5: `in` は prototype chain を辿るので、
  * `Object.prototype.errno` が汚染されていると読めた holder の判定が errno 枝へ化ける)。

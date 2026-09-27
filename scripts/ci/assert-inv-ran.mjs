@@ -90,7 +90,7 @@ export const SUITES = {
   // real-filesystem case deterministic. Instead the EISDIR decision is pinned by two matched
   // describes that do not depend on inode reuse: "INV-FILELOCK-IDENTITY-V2: 解放の所有判定 ..."
   // (the pure decision function) and "INV-FILELOCK-IDENTITY-V2: 解放路の所有判定の結線 ..." (the
-  // release path's call site, via an injected open() errno). The EISDIR describe is kept as an
+  // release path's call site; scope in that test file's header). The EISDIR describe is kept as an
   // extra real-fs axis and stays excluded. Describes titled INV-ATTACH-WIRE-LOCK are outside
   // these prefixes (some of them skip when running as root, where chmod does not restrict), as
   // is the INV-FILELOCK-NO-EMPTY-WINDOW it (inside INV-APPROVAL-PERSIST-CONCURRENT); none of
@@ -106,7 +106,7 @@ export const SUITES = {
     pattern:
       "INV-FILELOCK-STALE-TAKEOVER-IDENTITY|INV-FILELOCK-TESTHOOKS-BOUNDARY|" +
       "INV-FILELOCK-IDENTITY-V2: (?!EISDIR)",
-    minTests: 39,
+    minTests: 40,
   },
 };
 

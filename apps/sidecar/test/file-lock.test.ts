@@ -888,7 +888,7 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す err
  *
  * **ここが固定しないもの (SEC-FLD-1 ≡ TDA-FLD-1・監査 R1 実測)**: 解放路 (`ownsLockForRelease`) の
  * **呼び出し側**で errno を写し替える / 条件を足す変異 (旧 N1 と同形) は、この describe を素通りする。
- * その結線は `inv-file-lock-release-wiring.test.ts` が `openSync(lockPath)` へ errno を注入して固定する。
+ * その結線は `inv-file-lock-release-wiring.test.ts` が固定する (被覆の範囲と固定しないものは同 file header が正)。
  *
  * 前提: この関数が受けるのは `(dev, ino)` が自 inode と一致した**後**の読取り結果。identity 不一致・
  * stat 失敗は I/O 側で先に「触らない」へ倒れる (ここには来ない)。
@@ -943,9 +943,11 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放の所有判定 (identity 一致後の
     const proto = Object.prototype as { errno?: unknown };
     proto.errno = "EACCES";
     try {
+      // 汚染が実際に効いている (これが無いと下の assert は汚染の有無と無関係に通る・監査 R2 O1)。
+      expect(({} as { errno?: unknown }).errno).toBe("EACCES");
       // 汚染下でも own property の holder で判定する = 別 pid は触らない。
       expect(isOwnLockForRelease(foreign)).toBe(false);
-      // POSITIVE 対: own property の errno は同じ汚染下でも errno 枝で判定される。
+      // 対照: own property の errno は同じ汚染下でも errno 枝で判定される (汚染の有無には依らない)。
       expect(isOwnLockForRelease({ errno: "EACCES" })).toBe(true);
       expect(isOwnLockForRelease({ errno: "EISDIR" })).toBe(false);
     } finally {
@@ -972,9 +974,9 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放の所有判定 (identity 一致後の
  *
  * **gate の主装置はこの it ではない**: errno クラスの歯は上の表駆動 test が持ち、
  * 「EISDIR を集合へ戻す」変異はどの環境でもそこで KILLED になる。呼び出し側の結線 (解放が実際に
- * その判定を通ること) は task 01a05a63 で `inv-file-lock-release-wiring.test.ts` (open の errno 注入) が
- * inode 再利用に依存せず固定した。この it は実 fs で「第三者のディレクトリが lockPath に残る」ことを
- * 見る追加の軸として残す (前提が揃った run でだけ走る・sidecar-filelock gate の対象外)。
+ * その判定を通ること) は task 01a05a63 で `inv-file-lock-release-wiring.test.ts` が固定した (範囲は同 file
+ * header が正)。この it は実 fs で「inode 番号を再利用した第三者のディレクトリが lockPath に残る」ことを
+ * 見る軸として残す (前提が揃った run でだけ走る・sidecar-filelock gate の対象外)。
  */
 describe("INV-FILELOCK-IDENTITY-V2: EISDIR は自 lock を記述しえない", () => {
   it("inode 番号を再利用した第三者のディレクトリを解放で持ち去らない", (ctx) => {

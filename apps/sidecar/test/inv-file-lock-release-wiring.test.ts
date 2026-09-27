@@ -7,16 +7,26 @@
  * 表駆動 describe を素通りし、inode 番号の再利用に依存する実 fs の EISDIR it が走った run でしか
  * 落ちなかった (tmpfs では常に skip・ext4 でも run ごとに skip しうる: 監査 R1 実測)。
  *
- * ここでは `node:fs` の `openSync` を **lockPath に対してだけ**指定 errno で失敗させる。`statSync` は
- * 本物のままなので `(dev, ino)` は実際に自 inode と一致し、解放は「identity 一致 + 読めない」枝へ
- * **決定的に**入る。本番コードに seam を足さずに、実 call site の結線をどの fs でも固定する。
+ * ここでは `node:fs` の `openSync` を **lockPath に対してだけ**差し替える。`statSync` は本物のままなので
+ * `(dev, ino)` は実際に自 inode と一致し、解放は「identity 一致 + 読めない」枝へ**決定的に**入る。
+ * 本番コードに seam は足さない。差し替えは 2 形:
  *
- * - EISDIR / 一過性 (EMFILE / ENFILE / EIO) → **触らない** (lock は自 pid のまま残り、取り外しにも進まない)。
- * - EACCES / EPERM → identity を信じて**解放する** (POSITIVE 対: 注入が効いていれば残る側と区別される)。
+ * 1. **open 段への合成 errno** (`code` のみを持つ Error): EISDIR / 一過性 (EMFILE / ENFILE / EIO) →
+ *    **触らない**、EACCES / EPERM → identity を信じて**解放する** (POSITIVE 対)。
+ * 2. **実ディレクトリを開かせる** (SEC-FLD-R2-1): Linux ではディレクトリの `open(O_RDONLY)` は成功し、
+ *    EISDIR は `read` 段で kernel が返す (`syscall: "read"`)。本物のディレクトリ fd を返して、この実形の
+ *    EISDIR で**触らない**ことを見る。1 だけでは「read 段の EISDIR だけを写し替える」変異が素通りした
+ *    (監査 R2 実測・tmpfs)。
+ *
+ * **被覆の範囲 (本 file header が正・他の docstring / CHANGELOG はここを参照する)**: 上の 7 形について、
+ * 解放路の call site が読取り失敗の errno を写し替えずに判定へ渡すことを、inode 番号の再利用に依存せず
+ * 固定する。**固定しないもの**: この 7 形以外の errno を写し替える変異 (例: read 段の ENOMEM を EACCES へ・
+ * 監査 R2 X3 は両 fs で SURVIVED)、および実 fs で第三者のディレクトリが lockPath に居座る形そのもの
+ * (`file-lock.test.ts` の実 fs EISDIR it が前提の揃った run でだけ見る・gate 対象外)。
  *
  * 🔴 すべて os.tmpdir() 配下。実設定不可侵。
  */
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +34,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 const inject = vi.hoisted(() => ({
   path: null as string | null,
   code: null as string | null,
+  // 非 null なら lockPath の open をこの実ディレクトリの open へ差し替える (read 段で実 EISDIR)。
+  dir: null as string | null,
   hits: 0,
 }));
 
@@ -32,6 +44,9 @@ vi.mock("node:fs", async (importOriginal) => {
   const openSync = ((p: unknown, ...rest: unknown[]) => {
     if (inject.path !== null && p === inject.path) {
       inject.hits += 1;
+      if (inject.dir !== null) {
+        return (actual.openSync as (...a: unknown[]) => number)(inject.dir, ...rest);
+      }
       const e = new Error(`${String(inject.code)}: injected open failure`) as NodeJS.ErrnoException;
       if (inject.code !== null) e.code = inject.code;
       throw e;
@@ -44,15 +59,17 @@ vi.mock("node:fs", async (importOriginal) => {
 import { withFileLock } from "../src/file-lock.js";
 import { cleanupTempDirs, makeTempDir } from "./helpers/lock-test-support.js";
 
+let dir: string;
 let target: string;
 let lockPath: string;
 
 beforeEach(() => {
-  const dir = makeTempDir("actradeck-filelock-wiring-");
+  dir = makeTempDir("actradeck-filelock-wiring-");
   target = join(dir, "target.json");
   lockPath = `${target}.actradeck-lock`; // 本番既定の lock 名
   inject.path = null;
   inject.code = null;
+  inject.dir = null;
   inject.hits = 0;
 });
 afterEach(() => {
@@ -73,7 +90,7 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放路の所有判定の結線 (自 inode
   let casesExecuted = 0;
   afterAll(() => {
     // 各 case が計測 callback の末尾まで到達したこと (skip / 早期 return を loud にする)。
-    expect(casesExecuted).toBe(CASES.length);
+    expect(casesExecuted).toBe(CASES.length + 1); // + 実ディレクトリ (read 段 EISDIR) の it
   });
 
   it("表の構成: 触らない側と解放する側の両方を含み、EISDIR を含む", () => {
@@ -107,4 +124,44 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放路の所有判定の結線 (自 inode
       casesExecuted += 1;
     });
   }
+
+  it("自 inode の中身が実ディレクトリとして読める (read 段で kernel が返す EISDIR) → 触らない", () => {
+    const realDir = join(dir, "real-directory");
+    mkdirSync(realDir);
+    writeFileSync(join(realDir, "occupied"), "x");
+    let seen: NodeJS.ErrnoException | undefined;
+    // 前提の実測: ディレクトリの open は成功し、read が EISDIR を返す (open 段の合成形とは別物)。
+    const fd = openSync(realDir, "r");
+    try {
+      readFileSync(fd, "utf8");
+    } catch (err) {
+      seen = err as NodeJS.ErrnoException;
+    } finally {
+      closeSync(fd);
+    }
+    expect(seen?.code).toBe("EISDIR");
+    expect(seen?.syscall).toBe("read");
+
+    const phases: string[] = [];
+    const ret = withFileLock(
+      target,
+      () => {
+        inject.path = lockPath;
+        inject.dir = realDir;
+        return "ok";
+      },
+      { testHooks: { onDetached: (phase) => phases.push(phase) } },
+    );
+    inject.path = null;
+    inject.dir = null;
+
+    expect(ret).toBe("ok");
+    expect(inject.hits, "the release never read the lock").toBe(1);
+    expect(existsSync(lockPath), "release took a lock it could only read as a directory").toBe(
+      true,
+    );
+    expect(phases).toEqual([]);
+    expect(readFileSync(lockPath, "utf8")).toBe(`${process.pid}\n`);
+    casesExecuted += 1;
+  });
 });
