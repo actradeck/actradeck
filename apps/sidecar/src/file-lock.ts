@@ -93,7 +93,7 @@ import { dirname } from "node:path";
  * lock file の同一性 (`(dev, ino)`)。**読み権限を要さない** (`statSync` のみ) ため、
  * 内容が読めなくなった自 lock でも「自分が立てた inode か」を判定できる。
  */
-interface LockIdentity {
+export interface LockIdentity {
   readonly dev: number;
   readonly ino: number;
 }
@@ -108,7 +108,7 @@ interface LockIdentity {
  * lock インスタンス粒度なので、良性の pid 再利用・解放直後の再取得も区別できる。
  * ADR 0012 の out-of-scope は pid **偽装**のみ (identity も偽装耐性は持たない)。
  */
-type LockHolder =
+export type LockHolder =
   | { readonly kind: "absent" }
   | { readonly kind: "corrupt"; readonly raw: string; readonly identity: LockIdentity }
   | {
@@ -134,13 +134,16 @@ type DetachPhase = "takeover" | "release";
  */
 const MAX_CONTENTION_SPINS = 1000;
 
-/** 奪取 (stale 取り外し) の結果。 */
-type TakeoverResult =
-  /** 判定した lock を原子的に取り外して破棄した。即再試行してよい。 */
+/** 「同一性を保った取り外し」({@link detachVerified}) の結果 (奪取・解放で共通)。 */
+type DetachOutcome =
+  /** 判定した lock を原子的に取り外して破棄した。奪取側は即再試行してよい。 */
   | "removed"
-  /** 取り外す前に他者が先に取り外していた (rename が ENOENT)。即再試行してよい。 */
+  /**
+   * 取り外さなかった。奪取側は rename の ENOENT (= 他者が先に取り外した) のみで、即再試行してよい。
+   * 解放側は rename の失敗全般 (best-effort・ADR 0012 limit 3)。
+   */
   | "gone"
-  /** 取り外したものが判定した lock と別物だった。復元済み → backoff retry すべき。 */
+  /** 取り外したものが判定した lock と別物だった。復元済み → 奪取側は backoff retry すべき。 */
   | "restored";
 
 /** 自プロセス内の奪取シーケンス番号 (stale 退避名の衝突回避)。 */
@@ -292,10 +295,10 @@ const IDENTITY_ONLY_READ_ERRNOS: ReadonlySet<string> = new Set(["EACCES", "EPERM
 /**
  * {@link IDENTITY_ONLY_READ_ERRNOS} に属する errno か。
  *
- * `code` が欠落した失敗は「識別できない」= **触らない側**へ倒す。ただしこの枝は
- * **到達しない防御** であって pin されていない: `readLockHolder` が投げるのは
- * `openSync` / `fstatSync` / `readFileSync` / `closeSync` の fs エラーだけで、いずれも `code` を持つ。
- * `undefined` を許容側へ反転させても落ちるテストは無い (実測 SURVIVED)。
+ * `code` が欠落した失敗は「識別できない」= **触らない側**へ倒す。この枝は本番経路からは
+ * **到達しない防御**: `readLockHolder` が投げるのは `openSync` / `fstatSync` / `readFileSync` /
+ * `closeSync` の fs エラーだけで、いずれも `code` を持つ。述語としての挙動は表駆動 test の
+ * `undefined` 行が固定している (TDA-FLD-2(c): 旧記述「落ちるテストは無い」は表の導入後は誤り)。
  *
  * **export の理由 (SEC-FLV2-R2-3)**: 「一過性 errno を足さない」という規則を、docstring だけでなく
  * **実行可能なコントロール**で守るため。テストがこの述語そのものへ in / out の errno を流して
@@ -357,7 +360,7 @@ function isOwnLockContent(holder: LockHolder): boolean {
 }
 
 /**
- * 判定時に観測した lock と、取り外したファイルが **同一の lock インスタンス** か。
+ * 判定時に観測した lock と、取り外したファイルが **同一の lock インスタンス** か (奪取側の再検証)。
  *
  * identity v2: `(dev, ino)` 一致 **かつ** 逐語バイト一致 (連言)。identity は
  * 「同じバイト列の別 inode」(解放→即再取得・pid 再利用) を弾き、バイト比較は
@@ -377,176 +380,202 @@ function sameLockInstance(observed: PresentLock, detachedPath: string): boolean 
 }
 
 /**
- * `lockPath` を退避名へ原子的に取り外す。ENOENT は「他者が先に取り外した」= `undefined`。
- * 取り外せた場合は退避パスを返す。
+ * 取り外したファイルが取得時に記録した自 inode か (解放側の再検証)。**`(dev, ino)` 単独**で判定する。
+ * 内容軸は rename 前の {@link isOwnLockForRelease} で「断る」ためだけに使い済み (ADR 0012 limit 2)。
+ * stat できない / 消えている = 自分のと確かめられない → 別物とみなして復元 (安全側)。
  */
-function detachTo(lockPath: string, stalePath: string): string | undefined {
+function isHeldInstance(held: LockIdentity, detachedPath: string): boolean {
   try {
-    renameSync(lockPath, stalePath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw err;
+    const detached = identityOf(detachedPath);
+    return detached !== undefined && sameIdentity(detached, held);
+  } catch {
+    return false;
   }
-  return stalePath;
 }
 
 /**
- * stale と判定した lock を **原子的に取り外し**、取り外したものが本当に判定した lock かを
- * `(dev, ino)` + 逐語内容で再検証してから破棄する。別物 (= 判定と取り外しの間に他プロセスが
- * 立て直した生きた lock) だったら元へ復元し、呼び出し側へ `"restored"` を返して backoff させる。
+ * 「同一性を保った取り外し」の局面ごとの入力 (TDA-FLV2-3)。
+ * - `takeover`: stale と判定したときに観測した lock (`observed`)。
+ * - `release`: 取得時に記録した自 inode (`held`)。
  *
- * 復元できなかったときは **fail-loud** で throw し、取り外した inode は退避名のまま**残す**
- * (SEC-FL-2: victim の lock を破棄しない。operator が退避ファイルから holder を辿れる)。
- *
- * @throws 復元できなかったとき (二重保持のまま無言継続しない)。
+ * 奪取と解放は **同じ 4 段** (rename で原子的に取り外す → 再検証 → 一致なら unlink /
+ * 不一致なら復元 → 復元できなければ fail-loud) を {@link detachVerified} 1 本で踏む。
+ * 局面による違いは {@link detachPolicy} の表 1 箇所にだけ置く (旧: 2 関数に手順を二重手書きしていた)。
  */
-function detachStaleLock(
-  lockPath: string,
-  observed: PresentLock,
-  hooks: FileLockTestHooks,
-): TakeoverResult {
-  const stalePath = `${lockPath}.stale-${process.pid}-${staleSeq++}`;
-  if (detachTo(lockPath, stalePath) === undefined) return "gone";
-  // テスト seam (本番未使用): 取り外し済み・復元前の窓 (lockPath は空いている)。
-  hooks.onDetached?.("takeover");
-  let settled = false;
-  let keepRemnant = false;
-  try {
-    if (sameLockInstance(observed, stalePath)) {
-      unlinkSync(stalePath);
-      settled = true;
-      return "removed";
-    }
-    // 判定 → rename の間に差し替わった = 別プロセスの**生きた** lock を外してしまった。復元する。
-    try {
-      linkSync(stalePath, lockPath);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code ?? "unknown";
-      // 退避ファイルは残す (victim の inode を破棄しない)。
-      keepRemnant = true;
-      throw new Error(
+type DetachRequest =
+  | { readonly phase: "takeover"; readonly observed: PresentLock }
+  | { readonly phase: "release"; readonly held: LockIdentity };
+
+/** {@link detachVerified} が局面ごとに切り替える部分 (これ以外の手順は共通)。 */
+interface DetachPolicy {
+  /** 退避名。奪取と解放で別系列 (解放が奪取側 seq の決定性を汚さない・ADR 0012 limit 5)。 */
+  readonly detachPath: string;
+  /** 取り外したファイルが判定した当の lock か。確かめられないときは false (= 復元 = 安全側)。 */
+  readonly verify: (detachedPath: string) => boolean;
+  /**
+   * rename の失敗 (ENOENT 以外) と、再検証が通った後の unlink の失敗を呼び出し側へ投げるか。
+   * 奪取は取得の一部なので fail-loud (`true`)、解放は fn の後始末なので best-effort (`false`・
+   * ADR 0012 limit 3 / 6)。**復元失敗の throw はこの値に関わらず常に投げる** (両局面で唯一共通の loud 経路)。
+   */
+  readonly strict: boolean;
+  /** 復元に失敗したときの fail-loud メッセージ (退避パスを名指しする・SEC-FL-2)。 */
+  readonly restoreFailure: (code: string) => string;
+}
+
+/**
+ * 局面ごとの差分表。**再検証の述語の非対称** (奪取 = identity ∧ 逐語バイト / 解放 = identity 単独) は
+ * ADR 0012 limit 1 / 2 の記述そのもので、ここ以外に局面分岐を書かない。
+ */
+function detachPolicy(lockPath: string, req: DetachRequest): DetachPolicy {
+  if (req.phase === "takeover") {
+    const detachPath = `${lockPath}.stale-${process.pid}-${staleSeq++}`;
+    return {
+      detachPath,
+      verify: (p) => sameLockInstance(req.observed, p),
+      strict: true,
+      restoreFailure: (code) =>
         `withFileLock: detached ${lockPath} as stale but it was a different lock, ` +
-          `and restoring the live holder failed (${code}). ` +
-          `the detached lock is kept at ${stalePath}. ` +
-          `aborting to avoid double-holding the lock.`,
-        { cause: err },
-      );
-    }
-    return "restored";
-  } finally {
-    // 退避名の残骸を残さない (復元済みなら余分な link)。復元失敗時だけは意図的に残す。
-    if (!settled && !keepRemnant) {
-      try {
-        unlinkSync(stalePath);
-      } catch {
-        /* best-effort */
-      }
-    }
+        `and restoring the live holder failed (${code}). ` +
+        `the detached lock is kept at ${detachPath}. ` +
+        `aborting to avoid double-holding the lock.`,
+    };
   }
+  const detachPath = `${lockPath}.stale-rel-${process.pid}-${releaseSeq++}`;
+  return {
+    detachPath,
+    verify: (p) => isHeldInstance(req.held, p),
+    strict: false,
+    restoreFailure: (code) =>
+      `withFileLock: released ${lockPath} but the file detached was a different lock, ` +
+      `and restoring it failed (${code}). ` +
+      `the detached lock is kept at ${detachPath}. ` +
+      `aborting so the broken serialization is not silently ignored.`,
+  };
 }
 
 /**
- * 解放の前半: 「これは自分の lock か」を `(dev, ino)` 主・内容補助で判定し、自分のものなら
- * 退避名へ原子的に取り外して退避パスを返す。取り外さなかった / 取り外せなかったときは `undefined`。
+ * 「同一性を保った取り外し」protocol の **単一実装** (奪取・解放で共有・TDA-FLV2-3)。
+ *
+ * 1. `renameSync` で lockPath を退避名へ原子的に取り外す。ENOENT (他者が先に取り外した) は `"gone"`。
+ * 2. 取り外したファイルを局面の述語で再検証する。
+ * 3. 一致すれば退避ファイルを unlink して `"removed"`。
+ * 4. 不一致 (= 判定と取り外しの間に差し替わった他者の lock) なら `linkSync` で元へ復元して `"restored"`。
+ *    復元できなければ **fail-loud** で throw し、取り外した inode は退避名のまま**残す**
+ *    (SEC-FL-2: victim の lock を破棄しない。operator が退避ファイルから holder を辿れる)。
+ *
+ * @throws 復元できなかったとき (両局面)。`strict` の局面では rename (ENOENT 以外) / unlink の失敗も。
+ */
+function detachVerified(
+  lockPath: string,
+  req: DetachRequest,
+  hooks: FileLockTestHooks,
+): DetachOutcome {
+  const policy = detachPolicy(lockPath, req);
+  const { detachPath } = policy;
+  try {
+    renameSync(lockPath, detachPath);
+  } catch (err) {
+    if (policy.strict && (err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    return "gone";
+  }
+  // テスト seam (本番未使用): 取り外し済み・再検証/復元前の窓 (lockPath は空いている)。
+  hooks.onDetached?.(req.phase);
+  if (policy.verify(detachPath)) {
+    try {
+      unlinkSync(detachPath);
+    } catch (err) {
+      if (policy.strict) throw err;
+      /* best-effort: lockPath は既に空いている。退避名の残骸だけが残る */
+    }
+    return "removed";
+  }
+  // 取り外したのは判定した lock ではなかった → 元へ復元する。
+  try {
+    linkSync(detachPath, lockPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+    // 退避ファイルは残す (victim の inode を破棄しない)。
+    throw new Error(policy.restoreFailure(code), { cause: err });
+  }
+  try {
+    unlinkSync(detachPath);
+  } catch {
+    /* best-effort: 復元済み。余分な link だけが残る */
+  }
+  return "restored";
+}
+
+/**
+ * 解放の rename 前に行う所有判定の入力: lockPath の `(dev, ino)` が自 inode と**一致した後**の読取り結果。
+ * 読めたなら観測 (`holder`)、読めなかったならその errno (`errno`・欠落は `undefined`)。
+ */
+export type ReleaseRead = { readonly holder: LockHolder } | { readonly errno: string | undefined };
+
+/**
+ * 解放で「identity が一致した lockPath を自 lock として取り外してよいか」の**判定そのもの** (純関数)。
  *
  * 判定の枝 (identity v2 (3)):
- * - identity 不一致 / 既に消えている → 触らない。
- * - identity 一致 + 内容が読めて自分 (`pid===self`) or `corrupt` → 自 lock。
- * - identity 一致 + 内容が読めず、その失敗が **permission クラス**
- *   ({@link IDENTITY_ONLY_READ_ERRNOS} = `EACCES` / `EPERM`) → identity を信じて自 lock
- *   (= SEC-FL-1 の恒久 wedge の回復経路)。
- * - identity 一致 + 内容が読めず、失敗が **それ以外** (`EMFILE` / `ENFILE` / `EIO` の一過性、
- *   `EISDIR` のように自 lock を記述しえないもの) → **触らない** (SEC-FLV2-1 / SEC-FLV2-R2-1)。
- *   content 軸を捨てると、inode 番号が再利用された「他者の生きた lock / ディレクトリ」を
- *   消す・持ち去る方向に倒れる。base 同等の fail-safe へ倒す。
- * - identity 一致 + 内容が読めて**別 pid** → 第三者が自分の inode を書き換えた → 触らない。
+ * - 内容が読めて自分 (`pid===self`) or `corrupt` → 自 lock。
+ * - 内容が読めて**別 pid** / 既に消えている (`absent`) → 触らない (第三者が自分の inode を書き換えた)。
+ * - 内容が読めず、その失敗が **permission クラス** ({@link isIdentityOnlyReadErrno} = `EACCES` / `EPERM`)
+ *   → identity を信じて自 lock (= SEC-FL-1 の恒久 wedge の回復経路)。
+ * - 内容が読めず、失敗が **それ以外** (`EMFILE` / `ENFILE` / `EIO` の一過性、`EISDIR` のように自 lock を
+ *   記述しえないもの、errno 欠落) → **触らない** (SEC-FLV2-1 / SEC-FLV2-R2-1)。content 軸を捨てると、
+ *   inode 番号が再利用された「他者の生きた lock / ディレクトリ」を消す・持ち去る方向に倒れる。
+ *
+ * **export の理由と被覆の範囲 (SEC-FLV2-R3-4 ≡ QA-FLV2-R3-1 / SEC-FLD-1 ≡ TDA-FLD-1)**: 判定を I/O から
+ * 切り出した純関数にし、表駆動 test (`INV-FILELOCK-IDENTITY-V2: 解放の所有判定 …`) がこの関数の**中身**を
+ * 固定する。ただしそれだけでは解放路 ({@link ownsLockForRelease}) の**呼び出し側**で errno を写し替える
+ * 変異 (例: EISDIR を EACCES へ写してから呼ぶ) は落ちない (監査 R1 実測)。呼び出し側の結線は
+ * `apps/sidecar/test/inv-file-lock-release-wiring.test.ts` が固定する。**被覆の範囲と固定しないものは
+ * 同 file の header が正** (ここに 2 コピー目を書かない)。本番コードから解放路以外が呼ぶ想定は無い。
+ *
+ * 枝の選択は **own property** の `errno` だけを見る (SEC-FLD-5: `in` は prototype chain を辿るので、
+ * `Object.prototype.errno` が汚染されていると読めた holder の判定が errno 枝へ化ける)。
  */
-function detachOwnLockForRelease(
-  lockPath: string,
-  held: LockIdentity,
-  hooks: FileLockTestHooks,
-): string | undefined {
+export function isOwnLockForRelease(read: ReleaseRead): boolean {
+  if (Object.hasOwn(read, "errno")) {
+    return isIdentityOnlyReadErrno((read as Extract<ReleaseRead, { errno: unknown }>).errno);
+  }
+  return isOwnLockContent((read as Extract<ReleaseRead, { holder: unknown }>).holder);
+}
+
+/**
+ * 解放の前半 (I/O 側): lockPath の `(dev, ino)` が自 inode と一致するかを見て (**読み権限不要**)、
+ * 一致したら内容を読み、{@link isOwnLockForRelease} に判定させる。identity 不一致・既に消えている・
+ * stat の失敗はすべて「触らない」(best-effort・ADR 0012 limit 3)。
+ */
+function ownsLockForRelease(lockPath: string, held: LockIdentity): boolean {
   try {
     const current = identityOf(lockPath);
-    if (current === undefined || !sameIdentity(current, held)) return undefined;
-    let holder: LockHolder | undefined;
+    if (current === undefined || !sameIdentity(current, held)) return false;
+    let read: ReleaseRead;
     try {
-      holder = readLockHolder(lockPath);
+      read = { holder: readLockHolder(lockPath) };
     } catch (err) {
-      // SEC-FLV2-1 / SEC-FLV2-R2-1: 「identity を信じてよい」のは
-      // **「自分の lock が読めなくなった」を記述しうる errno** だけ (EACCES / EPERM)。
-      // fd 枯渇 (EMFILE/ENFILE) や I/O 障害 (EIO) のような一過性の失敗、あるいは自 lock を
-      // 記述しえない EISDIR まで同じ枝へ落とすと、「読めなかった」だけで content 軸
-      // (= 別 pid なら触らない) を捨てることになり、inode 番号が再利用された**他者の生きた
-      // lock / ディレクトリ**を消す・持ち去る。判別できないときは触らない。
-      if (!isIdentityOnlyReadErrno((err as NodeJS.ErrnoException).code)) return undefined;
-      holder = undefined; // 読めない自 inode → identity を信じる (回復経路)
+      read = { errno: (err as NodeJS.ErrnoException).code };
     }
-    if (holder !== undefined && !isOwnLockContent(holder)) return undefined;
-    // テスト seam (本番未使用): 判定 → 取り外しの間の窓 (取得側 onHolderObserved の解放側の対)。
-    hooks.onReleaseChecked?.();
-    const releasePath = `${lockPath}.stale-rel-${process.pid}-${releaseSeq++}`;
-    return detachTo(lockPath, releasePath);
+    return isOwnLockForRelease(read);
   } catch {
-    // best-effort: 取り外せなければ lock はそのまま (次の取得が stale として扱う)。
-    return undefined;
+    return false;
   }
 }
 
 /**
  * 自分が保持している lock を解放する (identity v2 (3)・SEC-FL-3 / SEC-FL-1)。
  *
- * 1. `(dev, ino)` で自 lock か判定する (**読み権限不要**)。他者の inode なら何もしない。
- *    identity が一致した上で内容が読めて別 pid なら「第三者が自分の inode を書き換えた」
- *    とみなし触らない (既存軸の保存)。内容が読めず、その失敗が「自分の lock が読めなくなった」を
- *    記述しうる errno ({@link IDENTITY_ONLY_READ_ERRNOS} = `EACCES` / `EPERM`) なら identity を信じて外す
- *    (= 保持中に読めなくなった自 lock の回復経路。旧実装はここで rethrow して恒久 wedge した)。
- *    `EISDIR` やそれ以外の読取り失敗は自 lock を記述しえない / 所有権を語らないので触らない
- *    (SEC-FLV2-R2-1 / SEC-FLV2-1)。
- * 2. `renameSync` で原子的に取り外し、`(dev, ino)` を再検証してから unlink する
+ * 1. {@link ownsLockForRelease} で自 lock か判定する (`(dev, ino)` 主・内容補助)。違えば何もしない。
+ * 2. 奪取と同じ {@link detachVerified} で、rename → `(dev, ino)` 再検証 → unlink | 復元 を行う
  *    (旧実装の read → 判定 → unlink は非原子で、その窓に他者が差し替えると他者の lock を消した)。
- * 3. 取り外したものが自分のでなければ復元する。復元できなければ **fail-loud**。
  *
  * @throws 取り外した他者の lock を復元できなかったとき。それ以外の失敗 (stat / rename / unlink) は
  *         best-effort で握り潰す (解放は fn の後始末であり、その失敗で fn の結果を壊さない)。
  */
 function releaseOwnLock(lockPath: string, held: LockIdentity, hooks: FileLockTestHooks): void {
-  const releasePath = detachOwnLockForRelease(lockPath, held, hooks);
-  if (releasePath === undefined) return;
-  // テスト seam (本番未使用): 取り外し済み・再検証前の窓 (lockPath は空いている)。
-  hooks.onDetached?.("release");
-  let detached: LockIdentity | undefined;
-  try {
-    detached = identityOf(releasePath);
-  } catch {
-    detached = undefined;
-  }
-  if (detached !== undefined && sameIdentity(detached, held)) {
-    try {
-      unlinkSync(releasePath);
-    } catch {
-      /* best-effort */
-    }
-    return;
-  }
-  // 取り外したのは自分のではなかった (stat → rename の窓で差し替わった) → 復元する。
-  try {
-    linkSync(releasePath, lockPath);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code ?? "unknown";
-    throw new Error(
-      `withFileLock: released ${lockPath} but the file detached was a different lock, ` +
-        `and restoring it failed (${code}). ` +
-        `the detached lock is kept at ${releasePath}. ` +
-        `aborting so the broken serialization is not silently ignored.`,
-      { cause: err },
-    );
-  }
-  try {
-    unlinkSync(releasePath);
-  } catch {
-    /* best-effort: 復元済み。余分な link だけが残る */
-  }
+  if (!ownsLockForRelease(lockPath, held)) return;
+  // テスト seam (本番未使用): 判定 → 取り外しの間の窓 (取得側 onHolderObserved の解放側の対)。
+  hooks.onReleaseChecked?.();
+  detachVerified(lockPath, { phase: "release", held }, hooks);
 }
 
 /**
@@ -646,7 +675,8 @@ export function withFileLock<T>(
           retryWithoutDelay = true;
         } else if (isOwnLockContent(holder) || (holder.kind === "pid" && !isAlive(holder.pid))) {
           // "restored" は「判定した stale ではなく他者の生きた lock だった」= backoff すべき。
-          retryWithoutDelay = detachStaleLock(lockPath, holder, hooks) !== "restored";
+          retryWithoutDelay =
+            detachVerified(lockPath, { phase: "takeover", observed: holder }, hooks) !== "restored";
         }
 
         if (retryWithoutDelay) {

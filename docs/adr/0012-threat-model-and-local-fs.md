@@ -31,6 +31,15 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
   decline: if the lock is readable and names a different live pid, a third party overwrote
   the inode in place and release leaves it alone.
 
+  Takeover and release run **one shared detach procedure** (`detachVerified` in
+  `apps/sidecar/src/file-lock.ts`: `rename` → re-verify → `unlink`, or link back and throw if
+  that fails). Everything that differs between the two phases is declared in one table
+  (`detachPolicy`), which has four entries: the remnant name series (limit 5), the
+  re-verification predicate (pair _and_ bytes for takeover, pair alone for release),
+  strictness (takeover lets an unexpected `rename` failure, or an `unlink` failure after a
+  successful re-verification, propagate; release treats both as best-effort, per limits 3 and
+  6 below) and the text of the restore-failure error.
+
   On acquisition, a lock whose content cannot be read **for any reason** is **not** taken over,
   because it might belong to somebody else and its identity cannot be re-verified against what
   the staleness check saw. Previously that made an unreadable lock permanent: release went
@@ -99,7 +108,9 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
        (`ERR_STRING_TOO_LONG`, measured) reaches this state and stays there. This is unchanged
        from before identity v2 — the previous code rethrew the same failures on acquisition —
        so it is a carried-over residual rather than something this work introduced.
+
      Only the restore-failure path below is loud.
+
   4. **The restore-failure abort is reachable under third-party contention**, not dead code.
      A concurrent acquirer can take the lock path between the `rename` that detaches it and
      the `linkSync` that would restore it. The process that fails to restore throws and never
@@ -108,7 +119,8 @@ The threat model is **single-operator / local-fs / loopback**. Within that bound
      **kept** under its `.stale-<pid>-<seq>` name (it is a live holder's lock) and the error
      message names the path; earlier the cleanup deleted it.
   5. **`<lockPath>.stale-<pid>-<seq>` remnants can survive a crash** between the detach and
-     the cleanup that follows it, and a failed restore leaves one deliberately. There is no
+     the cleanup that follows it, and a failed restore leaves one deliberately. A failed
+     `unlink` of the detached file also leaves one: takeover then throws, release does not. There is no
      reaper. The sequence number is monotonic within a process, so a name is never reused by
      the same process; across processes (a restart, or pid reuse) the same name can recur, in
      which case `rename` silently replaces a leftover regular file (benign self-cleanup) and a

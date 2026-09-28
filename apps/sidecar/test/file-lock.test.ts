@@ -37,9 +37,9 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { isIdentityOnlyReadErrno, withFileLock } from "../src/file-lock.js";
+import { isIdentityOnlyReadErrno, isOwnLockForRelease, withFileLock } from "../src/file-lock.js";
 import { cleanupTempDirs, makeTempDir } from "./helpers/lock-test-support.js";
 
 let dir: string;
@@ -837,26 +837,27 @@ describe("INV-ATTACH-WIRE-LOCK: SEC-1 acquire-delay env は test モード時の
  *   **自 lock を記述しえない**もの (`EISDIR` — 自 lock は linkSync で立てた通常ファイル)、
  *   および errno の欠落。
  */
-describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す errno クラス", () => {
-  // 「自分の lock が読めなくなった」を記述しうる errno (= identity 単独で判定してよい)。
-  const IDENTITY_ONLY: readonly string[] = ["EACCES", "EPERM"];
-  // 記述しえない errno。**一過性 (資源枯渇 / I/O) と、自 lock ではありえない種別**の両方を並べる。
-  const MUST_DECLINE: readonly (string | undefined)[] = [
-    "EMFILE", // fd 枯渇 (SEC-FLV2-1 の実プロセス再現ベクタ)
-    "ENFILE", // system-wide fd 枯渇
-    "EIO", // I/O 障害
-    "ENOMEM", // メモリ枯渇
-    "EAGAIN", // 一時的に利用不可
-    "EBUSY",
-    "EBADF",
-    "ELOOP",
-    "ENAMETOOLONG",
-    "ENOENT", // 消えている = 自 lock の identity 判定より前に弾かれるべき形
-    "EISDIR", // SEC-FLV2-R2-1: 自 lock は通常ファイル。ディレクトリは第三者のもの
-    "ERR_STRING_TOO_LONG", // 恒久だが permission でない (読取り不能が続く形)
-    undefined, // errno が取れない失敗は識別できない
-  ];
+// 「自分の lock が読めなくなった」を記述しうる errno (= identity 単独で判定してよい)。
+// 述語 (isIdentityOnlyReadErrno) と解放の所有判定 (isOwnLockForRelease) の両 describe が同じ表を流す。
+const IDENTITY_ONLY: readonly string[] = ["EACCES", "EPERM"];
+// 記述しえない errno。**一過性 (資源枯渇 / I/O) と、自 lock ではありえない種別**の両方を並べる。
+const MUST_DECLINE: readonly (string | undefined)[] = [
+  "EMFILE", // fd 枯渇 (SEC-FLV2-1 の実プロセス再現ベクタ)
+  "ENFILE", // system-wide fd 枯渇
+  "EIO", // I/O 障害
+  "ENOMEM", // メモリ枯渇
+  "EAGAIN", // 一時的に利用不可
+  "EBUSY",
+  "EBADF",
+  "ELOOP",
+  "ENAMETOOLONG",
+  "ENOENT", // 消えている = 自 lock の identity 判定より前に弾かれるべき形
+  "EISDIR", // SEC-FLV2-R2-1: 自 lock は通常ファイル。ディレクトリは第三者のもの
+  "ERR_STRING_TOO_LONG", // 恒久だが permission でない (読取り不能が続く形)
+  undefined, // errno が取れない失敗は識別できない
+];
 
+describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す errno クラス", () => {
   it("in: 自 lock が読めなくなったことを記述しうる errno だけ true", () => {
     for (const code of IDENTITY_ONLY) {
       expect(isIdentityOnlyReadErrno(code), `${code} must let identity settle ownership`).toBe(
@@ -879,6 +880,84 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す err
 });
 
 /**
+ * SEC-FLV2-R3-4 ≡ QA-FLV2-R3-1 (task 01a05a63・TDA-FLV2-3): 解放の**所有判定そのもの**を表駆動で固定する。
+ *
+ * 上の表は errno クラスの述語 `isIdentityOnlyReadErrno` を固定する。ここでは判定を I/O から切り出した
+ * 純関数 `isOwnLockForRelease` に同じ表を流し、**関数の中身**で EISDIR / 一過性 errno に identity を
+ * 信じさせる変異を inode 番号の再利用に依存せず落とす。
+ *
+ * **ここが固定しないもの (SEC-FLD-1 ≡ TDA-FLD-1・監査 R1 実測)**: 解放路 (`ownsLockForRelease`) の
+ * **呼び出し側**で errno を写し替える / 条件を足す変異 (旧 N1 と同形) は、この describe を素通りする。
+ * その結線は `inv-file-lock-release-wiring.test.ts` が固定する (被覆の範囲と固定しないものは同 file header が正)。
+ *
+ * 前提: この関数が受けるのは `(dev, ino)` が自 inode と一致した**後**の読取り結果。identity 不一致・
+ * stat 失敗は I/O 側で先に「触らない」へ倒れる (ここには来ない)。
+ */
+describe("INV-FILELOCK-IDENTITY-V2: 解放の所有判定 (identity 一致後の読取り結果)", () => {
+  const identity = { dev: 1, ino: 2 };
+  let rowsChecked = 0;
+  afterAll(() => {
+    // 表の行がすべて実際に判定へ流れたこと (ループの空化・早期 return を loud にする)。
+    expect(rowsChecked).toBe(IDENTITY_ONLY.length + MUST_DECLINE.length + 4);
+  });
+
+  it("読めない: permission クラスの errno だけ identity を信じて自 lock とする", () => {
+    for (const code of IDENTITY_ONLY) {
+      expect(isOwnLockForRelease({ errno: code }), `${code} is our own unreadable lock`).toBe(true);
+      rowsChecked += 1;
+    }
+  });
+
+  it("読めない: 一過性・自 lock を記述しえない errno (EISDIR を含む) と欠落は触らない", () => {
+    for (const code of MUST_DECLINE) {
+      expect(isOwnLockForRelease({ errno: code }), `${String(code)} must NOT release`).toBe(false);
+      rowsChecked += 1;
+    }
+    // SEC-FLV2-R2-1 の指名ベクタを表とは別に逐語で持つ (表から EISDIR を抜く編集を loud にする)。
+    expect(MUST_DECLINE).toContain("EISDIR");
+    expect(isOwnLockForRelease({ errno: "EISDIR" })).toBe(false);
+  });
+
+  it("読めた: 自 pid / corrupt は自 lock、別 pid / 消えている は触らない", () => {
+    const self = String(process.pid);
+    const cases: readonly [string, Parameters<typeof isOwnLockForRelease>[0], boolean][] = [
+      ["own pid", { holder: { kind: "pid", pid: process.pid, raw: `${self}\n`, identity } }, true],
+      ["corrupt", { holder: { kind: "corrupt", raw: "garbage", identity } }, true],
+      [
+        "foreign pid (third party overwrote our inode)",
+        { holder: { kind: "pid", pid: process.pid + 1, raw: `${process.pid + 1}\n`, identity } },
+        false,
+      ],
+      ["absent (vanished between stat and read)", { holder: { kind: "absent" } }, false],
+    ];
+    for (const [label, read, want] of cases) {
+      expect(isOwnLockForRelease(read), label).toBe(want);
+      rowsChecked += 1;
+    }
+  });
+
+  it("prototype 由来の errno で holder の判定を errno 枝へ化けさせない (SEC-FLD-5)", () => {
+    const foreign = {
+      holder: { kind: "pid", pid: process.pid + 1, raw: `${process.pid + 1}\n`, identity },
+    } as const;
+    const proto = Object.prototype as { errno?: unknown };
+    proto.errno = "EACCES";
+    try {
+      // 汚染が実際に効いている (これが無いと下の assert は汚染の有無と無関係に通る・監査 R2 O1)。
+      expect(({} as { errno?: unknown }).errno).toBe("EACCES");
+      // 汚染下でも own property の holder で判定する = 別 pid は触らない。
+      expect(isOwnLockForRelease(foreign)).toBe(false);
+      // 対照: own property の errno は同じ汚染下でも errno 枝で判定される (汚染の有無には依らない)。
+      expect(isOwnLockForRelease({ errno: "EACCES" })).toBe(true);
+      expect(isOwnLockForRelease({ errno: "EISDIR" })).toBe(false);
+    } finally {
+      delete proto.errno;
+    }
+    expect(Object.prototype).not.toHaveProperty("errno");
+  });
+});
+
+/**
  * SEC-FLV2-R2-1: `EISDIR` は「自分の lock が読めない」を**記述しえない**。自 lock は `linkSync` で
  * 立てた通常ファイルなので、lockPath がディレクトリで、しかも `(dev, ino)` が一致する唯一の到達形は
  * **inode 番号を再利用した第三者のディレクトリ**。これを identity 単独で自 lock とみなすと、解放が
@@ -894,9 +973,10 @@ describe("INV-FILELOCK-IDENTITY-V2: 解放が identity 単独判定を許す err
  * 避ける (RED にすると再現できない環境で gate が壊れる)。
  *
  * **gate の主装置はこの it ではない**: errno クラスの歯は上の表駆動 test が持ち、
- * 「EISDIR を集合へ戻す」変異はどの環境でもそこで KILLED になる。この it が固定するのは
- * **呼び出し側の結線** (集合の内容ではなく、解放が実際にその判定を通ること) で、走ったときだけ
- * 捕捉できる残余。決定的に踏ませる手段は task 01a05a63 へ委譲する。
+ * 「EISDIR を集合へ戻す」変異はどの環境でもそこで KILLED になる。呼び出し側の結線 (解放が実際に
+ * その判定を通ること) は task 01a05a63 で `inv-file-lock-release-wiring.test.ts` が固定した (範囲は同 file
+ * header が正)。この it は実 fs で「inode 番号を再利用した第三者のディレクトリが lockPath に残る」ことを
+ * 見る軸として残す (前提が揃った run でだけ走る・sidecar-filelock gate の対象外)。
  */
 describe("INV-FILELOCK-IDENTITY-V2: EISDIR は自 lock を記述しえない", () => {
   it("inode 番号を再利用した第三者のディレクトリを解放で持ち去らない", (ctx) => {
@@ -939,4 +1019,49 @@ describe("INV-FILELOCK-IDENTITY-V2: EISDIR は自 lock を記述しえない", (
     expect(readdirSync(dir).filter((n) => n.includes(".stale"))).toEqual([]);
     rmSync(lockPath, { recursive: true, force: true }); // afterEach の掃除用
   });
+});
+
+/**
+ * QA-FLD-1 ≡ TDA-FLD-5 (task 01a05a63 R1): 奪取は再検証が通った後の `unlink` の失敗を**伝播する**
+ * (`detachPolicy` の takeover `strict: true`・ADR 0012 の共有手順段落)。解放は同じ失敗を握り潰す側
+ * (best-effort) なので、この差は `strict` の値だけが決める。
+ *
+ * 踏み方 (QA 実証): 取り外した直後 (`onDetached("takeover")`) に lock のディレクトリを `0o555` にすると、
+ * 退避ファイルの `unlink` が EACCES になる。伝播を落とす変異では処理が先へ進み、次の `linkSync`
+ * (取得) が同じ EACCES で落ちるので、**どの syscall で落ちたか**で区別する。
+ * root では chmod が権限判定に効かない (CAP_DAC_OVERRIDE) ため skip する。
+ */
+describe("INV-ATTACH-WIRE-LOCK: 奪取の検証後 unlink 失敗は伝播する", () => {
+  it.skipIf(runningAsRoot)(
+    "取り外した stale lock を unlink できなければ unlink の失敗として throw する (root では skip)",
+    () => {
+      const DEAD = 999999;
+      writeFileSync(lockPath, `${DEAD}\n`);
+      let caught: NodeJS.ErrnoException | undefined;
+      try {
+        withFileLock(target, () => "never", {
+          testHooks: {
+            isAlive: () => false, // DEAD を死亡扱い = 奪取経路へ入る
+            sleep: () => {},
+            onDetached: (phase) => {
+              if (phase === "takeover") chmodSync(dir, 0o555);
+            },
+          },
+        });
+      } catch (err) {
+        caught = err as NodeJS.ErrnoException;
+      } finally {
+        chmodSync(dir, 0o700); // afterEach の掃除用
+      }
+      expect(caught, "takeover swallowed the unlink failure").toBeDefined();
+      expect(caught?.code).toBe("EACCES");
+      expect(caught?.syscall).toBe("unlink");
+      // 取り外しまでは済んでいる: lockPath は空き、退避名が 1 つ残る (unlink できなかった stale lock)。
+      expect(existsSync(lockPath)).toBe(false);
+      const remnants = readdirSync(dir).filter((n) => n.includes(".stale-"));
+      expect(remnants).toHaveLength(1);
+      expect(readFileSync(join(dir, remnants[0] ?? ""), "utf8")).toBe(`${DEAD}\n`);
+    },
+    5_000,
+  );
 });
