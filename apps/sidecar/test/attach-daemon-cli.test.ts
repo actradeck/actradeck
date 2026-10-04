@@ -482,7 +482,12 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しな�
     ["空白 1 字", " "],
     ["TAB", "\t"],
     ["前後空白", " tok-surrounded-by-spaces-0123456789abcdef "],
+    // 先頭側と末尾側は対称に置く (片側だけだとアンカーの片方を外す変異が素通りする)。
+    ["先頭空白", " tok-leading-space-0123456789abcdefghij"],
+    ["末尾空白", "tok-trailing-space-0123456789abcdefghij "],
+    ["先頭 CR", "\rtok-leading-carriage-return-0123456789"],
     ["末尾 CR", "tok-trailing-carriage-return-0123456789\r"],
+    ["先頭 LF", "\ntok-leading-line-feed-0123456789abcdef"],
     ["末尾 LF", "tok-trailing-line-feed-0123456789abcdef\n"],
     ["非 ASCII (U+20AC)", "tok-euro-sign-\u20ac-0123456789abcdef"],
     ["1 文字", "a"],
