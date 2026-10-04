@@ -507,6 +507,8 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しな�
         expect(out.status).toBe("denied-hook-token-invalid");
         expect(daemons.length).toBe(0);
         expect(existsSync(resolveSettingsPath("project-local", cwd, home))).toBe(false);
+        // POSITIVE 対: 拒否文言はログに出ている (ログが空で negative が恒真になるのを防ぐ)。
+        expect(logs.join("\n")).toContain("ACTRADECK_HOOK_TOKEN");
         if (value.trim().length > 1) expect(logs.join("\n")).not.toContain(value.trim());
       });
     }
