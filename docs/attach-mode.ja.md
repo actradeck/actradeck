@@ -272,6 +272,10 @@ node apps/sidecar/dist/cli.js approvals clear                # 全永続承認�
   daemon が承認要求として受け付けた後の hook では、処理中のエラーは deny で返します。これとは別に、
   Claude Code では `tool.check` を扱う mod が hook の判断を上書きでき、上書きできないのは managed
   settings の hook だけです。ActraDeck の attach entry は user / project の settings にあります。
+
+  これらを狭めるには: daemon を service として動かす（`./scripts/ad-attach install`。unit は失敗後に
+  再起動します）、エージェントを無人で走らせる前に `daemon status` を確認する、無人実行では `dontAsk`
+  mode を使う（hook が承認しない呼び出しのうち、本来プロンプトが出るものは実行されず deny されます）。
 - **codex は観測専用**: 素の Codex TUI は Codex Attach（`agentmon codex attach` / `ad-attach codex install`）が
   rollout JSONL を passive tail して観測します（codex を spawn/kill しない）。承認の書き戻し（interrupt/approval relay）は
   CC 経路のみで、codex には適用しません（observe-only）。これは**未実装でなく構造的な制約**です — rollout JSONL は

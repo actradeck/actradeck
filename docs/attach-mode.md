@@ -304,6 +304,11 @@ Security assumption: the store is, like `file-lock`, a **single-operator / local
   answered with a deny. Separately, Claude Code lets a mod that handles `tool.check` override a
   hook's decision unless the hook comes from managed settings, and ActraDeck's attach entries are
   in user or project settings.
+
+  To narrow these cases: run the daemon as a service (`./scripts/ad-attach install`; the unit
+  restarts it after a failure), check `daemon status` before leaving an agent running unattended,
+  and for unattended runs prefer `dontAsk` mode, where a call that would otherwise prompt is
+  denied rather than run when no hook approves it.
 - **codex is observation-only**: the bare Codex TUI is observed by Codex Attach (`agentmon codex
   attach` / `ad-attach codex install`) passively tailing the rollout JSONL (without
   spawning/killing codex). The write-back of approvals (interrupt/approval relay) is CC-path only
