@@ -21,9 +21,14 @@
  * - token-mode `literal`: headers に `X-ActraDeck-Hook-Token: <nonce>` を直書き。
  *   平文リスクは loopback bind + settings 0600 + project-local(gitignore) + 再起動 rotation で減殺。
  *   (CC HTTP hook の literal header 値は補間されずそのまま送られる — WebFetch 2026-06 確定。)
- * - token-mode `env`: headers に `Authorization: Bearer $ACTRADECK_HOOK_TOKEN` +
- *   `allowedEnvVars:["ACTRADECK_HOOK_TOKEN"]` を書く (非リテラル, forward-compat)。
- *   $VAR は allowedEnvVars 列挙時のみ CC プロセス env から解決される (非列挙は空文字)。
+ * - token-mode `env`: headers に `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN` +
+ *   `allowedEnvVars:["ACTRADECK_HOOK_TOKEN"]` を書く (非リテラル)。
+ *   $VAR は allowedEnvVars 列挙時のみ CC プロセス env から解決される (非列挙は空文字・
+ *   code.claude.com/docs/en/hooks 2026-10-05 確認)。ヘッダ名は literal と**同一**で、受信側
+ *   (hook-receiver の isAuthorized) が照合するのはこのヘッダだけ。旧実装は `Authorization: Bearer …` を
+ *   書いており、env mode の全 hook が 403 = 上流契約上 non-blocking で承認ゲートが働かなかった
+ *   (SEC-FC-2)。値は daemon と CC の双方に同じ `ACTRADECK_HOOK_TOKEN` を export して一致させる
+ *   (daemon 側が未設定なら daemon-cli が起動を拒否する)。
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { DEFAULT_APPROVAL_TIMEOUT_MS, hookTimeoutSecondsFor } from "@actradeck/event-model";
@@ -126,7 +131,7 @@ function buildAttachEntry(endpoint: string, ev: string, opts: MergeOptions): Att
       type: "http",
       url: endpoint,
       timeout,
-      headers: { Authorization: `Bearer $${HOOK_TOKEN_ENV_VAR}` },
+      headers: { [HOOK_TOKEN_HEADER]: `$${HOOK_TOKEN_ENV_VAR}` },
       allowedEnvVars: [HOOK_TOKEN_ENV_VAR],
       [ACTRADECK_MARKER]: true,
     };

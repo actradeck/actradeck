@@ -192,6 +192,14 @@ Scope and safety guards:
   plaintext is not a leak target, and it guarantees "just wiring makes it work" (`env` mode
   requires exporting `ACTRADECK_HOOK_TOKEN` in CC's startup shell, which breaks the "from
   anywhere" requirement).
+- **`env` token-mode setup.** Export the **same** `ACTRADECK_HOOK_TOKEN` value in the daemon's
+  environment and in the shell that starts Claude Code (for example a value from
+  `openssl rand -hex 32`). The daemon refuses to start in `env` mode when the variable is unset or
+  empty, because hooks would then fail authentication and the approval gate would not run. The
+  settings file holds only `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN` plus
+  `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]`, never the value. If your organization's managed
+  settings define `httpHookAllowedEnvVars`, that list must include `ACTRADECK_HOOK_TOKEN`;
+  otherwise Claude Code sends an empty header and every hook is rejected.
 
 ---
 

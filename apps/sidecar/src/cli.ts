@@ -230,8 +230,8 @@ async function mainDaemon(): Promise<void> {
   const wsUrl = resolveWsUrl();
   const dbPath = process.env.ACTRADECK_DB ?? defaultDbPath();
   const ingestToken = process.env.INGEST_TOKEN;
-  // literal token-mode の nonce: env override (ACTRADECK_HOOK_TOKEN) があれば流用、
-  // 無ければ daemon が自前採番する (AttachDaemon 側既定)。
+  // hook 認証トークン: env (ACTRADECK_HOOK_TOKEN) があれば流用、無ければ daemon が自前採番する
+  // (AttachDaemon 側既定)。env token-mode ではこの値が必須 (runStart が未設定を拒否する・SEC-FC-2)。
   const envHookToken = process.env.ACTRADECK_HOOK_TOKEN;
   // idle-reaper の env 上書き (QA-2 / ADR 019eb448)。誤 reap 窓の運用調整用。
   const reaperConfig = resolveAttachReaperConfig();
@@ -289,7 +289,11 @@ async function mainDaemon(): Promise<void> {
   );
   if (outcome.status !== "started" || runningDaemon === undefined) {
     // dry-run / already-running / denied-* は常駐しない (daemon も起動済でない)。
-    if (outcome.status === "denied-needs-confirm" || outcome.status === "denied-token-leak") {
+    if (
+      outcome.status === "denied-needs-confirm" ||
+      outcome.status === "denied-token-leak" ||
+      outcome.status === "denied-env-token-missing"
+    ) {
       process.exitCode = 1;
     }
     return;

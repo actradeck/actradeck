@@ -172,7 +172,8 @@ export interface StartOutcome {
     | "already-running"
     | "dry-run"
     | "denied-needs-confirm"
-    | "denied-token-leak";
+    | "denied-token-leak"
+    | "denied-env-token-missing";
   readonly hookEndpoint?: string;
   readonly settingsPath: string;
   readonly statePath: string;
@@ -233,6 +234,19 @@ export async function runStart(
         `commit へ漏らすため拒否します。--token-mode env を使うか --scope project-local を選んでください。`,
     );
     return { status: "denied-token-leak", settingsPath, statePath };
+  }
+
+  // SEC-FC-2: env token-mode は settings に値を書かず `$ACTRADECK_HOOK_TOKEN` を参照させる。daemon が
+  // 同じ値を知らずに自前の nonce で起動すると、CC 側はその nonce を知りようがなく**全 hook が 403** に
+  // なる。上流 hook 契約では non-2xx は non-blocking (ツールはそのまま実行) なので、承認ゲートが黙って
+  // 外れる。daemon 起動・settings write の前に値ベースで拒否する (fail-loud・SEC-R3-3 と同じ形)。
+  if (args.tokenMode === "env" && (env.hookToken === undefined || env.hookToken.length === 0)) {
+    rt.log(
+      `[attach] --token-mode env には ACTRADECK_HOOK_TOKEN が必要です (daemon と Claude Code の双方の ` +
+        `環境に同じ値を export してください)。未設定のまま起動すると全 hook が認証に失敗し、承認ゲートが ` +
+        `働きません。起動を中止します。`,
+    );
+    return { status: "denied-env-token-missing", settingsPath, statePath };
   }
 
   // SEC-1: user/project scope は共有/グローバル設定への write = 高リスク。--yes も

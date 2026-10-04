@@ -176,6 +176,13 @@ scope と安全ガード:
 - token-mode は **literal 既定**。user scope は git-tracked でないため nonce 平文を置いても
   漏洩対象外で、かつ「配線するだけで効く」を保証します（`env` mode は CC 起動 shell に
   `ACTRADECK_HOOK_TOKEN` の export が必要となり「どこからでも」要件を壊します）。
+- **`env` token-mode の設定**: daemon の環境と Claude Code を起動する shell の両方に、**同じ値**の
+  `ACTRADECK_HOOK_TOKEN` を export してください（例: `openssl rand -hex 32` の出力）。`env` mode で
+  この変数が未設定または空のとき、daemon は起動を拒否します（hook の認証がすべて失敗し、承認
+  ゲートが働かなくなるため）。settings に書かれるのは `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
+  と `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]` だけで、値は書かれません。組織の managed settings で
+  `httpHookAllowedEnvVars` が定義されている場合は、その一覧に `ACTRADECK_HOOK_TOKEN` が含まれている
+  必要があります（含まれないと空のヘッダが送られ、全 hook が拒否されます）。
 
 ---
 
