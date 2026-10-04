@@ -26,6 +26,7 @@ Status values: **Accepted** (in force) · **Superseded** · **Proposed**.
 | [0011](0011-attach-mode.md)                    | Attach Mode: non-destructive wiring, observability-first; Codex via rollout tail   | Accepted |
 | [0012](0012-threat-model-and-local-fs.md)      | Threat model: single-operator / local-fs / loopback; advisory locks; 0600 writes   | Accepted |
 | [0013](0013-release-signing-and-distribution.md) | Release signing & distribution: signed GitHub Releases, CycloneDX SBOM, SLSA provenance | Accepted |
+| [0016](0016-pretooluse-command-shim-fail-closed.md) | PreToolUse through a command shim that blocks when the daemon is unreachable (implementation pending) | Accepted |
 
 > This export is a curated backbone, not the complete decision history. More ADRs
 > will be added as areas stabilize.
