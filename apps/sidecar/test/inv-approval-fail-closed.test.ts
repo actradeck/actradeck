@@ -364,22 +364,32 @@ function postNode(
 
 describe("INV-APPROVAL-FAIL-CLOSED: 応答後の失敗で daemon が落ちず並走中の承認も deny (SEC-FC-1)", () => {
   it("rejection net の無い実プロセスで、承認 A の応答後失敗が並走中の承認 B を素通りさせない", async () => {
+    // 親の NODE_OPTIONS に unhandled-rejections の緩和が入っていても worker へ渡さない (前提を固定)。
+    const nodeOptions = (process.env.NODE_OPTIONS ?? "")
+      .split(/\s+/)
+      .filter((a) => a.length > 0 && !a.startsWith("--unhandled-rejections"))
+      .join(" ");
+    // detached: worker 実体は tsx CLI が起動する孫プロセス。CLI の pid だけを kill すると孫が孤児として
+    // 残る (QA-FC-R2-1)。新しいプロセスグループで起動し、グループごと終了させる。
     const child = spawn(tsxBin, [workerScript("hook-crash-chain-worker.mts")], {
-      env: { ...process.env },
+      env: { ...process.env, NODE_OPTIONS: nodeOptions },
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
     let stderr = "";
     child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
     const exited = new Promise<string>((r) =>
       child.on("exit", (code, sig) => r(`EXITED code=${String(code)} sig=${String(sig)}`)),
     );
+    let stdout = "";
+    child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
+    const field = (name: string): string | undefined =>
+      new RegExp(`^${name} (\\S+)$`, "m").exec(stdout)?.[1];
     try {
       const port = await new Promise<number>((resolvePort, reject) => {
-        let buf = "";
-        child.stdout.on("data", (c: Buffer) => {
-          buf += c.toString();
-          const m = /PORT (\d+)/.exec(buf);
-          if (m) resolvePort(Number(m[1]));
+        child.stdout.on("data", () => {
+          const p = field("PORT");
+          if (p !== undefined) resolvePort(Number(p));
         });
         void exited.then((why) =>
           reject(new Error(`worker exited before listening: ${why} ${stderr}`)),
@@ -405,6 +415,12 @@ describe("INV-APPROVAL-FAIL-CLOSED: 応答後の失敗で daemon が落ちず並
         new Promise<string>((r) => setTimeout(() => r("ALIVE"), 300)),
       ]);
 
+      // 前提 (QA-FC-R2-2): rejection net 0・未処理 rejection は既定 (= throw して落ちる) モード・
+      // resolved の emit が実際に throw した。どれかが崩れると「落ちなかった」は何も証明しない。
+      expect(field("NETS")).toBe("0");
+      expect(field("UNHANDLED")).toBe("default");
+      expect((stdout.match(/^THROW$/gm) ?? []).length).toBeGreaterThanOrEqual(1);
+
       expect(alive, `worker died: ${stderr.split("\n").slice(0, 3).join(" / ")}`).toBe("ALIVE");
       expect(ra.error).toBeUndefined();
       expect(JSON.parse(ra.body ?? "{}")).toMatchObject({
@@ -417,7 +433,28 @@ describe("INV-APPROVAL-FAIL-CLOSED: 応答後の失敗で daemon が落ちず並
         hookSpecificOutput: { permissionDecision: "deny" },
       });
     } finally {
-      child.kill("SIGKILL");
+      const workerPid = Number(field("PID"));
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          /* 既に終了 */
+        }
+      }
+      // worker 実体 (孫) が実際に消えたことを確認する (QA-FC-R2-1: 孤児を残さない)。
+      expect(Number.isInteger(workerPid) && workerPid > 0, "worker never reported its pid").toBe(
+        true,
+      );
+      let gone = false;
+      for (let i = 0; i < 200 && !gone; i++) {
+        try {
+          process.kill(workerPid, 0);
+          await new Promise((r) => setTimeout(r, 10));
+        } catch (err) {
+          gone = (err as NodeJS.ErrnoException).code === "ESRCH";
+        }
+      }
+      expect(gone, `worker pid ${workerPid} survived the group kill`).toBe(true);
     }
   }, 30_000);
 });
