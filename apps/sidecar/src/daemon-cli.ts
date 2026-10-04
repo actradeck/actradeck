@@ -34,11 +34,14 @@ export type AttachScope = "project-local" | "project" | "user";
  * (空白・TAB・前後空白・CR/LF・非 ASCII) は daemon が起動・配線まで済ませても全 hook が 403 になり、
  * 上流 hook 契約では non-2xx は non-blocking ゆえ承認ゲートが黙って外れる (監査 R1 で実測)。
  * 短すぎる値は推測で破れる (ローカル client から数千回/秒・rate limit 無し)。よって構造的な床として
- * **ヘッダで往復できる印字可能 ASCII のうち空白を含まない文字だけ・長さ 32 以上** を要求する。
- * daemon 自前の nonce (`generateHookToken` = 32 バイトの base64url・43 文字) はこの床を満たす。
+ * **ASCII 英数字と `. _ ~ + / = -` だけ・長さ 32 以上 1024 以下** を要求する。`$` は含めない
+ * (上流は header 値の `$VAR` / `${VAR}` を補間し、allowedEnvVars 非列挙なら空文字にするので、literal
+ * mode で書いた値が送信時に別の文字列になる)。上限は、検査を通った値が受信側の header 上限で全 hook
+ * 431 になるのを防ぐ (20,000 字以上で実測・SEC-ENV-R2-3)。daemon 自前の nonce
+ * (`generateHookToken` = 32 バイトの base64url・43 文字) はこの床を満たす。
  */
 export function isUsableHookToken(value: string): boolean {
-  return /^[A-Za-z0-9._~+/=-]{32,}$/.test(value);
+  return /^[A-Za-z0-9._~+/=-]{32,1024}$/.test(value);
 }
 
 export interface DaemonArgs {
@@ -355,7 +358,9 @@ export async function runStart(
   // QA-ENV-1 ≡ TDA-ENV-1: env mode では settings に値を書かず、CC は自分の環境の
   // ACTRADECK_HOOK_TOKEN を送る。daemon が別の値 (自前の nonce 等) で照合していると全 hook が 403 に
   // なり承認ゲートが黙って外れるので、起動直後に値で一致を確かめ、違えば daemon を止めて中止する
-  // (settings write の前)。runtime 側の受け渡しが壊れても CI 緑のまま戻らないための実行可能な床。
+  // (settings write の前)。runtime 側の受け渡しが壊れても無言の 403 へは戻らず起動失敗になる。
+  // ただし CI は cli.ts の本番 runtime を実行しないので、その配線の退行で CI が RED になるわけではない
+  // (実プロセスで exit 1 になることを監査 R2 で確認・QA-ENV-R2-3)。
   if (args.tokenMode === "env" && hookToken !== env.hookToken) {
     await daemon.shutdown();
     rt.log(

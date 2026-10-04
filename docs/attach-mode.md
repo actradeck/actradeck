@@ -194,9 +194,11 @@ Scope and safety guards:
   anywhere" requirement).
 - **`env` token-mode setup.** Export the **same** `ACTRADECK_HOOK_TOKEN` value in the daemon's
   environment and in the shell that starts Claude Code (for example a value from
-  `openssl rand -hex 32`). The daemon refuses to start in `env` mode when the variable is unset,
-  empty, shorter than 32 characters, or contains characters other than letters, digits and
-  `. _ ~ + / = -`. The settings file holds only `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
+  `openssl rand -hex 32`). In `env` mode the daemon refuses to start when the variable is unset or
+  empty. The value must be 32 to 1024 characters long and use only ASCII letters, ASCII digits and
+  `. _ ~ + / = -`; otherwise the daemon refuses to start, in `env` mode and also in `literal` mode when the variable
+  is exported (this includes `$`,
+  which Claude Code would treat as a variable reference). The settings file holds only `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
   plus `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]`, never the value. The daemon cannot see the
   environment of the shell that starts Claude Code: if that shell does not export the same value,
   every hook is rejected and the approval gate does not run for that session. If any of your
@@ -208,6 +210,18 @@ Scope and safety guards:
   writes it in plaintext into the settings file. The token then stays the same across restarts
   until you change the variable. Unset it before starting the daemon if you want a new token on
   every start.
+- **Moving an existing `env`-mode setup to the current entries.** The daemon rewrites its entries
+  when it starts, so stop the running daemon and start it again with the same options:
+
+  ```bash
+  node apps/sidecar/dist/cli.js daemon stop --scope <scope>   # run in the directory you started it from
+  node apps/sidecar/dist/cli.js attach --token-mode env --scope <scope> --yes   # drop --yes for project-local
+  ```
+
+  For `project` and `project-local` the daemon belongs to the directory you started it in, so run
+  both commands there. Running `attach` while the old daemon is still up only reports that it is
+  already running and leaves the old entries in place. `./scripts/ad-attach` (its `stop` and
+  `service` commands included) acts on the `user`-scope daemon only.
 
 ---
 

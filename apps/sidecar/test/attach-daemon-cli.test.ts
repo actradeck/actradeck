@@ -492,6 +492,10 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しな�
     ["非 ASCII (U+20AC)", "tok-euro-sign-\u20ac-0123456789abcdef"],
     ["1 文字", "a"],
     ["31 文字", "a".repeat(31)],
+    // 上流は header 値の $VAR / ${VAR} を補間するので、literal で書いた値が送信時に変わる。
+    ["$VAR 綴り", "tok$HOME-0123456789abcdefghijklmnopq"],
+    ["${VAR} 綴り", "tok${HOME}-0123456789abcdefghijklmnop"],
+    ["1025 文字", "a".repeat(1025)],
   ];
   for (const mode of ["env", "literal"] as const) {
     for (const [label, value] of INVALID) {
@@ -519,6 +523,7 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しな�
       expect(isUsableHookToken(value), JSON.stringify(value)).toBe(false);
     // 合格: 32 文字ちょうど / openssl rand -hex 32 形 / daemon 自前の base64url nonce 形。
     expect(isUsableHookToken("a".repeat(32))).toBe(true);
+    expect(isUsableHookToken("a".repeat(1024))).toBe(true);
     expect(isUsableHookToken("0123456789abcdef".repeat(4))).toBe(true);
     expect(isUsableHookToken(generateHookToken())).toBe(true);
     expect(isUsableHookToken("Abc-def_ghi.jkl~mno+pqr/stu=vwxyz0")).toBe(true);
@@ -554,6 +559,10 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しな�
     );
     expect(out.status).toBe("denied-env-token-mismatch");
     expect(started.length).toBe(1);
+    // 拒否文言は出す (POSITIVE 対)・渡した値と daemon 側の値はどちらもログに出さない。
+    expect(logs.join("\n")).toContain("ACTRADECK_HOOK_TOKEN");
+    expect(logs.join("\n")).not.toContain("tok-mismatch-0123456789abcdef0123");
+    expect(logs.join("\n")).not.toContain(started[0]?.hookAuthToken ?? "<no-daemon>");
     // settings は書かない・daemon は止めた (受信口がもう応答しない)。
     expect(existsSync(resolveSettingsPath("project-local", cwd, home))).toBe(false);
     const endpoint = started[0]?.hookEndpoint ?? "http://127.0.0.1:1/hook";

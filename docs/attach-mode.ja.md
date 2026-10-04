@@ -178,8 +178,9 @@ scope と安全ガード:
   `ACTRADECK_HOOK_TOKEN` の export が必要となり「どこからでも」要件を壊します）。
 - **`env` token-mode の設定**: daemon の環境と Claude Code を起動する shell の両方に、**同じ値**の
   `ACTRADECK_HOOK_TOKEN` を export してください（例: `openssl rand -hex 32` の出力）。`env` mode で
-  この変数が未設定・空・32 文字未満・英数字と `. _ ~ + / = -` 以外の文字を含む、のいずれかのとき、
-  daemon は起動を拒否します。settings に書かれるのは `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
+  この変数が未設定または空のとき、daemon は起動を拒否します。値は 32 文字以上 1024 文字以下で、
+  ASCII の英字・数字と `. _ ~ + / = -` だけを使う必要があります。これを満たさない値では、`env` mode でも、
+  変数を export した `literal` mode でも daemon は起動を拒否します（Claude Code が変数参照として扱う `$` も拒否対象です）。settings に書かれるのは `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
   と `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]` だけで、値は書かれません。daemon は Claude Code を
   起動する shell の環境を確認できません。その shell が同じ値を export していないと、そのセッションの
   hook はすべて拒否され、承認ゲートは働きません。user / project / local / managed のいずれかの
@@ -189,6 +190,17 @@ scope と安全ガード:
   設定されていると、`literal` mode は起動ごとに新しい値を生成せずその値を採用し、settings に平文で
   書きます。変数を変えない限り、再起動しても token は変わりません。起動ごとに新しい token にしたい
   場合は、daemon の起動前に変数を unset してください。
+- **既存の `env` mode 構成を現行の entry へ移す**: daemon は起動時に entry を書き直すので、稼働中の
+  daemon を止め、同じ option で起動し直してください。
+
+  ```bash
+  node apps/sidecar/dist/cli.js daemon stop --scope <scope>   # 起動したディレクトリで実行する
+  node apps/sidecar/dist/cli.js attach --token-mode env --scope <scope> --yes   # project-local では --yes 不要
+  ```
+
+  `project` と `project-local` の daemon は起動したディレクトリに属するので、両方のコマンドをそこで
+  実行します。旧 daemon が稼働したまま `attach` を実行しても「既に稼働中」と表示されるだけで、旧 entry は
+  残ります。`./scripts/ad-attach`（`stop` と `service` を含む）が操作するのは `user` scope の daemon だけです。
 
 ---
 
