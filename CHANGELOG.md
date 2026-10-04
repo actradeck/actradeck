@@ -19,8 +19,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   and the daemon refuses to start in `env` mode when `ACTRADECK_HOOK_TOKEN` is unset, empty,
   shorter than 32 characters, or contains characters outside the base64url / hex set.
   Existing `env`-mode entries are rewritten when the daemon starts: restart it
-  (`./scripts/ad-attach service restart`, or stop a foreground daemon with Ctrl-C and start it
-  again). Running attach again while the old daemon is still up leaves the old entries in place.
+  (`./scripts/ad-attach service restart`; for a foreground daemon, stop it with Ctrl-C or
+  `./scripts/ad-attach stop` and start it again). Running attach again while the old daemon is still up leaves the old entries in place.
   Setup is described in `docs/attach-mode.md`.
 
 - **Dependency updates for advisories published after the previous round (one critical,
