@@ -13,6 +13,13 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Security
 
+- **Dependency updates for advisories published after the previous round (one critical,
+  eight high, four moderate at the time of the change).** Direct bumps: Next.js
+  16.3.3 → 16.3.8 (critical advisory) and Fastify 5.12.1 → 5.12.5. Transitive fixes
+  through `pnpm.overrides`: `undici` (new window `>=7.29.1 <8`), `brace-expansion`
+  (window moved from `>=5.0.9 <6` to `>=5.0.11 <6`) and `ip-address` (new window
+  `>=10.7.1 <11`). `pnpm audit` reports no known vulnerabilities and the CI
+  dependency-audit gate (INV-DEP-AUDIT) passes again.
 - **Dependency updates clearing every open Dependabot alert (30 at the time of the
   change).** Direct bumps: Next.js 16.2.11 → 16.3.3 (critical advisory), Fastify
   5.8.5 → 5.12.1, Vitest and `@vitest/coverage-v8` 4.1.8 → 4.1.11,
