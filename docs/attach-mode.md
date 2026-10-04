@@ -288,6 +288,28 @@ Security assumption: the store is, like `file-lock`, a **single-operator / local
 - **Claude Code's approval relay is supported**: Claude Code Attach can return allow / deny from
   the cockpit via the hooks' response path. Meanwhile, because ActraDeck does not own startup,
   this is separate from stop control.
+- **The approval gate works only while the daemon answers the hook.** Claude Code treats an HTTP
+  hook that cannot connect, gets a non-2xx response, or times out as a non-blocking error and
+  continues with the tool call. So the gate does not hold a tool call when:
+  - the daemon is not running (stopped, restarting, or crashed);
+  - the hook fails authentication (for example, in `env` token-mode the shell that started
+    Claude Code does not have the same `ACTRADECK_HOOK_TOKEN`);
+  - the hook request body is larger than 4 MB (the daemon drops the connection);
+  - the hook times out on the Claude Code side. ActraDeck writes a hook timeout longer than its
+    own approval wait, so this happens only if that timeout is lowered;
+  - a settings file's `allowedHttpHookUrls` does not include the daemon's endpoint, or its
+    `httpHookAllowedEnvVars` excludes `ACTRADECK_HOOK_TOKEN` (`env` token-mode).
+
+  Once the daemon has accepted a hook as an approval request, an error while handling it is
+  answered with a deny. Separately, Claude Code lets a mod that handles `tool.check` override a
+  hook's decision unless the hook comes from managed settings, and ActraDeck's attach entries are
+  in user or project settings.
+
+  To narrow these cases: run the daemon as a service (`./scripts/ad-attach install`; the unit
+  restarts it after a failure), check `daemon status` before leaving an agent running unattended,
+  and for unattended runs prefer `dontAsk` mode, where a call that would otherwise prompt is
+  denied rather than run when no hook approves it. A change that makes `PreToolUse` block when the
+  daemon cannot be reached is planned; see [ADR 0016](adr/0016-pretooluse-command-shim-fail-closed.md).
 - **codex is observation-only**: the bare Codex TUI is observed by Codex Attach (`agentmon codex
   attach` / `ad-attach codex install`) passively tailing the rollout JSONL (without
   spawning/killing codex). The write-back of approvals (interrupt/approval relay) is CC-path only
