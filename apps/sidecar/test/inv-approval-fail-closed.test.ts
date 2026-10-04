@@ -16,6 +16,11 @@
  * 挙動として採用した境界 (sink 障害時は low-risk / auto-allow も deny・判定前の解釈不能入力と
  * 非承認 hook は `{}`) を pin する。
  *
+ * crash-chain テスト (SEC-FC-1) の前提は worker の自己申告 (`NETS` / `UNHANDLED` / `THROW`) で assert する。
+ * **ただし `THROW` は throw の直前に出す印なので、worker の throw 文だけを消す編集は検出できない**
+ * (main ループ変異 VW2 で SURVIVED を実測)。worker は test helper (.mts) であり、その編集は本テストの
+ * fixture を変える coordinated 編集にあたる (開示する残余)。
+ *
  * **固定しないもの**: 承認フックと判定する前に HTTP 層で起きる失敗 (daemon 不在・token 不一致・body
  * 上限超過・CC 側 timeout)。これらは上流契約で non-blocking になり、本 INV の守備範囲外 (SEC-FC-3・
  * 別 task で docs と構造対策を扱う)。
