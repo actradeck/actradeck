@@ -257,6 +257,21 @@ node apps/sidecar/dist/cli.js approvals clear                # 全永続承認�
   非所有 PID を kill せず **no-op**（安全側）。
 - **Claude Code の承認 relay は対応**: Claude Code Attach は hooks の応答経路で cockpit から
   allow / deny を返せます。一方で ActraDeck が起動を所有しないため、停止制御とは別物です。
+- **承認ゲートが働くのは daemon が hook に応答できる間だけです**: Claude Code は、接続できない・
+  2xx 以外が返る・timeout した HTTP hook を non-blocking なエラーとして扱い、ツール呼び出しを
+  そのまま続けます。したがって次の場合、承認ゲートはツール呼び出しを止めません。
+  - daemon が動いていない（停止中・再起動中・crash）。
+  - hook の認証が通らない（例: `env` token-mode で、Claude Code を起動した shell が同じ
+    `ACTRADECK_HOOK_TOKEN` を持っていない）。
+  - hook の request body が 4 MB を超える（daemon が接続を切ります）。
+  - Claude Code 側で hook が timeout する。ActraDeck は自分の承認待ちより長い hook timeout を書くので、
+    これが起きるのはその timeout を短くした場合だけです。
+  - settings の `allowedHttpHookUrls` が daemon の endpoint を含まない、または
+    `httpHookAllowedEnvVars` が `ACTRADECK_HOOK_TOKEN` を除外している（`env` token-mode）。
+
+  daemon が承認要求として受け付けた後の hook では、処理中のエラーは deny で返します。これとは別に、
+  Claude Code では `tool.check` を扱う mod が hook の判断を上書きでき、上書きできないのは managed
+  settings の hook だけです。ActraDeck の attach entry は user / project の settings にあります。
 - **codex は観測専用**: 素の Codex TUI は Codex Attach（`agentmon codex attach` / `ad-attach codex install`）が
   rollout JSONL を passive tail して観測します（codex を spawn/kill しない）。承認の書き戻し（interrupt/approval relay）は
   CC 経路のみで、codex には適用しません（observe-only）。これは**未実装でなく構造的な制約**です — rollout JSONL は
