@@ -496,6 +496,9 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しな�
     ["$VAR 綴り", "tok$HOME-0123456789abcdefghijklmnopq"],
     ["${VAR} 綴り", "tok${HOME}-0123456789abcdefghijklmnop"],
     ["1025 文字", "a".repeat(1025)],
+    // 許容集合 (docs に逐語で書いた ASCII 英数字と . _ ~ + / = -) の外側の記号。
+    ["波括弧", "tok{brace}-0123456789abcdefghijklmnopq"],
+    ["感嘆符", "tok!bang-0123456789abcdefghijklmnopqr"],
   ];
   for (const mode of ["env", "literal"] as const) {
     for (const [label, value] of INVALID) {
