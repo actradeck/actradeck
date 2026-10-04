@@ -144,7 +144,8 @@ describe("INV-ATTACH-SETTINGS-MERGE: 既存ユーザー hooks を保持して ap
       allowedEnvVars?: string[];
     }>;
     for (const e of entries) {
-      expect(e.headers?.Authorization).toBe(`Bearer $${HOOK_TOKEN_ENV_VAR}`);
+      // 受信側が照合するヘッダ名と同一 (SEC-FC-2: 旧 `Authorization: Bearer` は全 hook 403 だった)。
+      expect(e.headers).toEqual({ [HOOK_TOKEN_HEADER]: `$${HOOK_TOKEN_ENV_VAR}` });
       expect(e.allowedEnvVars).toEqual([HOOK_TOKEN_ENV_VAR]);
     }
   });

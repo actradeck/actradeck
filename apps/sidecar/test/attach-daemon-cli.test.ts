@@ -10,7 +10,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AttachDaemon } from "../src/attach-daemon.js";
 import {
@@ -18,12 +18,15 @@ import {
   type DaemonRuntime,
   parseDaemonArgs,
   resolveSettingsPath,
+  isUsableHookToken,
   runStart,
   runStatus,
   runStop,
   scopeNeedsConfirm,
+  startOutcomeExitCode,
   tokenModeLeaksToTrackedFile,
 } from "../src/daemon-cli.js";
+import { generateHookToken } from "../src/settings-injection.js";
 import { isActradeckEntry } from "../src/settings-merge.js";
 
 let home: string;
@@ -223,10 +226,15 @@ describe("INV-ATTACH-CONFIRM-GATE (SEC-1): user/project scope は確認なしで
     const logs: string[] = [];
     const { rt, daemons } = makeRuntime(logs);
     // project + env token-mode は token-leak ゲートを通過するが、confirm ゲートで止まる。
+    // env mode の token 必須ゲート (SEC-FC-2) を先に満たし、confirm ゲートだけを単独で検証する。
     const args = parseDaemonArgs(["attach", "--scope", "project", "--token-mode", "env"], cwd);
     const out = await runStart(
       args,
-      { wsUrl: "ws://127.0.0.1:1/ingest/ws", dbPath: join(cwd, "p.db") },
+      {
+        wsUrl: "ws://127.0.0.1:1/ingest/ws",
+        dbPath: join(cwd, "p.db"),
+        hookToken: "tok-confirm-gate-0123456789abcdef",
+      },
       rt,
     );
     expect(out.status).toBe("denied-needs-confirm");
@@ -301,18 +309,297 @@ describe("INV-ATTACH-TOKEN-LEAK (SEC-2): tracked file に nonce 平文を着地�
     );
     const out = await runStart(
       args,
-      { wsUrl: "ws://127.0.0.1:1/ingest/ws", dbPath: join(cwd, "p3.db") },
+      {
+        wsUrl: "ws://127.0.0.1:1/ingest/ws",
+        dbPath: join(cwd, "p3.db"),
+        // env mode は daemon 側の ACTRADECK_HOOK_TOKEN が必須 (SEC-FC-2)。
+        hookToken: "tok-env-mode-project-scope-0123456789",
+      },
       rt,
     );
     expect(out.status).toBe("started");
     const settingsPath = resolveSettingsPath("project", cwd, home);
     const raw = readFileSync(settingsPath, "utf8");
     const tok = daemons[0]?.hookAuthToken as string;
+    expect(tok).toBe("tok-env-mode-project-scope-0123456789");
     // tracked settings.json に nonce 平文が無い ($VAR 参照 + allowedEnvVars のみ)。
     expect(raw).not.toContain(tok);
     expect(raw).toContain("$ACTRADECK_HOOK_TOKEN");
     expect(raw).toContain("allowedEnvVars");
     await daemons[0]?.shutdown();
     runStop(args, rt);
+  });
+});
+
+/**
+ * SEC-FC-2 (task 01a107b4-8e9b): env token-mode の**往復**。settings に書いた entry を、上流の HTTP hook と
+ * 同じ規則で補間 (`$VAR` / `${VAR}` は allowedEnvVars に列挙された変数だけ CC プロセス env から解決・
+ * それ以外は空文字 — code.claude.com/docs/en/hooks 2026-10-05 確認) してから、実 daemon の受信口へ送る。
+ *
+ * 旧実装は env mode で `Authorization: Bearer $ACTRADECK_HOOK_TOKEN` を書き、受信側は
+ * `X-ActraDeck-Hook-Token` しか照合しないため全 hook が 403 = 上流では non-blocking で承認ゲートが
+ * 働かなかった。書く側と照合する側を**同じテストで突き合わせる**ことで、片側だけの変更を落とす。
+ */
+function interpolateHookHeaders(
+  entry: { headers?: Record<string, string>; allowedEnvVars?: string[] },
+  ccEnv: Record<string, string>,
+): Record<string, string> {
+  const allowed = new Set(entry.allowedEnvVars ?? []);
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(entry.headers ?? {})) {
+    out[name] = value.replace(
+      /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+      (_m, a, b) => {
+        const key = (a ?? b) as string;
+        return allowed.has(key) ? (ccEnv[key] ?? "") : "";
+      },
+    );
+  }
+  return out;
+}
+
+async function postHookWith(
+  endpoint: string,
+  headers: Record<string, string>,
+  body: unknown,
+): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text.length > 0 ? JSON.parse(text) : {} };
+}
+
+describe("INV-ATTACH-HOOK-AUTH-ENV: env token-mode の書込と受信側の照合が往復で一致する (SEC-FC-2)", () => {
+  const TOKEN = "tok-env-roundtrip-abcdef0123456789";
+  const LOW_RISK_PRE_TOOL_USE = {
+    session_id: "s-env-roundtrip",
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "ls -la" },
+  };
+
+  it("CC と daemon が同じ ACTRADECK_HOOK_TOKEN を持てば、承認フックが 403 でなく認証を通る", async () => {
+    const logs: string[] = [];
+    const { rt, daemons } = makeRuntime(logs);
+    const args = parseDaemonArgs(["attach", "--token-mode", "env"], cwd);
+    const out = await runStart(
+      args,
+      { wsUrl: "ws://127.0.0.1:1/ingest/ws", dbPath: join(cwd, "env-rt.db"), hookToken: TOKEN },
+      rt,
+    );
+    try {
+      expect(out.status).toBe("started");
+      const settings = JSON.parse(
+        readFileSync(resolveSettingsPath("project-local", cwd, home), "utf8"),
+      ) as { hooks: Record<string, Array<{ hooks: unknown[] }>> };
+      const entries = Object.values(settings.hooks)
+        .flatMap((g) => g)
+        .flatMap((x) => x.hooks)
+        .filter(isActradeckEntry) as Array<{
+        url: string;
+        headers?: Record<string, string>;
+        allowedEnvVars?: string[];
+      }>;
+      expect(entries.length).toBeGreaterThan(0);
+      // 平文 token は settings に書かれない (env 参照のみ)。
+      expect(JSON.stringify(settings)).not.toContain(TOKEN);
+
+      for (const entry of entries) {
+        const ccHeaders = interpolateHookHeaders(entry, { ACTRADECK_HOOK_TOKEN: TOKEN });
+        // 補間後に token が実際に載っている (= allowedEnvVars と参照名が一致している)。
+        expect(Object.values(ccHeaders)).toContain(TOKEN);
+        const ok = await postHookWith(entry.url, ccHeaders, LOW_RISK_PRE_TOOL_USE);
+        expect(ok.status, "env-mode hook was rejected by the receiver").toBe(200);
+        expect(ok.body).toEqual({}); // 認証を通った (200)。承認経路への到達はここでは判別しない (hook-approval-gate 側の INV が担う)
+      }
+
+      // 対照: CC 側の値が違えば同じ entry でも 403 (照合が実際に効いている)。
+      const first = entries[0];
+      if (first === undefined) throw new Error("no ActraDeck entry");
+      const wrong = interpolateHookHeaders(first, { ACTRADECK_HOOK_TOKEN: "tok-wrong" });
+      expect((await postHookWith(first.url, wrong, LOW_RISK_PRE_TOOL_USE)).status).toBe(403);
+      // 対照: CC 側で未 export (空文字に補間) でも 403。
+      const unset = interpolateHookHeaders(first, {});
+      expect((await postHookWith(first.url, unset, LOW_RISK_PRE_TOOL_USE)).status).toBe(403);
+    } finally {
+      await daemons[0]?.shutdown();
+      runStop(args, rt);
+    }
+  });
+});
+
+/**
+ * INV-ATTACH-HOOK-AUTH-ENV の起動前ゲート (裁定 01a10814)。どれも daemon を起動せず settings も書かない
+ * 値ベースの拒否で、拒否は CLI の終了コード 1 になる。
+ */
+describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しない", () => {
+  const WS = "ws://127.0.0.1:1/ingest/ws";
+  const SCOPES = [
+    { scope: "project-local", flags: [] as string[] },
+    { scope: "project", flags: ["--yes"] },
+    { scope: "user", flags: ["--yes"] },
+  ] as const;
+  const MISSING: readonly (string | undefined)[] = [undefined, ""];
+  let missingCasesExecuted = 0;
+  afterAll(() => {
+    expect(missingCasesExecuted).toBe(SCOPES.length * MISSING.length);
+  });
+
+  // QA-ENV-2: docs が env mode へ誘導する project scope を含む 3 scope すべてで固定する。
+  for (const { scope, flags } of SCOPES) {
+    for (const value of MISSING) {
+      it(`env mode × ${scope} × ${value === undefined ? "未設定" : "空文字"} は denied-env-token-missing`, async () => {
+        const logs: string[] = [];
+        const { rt, daemons } = makeRuntime(logs);
+        const args = parseDaemonArgs(
+          ["attach", "--scope", scope, "--token-mode", "env", ...flags],
+          cwd,
+        );
+        const out = await runStart(
+          args,
+          {
+            wsUrl: WS,
+            dbPath: join(cwd, `missing-${scope}.db`),
+            ...(value !== undefined ? { hookToken: value } : {}),
+          },
+          rt,
+        );
+        expect(out.status).toBe("denied-env-token-missing");
+        expect(daemons.length).toBe(0);
+        expect(existsSync(resolveSettingsPath(scope, cwd, home))).toBe(false);
+        expect(logs.join("\n")).toContain("ACTRADECK_HOOK_TOKEN");
+        missingCasesExecuted += 1;
+      });
+    }
+  }
+
+  // SEC-ENV-1 ≡ TDA-ENV-4 / SEC-ENV-3: 監査 R1 が実測した「起動はするが全 hook が 403 になる / 推測で
+  // 破れる」値を逐語で持つ。env mode と literal mode の上書きの両方で拒否する。
+  const INVALID: readonly [string, string][] = [
+    ["空白 1 字", " "],
+    ["TAB", "\t"],
+    ["前後空白", " tok-surrounded-by-spaces-0123456789abcdef "],
+    // 先頭側と末尾側は対称に置く (片側だけだとアンカーの片方を外す変異が素通りする)。
+    ["先頭空白", " tok-leading-space-0123456789abcdefghij"],
+    ["末尾空白", "tok-trailing-space-0123456789abcdefghij "],
+    ["先頭 CR", "\rtok-leading-carriage-return-0123456789"],
+    ["末尾 CR", "tok-trailing-carriage-return-0123456789\r"],
+    ["先頭 LF", "\ntok-leading-line-feed-0123456789abcdef"],
+    ["末尾 LF", "tok-trailing-line-feed-0123456789abcdef\n"],
+    ["非 ASCII (U+20AC)", "tok-euro-sign-\u20ac-0123456789abcdef"],
+    ["1 文字", "a"],
+    ["31 文字", "a".repeat(31)],
+    // 上流は header 値の $VAR / ${VAR} を補間するので、literal で書いた値が送信時に変わる。
+    ["$VAR 綴り", "tok$HOME-0123456789abcdefghijklmnopq"],
+    ["${VAR} 綴り", "tok${HOME}-0123456789abcdefghijklmnop"],
+    ["1025 文字", "a".repeat(1025)],
+    // 許容集合 (docs に逐語で書いた ASCII 英数字と . _ ~ + / = -) の外側の記号。
+    ["波括弧", "tok{brace}-0123456789abcdefghijklmnopq"],
+    ["感嘆符", "tok!bang-0123456789abcdefghijklmnopqr"],
+  ];
+  for (const mode of ["env", "literal"] as const) {
+    for (const [label, value] of INVALID) {
+      it(`${mode} mode × ${label} は denied-hook-token-invalid (値はログに出さない)`, async () => {
+        const logs: string[] = [];
+        const { rt, daemons } = makeRuntime(logs);
+        const args = parseDaemonArgs(["attach", "--token-mode", mode], cwd);
+        const out = await runStart(
+          args,
+          { wsUrl: WS, dbPath: join(cwd, "invalid.db"), hookToken: value },
+          rt,
+        );
+        expect(out.status).toBe("denied-hook-token-invalid");
+        expect(daemons.length).toBe(0);
+        expect(existsSync(resolveSettingsPath("project-local", cwd, home))).toBe(false);
+        // POSITIVE 対: 拒否文言はログに出ている (ログが空で negative が恒真になるのを防ぐ)。
+        expect(logs.join("\n")).toContain("ACTRADECK_HOOK_TOKEN");
+        if (value.trim().length > 1) expect(logs.join("\n")).not.toContain(value.trim());
+      });
+    }
+  }
+
+  it("述語: ヘッダで往復できる 32 文字以上だけを受理する (合格の対照つき)", () => {
+    for (const [, value] of INVALID)
+      expect(isUsableHookToken(value), JSON.stringify(value)).toBe(false);
+    // 合格: 32 文字ちょうど / openssl rand -hex 32 形 / daemon 自前の base64url nonce 形。
+    expect(isUsableHookToken("a".repeat(32))).toBe(true);
+    expect(isUsableHookToken("a".repeat(1024))).toBe(true);
+    expect(isUsableHookToken("0123456789abcdef".repeat(4))).toBe(true);
+    expect(isUsableHookToken(generateHookToken())).toBe(true);
+    expect(isUsableHookToken("Abc-def_ghi.jkl~mno+pqr/stu=vwxyz0")).toBe(true);
+  });
+
+  it("daemon が渡した値と違うトークンで起動したら止めて denied-env-token-mismatch (QA-ENV-1 ≡ TDA-ENV-1)", async () => {
+    const logs: string[] = [];
+    const started: AttachDaemon[] = [];
+    // 本番 runtime の受け渡しが壊れた形: hookToken を無視し daemon 自前の nonce で起動する。
+    const rt: DaemonRuntime = {
+      home,
+      log: (m) => logs.push(m),
+      startDaemon: async (opts) => {
+        const daemon = new AttachDaemon({
+          wsUrl: opts.wsUrl,
+          dbPath: opts.dbPath,
+          host: "127.0.0.1",
+        });
+        const { hookEndpoint } = await daemon.start();
+        started.push(daemon);
+        return { daemon, hookEndpoint, hookToken: daemon.hookAuthToken };
+      },
+    };
+    const args = parseDaemonArgs(["attach", "--token-mode", "env"], cwd);
+    const out = await runStart(
+      args,
+      {
+        wsUrl: WS,
+        dbPath: join(cwd, "mismatch.db"),
+        hookToken: "tok-mismatch-0123456789abcdef0123",
+      },
+      rt,
+    );
+    expect(out.status).toBe("denied-env-token-mismatch");
+    expect(started.length).toBe(1);
+    // 拒否文言は出す (POSITIVE 対)・渡した値と daemon 側の値はどちらもログに出さない。
+    expect(logs.join("\n")).toContain("ACTRADECK_HOOK_TOKEN");
+    expect(logs.join("\n")).not.toContain("tok-mismatch-0123456789abcdef0123");
+    expect(logs.join("\n")).not.toContain(started[0]?.hookAuthToken ?? "<no-daemon>");
+    // settings は書かない・daemon は止めた (受信口がもう応答しない)。
+    expect(existsSync(resolveSettingsPath("project-local", cwd, home))).toBe(false);
+    const endpoint = started[0]?.hookEndpoint ?? "http://127.0.0.1:1/hook";
+    await expect(
+      fetch(endpoint, {
+        method: "POST",
+        body: "{}",
+        headers: { "content-type": "application/json" },
+      }),
+    ).rejects.toThrow();
+    // 対照: 受け渡しが正しい runtime なら同じ値で started。
+    const ok = makeRuntime([]);
+    const out2 = await runStart(
+      args,
+      { wsUrl: WS, dbPath: join(cwd, "match.db"), hookToken: "tok-mismatch-0123456789abcdef0123" },
+      ok.rt,
+    );
+    expect(out2.status).toBe("started");
+    await ok.daemons[0]?.shutdown();
+    runStop(args, ok.rt);
+  });
+
+  it("終了コード: 拒否はすべて 1・それ以外は 0 (TDA-ENV-3 ≡ QA-ENV-4)", () => {
+    const table: readonly [Parameters<typeof startOutcomeExitCode>[0], 0 | 1][] = [
+      ["started", 0],
+      ["already-running", 0],
+      ["dry-run", 0],
+      ["denied-needs-confirm", 1],
+      ["denied-token-leak", 1],
+      ["denied-env-token-missing", 1],
+      ["denied-hook-token-invalid", 1],
+      ["denied-env-token-mismatch", 1],
+    ];
+    for (const [status, code] of table) expect(startOutcomeExitCode(status), status).toBe(code);
+    expect(new Set(table.map(([s]) => s)).size).toBe(table.length);
   });
 });

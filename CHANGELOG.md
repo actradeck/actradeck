@@ -13,6 +13,14 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Security
 
+- **Attach `--token-mode env` hooks now authenticate.** In `env` mode the hook entries sent the
+  token in a header the daemon does not check, so every hook was rejected and the approval gate
+  did not run. They now use the same `X-ActraDeck-Hook-Token` header as the default `literal` mode,
+  and the daemon now checks `ACTRADECK_HOOK_TOKEN` before it starts. This check also applies to
+  `literal` mode when the variable is exported, so a value that `literal` mode used to accept can
+  now make the daemon refuse to start. The accepted values and the steps to move an existing
+  `env`-mode setup over are in the `env` token-mode notes of `docs/attach-mode.md`.
+
 - **Dependency updates for advisories published after the previous round (one critical,
   eight high, four moderate at the time of the change).** Direct bumps: Next.js
   16.3.3 → 16.3.8 (critical advisory) and Fastify 5.12.1 → 5.12.5. Transitive fixes

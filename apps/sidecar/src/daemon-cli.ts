@@ -27,6 +27,23 @@ import {
 
 export type AttachScope = "project-local" | "project" | "user";
 
+/**
+ * hook 認証トークンとして使える値か (SEC-ENV-1 ≡ TDA-ENV-4 / SEC-ENV-3・裁定 01a10814)。
+ *
+ * 受信側 (hook-receiver) はヘッダ値をバイト一致で照合する。HTTP ヘッダとして往復できない値
+ * (空白・TAB・前後空白・CR/LF・非 ASCII) は daemon が起動・配線まで済ませても全 hook が 403 になり、
+ * 上流 hook 契約では non-2xx は non-blocking ゆえ承認ゲートが黙って外れる (監査 R1 で実測)。
+ * 短すぎる値は推測で破れる (ローカル client から数千回/秒・rate limit 無し)。よって構造的な床として
+ * **ASCII 英数字と `. _ ~ + / = -` だけ・長さ 32 以上 1024 以下** を要求する。`$` は含めない
+ * (上流は header 値の `$VAR` / `${VAR}` を補間し、allowedEnvVars 非列挙なら空文字にするので、literal
+ * mode で書いた値が送信時に別の文字列になる)。上限は、検査を通った値が受信側の header 上限で全 hook
+ * 431 になるのを防ぐ (20,000 字以上で実測・SEC-ENV-R2-3)。daemon 自前の nonce
+ * (`generateHookToken` = 32 バイトの base64url・43 文字) はこの床を満たす。
+ */
+export function isUsableHookToken(value: string): boolean {
+  return /^[A-Za-z0-9._~+/=-]{32,1024}$/.test(value);
+}
+
 export interface DaemonArgs {
   /** start | stop | status (attach は start に正規化済)。 */
   readonly action: "start" | "stop" | "status";
@@ -148,6 +165,9 @@ export interface DaemonRuntime {
    * 安定 hook endpoint を確立し endpoint を返す daemon を起動する。
    * `hookToken` は daemon が実際に検証に使う nonce (settings へ literal で書くのはこの値)。
    * env override が無ければ daemon が自前採番した hookAuthToken を返すこと。
+   * **契約**: `opts.hookToken` が渡されたら daemon はその値で照合し、同じ値を返すこと。env token-mode は
+   * この値と CC 側の値が一致することで成立し、runStart は返却値が渡した値と違えば daemon を止めて
+   * `denied-env-token-mismatch` を返す (QA-ENV-1 ≡ TDA-ENV-1)。
    */
   startDaemon: (opts: {
     wsUrl: string;
@@ -172,12 +192,38 @@ export interface StartOutcome {
     | "already-running"
     | "dry-run"
     | "denied-needs-confirm"
-    | "denied-token-leak";
+    | "denied-token-leak"
+    | "denied-env-token-missing"
+    | "denied-hook-token-invalid"
+    | "denied-env-token-mismatch";
   readonly hookEndpoint?: string;
   readonly settingsPath: string;
   readonly statePath: string;
   readonly backupPath?: string;
   readonly previewSettings?: unknown;
+}
+
+/**
+ * start の結果を CLI の終了コードへ写す (TDA-ENV-3 ≡ QA-ENV-4)。拒否はすべて 1 (systemd 等から失敗として
+ * 見える)。網羅 switch なので status を足すと型検査がここでの扱いを要求する。
+ */
+export function startOutcomeExitCode(status: StartOutcome["status"]): 0 | 1 {
+  switch (status) {
+    case "started":
+    case "already-running":
+    case "dry-run":
+      return 0;
+    case "denied-needs-confirm":
+    case "denied-token-leak":
+    case "denied-env-token-missing":
+    case "denied-hook-token-invalid":
+    case "denied-env-token-mismatch":
+      return 1;
+    default: {
+      const unreachable: never = status;
+      return unreachable;
+    }
+  }
 }
 
 /** scope が高リスク (共有/グローバル設定 write) で確認を要するか。 */
@@ -235,6 +281,33 @@ export async function runStart(
     return { status: "denied-token-leak", settingsPath, statePath };
   }
 
+  // SEC-FC-2: env token-mode は settings に値を書かず `$ACTRADECK_HOOK_TOKEN` を参照させる。daemon が
+  // 同じ値を知らずに自前の nonce で起動すると、CC 側はその nonce を知りようがなく**全 hook が 403** に
+  // なる。上流 hook 契約では non-2xx は non-blocking (ツールはそのまま実行) なので、承認ゲートが黙って
+  // 外れる。daemon 起動・settings write の前に値ベースで拒否する (fail-loud・SEC-R3-3 と同じ形)。
+  if (args.tokenMode === "env" && (env.hookToken === undefined || env.hookToken.length === 0)) {
+    rt.log(
+      `[attach] --token-mode env には ACTRADECK_HOOK_TOKEN が必要です (daemon と Claude Code の双方の ` +
+        `環境に同じ値を export してください)。未設定のまま起動すると全 hook が認証に失敗し、承認ゲートが ` +
+        `働きません。起動を中止します。`,
+    );
+    return { status: "denied-env-token-missing", settingsPath, statePath };
+  }
+
+  // SEC-ENV-1: 与えられた値 (env mode の必須値・literal mode の上書き値の両方) がヘッダで往復できない /
+  // 短すぎるなら、起動しても全 hook が 403 になるか推測で破れる。値は表示しない (NO-RAW)。
+  if (
+    env.hookToken !== undefined &&
+    env.hookToken.length > 0 &&
+    !isUsableHookToken(env.hookToken)
+  ) {
+    rt.log(
+      `[attach] ACTRADECK_HOOK_TOKEN の値が使えません (英数字と . _ ~ + / = - のみ・空白なし・32 文字以上が ` +
+        `必要です。例: openssl rand -hex 32)。起動を中止します。`,
+    );
+    return { status: "denied-hook-token-invalid", settingsPath, statePath };
+  }
+
   // SEC-1: user/project scope は共有/グローバル設定への write = 高リスク。--yes も
   // confirm() の承認も無ければ **安全側 deny** で中止する (daemon 起動・write をしない)。
   // project-local (gitignore 既定) は従来どおり無確認。security.md: 承認は ask/deny 安全側。
@@ -281,7 +354,21 @@ export async function runStart(
       : {}),
     tokenMode: args.tokenMode,
   });
-  void daemon; // 常駐ループは呼び元 (CLI main) が保持。
+
+  // QA-ENV-1 ≡ TDA-ENV-1: env mode では settings に値を書かず、CC は自分の環境の
+  // ACTRADECK_HOOK_TOKEN を送る。daemon が別の値 (自前の nonce 等) で照合していると全 hook が 403 に
+  // なり承認ゲートが黙って外れるので、起動直後に値で一致を確かめ、違えば daemon を止めて中止する
+  // (settings write の前)。runtime 側の受け渡しが壊れても無言の 403 へは戻らず起動失敗になる。
+  // ただし CI は cli.ts の本番 runtime を実行しないので、その配線の退行で CI が RED になるわけではない
+  // (実プロセスで exit 1 になることを監査 R2 で確認・QA-ENV-R2-3)。
+  if (args.tokenMode === "env" && hookToken !== env.hookToken) {
+    await daemon.shutdown();
+    rt.log(
+      `[attach] daemon が ACTRADECK_HOOK_TOKEN と異なる値で起動しました。env token-mode の hook は認証に ` +
+        `失敗するため、起動を中止します。`,
+    );
+    return { status: "denied-env-token-mismatch", settingsPath, statePath };
+  }
 
   // settings を非破壊配線 (実 endpoint + daemon が検証に使う実 nonce を書く)。
   const merge = mergeAttachHooks({
