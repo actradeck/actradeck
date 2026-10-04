@@ -178,11 +178,17 @@ scope と安全ガード:
   `ACTRADECK_HOOK_TOKEN` の export が必要となり「どこからでも」要件を壊します）。
 - **`env` token-mode の設定**: daemon の環境と Claude Code を起動する shell の両方に、**同じ値**の
   `ACTRADECK_HOOK_TOKEN` を export してください（例: `openssl rand -hex 32` の出力）。`env` mode で
-  この変数が未設定または空のとき、daemon は起動を拒否します（hook の認証がすべて失敗し、承認
-  ゲートが働かなくなるため）。settings に書かれるのは `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
-  と `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]` だけで、値は書かれません。組織の managed settings で
-  `httpHookAllowedEnvVars` が定義されている場合は、その一覧に `ACTRADECK_HOOK_TOKEN` が含まれている
-  必要があります（含まれないと空のヘッダが送られ、全 hook が拒否されます）。
+  この変数が未設定・空・32 文字未満・英数字と `. _ ~ + / = -` 以外の文字を含む、のいずれかのとき、
+  daemon は起動を拒否します。settings に書かれるのは `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
+  と `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]` だけで、値は書かれません。daemon は Claude Code を
+  起動する shell の環境を確認できません。その shell が同じ値を export していないと、そのセッションの
+  hook はすべて拒否され、承認ゲートは働きません。user / project / local / managed のいずれかの
+  settings で `httpHookAllowedEnvVars` が定義されている場合は、その一覧に `ACTRADECK_HOOK_TOKEN` が
+  含まれている必要があります（含まれないと空のヘッダが送られ、全 hook が拒否されます）。
+- **`literal` mode も export 済みの `ACTRADECK_HOOK_TOKEN` を使います**: daemon 起動時にこの変数が
+  設定されていると、`literal` mode は起動ごとに新しい値を生成せずその値を採用し、settings に平文で
+  書きます。変数を変えない限り、再起動しても token は変わりません。起動ごとに新しい token にしたい
+  場合は、daemon の起動前に変数を unset してください。
 
 ---
 

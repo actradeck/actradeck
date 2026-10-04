@@ -16,9 +16,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 - **Attach `--token-mode env` hooks now authenticate.** In `env` mode the hook entries sent the
   token in a header the daemon does not check, so every hook was rejected and the approval gate
   did not run. They now use the same `X-ActraDeck-Hook-Token` header as the default `literal` mode,
-  and the daemon refuses to start in `env` mode when `ACTRADECK_HOOK_TOKEN` is unset or empty.
-  Re-run attach (or restart the daemon) to rewrite existing `env`-mode entries. Setup is described
-  in `docs/attach-mode.md`.
+  and the daemon refuses to start in `env` mode when `ACTRADECK_HOOK_TOKEN` is unset, empty,
+  shorter than 32 characters, or contains characters outside the base64url / hex set.
+  Existing `env`-mode entries are rewritten when the daemon starts: restart it
+  (`./scripts/ad-attach service restart`, or stop a foreground daemon with Ctrl-C and start it
+  again). Running attach again while the old daemon is still up leaves the old entries in place.
+  Setup is described in `docs/attach-mode.md`.
 
 - **Dependency updates for advisories published after the previous round (one critical,
   eight high, four moderate at the time of the change).** Direct bumps: Next.js

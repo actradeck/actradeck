@@ -36,7 +36,15 @@ import { runApprovalsCli } from "./approvals-cli.js";
 import { Sidecar } from "./sidecar.js";
 import { AttachDaemon } from "./attach-daemon.js";
 import { CodexRolloutDaemon } from "./codex-rollout-daemon.js";
-import { type DaemonRuntime, parseDaemonArgs, runStart, runStatus, runStop } from "./daemon-cli.js";
+import {
+  type DaemonRuntime,
+  parseDaemonArgs,
+  runStart,
+  runStatus,
+  runStop,
+  startOutcomeExitCode,
+} from "./daemon-cli.js";
+import { HOOK_TOKEN_ENV_VAR } from "./settings-merge.js";
 
 function parseArgs(argv: readonly string[]): {
   provider: string;
@@ -232,7 +240,7 @@ async function mainDaemon(): Promise<void> {
   const ingestToken = process.env.INGEST_TOKEN;
   // hook 認証トークン: env (ACTRADECK_HOOK_TOKEN) があれば流用、無ければ daemon が自前採番する
   // (AttachDaemon 側既定)。env token-mode ではこの値が必須 (runStart が未設定を拒否する・SEC-FC-2)。
-  const envHookToken = process.env.ACTRADECK_HOOK_TOKEN;
+  const envHookToken = process.env[HOOK_TOKEN_ENV_VAR];
   // idle-reaper の env 上書き (QA-2 / ADR 019eb448)。誤 reap 窓の運用調整用。
   const reaperConfig = resolveAttachReaperConfig();
 
@@ -289,13 +297,7 @@ async function mainDaemon(): Promise<void> {
   );
   if (outcome.status !== "started" || runningDaemon === undefined) {
     // dry-run / already-running / denied-* は常駐しない (daemon も起動済でない)。
-    if (
-      outcome.status === "denied-needs-confirm" ||
-      outcome.status === "denied-token-leak" ||
-      outcome.status === "denied-env-token-missing"
-    ) {
-      process.exitCode = 1;
-    }
+    process.exitCode = startOutcomeExitCode(outcome.status);
     return;
   }
   const daemon = runningDaemon;

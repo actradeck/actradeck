@@ -10,7 +10,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AttachDaemon } from "../src/attach-daemon.js";
 import {
@@ -18,12 +18,15 @@ import {
   type DaemonRuntime,
   parseDaemonArgs,
   resolveSettingsPath,
+  isUsableHookToken,
   runStart,
   runStatus,
   runStop,
   scopeNeedsConfirm,
+  startOutcomeExitCode,
   tokenModeLeaksToTrackedFile,
 } from "../src/daemon-cli.js";
+import { generateHookToken } from "../src/settings-injection.js";
 import { isActradeckEntry } from "../src/settings-merge.js";
 
 let home: string;
@@ -230,7 +233,7 @@ describe("INV-ATTACH-CONFIRM-GATE (SEC-1): user/project scope は確認なしで
       {
         wsUrl: "ws://127.0.0.1:1/ingest/ws",
         dbPath: join(cwd, "p.db"),
-        hookToken: "tok-confirm-gate-0123456789",
+        hookToken: "tok-confirm-gate-0123456789abcdef",
       },
       rt,
     );
@@ -369,7 +372,7 @@ async function postHookWith(
   return { status: res.status, body: text.length > 0 ? JSON.parse(text) : {} };
 }
 
-describe("SEC-FC-2: env token-mode の書込と受信側の照合が往復で一致する", () => {
+describe("INV-ATTACH-HOOK-AUTH-ENV: env token-mode の書込と受信側の照合が往復で一致する (SEC-FC-2)", () => {
   const TOKEN = "tok-env-roundtrip-abcdef0123456789";
   const LOW_RISK_PRE_TOOL_USE = {
     session_id: "s-env-roundtrip",
@@ -426,28 +429,158 @@ describe("SEC-FC-2: env token-mode の書込と受信側の照合が往復で一
       runStop(args, rt);
     }
   });
+});
 
-  it("daemon 側に ACTRADECK_HOOK_TOKEN が無ければ起動を拒否し、settings も書かない", async () => {
+/**
+ * INV-ATTACH-HOOK-AUTH-ENV の起動前ゲート (裁定 01a10814)。どれも daemon を起動せず settings も書かない
+ * 値ベースの拒否で、拒否は CLI の終了コード 1 になる。
+ */
+describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しない", () => {
+  const WS = "ws://127.0.0.1:1/ingest/ws";
+  const SCOPES = [
+    { scope: "project-local", flags: [] as string[] },
+    { scope: "project", flags: ["--yes"] },
+    { scope: "user", flags: ["--yes"] },
+  ] as const;
+  const MISSING: readonly (string | undefined)[] = [undefined, ""];
+  let missingCasesExecuted = 0;
+  afterAll(() => {
+    expect(missingCasesExecuted).toBe(SCOPES.length * MISSING.length);
+  });
+
+  // QA-ENV-2: docs が env mode へ誘導する project scope を含む 3 scope すべてで固定する。
+  for (const { scope, flags } of SCOPES) {
+    for (const value of MISSING) {
+      it(`env mode × ${scope} × ${value === undefined ? "未設定" : "空文字"} は denied-env-token-missing`, async () => {
+        const logs: string[] = [];
+        const { rt, daemons } = makeRuntime(logs);
+        const args = parseDaemonArgs(
+          ["attach", "--scope", scope, "--token-mode", "env", ...flags],
+          cwd,
+        );
+        const out = await runStart(
+          args,
+          {
+            wsUrl: WS,
+            dbPath: join(cwd, `missing-${scope}.db`),
+            ...(value !== undefined ? { hookToken: value } : {}),
+          },
+          rt,
+        );
+        expect(out.status).toBe("denied-env-token-missing");
+        expect(daemons.length).toBe(0);
+        expect(existsSync(resolveSettingsPath(scope, cwd, home))).toBe(false);
+        expect(logs.join("\n")).toContain("ACTRADECK_HOOK_TOKEN");
+        missingCasesExecuted += 1;
+      });
+    }
+  }
+
+  // SEC-ENV-1 ≡ TDA-ENV-4 / SEC-ENV-3: 監査 R1 が実測した「起動はするが全 hook が 403 になる / 推測で
+  // 破れる」値を逐語で持つ。env mode と literal mode の上書きの両方で拒否する。
+  const INVALID: readonly [string, string][] = [
+    ["空白 1 字", " "],
+    ["TAB", "\t"],
+    ["前後空白", " tok-surrounded-by-spaces-0123456789abcdef "],
+    ["末尾 CR", "tok-trailing-carriage-return-0123456789\r"],
+    ["末尾 LF", "tok-trailing-line-feed-0123456789abcdef\n"],
+    ["非 ASCII (U+20AC)", "tok-euro-sign-\u20ac-0123456789abcdef"],
+    ["1 文字", "a"],
+    ["31 文字", "a".repeat(31)],
+  ];
+  for (const mode of ["env", "literal"] as const) {
+    for (const [label, value] of INVALID) {
+      it(`${mode} mode × ${label} は denied-hook-token-invalid (値はログに出さない)`, async () => {
+        const logs: string[] = [];
+        const { rt, daemons } = makeRuntime(logs);
+        const args = parseDaemonArgs(["attach", "--token-mode", mode], cwd);
+        const out = await runStart(
+          args,
+          { wsUrl: WS, dbPath: join(cwd, "invalid.db"), hookToken: value },
+          rt,
+        );
+        expect(out.status).toBe("denied-hook-token-invalid");
+        expect(daemons.length).toBe(0);
+        expect(existsSync(resolveSettingsPath("project-local", cwd, home))).toBe(false);
+        if (value.trim().length > 1) expect(logs.join("\n")).not.toContain(value.trim());
+      });
+    }
+  }
+
+  it("述語: ヘッダで往復できる 32 文字以上だけを受理する (合格の対照つき)", () => {
+    for (const [, value] of INVALID)
+      expect(isUsableHookToken(value), JSON.stringify(value)).toBe(false);
+    // 合格: 32 文字ちょうど / openssl rand -hex 32 形 / daemon 自前の base64url nonce 形。
+    expect(isUsableHookToken("a".repeat(32))).toBe(true);
+    expect(isUsableHookToken("0123456789abcdef".repeat(4))).toBe(true);
+    expect(isUsableHookToken(generateHookToken())).toBe(true);
+    expect(isUsableHookToken("Abc-def_ghi.jkl~mno+pqr/stu=vwxyz0")).toBe(true);
+  });
+
+  it("daemon が渡した値と違うトークンで起動したら止めて denied-env-token-mismatch (QA-ENV-1 ≡ TDA-ENV-1)", async () => {
     const logs: string[] = [];
-    const { rt, daemons } = makeRuntime(logs);
+    const started: AttachDaemon[] = [];
+    // 本番 runtime の受け渡しが壊れた形: hookToken を無視し daemon 自前の nonce で起動する。
+    const rt: DaemonRuntime = {
+      home,
+      log: (m) => logs.push(m),
+      startDaemon: async (opts) => {
+        const daemon = new AttachDaemon({
+          wsUrl: opts.wsUrl,
+          dbPath: opts.dbPath,
+          host: "127.0.0.1",
+        });
+        const { hookEndpoint } = await daemon.start();
+        started.push(daemon);
+        return { daemon, hookEndpoint, hookToken: daemon.hookAuthToken };
+      },
+    };
     const args = parseDaemonArgs(["attach", "--token-mode", "env"], cwd);
     const out = await runStart(
       args,
-      { wsUrl: "ws://127.0.0.1:1/ingest/ws", dbPath: join(cwd, "env-missing.db") },
+      {
+        wsUrl: WS,
+        dbPath: join(cwd, "mismatch.db"),
+        hookToken: "tok-mismatch-0123456789abcdef0123",
+      },
       rt,
     );
-    expect(out.status).toBe("denied-env-token-missing");
-    expect(daemons.length).toBe(0);
+    expect(out.status).toBe("denied-env-token-mismatch");
+    expect(started.length).toBe(1);
+    // settings は書かない・daemon は止めた (受信口がもう応答しない)。
     expect(existsSync(resolveSettingsPath("project-local", cwd, home))).toBe(false);
-    expect(logs.join("\n")).toContain("ACTRADECK_HOOK_TOKEN");
-
-    // 対照: 空文字も未設定と同じく拒否。
-    const outEmpty = await runStart(
+    const endpoint = started[0]?.hookEndpoint ?? "http://127.0.0.1:1/hook";
+    await expect(
+      fetch(endpoint, {
+        method: "POST",
+        body: "{}",
+        headers: { "content-type": "application/json" },
+      }),
+    ).rejects.toThrow();
+    // 対照: 受け渡しが正しい runtime なら同じ値で started。
+    const ok = makeRuntime([]);
+    const out2 = await runStart(
       args,
-      { wsUrl: "ws://127.0.0.1:1/ingest/ws", dbPath: join(cwd, "env-empty.db"), hookToken: "" },
-      rt,
+      { wsUrl: WS, dbPath: join(cwd, "match.db"), hookToken: "tok-mismatch-0123456789abcdef0123" },
+      ok.rt,
     );
-    expect(outEmpty.status).toBe("denied-env-token-missing");
-    expect(daemons.length).toBe(0);
+    expect(out2.status).toBe("started");
+    await ok.daemons[0]?.shutdown();
+    runStop(args, ok.rt);
+  });
+
+  it("終了コード: 拒否はすべて 1・それ以外は 0 (TDA-ENV-3 ≡ QA-ENV-4)", () => {
+    const table: readonly [Parameters<typeof startOutcomeExitCode>[0], 0 | 1][] = [
+      ["started", 0],
+      ["already-running", 0],
+      ["dry-run", 0],
+      ["denied-needs-confirm", 1],
+      ["denied-token-leak", 1],
+      ["denied-env-token-missing", 1],
+      ["denied-hook-token-invalid", 1],
+      ["denied-env-token-mismatch", 1],
+    ];
+    for (const [status, code] of table) expect(startOutcomeExitCode(status), status).toBe(code);
+    expect(new Set(table.map(([s]) => s)).size).toBe(table.length);
   });
 });

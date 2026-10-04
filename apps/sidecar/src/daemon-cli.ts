@@ -27,6 +27,20 @@ import {
 
 export type AttachScope = "project-local" | "project" | "user";
 
+/**
+ * hook 認証トークンとして使える値か (SEC-ENV-1 ≡ TDA-ENV-4 / SEC-ENV-3・裁定 01a10814)。
+ *
+ * 受信側 (hook-receiver) はヘッダ値をバイト一致で照合する。HTTP ヘッダとして往復できない値
+ * (空白・TAB・前後空白・CR/LF・非 ASCII) は daemon が起動・配線まで済ませても全 hook が 403 になり、
+ * 上流 hook 契約では non-2xx は non-blocking ゆえ承認ゲートが黙って外れる (監査 R1 で実測)。
+ * 短すぎる値は推測で破れる (ローカル client から数千回/秒・rate limit 無し)。よって構造的な床として
+ * **ヘッダで往復できる印字可能 ASCII のうち空白を含まない文字だけ・長さ 32 以上** を要求する。
+ * daemon 自前の nonce (`generateHookToken` = 32 バイトの base64url・43 文字) はこの床を満たす。
+ */
+export function isUsableHookToken(value: string): boolean {
+  return /^[A-Za-z0-9._~+/=-]{32,}$/.test(value);
+}
+
 export interface DaemonArgs {
   /** start | stop | status (attach は start に正規化済)。 */
   readonly action: "start" | "stop" | "status";
@@ -148,6 +162,9 @@ export interface DaemonRuntime {
    * 安定 hook endpoint を確立し endpoint を返す daemon を起動する。
    * `hookToken` は daemon が実際に検証に使う nonce (settings へ literal で書くのはこの値)。
    * env override が無ければ daemon が自前採番した hookAuthToken を返すこと。
+   * **契約**: `opts.hookToken` が渡されたら daemon はその値で照合し、同じ値を返すこと。env token-mode は
+   * この値と CC 側の値が一致することで成立し、runStart は返却値が渡した値と違えば daemon を止めて
+   * `denied-env-token-mismatch` を返す (QA-ENV-1 ≡ TDA-ENV-1)。
    */
   startDaemon: (opts: {
     wsUrl: string;
@@ -173,12 +190,37 @@ export interface StartOutcome {
     | "dry-run"
     | "denied-needs-confirm"
     | "denied-token-leak"
-    | "denied-env-token-missing";
+    | "denied-env-token-missing"
+    | "denied-hook-token-invalid"
+    | "denied-env-token-mismatch";
   readonly hookEndpoint?: string;
   readonly settingsPath: string;
   readonly statePath: string;
   readonly backupPath?: string;
   readonly previewSettings?: unknown;
+}
+
+/**
+ * start の結果を CLI の終了コードへ写す (TDA-ENV-3 ≡ QA-ENV-4)。拒否はすべて 1 (systemd 等から失敗として
+ * 見える)。網羅 switch なので status を足すと型検査がここでの扱いを要求する。
+ */
+export function startOutcomeExitCode(status: StartOutcome["status"]): 0 | 1 {
+  switch (status) {
+    case "started":
+    case "already-running":
+    case "dry-run":
+      return 0;
+    case "denied-needs-confirm":
+    case "denied-token-leak":
+    case "denied-env-token-missing":
+    case "denied-hook-token-invalid":
+    case "denied-env-token-mismatch":
+      return 1;
+    default: {
+      const unreachable: never = status;
+      return unreachable;
+    }
+  }
 }
 
 /** scope が高リスク (共有/グローバル設定 write) で確認を要するか。 */
@@ -249,6 +291,20 @@ export async function runStart(
     return { status: "denied-env-token-missing", settingsPath, statePath };
   }
 
+  // SEC-ENV-1: 与えられた値 (env mode の必須値・literal mode の上書き値の両方) がヘッダで往復できない /
+  // 短すぎるなら、起動しても全 hook が 403 になるか推測で破れる。値は表示しない (NO-RAW)。
+  if (
+    env.hookToken !== undefined &&
+    env.hookToken.length > 0 &&
+    !isUsableHookToken(env.hookToken)
+  ) {
+    rt.log(
+      `[attach] ACTRADECK_HOOK_TOKEN の値が使えません (英数字と . _ ~ + / = - のみ・空白なし・32 文字以上が ` +
+        `必要です。例: openssl rand -hex 32)。起動を中止します。`,
+    );
+    return { status: "denied-hook-token-invalid", settingsPath, statePath };
+  }
+
   // SEC-1: user/project scope は共有/グローバル設定への write = 高リスク。--yes も
   // confirm() の承認も無ければ **安全側 deny** で中止する (daemon 起動・write をしない)。
   // project-local (gitignore 既定) は従来どおり無確認。security.md: 承認は ask/deny 安全側。
@@ -295,7 +351,19 @@ export async function runStart(
       : {}),
     tokenMode: args.tokenMode,
   });
-  void daemon; // 常駐ループは呼び元 (CLI main) が保持。
+
+  // QA-ENV-1 ≡ TDA-ENV-1: env mode では settings に値を書かず、CC は自分の環境の
+  // ACTRADECK_HOOK_TOKEN を送る。daemon が別の値 (自前の nonce 等) で照合していると全 hook が 403 に
+  // なり承認ゲートが黙って外れるので、起動直後に値で一致を確かめ、違えば daemon を止めて中止する
+  // (settings write の前)。runtime 側の受け渡しが壊れても CI 緑のまま戻らないための実行可能な床。
+  if (args.tokenMode === "env" && hookToken !== env.hookToken) {
+    await daemon.shutdown();
+    rt.log(
+      `[attach] daemon が ACTRADECK_HOOK_TOKEN と異なる値で起動しました。env token-mode の hook は認証に ` +
+        `失敗するため、起動を中止します。`,
+    );
+    return { status: "denied-env-token-mismatch", settingsPath, statePath };
+  }
 
   // settings を非破壊配線 (実 endpoint + daemon が検証に使う実 nonce を書く)。
   const merge = mergeAttachHooks({

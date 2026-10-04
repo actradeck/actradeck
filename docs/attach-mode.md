@@ -194,12 +194,20 @@ Scope and safety guards:
   anywhere" requirement).
 - **`env` token-mode setup.** Export the **same** `ACTRADECK_HOOK_TOKEN` value in the daemon's
   environment and in the shell that starts Claude Code (for example a value from
-  `openssl rand -hex 32`). The daemon refuses to start in `env` mode when the variable is unset or
-  empty, because hooks would then fail authentication and the approval gate would not run. The
-  settings file holds only `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN` plus
-  `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]`, never the value. If your organization's managed
-  settings define `httpHookAllowedEnvVars`, that list must include `ACTRADECK_HOOK_TOKEN`;
-  otherwise Claude Code sends an empty header and every hook is rejected.
+  `openssl rand -hex 32`). The daemon refuses to start in `env` mode when the variable is unset,
+  empty, shorter than 32 characters, or contains characters other than letters, digits and
+  `. _ ~ + / = -`. The settings file holds only `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
+  plus `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]`, never the value. The daemon cannot see the
+  environment of the shell that starts Claude Code: if that shell does not export the same value,
+  every hook is rejected and the approval gate does not run for that session. If any of your
+  settings files (user, project, local or managed) defines `httpHookAllowedEnvVars`, that list
+  must include `ACTRADECK_HOOK_TOKEN`; otherwise Claude Code sends an empty header and every hook
+  is rejected.
+- **`literal` mode also uses an exported `ACTRADECK_HOOK_TOKEN`.** If the variable is set when the
+  daemon starts, `literal` mode adopts that value instead of generating a fresh one per start, and
+  writes it in plaintext into the settings file. The token then stays the same across restarts
+  until you change the variable. Unset it before starting the daemon if you want a new token on
+  every start.
 
 ---
 
