@@ -381,7 +381,7 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: env token-mode の書込と受信側の照�
     tool_input: { command: "ls -la" },
   };
 
-  it("CC と daemon が同じ ACTRADECK_HOOK_TOKEN を持てば、承認フックが 403 でなく承認経路に届く", async () => {
+  it("CC と daemon が同じ ACTRADECK_HOOK_TOKEN を持てば、承認フックが 403 でなく認証を通る", async () => {
     const logs: string[] = [];
     const { rt, daemons } = makeRuntime(logs);
     const args = parseDaemonArgs(["attach", "--token-mode", "env"], cwd);
@@ -413,7 +413,7 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: env token-mode の書込と受信側の照�
         expect(Object.values(ccHeaders)).toContain(TOKEN);
         const ok = await postHookWith(entry.url, ccHeaders, LOW_RISK_PRE_TOOL_USE);
         expect(ok.status, "env-mode hook was rejected by the receiver").toBe(200);
-        expect(ok.body).toEqual({}); // low-risk は承認経路で defer (= 通常 flow へ委譲)
+        expect(ok.body).toEqual({}); // 認証を通った (200)。承認経路への到達はここでは判別しない (hook-approval-gate 側の INV が担う)
       }
 
       // 対照: CC 側の値が違えば同じ entry でも 403 (照合が実際に効いている)。
