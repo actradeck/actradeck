@@ -155,15 +155,14 @@ export const SUITES = {
   // QA-DC-3 (SEC-ENV-4 R1): the refused-start cleanup of a dead daemon's wiring. Its in-file
   // afterAll counters catch a single skipped row, but skipping a whole describe also skips that
   // describe's afterAll. Same report and two-layer shape as sidecar-approval-fail-closed.
-  // `minTests` is the exact count in the full sidecar report this step reads, measured at SEC-ENV-4
-  // R3: 64 = 45 (denial x scope table, stale + alive rows, plus the table-shape test)
+  // `minTests` is the exact count in the full sidecar report this step reads (measured at task
+  // 01a10c42 PR-A): 65 = 45 (denial x scope table, stale + alive rows, plus the table-shape test)
   // + 9 (cleanup boundaries) + 3 (entries left on other ports keep the state, SEC-DC-R2-1)
   // + 3 (remaining-entry shapes: marker-less legacy literal / env entries, no recorded-port entry)
   // + 2 (concurrent start races R1 / R2) in inv-attach-deny-cleanup.test.ts, + 3 (single read of
   // the state file, the cleanup's CAS using that read, state delete failure) in
-  // inv-attach-deny-cleanup-fs.test.ts = 65 (task 01a10c42 PR-A added the CAS test). At 65,
-  // skipping or renaming any one matched describe fails the gate. Raise it by hand when tests are
-  // added.
+  // inv-attach-deny-cleanup-fs.test.ts. At 65, skipping or renaming any one matched describe fails
+  // the gate. Raise it by hand when tests are added.
   // What this entry does not catch: an early return at the top of an `it`, a removed `expect`, or a
   // removed afterAll counter check — the gate sees only each test's status.
   "sidecar-attach-deny-cleanup": {
@@ -178,23 +177,25 @@ export const SUITES = {
     pattern: "INV-ATTACH-SIGHUP-DETACH",
     minTests: 1,
   },
-  // Task 01a10c42 PR-A (Triangle ADR 01a10ddb D3 / D7): the attach state trust rule (artifact
-  // paths derived from the realpath of the settings path, the single 3-way state reader and its
-  // shape table, the corrupt branch, the fallback read of the path older builds used, and the
-  // project / user scopes that share one settings file when cwd is the home directory) and the
-  // process identity check before `daemon stop` signals a pid (real child processes). `minTests`
-  // is the exact count in the full sidecar report this step reads, measured on Linux: 72 = 3
-  // (artifact paths) + 36 (shape table: 4 accepted + 30 corrupt rows + not-JSON/absent + writer
-  // check) + 2 (corrupt branch) + 7 (stop vs identity, real processes) + 2 (alive judgement)
-  // + 6 (fallback to the older state path, derived-path guard) + 2 (cwd = home, one real attach
-  // CLI) + 14 (identity
-  // branches with injected OS sources + parsers), all in inv-attach-state-trust.test.ts. Five
-  // rows run on Linux only (`it.runIf`), so the count is lower elsewhere; CI runs on Linux. Its
-  // in-file afterAll counters catch a skipped row; this entry also catches a skipped describe.
+  // Task 01a10c42 PR-A (Triangle ADR 01a10ddb D3 / D7, D3 revised in decision 01a10e44): the attach
+  // state trust rule (artifact paths derived from the settings path with its parent directory
+  // resolved, the single 3-way state reader and its shape table, the corrupt branch, the fallback
+  // read of the path older builds used, the project / user labels of the user settings file) and
+  // the process identity check before `daemon stop` signals a pid (real child processes and real
+  // attach CLIs). `minTests` is the exact count in the full sidecar report this step reads,
+  // measured on Linux: 82 = 3 (artifact paths) + 36 (shape table: 4 accepted + 30 corrupt rows
+  // + not-JSON/absent + writer check) + 2 (corrupt branch) + 7 (stop vs identity) + 3 (alive
+  // judgement, clock skew) + 6 (older state path, derived-path guard) + 2 (cwd = home) + 3 (user
+  // scope labels from any cwd, runStart / cleanup use the same labels) + 4 (settings file itself a
+  // symlink: user / project-local / monorepo / symlinked HOME) + 1 (ps target pid) + 15 (identity
+  // branches with injected OS sources + parsers), all in inv-attach-state-trust.test.ts. Rows
+  // marked `it.runIf(LINUX)` are reported as skipped elsewhere, which this gate rejects; CI runs on
+  // Linux. In-file afterAll counters exist only for the shape table and the stop-vs-identity rows.
+  // What this entry does not catch: an early return inside an `it` or a removed `expect`.
   "sidecar-attach-state-trust": {
     label: "sidecar attach state trust / process identity INV (INV-ATTACH-STATE-TRUST)",
     pattern: "INV-ATTACH-STATE-TRUST",
-    minTests: 72,
+    minTests: 82,
   },
 };
 

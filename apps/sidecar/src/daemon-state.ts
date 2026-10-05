@@ -10,8 +10,8 @@
  *   ({@link scopeArtifacts})。state の中身から path を取り出して読み書きしない。
  * - state の読み取りは {@link readState} 1 本で、結果は `absent | corrupt | state` の 3 値。形の検証は
  *   {@link asDaemonState} 1 か所。記録された `settingsPath` と `scope` は導出値との**整合検査**にだけ使い、
- *   一致しなければ corrupt (pid も信用しない)。scope ラベルは、別の scope が**同じ物理 settings file** を
- *   指すとき (cwd が home で project と user が同じ file) だけ、その scope のラベルも受け入れる。
+ *   一致しなければ corrupt (pid も信用しない)。scope ラベルは、導出した settings file が user の settings
+ *   file と同じ (cwd が home の project・または user) ときだけ project / user の両方を受け入れる。
  * - 旧い dist は state path を symlink を解決しない settings path から導出していた。新しい path に state が
  *   無いときだけ、reader の中で旧い path を読む (symlink を含まない path では同じ path なので何もしない)。
  */
@@ -25,7 +25,6 @@ import type { ProcIdentity } from "./process-identity.js";
 import { HOOK_TOKEN_ENV_VAR, type TokenMode } from "./settings-merge.js";
 
 export type AttachScope = "project-local" | "project" | "user";
-export const ATTACH_SCOPES: readonly AttachScope[] = ["project-local", "project", "user"];
 
 export interface DaemonState {
   readonly pid: number;
@@ -56,10 +55,10 @@ export function scopeHash(path: string): string {
 }
 
 /**
- * path を物理 path へ正規化する: 存在する最長の祖先を realpath で解決し、存在しない残りの成分は
- * lexical に足す。symlink を含まない path では `resolve(path)` と同じ文字列になる。
+ * directory の path を物理 path へ正規化する: 存在する最長の祖先を realpath で解決し、存在しない残りの
+ * 成分は lexical に足す。symlink を含まない path では `resolve(path)` と同じ文字列になる。
  */
-export function canonicalPath(path: string): string {
+function canonicalDir(path: string): string {
   const abs = resolve(path);
   const tail: string[] = [];
   let head = abs;
@@ -74,6 +73,18 @@ export function canonicalPath(path: string): string {
       head = parent;
     }
   }
+}
+
+/**
+ * settings file の正規化済み path (唯一の導出・裁定 01a10e44 で改訂した ADR 01a10ddb D3):
+ * **親 directory だけ** realpath し ({@link canonicalDir})、最終成分 (file 名) は lexical のまま足す。
+ * settings の書込 (`fs-atomic.ts` の tmp + rename) は file 自体の symlink を通常 file に置き換えるので、
+ * 最終成分まで解決すると起動の前後で値が変わる。書込が置き換える単位は (物理 dir, 名前) なのでそれに揃える。
+ * 親 directory の symlink (symlink 経由の cwd・monorepo の package dir・symlink の HOME) は同じ値に集約する。
+ */
+export function canonicalSettingsPath(settingsPath: string): string {
+  const abs = resolve(settingsPath);
+  return join(canonicalDir(dirname(abs)), basename(abs));
 }
 
 export interface ScopeArtifacts {
@@ -97,16 +108,17 @@ export interface ScopeArtifacts {
 
 /**
  * settings path から scope の artifact path を導出する (単一出所)。symlink 経由の cwd と物理 cwd は
- * 同じ scopeKey になる (同じ物理 settings に 2 つの state を作らない)。
+ * 同じ scopeKey になる。settings file 自体が symlink のときは file 名を解決しないので、symlink が通常 file に
+ * 置き換わっても scopeKey は変わらない ({@link canonicalSettingsPath})。
  */
 export function scopeArtifacts(settingsPath: string, home: string = homedir()): ScopeArtifacts {
-  const canonicalSettingsPath = canonicalPath(settingsPath);
+  const canonical = canonicalSettingsPath(settingsPath);
   const lexicalSettingsPath = resolve(settingsPath);
-  const scopeKey = scopeHash(canonicalSettingsPath);
+  const scopeKey = scopeHash(canonical);
   const dir = daemonStateDir(home);
   return {
     scopeKey,
-    canonicalSettingsPath,
+    canonicalSettingsPath: canonical,
     statePath: join(dir, `${scopeKey}.json`),
     lexicalSettingsPath,
     legacyStatePath: join(dir, `${scopeHash(lexicalSettingsPath)}.json`),
@@ -119,8 +131,7 @@ export function scopeArtifacts(settingsPath: string, home: string = homedir()): 
 export interface StateExpectation {
   readonly settingsPath: string;
   /**
-   * 受け入れる scope ラベル。要求した scope と、同じ物理 settings file を指す scope だけ
-   * (daemon-cli の `acceptedScopes` が導出する)。
+   * 受け入れる scope ラベル (daemon-cli の `scopeTarget` が導出する)。
    */
   readonly scopes: readonly AttachScope[];
 }

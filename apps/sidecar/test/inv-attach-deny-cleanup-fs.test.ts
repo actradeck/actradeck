@@ -18,7 +18,12 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cleanupStaleWiring, resolveSettingsPath } from "../src/daemon-cli.js";
-import { canonicalPath, readState, scopeArtifacts, writeDaemonState } from "../src/daemon-state.js";
+import {
+  canonicalSettingsPath,
+  readState,
+  scopeArtifacts,
+  writeDaemonState,
+} from "../src/daemon-state.js";
 import { mergeAttachHooks } from "../src/settings-merge.js";
 
 /**
@@ -86,7 +91,7 @@ function plantStale(): { settingsPath: string; statePath: string; stateRaw: stri
     pid: spawnSync(process.execPath, ["-e", ""]).pid,
     endpoint,
     scope: "project-local",
-    settingsPath: canonicalPath(settingsPath),
+    settingsPath: canonicalSettingsPath(settingsPath),
     startedAt: new Date(0).toISOString(),
     tokenMode: "literal",
   });

@@ -111,6 +111,10 @@ export default defineConfig({
         //   締めた (TDA-HS-R2-1 (h)・per-file-coverage-floor-below-worst-not-best)。functions は 21 中
         //   19 で、被覆済みの関数が 1 つ未被覆になると 18 / 21 = 85.7 で floor を割る。
         "src/hook-shim-core.ts": { statements: 93, branches: 88, functions: 86, lines: 95 },
+        // QA-STA-8 (task 01a10c42 PR-A): `daemon stop` が SIGTERM を送るかを決める同一性判定
+        //   (process-identity.ts)。test:coverage を 3 回実測して 3 回とも 91.8 / 83.92 / 100 / 96.07
+        //   (分散 0)。floor はその 4〜5pt 下 (per-file-coverage-floor-below-worst-not-best)。
+        "src/process-identity.ts": { statements: 87, branches: 79, functions: 95, lines: 92 },
       },
     },
   },

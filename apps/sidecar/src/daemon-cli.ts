@@ -11,9 +11,7 @@ import { join, resolve } from "node:path";
 import { AttachDaemon } from "./attach-daemon.js";
 import {
   assertDaemonStateShape,
-  ATTACH_SCOPES,
   type AttachScope,
-  canonicalPath,
   type DaemonState,
   isDaemonStateUnchanged,
   readState,
@@ -180,18 +178,22 @@ export interface ScopeTarget {
 }
 
 /**
- * args の scope / cwd / home から {@link ScopeTarget} を導出する。state の scope ラベルは、要求した scope と、
- * **同じ物理 settings file** (正規化した path が一致) を指す scope だけを受け入れる (cwd が home のとき
- * project と user は同じ `~/.claude/settings.json` を指し、どちらで起動した daemon もどちらで止められる)。
+ * args の scope / cwd / home から {@link ScopeTarget} を導出する。state の scope ラベルは要求した scope だけを
+ * 受け入れる。ただし導出した settings file が **user の settings file と同じ** (正規化した path が一致・
+ * cwd が home の project か user) なら project と user の両方を受け入れる: cwd が home のとき project と
+ * user は同じ `~/.claude/settings.json` を指すので、どちらで起動した daemon も、どの cwd からでも user で
+ * (home からなら project でも) 止められる。state に記録された settings path の一致は別途必須 (asDaemonState)。
  */
 export function scopeTarget(scope: AttachScope, cwd: string, home: string): ScopeTarget {
   const settingsPath = resolveSettingsPath(scope, cwd, home);
   const artifacts = scopeArtifacts(settingsPath, home);
-  const scopes = ATTACH_SCOPES.filter(
-    (s) =>
-      s === scope ||
-      canonicalPath(resolveSettingsPath(s, cwd, home)) === artifacts.canonicalSettingsPath,
-  );
+  const userCanonical = scopeArtifacts(
+    resolveSettingsPath("user", cwd, home),
+    home,
+  ).canonicalSettingsPath;
+  const sharesUserFile =
+    scope !== "project-local" && artifacts.canonicalSettingsPath === userCanonical;
+  const scopes: readonly AttachScope[] = sharesUserFile ? ["project", "user"] : [scope];
   return { settingsPath, artifacts, scopes };
 }
 

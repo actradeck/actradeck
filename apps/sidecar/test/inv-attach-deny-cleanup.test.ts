@@ -38,7 +38,7 @@ import {
   type StartOutcome,
 } from "../src/daemon-cli.js";
 import {
-  canonicalPath,
+  canonicalSettingsPath,
   type DaemonState,
   removeDaemonStateIfUnchanged,
   scopeArtifacts,
@@ -137,7 +137,7 @@ function stateOf(
     pid,
     endpoint,
     scope,
-    settingsPath: canonicalPath(settingsPath),
+    settingsPath: canonicalSettingsPath(settingsPath),
     startedAt: new Date().toISOString(),
     tokenMode: scope === "project" ? "env" : "literal",
     ...(identity !== undefined ? { procIdentity: identity } : {}),

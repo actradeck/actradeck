@@ -10,15 +10,22 @@
  *   boot_id 一致かつ start ticks の**完全一致**で alive、不一致は dead (pid 再利用)。wall-clock に依存しない。
  * - それ以外 (Linux 以外・または `procIdentity` の無い旧 state): `ps -o etime= -p <pid>` から開始時刻
  *   (`now − etime`) を求め、state の `startedAt` + 許容 {@link ETIME_TOLERANCE_MS} 以前に始まったプロセスなら
- *   alive、それより後に始まったプロセスなら dead (state を書いた後に pid が再利用された)。
+ *   alive。それより後に始まったように見えるプロセスは、boot_id が読めない (Linux 以外) なら dead (state を
+ *   書いた後に pid が再利用された)、boot_id が読める (Linux の旧 state) なら **unknown** (SEC-STA-2: 壁時計が
+ *   state の書込後に進むと生きた旧 daemon もこう見えるので、dead と断定しない = alive 扱い・kill しない)。
  * - pid が存在しない (ESRCH) → dead。存在するが権限が無い (EPERM)・`/proc` や `ps` が読めない → unknown。
  *
  * 使い方 (ADR 採用判断 01a10ddc): **unknown は非対称に安全側**。alive 判定 (二重起動防止・拒否起動の後始末・
  * status) では alive 扱い (base 同値)、`daemon stop` の SIGTERM では送らない (無関係なプロセスを止めない)。
  *
  * **残余 (開示)**: etime 経路は秒単位の切り捨てと wall-clock (state 書込時刻と現在時刻) に依存する。
- * 許容 2s 以内の pid 再利用 (state 書込 → daemon 死亡 → 同じ pid の新プロセス起動が 2 秒以内) は alive と
- * 誤判定する。書込後に時計が 2s 以上戻されても同様。Windows では `ps` が無く常に unknown。
+ * - 許容 2s 以内の pid 再利用 (state 書込 → daemon 死亡 → 同じ pid の新プロセス起動が 2 秒以内) は alive と
+ *   誤判定する (kill しうる)。
+ * - 書込後に時計が**戻された**場合 (QA-STA-7)、戻った量だけ「再利用された pid の起動」が早く見えるので、
+ *   戻り量 − 2s より後に起動した再利用プロセスまでを alive と誤判定する (kill しうる)。
+ * - 書込後に時計が**進んだ**場合、Linux 以外では生きた daemon を dead と誤判定しうる (配線を外す・kill は
+ *   しない)。Linux は上記のとおり unknown に倒す。
+ * - Windows では `ps` が無く常に unknown。
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -149,5 +156,6 @@ export function isDaemonProcess(
   const procStart = src.now() - elapsed * 1000;
   const startedAt = Date.parse(state.startedAt);
   if (!Number.isFinite(startedAt)) return "unknown";
-  return procStart <= startedAt + ETIME_TOLERANCE_MS ? "alive" : "dead";
+  if (procStart <= startedAt + ETIME_TOLERANCE_MS) return "alive";
+  return src.readBootId() === undefined ? "dead" : "unknown";
 }

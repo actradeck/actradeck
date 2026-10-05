@@ -11,17 +11,22 @@
  * - upgrade の窓: 新しい path に state が無いときは、旧い dist の path (symlink を解決しない settings path の
  *   scopeHash) を reader の中で読む。start / stop / status / 拒否起動の後始末がすべて同じ reader を通る。
  * - cwd が home: project と user が同じ settings file を指すときは、どちらの scope ラベルの state も受け入れる
- *   (別 file を指す scope のラベルは corrupt のまま)。
+ *   (別 file を指す scope のラベルは corrupt のまま)。user scope はどの cwd からでも project ラベルを受け入れる。
+ * - settings file 自体が symlink (dotfiles) でも、正規化は親 dir だけなので起動前後で state path が変わらない
+ *   (実 attach CLI で固定・裁定 01a10e44 の D3 改訂)。
+ * - 時計ずれ: procIdentity の無い旧 state を etime で「許容より後に起動」と見たとき、Linux では unknown。
  *
  * temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。signal は自分で spawn した子にだけ届く。
  */
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -44,7 +49,7 @@ import {
   runStop,
 } from "../src/daemon-cli.js";
 import {
-  canonicalPath,
+  canonicalSettingsPath,
   type DaemonState,
   readState,
   scopeArtifacts,
@@ -98,6 +103,72 @@ async function spawnBystander(): Promise<ChildProcess & { pid: number }> {
   await new Promise<void>((r, j) => c.once("spawn", r).once("error", j));
   return c as ChildProcess & { pid: number };
 }
+/** 実 attach CLI (src/cli.ts を tsx で・新しいプロセスグループ)。afterEach でグループごと止める。 */
+interface AttachCli {
+  readonly pgid: number;
+  stderr(): string;
+  groupGone(ms: number): Promise<boolean>;
+}
+const clis: AttachCli[] = [];
+const sidecarRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+async function startAttachCli(
+  args: readonly string[],
+  at: { cwd: string; home: string },
+): Promise<AttachCli> {
+  const child = spawn(tsxBin, [join(sidecarRoot, "src", "cli.ts"), "attach", ...args], {
+    cwd: at.cwd,
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: at.home,
+      ACTRADECK_WS_URL: "ws://127.0.0.1:1",
+      ACTRADECK_DB: join(at.cwd, `cli-${clis.length}.db`),
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+    detached: true,
+  });
+  const pgid = child.pid as number;
+  let err = "";
+  child.stderr.on("data", (c: Buffer) => (err += c.toString()));
+  const cli: AttachCli = {
+    pgid,
+    stderr: () => err,
+    async groupGone(ms) {
+      const deadline = Date.now() + ms;
+      for (;;) {
+        try {
+          process.kill(-pgid, 0);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === "ESRCH") return true;
+        }
+        if (Date.now() >= deadline) return false;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    },
+  };
+  clis.push(cli);
+  const deadline = Date.now() + 20_000;
+  while (!err.includes("常駐中") && Date.now() < deadline) {
+    if (await cli.groupGone(0)) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  expect(err, err).toContain("常駐中");
+  return cli;
+}
+afterEach(async () => {
+  for (const cli of clis.splice(0)) {
+    try {
+      process.kill(-cli.pgid, "SIGKILL");
+    } catch {
+      /* 既に終了 */
+    }
+    expect(await cli.groupGone(5_000), "attach CLI process group survived").toBe(true);
+  }
+});
+function stateFiles(h: string): string[] {
+  const d = join(h, ".actradeck", "daemon");
+  return existsSync(d) ? readdirSync(d).filter((f) => f.endsWith(".json")) : [];
+}
+
 function running(c: ChildProcess): boolean {
   return c.exitCode === null && c.signalCode === null;
 }
@@ -125,7 +196,7 @@ function plant(over: Partial<DaemonState> & { pid: number }): {
   writeDaemonState(statePath, {
     endpoint: DEAD_ENDPOINT,
     scope: "project-local",
-    settingsPath: canonicalPath(settingsPath),
+    settingsPath: canonicalSettingsPath(settingsPath),
     startedAt: new Date().toISOString(),
     tokenMode: "literal",
     ...over,
@@ -451,10 +522,11 @@ describe("INV-ATTACH-STATE-TRUST: daemon stop は記録した daemon と同一�
       kill: "skipped-dead",
     },
     {
-      name: "procIdentity 無し・子は startedAt より後に起動 (etime 許容超過)",
+      name: "procIdentity 無し・startedAt が子の起動より 60s 前 (壁時計の前進か pid 再利用・Linux は unknown)",
       linuxOnly: false,
       state: () => ({ startedAt: minuteAgo() }),
-      kill: "skipped-dead",
+      // SEC-STA-2: Linux (boot_id が読める) では時計の前進と区別できないので unknown (kill しない・base 同値)。
+      kill: LINUX ? "skipped-identity-unknown" : "skipped-dead",
     },
     {
       name: "同一性 unknown (EPERM 注入)",
@@ -557,11 +629,14 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
     },
   );
 
-  it("同一性 unknown は alive 扱い: 後始末は触らない・起動は already-running・status は稼働中 (対照: 注入なしの一致は alive)", async () => {
+  it("同一性 unknown は alive 扱い: 後始末は触らない・起動は already-running・status は稼働中 (対照: 注入なしでは stale)", async () => {
     const child = await spawnBystander();
+    // 注入なしなら stale と判定される state (Linux: start ticks 不一致・それ以外: etime 許容超過)。
     const { settingsPath, statePath } = plant({
       pid: child.pid,
-      startedAt: new Date(Date.now() - 60_000).toISOString(),
+      ...(LINUX
+        ? { procIdentity: { bootId: bootIdNow(), startTicks: ticksOf(child.pid) + 1 } }
+        : { startedAt: new Date(Date.now() - 60_000).toISOString() }),
     });
     const before = readFileSync(settingsPath, "utf8");
     const unknown = withSignal0("eperm");
@@ -597,10 +672,40 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
       }),
     ).toBe("alive-untouched");
     expect(readFileSync(settingsPath, "utf8")).toBe(before);
-    // 対照: 注入なしでは、この state (startedAt は子の起動より前) は stale (etime) として外れる。
+    // 対照: 注入なしでは、この state は stale (Linux は ticks 不一致・それ以外は etime) として外れる。
     expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt(logs)).liveness).toBe("dead");
     expect(running(child)).toBe(true);
   });
+  it.runIf(LINUX)(
+    "時計ずれ (SEC-STA-2): procIdentity の無い旧 state の startedAt が 5s 進んで見えても生きた daemon を dead にしない (後始末は触らない・stop は kill しない)",
+    async () => {
+      const child = await spawnBystander();
+      // 壁時計が state 書込の後に 5s 進んだ = 生きた daemon の起動が startedAt より 5s 後に見える。
+      const { settingsPath, statePath } = plant({
+        pid: child.pid,
+        startedAt: new Date(Date.now() - 5000).toISOString(),
+      });
+      const before = readFileSync(settingsPath, "utf8");
+      const stateBefore = readFileSync(statePath, "utf8");
+      const logs: string[] = [];
+      expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt(logs))).toMatchObject({
+        running: true,
+        liveness: "unknown",
+      });
+      const denied = await runStart(
+        parseDaemonArgs(["attach", "--token-mode", "env"], cwd),
+        { wsUrl: "ws://x", dbPath: join(cwd, "skew.db") },
+        rt(logs),
+      );
+      expect(denied.status).toBe("denied-env-token-missing");
+      expect(readFileSync(settingsPath, "utf8")).toBe(before);
+      expect(readFileSync(statePath, "utf8")).toBe(stateBefore);
+      const stop = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs));
+      expect(stop.kill).toBe("skipped-identity-unknown");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(running(child)).toBe(true);
+    },
+  );
 });
 
 describe("INV-ATTACH-STATE-TRUST: 新しい path に state が無ければ旧い dist の path を同じ reader で読む (upgrade の窓)", () => {
@@ -748,73 +853,24 @@ describe("INV-ATTACH-STATE-TRUST: 新しい path に state が無ければ旧い
   });
 });
 
-const sidecarRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-
 describe("INV-ATTACH-STATE-TRUST: cwd が home のとき project と user は同じ settings file を指し、どちらの scope でも止められる", () => {
   it("実 attach CLI を user scope で home から起動 → `daemon stop --scope project` (cwd = home) が kill して外す", async () => {
-    const child = spawn(
-      tsxBin,
-      [join(sidecarRoot, "src", "cli.ts"), "attach", "--scope", "user", "--yes"],
-      {
-        cwd: home,
-        env: {
-          PATH: process.env.PATH ?? "",
-          HOME: home,
-          ACTRADECK_WS_URL: "ws://127.0.0.1:1",
-          ACTRADECK_DB: join(home, "cli.db"),
-        },
-        stdio: ["ignore", "ignore", "pipe"],
-        detached: true,
-      },
+    const cli = await startAttachCli(["--scope", "user", "--yes"], { cwd: home, home });
+    const userSettings = resolveSettingsPath("user", home, home);
+    expect(resolveSettingsPath("project", home, home)).toBe(userSettings);
+    expect(entries(userSettings)).toBeGreaterThan(0);
+    const logs: string[] = [];
+    const status = runStatus(
+      parseDaemonArgs(["daemon", "status", "--scope", "project"], home),
+      rt(logs),
     );
-    const pgid = child.pid as number;
-    let stderr = "";
-    child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
-    const groupGone = async (ms: number): Promise<boolean> => {
-      const deadline = Date.now() + ms;
-      for (;;) {
-        try {
-          process.kill(-pgid, 0);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ESRCH") return true;
-        }
-        if (Date.now() >= deadline) return false;
-        await new Promise((r) => setTimeout(r, 20));
-      }
-    };
-    try {
-      const deadline = Date.now() + 20_000;
-      while (!stderr.includes("常駐中") && Date.now() < deadline) {
-        if (await groupGone(0)) break;
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      expect(stderr, stderr).toContain("常駐中");
-      const userSettings = resolveSettingsPath("user", home, home);
-      expect(resolveSettingsPath("project", home, home)).toBe(userSettings);
-      expect(entries(userSettings)).toBeGreaterThan(0);
-      const logs: string[] = [];
-      const status = runStatus(
-        parseDaemonArgs(["daemon", "status", "--scope", "project"], home),
-        rt(logs),
-      );
-      expect(status.running).toBe(true);
-      expect(status.state?.scope).toBe("user");
-      const stop = runStop(
-        parseDaemonArgs(["daemon", "stop", "--scope", "project"], home),
-        rt(logs),
-      );
-      expect(stop.kill).toBe("sent");
-      expect(await groupGone(15_000), `attach CLI survived SIGTERM: ${stderr}`).toBe(true);
-      expect(entries(userSettings)).toBe(0);
-      expect(existsSync(scopeArtifacts(userSettings, home).statePath)).toBe(false);
-    } finally {
-      try {
-        process.kill(-pgid, "SIGKILL");
-      } catch {
-        /* 既に終了 */
-      }
-      expect(await groupGone(5_000), "process group survived the group kill").toBe(true);
-    }
+    expect(status.running).toBe(true);
+    expect(status.state?.scope).toBe("user");
+    const stop = runStop(parseDaemonArgs(["daemon", "stop", "--scope", "project"], home), rt(logs));
+    expect(stop.kill).toBe("sent");
+    expect(await cli.groupGone(15_000), `attach CLI survived SIGTERM: ${cli.stderr()}`).toBe(true);
+    expect(entries(userSettings)).toBe(0);
+    expect(existsSync(scopeArtifacts(userSettings, home).statePath)).toBe(false);
   }, 40_000);
 
   it("project ラベルの state も `--scope user` で止まる (cwd = home)・別 file を指す scope のラベルは corrupt のまま", async () => {
@@ -827,7 +883,7 @@ describe("INV-ATTACH-STATE-TRUST: cwd が home のとき project と user は同
       pid: child.pid,
       endpoint: DEAD_ENDPOINT,
       scope,
-      settingsPath: canonicalPath(settingsPath),
+      settingsPath: canonicalSettingsPath(settingsPath),
       startedAt: new Date().toISOString(),
       tokenMode: "env",
     });
@@ -856,6 +912,179 @@ describe("INV-ATTACH-STATE-TRUST: cwd が home のとき project と user は同
     expect(await exited).toBe("SIGTERM");
     expect(entries(userSettings)).toBe(0);
   });
+});
+
+describe("INV-ATTACH-STATE-TRUST: user scope はどの cwd からでも project ラベルの state を読む・runStart と拒否起動の後始末も同じ規則 (QA-STA-1 / QA-STA-3)", () => {
+  const userState = (pid: number, scope: AttachScope): DaemonState => ({
+    pid,
+    endpoint: DEAD_ENDPOINT,
+    scope,
+    settingsPath: canonicalSettingsPath(resolveSettingsPath("user", home, home)),
+    startedAt: new Date().toISOString(),
+    tokenMode: "env",
+  });
+  function wireUser(): { settingsPath: string; statePath: string } {
+    const settingsPath = resolveSettingsPath("user", home, home);
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    mergeAttachHooks({ settingsPath, endpoint: DEAD_ENDPOINT, tokenMode: "env" });
+    return { settingsPath, statePath: scopeArtifacts(settingsPath, home).statePath };
+  }
+
+  it("cwd = home の project で起動した state を、別の cwd から `--scope user` の status / start / stop が見つける", async () => {
+    const child = await spawnBystander();
+    const { settingsPath, statePath } = wireUser();
+    writeDaemonState(statePath, userState(child.pid, "project"));
+    expect(cwd).not.toBe(home);
+    const logs: string[] = [];
+    const status = runStatus(
+      parseDaemonArgs(["daemon", "status", "--scope", "user"], cwd),
+      rt(logs),
+    );
+    expect(status).toMatchObject({ running: true, liveness: "alive" });
+    expect(status.state?.scope).toBe("project");
+    const again = await runStart(
+      parseDaemonArgs(["attach", "--scope", "user", "--yes"], cwd),
+      { wsUrl: "ws://x", dbPath: join(cwd, "u.db") },
+      rt(logs),
+    );
+    expect(again.status).toBe("already-running");
+    const exited = new Promise<NodeJS.Signals | null>((r) =>
+      child.once("exit", (_c, sig) => r(sig)),
+    );
+    const stop = runStop(parseDaemonArgs(["daemon", "stop", "--scope", "user"], cwd), rt(logs));
+    expect(stop).toMatchObject({ status: "stopped", kill: "sent", killedPid: child.pid });
+    expect(await exited).toBe("SIGTERM");
+    expect(entries(settingsPath)).toBe(0);
+  });
+
+  it("cwd = home の `--scope project` 起動は user ラベルの生きた daemon を already-running と見る (runStart が同じ規則を使う)", async () => {
+    const child = await spawnBystander();
+    const { statePath } = wireUser();
+    writeDaemonState(statePath, userState(child.pid, "user"));
+    const out = await runStart(
+      parseDaemonArgs(["attach", "--scope", "project", "--yes", "--token-mode", "env"], home),
+      { wsUrl: "ws://x", dbPath: join(cwd, "p.db"), hookToken: "a".repeat(40) },
+      rt([]),
+    );
+    expect(out.status).toBe("already-running");
+    expect(running(child)).toBe(true);
+  });
+
+  it("cwd = home の `--scope project` の拒否起動は user ラベルの stale state の配線を外す (後始末が同じ規則を使う)", async () => {
+    const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
+    const { settingsPath, statePath } = wireUser();
+    writeDaemonState(statePath, userState(deadPid, "user"));
+    expect(entries(settingsPath)).toBeGreaterThan(0);
+    const logs: string[] = [];
+    const out = await runStart(
+      parseDaemonArgs(["attach", "--scope", "project", "--yes", "--token-mode", "env"], home),
+      { wsUrl: "ws://x", dbPath: join(cwd, "d.db") },
+      rt(logs),
+    );
+    expect(out.status).toBe("denied-env-token-missing");
+    expect(entries(settingsPath)).toBe(0);
+    expect(existsSync(statePath)).toBe(false);
+    expect(logs.join("\n")).not.toContain(INVALID_MSG);
+  });
+});
+
+describe("INV-ATTACH-STATE-TRUST: settings file 自体が symlink でも state は起動の前後で変わらない (SEC-STA-1 ≡ TDA-STA-1・実 attach CLI)", () => {
+  /** settings file を別 dir (dotfiles) の実体への symlink にする。 */
+  function linkSettings(settingsPath: string): string {
+    const real = join(home, "dotfiles", `${basenameOf(settingsPath)}-${Date.now()}`);
+    mkdirSync(dirname(real), { recursive: true });
+    writeFileSync(real, JSON.stringify({ hooks: {} }));
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    symlinkSync(real, settingsPath);
+    // POSITIVE 対: 起動前は symlink。
+    expect(lstatSync(settingsPath).isSymbolicLink()).toBe(true);
+    return real;
+  }
+  const basenameOf = (p: string): string => p.slice(p.lastIndexOf("/") + 1);
+
+  for (const scope of ["user", "project-local"] as const) {
+    it(`${scope}: status は稼働中・2 回目の attach は already-running・daemon の SIGTERM 終了で entry 0 + state 削除・daemon stop が効く`, async () => {
+      const settingsPath = resolveSettingsPath(scope, cwd, home);
+      linkSettings(settingsPath);
+      const args = scope === "user" ? ["--scope", "user", "--yes"] : [];
+      const scopeArgs = scope === "user" ? ["--scope", "user"] : [];
+      const a = await startAttachCli(args, { cwd, home });
+      expect(entries(settingsPath)).toBeGreaterThan(0);
+      const logs: string[] = [];
+      expect(
+        runStatus(parseDaemonArgs(["daemon", "status", ...scopeArgs], cwd), rt(logs)).running,
+      ).toBe(true);
+      const again = await runStart(
+        parseDaemonArgs(["attach", ...args], cwd),
+        { wsUrl: "ws://x", dbPath: join(cwd, "again.db") },
+        rt(logs),
+      );
+      expect(again.status).toBe("already-running");
+      process.kill(-a.pgid, "SIGTERM");
+      expect(await a.groupGone(15_000), a.stderr()).toBe(true);
+      expect(entries(settingsPath)).toBe(0);
+      expect(stateFiles(home)).toEqual([]);
+      // 2 回目の寿命: `daemon stop` が見つけて止める。
+      const b = await startAttachCli(args, { cwd, home });
+      const stop = runStop(parseDaemonArgs(["daemon", "stop", ...scopeArgs], cwd), rt(logs));
+      expect(stop.kill).toBe("sent");
+      expect(await b.groupGone(15_000), b.stderr()).toBe(true);
+      expect(entries(settingsPath)).toBe(0);
+      expect(stateFiles(home)).toEqual([]);
+    }, 60_000);
+  }
+
+  it("monorepo 形: package の settings が root の file への symlink でも、package 側の stop は root の daemon を止めない", async () => {
+    const rootSettings = resolveSettingsPath("project-local", cwd, home);
+    mkdirSync(dirname(rootSettings), { recursive: true });
+    writeFileSync(rootSettings, JSON.stringify({ hooks: {} }));
+    const pkg = join(cwd, "packages", "a");
+    const pkgSettings = resolveSettingsPath("project-local", pkg, home);
+    mkdirSync(dirname(pkgSettings), { recursive: true });
+    symlinkSync(rootSettings, pkgSettings);
+    const root = await startAttachCli([], { cwd, home });
+    expect(entries(rootSettings)).toBeGreaterThan(0);
+    const logs: string[] = [];
+    const stop = runStop(parseDaemonArgs(["daemon", "stop"], pkg), rt(logs));
+    expect(stop).toMatchObject({ status: "not-running", kill: "no-state" });
+    expect(await root.groupGone(300)).toBe(false);
+    expect(entries(rootSettings)).toBeGreaterThan(0);
+    // 対照 (POSITIVE): root 側の stop は止める。
+    expect(runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs)).kill).toBe("sent");
+    expect(await root.groupGone(15_000), root.stderr()).toBe(true);
+    expect(entries(rootSettings)).toBe(0);
+  }, 60_000);
+
+  it("HOME 自体が symlink (H3): symlink の HOME で起動した user daemon を、物理 home を cwd にした `--scope project` が止める", async () => {
+    const homeLink = join(cwd, "home-link");
+    symlinkSync(home, homeLink);
+    const cli = await startAttachCli(["--scope", "user", "--yes"], { cwd, home: homeLink });
+    const userSettings = resolveSettingsPath("user", cwd, homeLink);
+    expect(entries(userSettings)).toBeGreaterThan(0);
+    const viaPhysical = parseDaemonArgs(["daemon", "status", "--scope", "project"], home);
+    // POSITIVE 対: lexical には別の path。
+    expect(resolveSettingsPath("project", home, homeLink)).not.toBe(userSettings);
+    const logs: string[] = [];
+    const rtLink: DaemonRuntime = { ...rt(logs), home: homeLink };
+    expect(runStatus(viaPhysical, rtLink).running).toBe(true);
+    const stop = runStop(parseDaemonArgs(["daemon", "stop", "--scope", "project"], home), rtLink);
+    expect(stop.kill).toBe("sent");
+    expect(await cli.groupGone(15_000), cli.stderr()).toBe(true);
+    expect(entries(userSettings)).toBe(0);
+  }, 40_000);
+});
+
+describe("INV-ATTACH-STATE-TRUST: etime は記録 pid の経過時間を読む (QA-STA-2)", () => {
+  it("ps -o etime= の対象は引数の pid (自プロセスではない)", async () => {
+    const self = (): number => defaultIdentitySources.elapsedSeconds(process.pid) ?? -1;
+    while (self() < 3) await new Promise((r) => setTimeout(r, 200));
+    const child = await spawnBystander();
+    const childElapsed = defaultIdentitySources.elapsedSeconds(child.pid);
+    expect(childElapsed).toBeDefined();
+    expect(childElapsed as number).toBeLessThanOrEqual(1);
+    // POSITIVE 対: 自プロセスの経過時間は 3s 以上。
+    expect(self()).toBeGreaterThanOrEqual(3);
+  }, 10_000);
 });
 
 describe("INV-ATTACH-STATE-TRUST: isDaemonProcess の分岐 (OS 情報を注入)", () => {
@@ -904,7 +1133,18 @@ describe("INV-ATTACH-STATE-TRUST: isDaemonProcess の分岐 (OS 情報を注入)
     ],
     ["etime: startedAt より前に起動", st(), src({ elapsedFromStart: -10_000 }), "alive"],
     ["etime: startedAt + 2000ms ちょうど (許容内)", st(), src({ elapsedFromStart: 2000 }), "alive"],
-    ["etime: startedAt + 3000ms (許容超過)", st(), src({ elapsedFromStart: 3000 }), "dead"],
+    [
+      "etime: startedAt + 3000ms (許容超過・boot_id 読めない)",
+      st(),
+      src({ elapsedFromStart: 3000 }),
+      "dead",
+    ],
+    [
+      "etime: startedAt + 3000ms (許容超過・boot_id 読める = Linux の旧 state)",
+      st(),
+      src({ boot: B, elapsedFromStart: 3000 }),
+      "unknown",
+    ],
     ["etime 取れない・まだ存在", st(), src({}), "unknown"],
     ["etime 取れない・その間に終了", st(), src({ sig: ["exists", "esrch"] }), "dead"],
   ];
