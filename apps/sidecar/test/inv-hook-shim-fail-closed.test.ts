@@ -20,8 +20,8 @@
  * 現れること (= 値が shim まで届いた)、固定文言は stderr に存在すること。
  *
  * ## 実行証跡
- * 表駆動ループの計測 callback 末尾でカウンタを加算し、afterAll で表の件数と照合する
- * (`it.skip` 化・早期 return・ケース削除で RED)。CI 側の二段目は
+ * 表駆動ループの計測 callback 末尾でカウンタを加算し、file top-level の afterAll で表の件数と照合する
+ * (`it.skip` 化・早期 return・加算行削除で RED)。CI 側の二段目は
  * `scripts/ci/assert-inv-ran.mjs --suite sidecar-hook-shim`。
  */
 import { spawn } from "node:child_process";
@@ -555,8 +555,10 @@ async function check(c: Case, run: typeof runProcess): Promise<void> {
     const spec = (c.args ?? defaultSpec)(ctx);
     const env = c.env ?? {};
     const stdin = c.stdin ?? HOOK_INPUT;
+    const argv = toArgv(spec);
+    if (argv.some((a) => a.includes(FAKE_ARGV_SECRET))) executed.argvSecretCases += 1;
     const started = Date.now();
-    const r = await run(toArgv(spec), stdin, env);
+    const r = await run(argv, stdin, env);
     const elapsed = Date.now() - started;
 
     if (c.cause === undefined) {
@@ -616,30 +618,33 @@ async function check(c: Case, run: typeof runProcess): Promise<void> {
   }
 }
 
-describe("INV-HOOK-SHIM-FAIL-CLOSED: 実 shim プロセス (exit code / stdout bytes / stderr cause)", () => {
-  let executed = 0;
-  afterAll(() => {
-    expect(executed, "every table case must have run to completion").toBe(CASES.length);
-  });
+/**
+ * 実行証跡は **file top-level** の afterAll で照合する。describe 内の afterAll は、その describe の
+ * test が全部 skip されると vitest が呼ばない (変異 `it` → `it.skip` で実測: 内側 afterAll では
+ * 素通りした)。top-level なら結合 describe の test が 1 本でも走れば呼ばれる。
+ */
+const executed = { process: 0, inProcess: 0, argvSecretCases: 0 };
+afterAll(() => {
+  expect(executed.process, "every table case must have run (real process)").toBe(CASES.length);
+  expect(executed.inProcess, "every table case must have run (in-process)").toBe(CASES.length);
+  // POSITIVE 対 (argv の偽値): 偽値を argv に載せたケースが実際に shim へ渡っている。
+  expect(executed.argvSecretCases).toBeGreaterThanOrEqual(12);
+});
 
+describe("INV-HOOK-SHIM-FAIL-CLOSED: 実 shim プロセス (exit code / stdout bytes / stderr cause)", () => {
   for (const c of CASES) {
     it(c.name, { timeout: 30_000 }, async () => {
       await check(c, runProcess);
-      executed += 1;
+      executed.process += 1;
     });
   }
 });
 
 describe("INV-HOOK-SHIM-FAIL-CLOSED: in-process parity (同じ表を runHookShim に流す)", () => {
-  let executed = 0;
-  afterAll(() => {
-    expect(executed, "every table case must have run to completion").toBe(CASES.length);
-  });
-
   for (const c of CASES) {
     it(c.name, { timeout: 30_000 }, async () => {
       await check(c, runInProcess);
-      executed += 1;
+      executed.inProcess += 1;
     });
   }
 });
