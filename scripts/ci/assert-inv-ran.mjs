@@ -128,12 +128,14 @@ export const SUITES = {
   // failure into exit 2. INV-HOOK-SHIM-FAIL-CLOSED drives the real shim process through a
   // table of failure sources; its in-file afterAll counter catches a skipped/early-returned
   // case, and this entry is the CI-side second layer that also refuses a skipped/todo suite
-  // and - through `minTests` - a table that silently shrank (measured 131 when added: two
-  // table describes x 62 cases + 7 binding tests). Raise it by hand when cases are added.
+  // and - through `minTests` - a table that silently shrank. `minTests` is the exact count in
+  // the full sidecar report this step reads (measured 132: two table describes x 62 cases +
+  // 1 hold/cleanup case + 7 binding tests, all in inv-hook-shim-fail-closed.test.ts). Raise it
+  // by hand when cases are added.
   "sidecar-hook-shim": {
     label: "sidecar PreToolUse hook shim (INV-HOOK-SHIM-FAIL-CLOSED)",
     pattern: "INV-HOOK-SHIM-FAIL-CLOSED",
-    minTests: 131,
+    minTests: 132,
   },
 };
 

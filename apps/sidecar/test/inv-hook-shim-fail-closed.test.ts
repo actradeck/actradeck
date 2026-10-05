@@ -25,7 +25,7 @@
  * `scripts/ci/assert-inv-ran.mjs --suite sidecar-hook-shim`。
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -33,7 +33,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_APPROVAL_TIMEOUT_MS,
@@ -496,17 +496,113 @@ interface Outcome {
   readonly stderr: string;
 }
 
+/**
+ * 起動した shim の後始末 (孤児を残さない)。
+ *
+ * tsx の CLI は shim 本体を**子の node** として起動する (孫)。CLI の pid だけを kill しても孫は
+ * 残り、systemd --user 等へ付け替わって deadline (既定導出 315s) まで生き続ける。変異や assert 失敗で
+ * test が timeout すると `close` を待つ Promise ごと放置されるので、正常終了に頼らず
+ * **プロセスグループ単位** (`detached: true` で新グループ・`process.kill(-pgid, "SIGKILL")`) で止め、
+ * グループと観測できた全子孫の pid が `ESRCH` であることを assert する
+ * (前例: inv-approval-fail-closed.test.ts の crash-chain worker・QA-FC-R2-1)。
+ */
+const spawnedAll: number[] = [];
+let spawnedThisTest: number[] = [];
+/**
+ * afterEach の**後半**で閉じる server。保留ケースは server を test 内で閉じない: 閉じると接続断で
+ * shim が `unreachable` として自分で exit し、後始末の kill が無くても緑になる (変異で実測)。
+ */
+let closeAfterCleanup: Array<() => Promise<void>> = [];
+
+/** Linux の /proc から子孫 pid を集める (/proc が無い環境では空 = グループ検査だけになる)。 */
+function descendantsOf(pid: number): number[] {
+  const out: number[] = [];
+  const walk = (p: number): void => {
+    const path = `/proc/${p}/task/${p}/children`;
+    if (!existsSync(path)) return;
+    let text = "";
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      return;
+    }
+    for (const tok of text.trim().split(/\s+/)) {
+      const c = Number(tok);
+      if (Number.isInteger(c) && c > 0) {
+        out.push(c);
+        walk(c);
+      }
+    }
+  };
+  walk(pid);
+  return out;
+}
+
+function isGone(target: number): boolean {
+  try {
+    process.kill(target, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/** グループを SIGKILL で止める (既に居なければ何もしない)。 */
+function killGroup(pgid: number): void {
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {
+    /* 既に終了 */
+  }
+}
+
+/** グループ (-pgid) と各 pid が ESRCH になるまで待ち、残れば名指しで落とす。 */
+async function expectAllGone(pgid: number, pids: readonly number[]): Promise<void> {
+  const targets = [-pgid, pgid, ...pids];
+  for (let i = 0; i < 300 && !targets.every(isGone); i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const alive = targets.filter((t) => !isGone(t));
+  expect(alive, `shim processes survived cleanup (group ${pgid})`).toEqual([]);
+}
+
+/** 1 本の shim を新しいプロセスグループで起動し、後始末の対象に登録する。 */
+function spawnShim(argv: readonly string[], env: Readonly<Record<string, string>>) {
+  // 親 env を継承しない (偽 token env が既定で漏れ込まない・必要な PATH だけ渡す)。
+  const child = spawn(tsxBin, [SHIM_SRC, ...argv], {
+    env: { PATH: process.env.PATH ?? "", ...env },
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
+  });
+  if (child.pid !== undefined) {
+    spawnedAll.push(child.pid);
+    spawnedThisTest.push(child.pid);
+  }
+  return child;
+}
+
+afterEach(async () => {
+  const groups = spawnedThisTest;
+  spawnedThisTest = [];
+  const closers = closeAfterCleanup;
+  closeAfterCleanup = [];
+  try {
+    // 全グループを先に止める (1 つの assert 失敗で残りの kill を飛ばさない)。子孫は kill の前に採る。
+    const observed = groups.map((pgid) => ({ pgid, descendants: descendantsOf(pgid) }));
+    for (const { pgid } of observed) killGroup(pgid);
+    for (const { pgid, descendants } of observed) await expectAllGone(pgid, descendants);
+  } finally {
+    for (const close of closers) await close();
+  }
+});
+
 function runProcess(
   argv: readonly string[],
   stdin: Buffer,
   env: Readonly<Record<string, string>>,
 ): Promise<Outcome> {
   return new Promise((resolve, reject) => {
-    // 親 env を継承しない (偽 token env が既定で漏れ込まない・必要な PATH だけ渡す)。
-    const child = spawn(tsxBin, [SHIM_SRC, ...argv], {
-      env: { PATH: process.env.PATH ?? "", ...env },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const child = spawnShim(argv, env);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on("data", (c: Buffer) => out.push(c));
@@ -623,10 +719,15 @@ async function check(c: Case, run: typeof runProcess): Promise<void> {
  * test が全部 skip されると vitest が呼ばない (変異 `it` → `it.skip` で実測: 内側 afterAll では
  * 素通りした)。top-level なら結合 describe の test が 1 本でも走れば呼ばれる。
  */
-const executed = { process: 0, inProcess: 0, argvSecretCases: 0 };
+const executed = { process: 0, inProcess: 0, argvSecretCases: 0, hold: 0 };
 afterAll(() => {
   expect(executed.process, "every table case must have run (real process)").toBe(CASES.length);
   expect(executed.inProcess, "every table case must have run (in-process)").toBe(CASES.length);
+  expect(executed.hold, "the hold case must have run").toBe(1);
+  // 起動した全 shim (正常終了・timeout・失敗のどれでも) のグループが残っていない。
+  // 件数の下限: 表 × 実プロセス + 保留ケース 1 本 (空振りで恒真にならない)。
+  expect(spawnedAll.length).toBeGreaterThanOrEqual(CASES.length + 1);
+  expect(spawnedAll.filter((pgid) => !isGone(-pgid))).toEqual([]);
   // POSITIVE 対 (argv の偽値): 偽値を argv に載せたケースが実際に shim へ渡っている。
   expect(executed.argvSecretCases).toBeGreaterThanOrEqual(12);
 });
@@ -638,6 +739,37 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: 実 shim プロセス (exit code / stdout b
       executed.process += 1;
     });
   }
+});
+
+describe("INV-HOOK-SHIM-FAIL-CLOSED: 承認保留中の shim と後始末", () => {
+  /**
+   * daemon が承認を握っている間 (応答しない間)、shim は導出 deadline (315s) まで待ち続け、先に
+   * 諦めない (諦めると承認待ち中に block = operator の承認が効かない)。同時にこれは「test が先に
+   * 終わったとき shim が生きている」形そのもので、afterEach がグループごと止めて孫の node まで
+   * ESRCH を確認する (後始末の kill を消すと afterEach が RED)。
+   */
+  it("承認保留中は導出 deadline まで待ち続ける (先に exit しない)・後始末が孫まで止める", async () => {
+    const srv = await startServer({ kind: "hang" });
+    // server は afterEach が shim を止めて ESRCH を確認した**後**に閉じる (上の closeAfterCleanup)。
+    closeAfterCleanup.push(srv.close);
+    const ctx: Ctx = { port: srv.port, tokenFile: tokenFilePath, dir: workDir };
+    const child = spawnShim(toArgv(defaultSpec(ctx)), {});
+    let exited = false;
+    child.on("exit", () => (exited = true));
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(HOOK_INPUT);
+    for (let i = 0; i < 1000 && srv.seen.length === 0 && !exited; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(srv.seen.length, "the shim reached the daemon").toBe(1);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(exited, "the shim must keep waiting while the daemon holds the approval").toBe(false);
+    // POSITIVE: 本体は孫の node (tsx CLI の子) であり、後始末はその pid も対象に含む。
+    if (process.platform === "linux" && child.pid !== undefined) {
+      expect(descendantsOf(child.pid).length).toBeGreaterThanOrEqual(1);
+    }
+    executed.hold += 1;
+  });
 });
 
 describe("INV-HOOK-SHIM-FAIL-CLOSED: in-process parity (同じ表を runHookShim に流す)", () => {
