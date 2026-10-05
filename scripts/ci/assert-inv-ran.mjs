@@ -108,6 +108,17 @@ export const SUITES = {
       "INV-FILELOCK-IDENTITY-V2: (?!EISDIR)",
     minTests: 40,
   },
+  // QA-FC-R2-4: INV-APPROVAL-FAIL-CLOSED pins that an approval hook the daemon has accepted is
+  // answered with a deny when handling it fails (including the crash-chain case run in a real
+  // child process). Its in-file checks run only if the file runs, so a `describe.skip`, a
+  // deleted afterAll or a deleted file would leave CI green. Same report and two-layer shape as
+  // sidecar-filelock. `minTests` is the count measured when this entry was added (20); raise it
+  // by hand when tests are added.
+  "sidecar-approval-fail-closed": {
+    label: "sidecar approval fail-closed INV (INV-APPROVAL-FAIL-CLOSED)",
+    pattern: "INV-APPROVAL-FAIL-CLOSED",
+    minTests: 20,
+  },
 };
 
 function main() {
