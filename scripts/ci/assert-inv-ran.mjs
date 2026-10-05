@@ -110,14 +110,19 @@ export const SUITES = {
   },
   // QA-FC-R2-4: INV-APPROVAL-FAIL-CLOSED pins that an approval hook the daemon has accepted is
   // answered with a deny when handling it fails (including the crash-chain case run in a real
-  // child process). Its in-file checks run only if the file runs, so a `describe.skip`, a
-  // deleted afterAll or a deleted file would leave CI green. Same report and two-layer shape as
-  // sidecar-filelock. `minTests` is the count measured when this entry was added (20); raise it
-  // by hand when tests are added.
+  // child process). Same report and two-layer shape as sidecar-filelock.
+  // `minTests` is the exact count in the full sidecar report this step reads (measured when the
+  // entry was added): 20 tests in inv-approval-fail-closed.test.ts plus 2 in
+  // hook-approval-gate.test.ts whose titles name the invariant = 22. At 22, skipping or renaming
+  // any one matched describe (the crash-chain one included) fails the gate (QA-AFC-1). Raise it by
+  // hand when tests are added.
+  // What this entry catches: a skipped/todo matched test, a matched describe renamed out of the
+  // pattern, the file removed. What it does not catch: a removed `expect` in an afterAll, or an
+  // early return inside a test — the gate sees only each test's status (QA-AFC-2 / QA-AFC-3).
   "sidecar-approval-fail-closed": {
     label: "sidecar approval fail-closed INV (INV-APPROVAL-FAIL-CLOSED)",
     pattern: "INV-APPROVAL-FAIL-CLOSED",
-    minTests: 20,
+    minTests: 22,
   },
 };
 
