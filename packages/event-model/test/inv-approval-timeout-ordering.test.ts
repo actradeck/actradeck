@@ -20,12 +20,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   APPROVAL_HOOK_MARGIN_MS,
+  APPROVAL_SHIM_MARGIN_MS,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   MAX_APPROVAL_TIMEOUT_MS,
   MIN_APPROVAL_TIMEOUT_MS,
   clampApprovalTimeoutMs,
   effectiveApprovalTimeoutMs,
   hookTimeoutSecondsFor,
+  shimDeadlineMsFor,
 } from "../src/index.js";
 // 走査正規化の単一出所 (sidecar の exclusivity / source-coupling metatest と共有・TDA-V9-2)。
 import { stripComments } from "../src/test-strip-comments.js";
@@ -104,6 +106,78 @@ describe("INV-APPROVAL-TIMEOUT-ORDERING", () => {
     );
   });
 
+  /**
+   * 三段順序 (ADR 0016・Triangle ADR 01a108aa Decision 4): PreToolUse を command shim にすると、
+   * 承認待ちと CC フック timeout の間に shim の deadline が入る。CC は command フックの timeout も
+   * non-blocking (素通り) なので、shim は CC より**先に**自分で exit 2 する必要があり、かつ bridge の
+   * 満了 deny を受け取れるだけ**後に**切れる必要がある:
+   *   effective (≤ DEFAULT) < shim deadline < CC hook timeout
+   * 各段の差が margin 未満へ痩せないことも全数で見る (順序だけだと 1ms 差でも緑になる)。
+   */
+  it("三段順序: 承認待ち < shim deadline < CC フック timeout (境界値・不正値・上限超過を含む全数)", () => {
+    const shimToHookGap = APPROVAL_HOOK_MARGIN_MS - APPROVAL_SHIM_MARGIN_MS;
+    const candidates = [
+      MIN_APPROVAL_TIMEOUT_MS,
+      MIN_APPROVAL_TIMEOUT_MS + 1,
+      999,
+      1_000,
+      1_001,
+      30_000,
+      DEFAULT_APPROVAL_TIMEOUT_MS - 1,
+      DEFAULT_APPROVAL_TIMEOUT_MS,
+      DEFAULT_APPROVAL_TIMEOUT_MS + 1,
+      MAX_APPROVAL_TIMEOUT_MS - 1,
+      MAX_APPROVAL_TIMEOUT_MS,
+      MAX_APPROVAL_TIMEOUT_MS + 1,
+      MAX_APPROVAL_TIMEOUT_MS + 60_000,
+      0.5, // 下限未満の正の小数 → 既定へ
+      0,
+      -0,
+      -1,
+      Number.MIN_SAFE_INTEGER,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+    ];
+    let checked = 0;
+    for (const raw of candidates) {
+      const effective = clampApprovalTimeoutMs(raw);
+      const shim = shimDeadlineMsFor(raw);
+      const hookMs = hookTimeoutSecondsFor(raw) * 1000;
+      expect(Number.isSafeInteger(shim), `shim deadline is an integer ms for ${String(raw)}`).toBe(
+        true,
+      );
+      expect(shim, `shim > approval wait for ${String(raw)}`).toBeGreaterThan(effective);
+      expect(hookMs, `hook > shim for ${String(raw)}`).toBeGreaterThan(shim);
+      expect(shim - effective, `approval→shim margin for ${String(raw)}`).toBeGreaterThanOrEqual(
+        APPROVAL_SHIM_MARGIN_MS,
+      );
+      expect(hookMs - shim, `shim→hook margin for ${String(raw)}`).toBeGreaterThanOrEqual(
+        shimToHookGap,
+      );
+      checked += 1;
+    }
+    expect(checked).toBe(candidates.length);
+
+    // 実際に settings へ焼かれるのは既定からの静的導出。bridge の実効値は要求値によらず ≤ 既定。
+    const staticShim = shimDeadlineMsFor(DEFAULT_APPROVAL_TIMEOUT_MS);
+    const staticHookMs = hookTimeoutSecondsFor(DEFAULT_APPROVAL_TIMEOUT_MS) * 1000;
+    for (const raw of [undefined, ...candidates]) {
+      expect(
+        effectiveApprovalTimeoutMs(raw),
+        `effective < static shim for ${String(raw)}`,
+      ).toBeLessThan(staticShim);
+    }
+    expect(staticHookMs).toBeGreaterThan(staticShim);
+  });
+
+  it("margin の符号と大小: 0 < shim margin < hook margin (どちらかが崩れると段が潰れる)", () => {
+    expect(APPROVAL_SHIM_MARGIN_MS).toBeGreaterThan(0);
+    expect(APPROVAL_SHIM_MARGIN_MS).toBeLessThan(APPROVAL_HOOK_MARGIN_MS);
+    // shim が deadline で exit 2 を書き終えるまでに 1 秒以上は残す (CC の timeout は秒粒度)。
+    expect(APPROVAL_HOOK_MARGIN_MS - APPROVAL_SHIM_MARGIN_MS).toBeGreaterThanOrEqual(1_000);
+  });
+
   it("導出フック timeout は CC の http フック既定 600s を超えない (未検証域へ出さない)", () => {
     expect(hookTimeoutSecondsFor(MAX_APPROVAL_TIMEOUT_MS)).toBeLessThanOrEqual(
       CC_HTTP_HOOK_DEFAULT_TIMEOUT_SECONDS,
@@ -129,6 +203,13 @@ describe("INV-APPROVAL-TIMEOUT-ORDERING", () => {
     expect(DEFAULT_APPROVAL_TIMEOUT_MS).toBe(300_000);
     expect(APPROVAL_HOOK_MARGIN_MS).toBe(30_000);
     expect(hookTimeoutSecondsFor(DEFAULT_APPROVAL_TIMEOUT_MS)).toBe(330);
+    expect(APPROVAL_SHIM_MARGIN_MS).toBe(15_000);
+    expect(shimDeadlineMsFor(DEFAULT_APPROVAL_TIMEOUT_MS)).toBe(315_000);
+    // 不正値は既定へ、上限超過は上限へ倒れてから margin が乗る (clamp を共有している)。
+    expect(shimDeadlineMsFor(Number.NaN)).toBe(315_000);
+    expect(shimDeadlineMsFor(-1)).toBe(315_000);
+    expect(shimDeadlineMsFor(MAX_APPROVAL_TIMEOUT_MS + 1)).toBe(MAX_APPROVAL_TIMEOUT_MS + 15_000);
+    expect(shimDeadlineMsFor(1_000)).toBe(16_000);
   });
 
   /**

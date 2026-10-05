@@ -27,6 +27,24 @@
  *   記載は無い。導出後のフック timeout が 600s を超えない範囲に承認待ちを制限する
  *   (600s は「既定として安全に使える」ことが分かっている唯一の上限であり、それ以上は未検証)。
  *
+ * ## 三段順序 (ADR 0016・Triangle ADR 01a108aa Decision 4)
+ * PreToolUse を command 型 shim (`apps/sidecar/src/hook-shim.ts`) へ移すと、承認待ちとフック timeout の
+ * 間に **shim 自身の deadline** が入る。CC は command フックの timeout も non-blocking として扱う
+ * (上の引用は `command` を含む) ため、shim は CC に殺される**前に**自分で exit 2 しなければならない。
+ * よって順序は 3 段になる:
+ *
+ *   effective (≤ DEFAULT 300s) < shim deadline (= clamp + 15s = 315s) < CC hook timeout (= clamp + 30s = 330s)
+ *
+ * - 1 段目と 2 段目の間 (`APPROVAL_SHIM_MARGIN_MS`): bridge が満了 deny を書いてから shim が受け取って
+ *   逐語転送するまでの余裕。これが 0 以下だと shim が bridge の deny より先に `deadline` で落ちる
+ *   (結果は block で安全側だが、operator の承認が届いていても捨てる = 承認が効かない)。
+ * - 2 段目と 3 段目の間 (`APPROVAL_HOOK_MARGIN_MS - APPROVAL_SHIM_MARGIN_MS`): shim が deadline で
+ *   exit 2 を書き終えるまでの余裕。これが 0 以下だと CC が先に shim を殺し、timeout = **素通り**になる。
+ *
+ * どちらの margin も導出で決まり、`INV-APPROVAL-TIMEOUT-ORDERING` が境界値・不正値を含めて固定する。
+ * shim は event-model を import しない (runtime 依存を `node:*` に閉じる) ため、deadline は
+ * settings の args で受け取る — その値を作る唯一の経路が `shimDeadlineMsFor` である。
+ *
  * ## 適用範囲の正直な開示
  * この導出が守るのは **Claude Code の hook 経路**である。managed Codex は承認を JSON-RPC の
  * inbound server-request として受けるため、codex 側が応答をどれだけ待つかは ActraDeck の設定では
@@ -39,6 +57,13 @@ export const DEFAULT_APPROVAL_TIMEOUT_MS = 300_000;
 
 /** 承認待ち満了とフック timeout の間に置く余裕 (ms)。解決の relay/書き込み分。 */
 export const APPROVAL_HOOK_MARGIN_MS = 30_000;
+
+/**
+ * 承認待ち満了と shim deadline の間に置く余裕 (ms・ADR 0016)。
+ * `0 < APPROVAL_SHIM_MARGIN_MS < APPROVAL_HOOK_MARGIN_MS` でなければ三段順序が崩れる
+ * (理由はモジュール docstring「三段順序」)。
+ */
+export const APPROVAL_SHIM_MARGIN_MS = 15_000;
 
 /**
  * 承認待ちの上限 (ms)。導出フック timeout が CC の `http` 既定 600s を超えない範囲。
@@ -69,6 +94,19 @@ export const MIN_APPROVAL_TIMEOUT_MS = 1;
 export function hookTimeoutSecondsFor(approvalTimeoutMs: number): number {
   const clamped = clampApprovalTimeoutMs(approvalTimeoutMs);
   return Math.ceil((clamped + APPROVAL_HOOK_MARGIN_MS) / 1000);
+}
+
+/**
+ * 承認待ち (ms) から PreToolUse command shim の内部 deadline (**ms**) を導出する (ADR 0016)。
+ *
+ * `hookTimeoutSecondsFor` と同じ clamp を通すので、同じ入力に対して
+ *   clamp(x) < shimDeadlineMsFor(x) < hookTimeoutSecondsFor(x) * 1000
+ * が常に成り立つ (不正値は既定へ・上限超過は上限へ倒れたうえで順序を保つ)。shim の args に
+ * 焼き込む値はこの関数から**だけ**作ること (手書きリテラル禁止・`hookTimeoutSecondsFor` と同じ規律)。
+ * ms のまま返すのは、shim の deadline が CC の settings スキーマ (秒) を通らないため。
+ */
+export function shimDeadlineMsFor(approvalTimeoutMs: number): number {
+  return clampApprovalTimeoutMs(approvalTimeoutMs) + APPROVAL_SHIM_MARGIN_MS;
 }
 
 /**

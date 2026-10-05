@@ -346,6 +346,8 @@ run_verify_job() {
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-filelock
   # QA-FC-R2-4: mirrors ci.yml — same report, fourth suite (approval fail-closed INV ran).
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-approval-fail-closed
+  # Task 01a108ac-cd47: mirrors ci.yml - same report, fifth suite (PreToolUse shim INV ran).
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-hook-shim
 
   step "verify: Test (webui coverage gate)"
   pnpm --filter @actradeck/webui run test:coverage

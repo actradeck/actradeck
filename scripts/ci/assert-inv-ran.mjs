@@ -124,6 +124,17 @@ export const SUITES = {
     pattern: "INV-APPROVAL-FAIL-CLOSED",
     minTests: 22,
   },
+  // Task 01a108ac-cd47 (T-A, ADR 0016): the PreToolUse command shim turns every transport
+  // failure into exit 2. INV-HOOK-SHIM-FAIL-CLOSED drives the real shim process through a
+  // table of failure sources; its in-file afterAll counter catches a skipped/early-returned
+  // case, and this entry is the CI-side second layer that also refuses a skipped/todo suite
+  // and - through `minTests` - a table that silently shrank (measured 131 when added: two
+  // table describes x 62 cases + 7 binding tests). Raise it by hand when cases are added.
+  "sidecar-hook-shim": {
+    label: "sidecar PreToolUse hook shim (INV-HOOK-SHIM-FAIL-CLOSED)",
+    pattern: "INV-HOOK-SHIM-FAIL-CLOSED",
+    minTests: 131,
+  },
 };
 
 function main() {

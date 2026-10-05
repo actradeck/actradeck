@@ -145,12 +145,15 @@ export {
 
 // 承認待ち時間とフック timeout の正準単一出所 (T1: sidecar bridge / sidecar settings-merge / webui 残時間表示が共有)
 //   フック timeout は承認待ちから**導出**する。逆転すると CC 契約により deny でなく素通りになる。
+//   PreToolUse command shim の deadline も同じ出所から導出する (三段順序・ADR 0016)。
 export {
   DEFAULT_APPROVAL_TIMEOUT_MS,
   APPROVAL_HOOK_MARGIN_MS,
+  APPROVAL_SHIM_MARGIN_MS,
   MAX_APPROVAL_TIMEOUT_MS,
   MIN_APPROVAL_TIMEOUT_MS,
   hookTimeoutSecondsFor,
+  shimDeadlineMsFor,
   clampApprovalTimeoutMs,
   effectiveApprovalTimeoutMs,
 } from "./approval-timeout.js";
