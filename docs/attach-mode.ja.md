@@ -216,7 +216,7 @@ scope と安全ガード:
   port の entry を外した後もほかの port を向いた ActraDeck の entry が settings に残っていれば、記録を
   消さずに同じコマンドを表示します。拒否された起動が後始末をしている間に同じ scope で別の daemon が
   起動すると、表示されたコマンドがその新しい daemon を指すことがあり、実行するとその daemon を止めて
-  entry をすべて外します。
+  settings にある ActraDeck の entry を（ほかの port のものも含めて）すべて外します。
 
 ---
 
