@@ -183,6 +183,12 @@ type Behavior =
       readonly body: Buffer;
       readonly headers?: Readonly<Record<string, string>>;
     }
+  | {
+      // daemon と同じく token を照合する: 一致なら 200 + body、不一致なら 403。
+      readonly kind: "auth";
+      readonly token: string;
+      readonly body: Buffer;
+    }
   | { readonly kind: "destroy" } // body を受け取った後、応答せずに socket を destroy
   | { readonly kind: "truncate" } // Content-Length より短い本文を送って socket を destroy
   | { readonly kind: "hang" }; // 応答しない (deadline 超過用)
@@ -527,6 +533,43 @@ const BASE_CASES: readonly Case[] = [
     cause: "token_unavailable",
     reachesServer: false,
   },
+  // ---- token file の書式 (ADR 0016 Decision 4・QA-HSH-1 / SEC-HSH-3(a)) ----
+  // server は daemon と同じく token を照合する (一致 200 deny / 不一致 403)。
+  {
+    name: "token file が CRLF 終端 (改行 1 つは token に含めない)",
+    server: { kind: "auth", token: FAKE_TOKEN_FILE, body: DENY_BODY },
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "crlf.token") })),
+    stdout: DENY_BODY,
+    reachesServer: true,
+    expectedToken: FAKE_TOKEN_FILE,
+  },
+  {
+    name: "token file が LF 2 つで終わる (剥がすのは改行 1 つだけ)",
+    server: { kind: "auth", token: FAKE_TOKEN_FILE, body: DENY_BODY },
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "lf2.token") })),
+    cause: "token_unavailable",
+    reachesServer: false,
+  },
+  {
+    // writeJson0600 で文字列を書いた形 (`JSON.stringify(t, null, 2) + "\n"`)。引用符ごと送られ
+    // daemon が拒否する。allow 変種では素通りになる (SEC-HS-R2-3)。
+    name: "token file が JSON 文字列 (引用符つきで送られ 403)",
+    server: { kind: "auth", token: FAKE_TOKEN_FILE, body: DENY_BODY },
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "json-string.token") })),
+    cause: "unauthorized",
+    reachesServer: true,
+    expectedToken: JSON.stringify(FAKE_TOKEN_FILE),
+    allowVariant: true,
+  },
+  {
+    // writeJson0600 で object を書いた形。改行と空白を含むので token として読めない。
+    name: "token file が JSON object (token として読めない)",
+    server: { kind: "auth", token: FAKE_TOKEN_FILE, body: DENY_BODY },
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "json-object.token") })),
+    cause: "token_unavailable",
+    reachesServer: false,
+    allowVariant: true,
+  },
   {
     name: "token env 未設定",
     server: OK_EMPTY_OBJECT,
@@ -571,6 +614,24 @@ const BASE_CASES: readonly Case[] = [
     name: "127.0.0.2 endpoint (127.0.0.1 以外の loopback)",
     server: OK_EMPTY_OBJECT,
     args: withSpec((ctx) => ({ endpoint: `http://127.0.0.2:${ctx.port}/hook` })),
+    cause: "bad_args",
+    reachesServer: false,
+  },
+  {
+    // 先頭 anchor (`^`) の固定 (SEC-HSH-4): 前に文字を足した値は bad_args。anchor を外すと部分一致で
+    // 受理され、request が不正 protocol で失敗して unreachable になり cause の違いで RED。
+    name: "endpoint の前に文字がある (先頭 anchor)",
+    server: OK_EMPTY_OBJECT,
+    args: withSpec((ctx) => ({ endpoint: `xhttp://127.0.0.1:${ctx.port}/hook` })),
+    cause: "bad_args",
+    reachesServer: false,
+  },
+  {
+    // host の `.` の escape の固定 (SEC-HSH-4): escape を外すと `127x0x0x1` を受理して名前解決へ進み、
+    // unreachable になって RED。
+    name: "endpoint の host が 127x0x0x1 (. の escape)",
+    server: OK_EMPTY_OBJECT,
+    args: withSpec((ctx) => ({ endpoint: `http://127x0x0x1:${ctx.port}/hook` })),
     cause: "bad_args",
     reachesServer: false,
   },
@@ -857,6 +918,12 @@ async function startServer(behavior: Behavior): Promise<{
           res.writeHead(behavior.status, behavior.headers ?? {});
           res.end(behavior.body);
           return;
+        case "auth": {
+          const ok = seen[seen.length - 1]?.token === behavior.token;
+          res.writeHead(ok ? 200 : 403, { "Content-Type": "application/json" });
+          res.end(ok ? behavior.body : Buffer.from('{"error":"forbidden"}'));
+          return;
+        }
         case "destroy":
           req.socket.destroy();
           return;
@@ -1081,6 +1148,16 @@ function makeWorkDir(): string {
   writeFileSync(at("big.token"), "a".repeat(HOOK_SHIM_MAX_TOKEN_FILE_BYTES + 1), { mode: 0o600 });
   writeFileSync(at("long.token"), "a".repeat(HOOK_SHIM_MAX_TOKEN_LENGTH + 1), { mode: 0o600 });
   writeFileSync(at("space.token"), `${FAKE_TOKEN_FILE} x\n`, { mode: 0o600 });
+  writeFileSync(at("crlf.token"), `${FAKE_TOKEN_FILE}\r\n`, { mode: 0o600 });
+  writeFileSync(at("lf2.token"), `${FAKE_TOKEN_FILE}\n\n`, { mode: 0o600 });
+  writeFileSync(at("json-string.token"), `${JSON.stringify(FAKE_TOKEN_FILE, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  writeFileSync(
+    at("json-object.token"),
+    `${JSON.stringify({ token: FAKE_TOKEN_FILE }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
   return dir;
 }
 
@@ -1103,7 +1180,7 @@ const executed = {
   argvCarried: Object.fromEntries(ARGV_CARRIED.map((w) => [w, 0])) as Record<string, number>,
 };
 /** transpile した dist で流す起動形の件数 (下の describe の行数)。 */
-const DIST_CASE_COUNT = 6;
+const DIST_CASE_COUNT = 12;
 afterAll(() => {
   expect(executed.process, "every table case must have run (real process)").toBe(CASES.length);
   expect(executed.inProcess, "every table case must have run (in-process)").toBe(
@@ -1385,9 +1462,11 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: in-process parity (同じ表を runHookShim
 });
 
 /**
- * entry を `node` で起動する形のうち、core を読めない 3 形と、core の runHookShim が reject する形
- * (SEC-HS-R2-1 / QA-HS-R2-4 Q25E)。src の entry / core を TypeScript で transpile した dist 相当を
- * 一時 dir に置いて流す (tsc の出力と同じ ESM・dist の鮮度に依存しない)。期待:
+ * entry を `node` で起動する形のうち、core を読めない 4 形 (評価が決着しない形を含む・SEC-HSH-1) と、
+ * core の runHookShim が reject する形 (SEC-HS-R2-1 / QA-HS-R2-4 Q25E)。床の行はすべて
+ * `--on-unreachable allow` 版も流す (床は kill-switch を見ない・SEC-HSH-2)。src の entry / core を
+ * TypeScript で transpile した dist 相当を一時 dir に置いて流す (tsc の出力と同じ ESM・dist の鮮度に
+ * 依存しない)。期待:
  * - `deny`: daemon の 200 deny を逐語で通して exit 0 (起動形そのものが動くことの対照)。
  * - `floor`: daemon に届かず exit 2・stdout 無出力・stderr は表と同じ test 側リテラルに全文一致
  *   (entry 内の床の文 = core の文の 2 コピー目を、挙動で core と結合する)。
@@ -1395,6 +1474,8 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: in-process parity (同じ表を runHookShim
 interface DistCase {
   readonly name: string;
   readonly expect: "deny" | "floor";
+  /** `--on-unreachable allow` で起動する (床の行から生成する変種)。 */
+  readonly allow?: boolean | undefined;
   /** dist の配置を作り、起動する entry の path と NODE_OPTIONS を返す。 */
   readonly layout: (js: { entry: string; core: string }) => { entry: string; nodeOptions?: string };
 }
@@ -1415,7 +1496,7 @@ function symlinkOnlyDir(js: { entry: string; core: string }): string {
   return join(linkDir, "hook-shim.js");
 }
 
-const DIST_CASES: readonly DistCase[] = [
+const DIST_BASE_CASES: readonly DistCase[] = [
   {
     name: "完全な dist (対照)",
     expect: "deny",
@@ -1470,6 +1551,33 @@ const DIST_CASES: readonly DistCase[] = [
       ),
     }),
   },
+  {
+    // SEC-HSH-1: core の top-level await が決着しない。dynamic import は resolve も reject もせず、
+    // event loop が空になる (beforeExit の床が無いと何も書かずに exit 0)。
+    name: "core の評価が決着しない (top-level await が永久に pending)",
+    expect: "floor",
+    layout: (js) => ({
+      entry: join(
+        distDir({
+          "hook-shim.js": js.entry,
+          "hook-shim-core-real.js": js.core,
+          "hook-shim-core.js":
+            'export * from "./hook-shim-core-real.js";\n' + "await new Promise(() => {});\n",
+        }),
+        "hook-shim.js",
+      ),
+    }),
+  },
+];
+
+/** 床の行の `--on-unreachable allow` 変種 (SEC-HSH-2: core を読めないときは allow でも block)。 */
+const DIST_CASES: readonly DistCase[] = [
+  ...DIST_BASE_CASES,
+  ...DIST_BASE_CASES.filter((c) => c.expect === "floor").map((c) => ({
+    ...c,
+    name: `[allow] ${c.name}`,
+    allow: true,
+  })),
 ];
 
 describe("INV-HOOK-SHIM-FAIL-CLOSED: core を読めない entry は exit 2 (transpile した dist・実プロセス)", () => {
@@ -1488,11 +1596,20 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: core を読めない entry は exit 2 (tran
     js.core = transpile(SHIM_CORE);
   });
 
-  it("表の構成: 対照 (deny) と床 (floor) の両方を持つ", () => {
+  it("表の構成: 対照 (deny) と床 (floor) の両方を持ち、床の行はすべて allow 版もある", () => {
     expect(DIST_CASES.length).toBe(DIST_CASE_COUNT);
     expect(new Set(DIST_CASES.map((c) => c.name)).size).toBe(DIST_CASES.length);
     expect(DIST_CASES.filter((c) => c.expect === "deny").length).toBe(2);
-    expect(DIST_CASES.filter((c) => c.expect === "floor").length).toBe(4);
+    expect(DIST_BASE_CASES.filter((c) => c.expect === "floor").length).toBe(5);
+    const allowFloor = DIST_CASES.filter((c) => c.allow === true);
+    expect(allowFloor.length).toBe(5);
+    expect(allowFloor.every((c) => c.expect === "floor")).toBe(true);
+    for (const base of DIST_BASE_CASES.filter((c) => c.expect === "floor")) {
+      expect(
+        allowFloor.some((a) => a.layout === base.layout),
+        `allow variant of ${base.name}`,
+      ).toBe(true);
+    }
   });
 
   for (const c of DIST_CASES) {
@@ -1500,7 +1617,10 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: core を読めない entry は exit 2 (tran
       const srv = await startServer(ok200(DENY_BODY));
       try {
         const { entry, nodeOptions } = c.layout(js);
-        const argv = toArgv(defaultSpec({ port: srv.port, dir: makeWorkDir() }));
+        const argv = toArgv({
+          ...defaultSpec({ port: srv.port, dir: makeWorkDir() }),
+          onUnreachable: c.allow === true ? "allow" : undefined,
+        });
         const env: Record<string, string> =
           nodeOptions === undefined ? {} : { NODE_OPTIONS: nodeOptions };
         const r = await runProcess(argv, HOOK_INPUT, env, {
@@ -1513,6 +1633,9 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: core を読めない entry は exit 2 (tran
           expect(r.stdout.equals(DENY_BODY), `${c.name}: stdout bytes`).toBe(true);
           expect(srv.seen.length, `${c.name}: daemon reached once`).toBe(1);
         } else {
+          // allow 変種でも exit 2 (床は kill-switch を見ない・SEC-HSH-2)。POSITIVE 対: 実際に allow を
+          // argv に載せている。
+          if (c.allow === true) expect(argv).toContain("allow");
           expect(r.code, `${c.name}: exit code (stderr=${r.stderr})`).toBe(2);
           expect(r.stdout.length, `${c.name}: stdout must be empty on block`).toBe(0);
           // 表 (core 経由) と同じ test 側リテラルへの全文一致 = entry の床の文と core の文の結合。

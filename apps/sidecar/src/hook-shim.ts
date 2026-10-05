@@ -12,9 +12,13 @@
  * ## core は dynamic import で読む (SEC-HS-R2-1)
  * 静的 import だと、core (`hook-shim-core.js`) を解決・評価できないとき entry ごと読込みに失敗して
  * exit 1 (= 上流では non-blocking・素通り) になる。dynamic import の reject を床で受けて exit 2 にする。
- * INV で実測した形は 3 つ: entry 単体の symlink を `--preserve-symlinks-main` で起動・entry だけを
- * 別 dir へコピー・core の途中切断。entry 自身を読めない (不在・構文が壊れている) 場合と Node を
- * 起動できない場合は、このファイルが走らないので依然 exit 1 / 起動失敗 (= non-blocking・ADR 0016 に開示)。
+ * core の評価が決着しない (top-level await が永久に pending) 場合は reject も来ないので、event loop が
+ * 空になった時点の `beforeExit` でも床を走らせる (SEC-HSH-1)。床は `--on-unreachable allow` でも block。
+ * INV で実測した形は 4 つ (各 block / allow): entry 単体の symlink を `--preserve-symlinks-main` で
+ * 起動・entry だけを別 dir へコピー・core の途中切断・決着しない top-level await を持つ core。entry
+ * 自身を読めない (不在・構文が壊れている) 場合、Node を起動できない場合、CC から継承した
+ * `NODE_OPTIONS` の preload (`--require` / `--import`) が失敗する場合は、このファイルが走らないので
+ * 依然 exit 1 / 起動失敗 (= non-blocking・ADR 0016 に開示)。
  *
  * ## 床の stderr は core の固定文の 2 コピー目
  * 床は core を読めない場合にも走るので、core の `formatHookShimStderr` を使えない。よって
@@ -91,5 +95,10 @@ async function main(): Promise<void> {
 }
 
 // 床: core を読めない (解決・評価の失敗)・runHookShim の reject (throw しない契約だが万一)・
-// main 内の同期例外は、すべて exit 2 へ倒す。
+// main 内の同期例外は、すべて exit 2 へ倒す。床は `--on-unreachable` を見ない (allow でも block・
+// argv を読む core が無い状態で kill-switch を解釈しない・SEC-HSH-2)。
 main().catch(() => block(FLOOR_STDERR));
+// 床 (SEC-HSH-1): core の評価が決着しないまま (top-level await が永久に pending 等) event loop が
+// 空になると、main() は resolve も reject もしないので上の catch は走らず、Node は exit 0 で終わる。
+// 正常な経路はすべて exitWith (= process.exit) で終わり beforeExit は来ないので、来たら block する。
+process.on("beforeExit", () => block(FLOOR_STDERR));
