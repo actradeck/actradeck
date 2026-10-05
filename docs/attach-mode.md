@@ -238,7 +238,9 @@ Scope and safety guards:
   removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited,
   as long as the record for that scope is still there. A refused start keeps that record, and
   prints the same command, when ActraDeck entries for other ports are still in the settings file
-  after it has removed the ones for the recorded port.
+  after it has removed the ones for the recorded port. If another daemon starts in the same scope
+  while a refused start is cleaning up, the printed command can refer to that new daemon, and
+  running it stops that daemon and removes all of its entries.
 
 ---
 

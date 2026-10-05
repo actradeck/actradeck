@@ -313,7 +313,11 @@ export type StaleCleanup =
  *   ③ stale state に記録されていない死んだ entry (別の endpoint の残骸) は外さない。外した後も
  *   ActraDeck entry が残っていれば state を消さず {@link stopCommandHint} を出す (SEC-DC-R2-1) ので、
  *   `daemon stop` か次の成功起動の self-heal で外れる。判定の後に state が書き換わっていた場合は
- *   案内を出さない (別の daemon が書いた state を止めさせないため)。
+ *   案内を出さない (CAS が `changed` を返す)。
+ *   ④ (実装記録の残余⑧) ただし、判定の後に並走起動した daemon が merge を終え、まだ state を書いていない
+ *   間に後始末が走ると (race R1 の形)、その daemon の entry を「残っている」と数えて案内を出す。案内
+ *   どおり `daemon stop` を打つと、その時点で state を書き終えたその daemon を止め、全 entry を外す
+ *   (daemon だけ動き続けて配線が無い、という半開にはならない・SEC R3 の probe p8 で実測)。
  * - `writeApproved` が false (user / project scope で --yes も confirm の承認も無い) なら書かない。
  *   共有/グローバル settings への書込は confirm ゲート (SEC-1) の対象なので、拒否経路でも同じ線を守り、
  *   残っていることと {@link stopCommandHint} だけをログに出す。state は消さない

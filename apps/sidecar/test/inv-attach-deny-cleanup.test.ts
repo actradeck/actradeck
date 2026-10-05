@@ -44,11 +44,13 @@ import {
   writeDaemonState,
 } from "../src/daemon-state.js";
 import {
+  ACTRADECK_MARKER,
   computeDetachedSettings,
   isActradeckEntry,
   mergeAttachHooks,
   type TokenMode,
 } from "../src/settings-merge.js";
+import { HOOK_TOKEN_HEADER } from "../src/settings-injection.js";
 
 import { tsxBin } from "./helpers/lock-test-support.js";
 
@@ -876,6 +878,132 @@ describe("INV-ATTACH-DENY-CLEANUP: 記録外の ActraDeck entry が残るなら 
   });
 });
 
+/**
+ * marker (`__actradeck`) を持たない legacy の ActraDeck entry を、記録外の port で settings に足す。
+ * literal 署名 = 専用ヘッダだけ・env 署名 = allowedEnvVars の ACTRADECK_HOOK_TOKEN だけで識別される形。
+ * 本番 merge で作った entry から marker (env 署名はヘッダも) を取り除いて作る (手書き entry を作らない)。
+ */
+async function addLegacyEntries(settingsPath: string, kind: "literal" | "env"): Promise<string> {
+  const endpoint = `http://127.0.0.1:${await deadPort()}/hook`;
+  const other = join(dirname(settingsPath), `legacy-${kind}-${Date.now()}.json`);
+  mergeAttachHooks({
+    settingsPath: other,
+    endpoint,
+    tokenMode: kind,
+    ...(kind === "literal" ? { token: GOOD_TOKEN } : {}),
+  });
+  const b = JSON.parse(readFileSync(other, "utf8")) as {
+    hooks: Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
+  };
+  for (const groups of Object.values(b.hooks)) {
+    for (const g of groups) {
+      for (const e of g.hooks) {
+        delete e[ACTRADECK_MARKER];
+        if (kind === "env") delete e.headers;
+      }
+    }
+  }
+  const a = JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks: Record<string, unknown[]> };
+  for (const [ev, groups] of Object.entries(b.hooks)) {
+    a.hooks[ev] = [...(a.hooks[ev] ?? []), ...groups];
+  }
+  writeFileSync(settingsPath, JSON.stringify(a));
+  rmSync(other, { force: true });
+  return endpoint;
+}
+
+describe("INV-ATTACH-DENY-CLEANUP: 残存判定の形 — marker の無い legacy 署名 entry / 記録 endpoint 0 本 (R3)", () => {
+  let legacyExecuted = 0;
+  let zeroRecordedExecuted = 0;
+  afterAll(() => {
+    expect(legacyExecuted).toBe(2);
+    expect(zeroRecordedExecuted).toBe(1);
+  });
+
+  // QA-DC-R3-1 ≡ TDA-DC-R3-3: 残存判定は isActradeckEntry (marker または legacy 署名) で数える。
+  for (const kind of ["literal", "env"] as const) {
+    it(`legacy ${kind} 署名 (marker 無し) の別 port entry が残るなら state を残し案内する`, async () => {
+      const r = await plantResidue("project-local", deadPid());
+      const legacy = await addLegacyEntries(r.settingsPath, kind);
+      const legacyEntries = actradeckEntries(r.settingsPath).filter(
+        (e) => (e as { url?: unknown }).url === legacy,
+      );
+      expect(legacyEntries.length).toBeGreaterThan(0);
+      // 足した entry は marker を持たない (POSITIVE 対: 記録 endpoint の残骸は marker を持つ)。
+      expect(JSON.stringify(legacyEntries)).not.toContain(ACTRADECK_MARKER);
+      expect(r.settingsBefore).toContain(ACTRADECK_MARKER);
+      if (kind === "env") expect(JSON.stringify(legacyEntries)).not.toContain(HOOK_TOKEN_HEADER);
+      else expect(JSON.stringify(legacyEntries)).toContain(HOOK_TOKEN_HEADER);
+      const stateBefore = readFileSync(r.statePath, "utf8");
+
+      const logs: string[] = [];
+      const out = await runStart(
+        parseDaemonArgs(["attach", "--token-mode", "env"], cwd),
+        { wsUrl: WS, dbPath: join(cwd, "legacy.db") },
+        { home, log: (m) => logs.push(m), startDaemon: () => Promise.reject(new Error("no")) },
+      );
+      expect(out.status).toBe("denied-env-token-missing");
+      expect(actradeckUrls(r.settingsPath).filter((u) => u === r.deadEndpoint).length).toBe(0);
+      expect(actradeckUrls(r.settingsPath).filter((u) => u === legacy).length).toBe(
+        legacyEntries.length,
+      );
+      expect(readFileSync(r.statePath, "utf8")).toBe(stateBefore);
+      const log = logs.join("\n");
+      expect(log).toContain(ENTRIES_REMAIN_MSG);
+      expect(log).toContain(expectedHint("project-local"));
+      expect(log).not.toContain(DETACHED_MSG);
+
+      runStop(parseDaemonArgs(["daemon", "stop"], cwd), {
+        home,
+        log: () => undefined,
+        startDaemon: () => Promise.reject(new Error("unused")),
+      });
+      expect(actradeckEntries(r.settingsPath)).toEqual([]);
+      legacyExecuted += 1;
+    });
+  }
+
+  // SEC-DC-R3-4: 記録 endpoint の entry が 0 本 (既に無い) で、記録外の ActraDeck entry だけが残る形。
+  it("記録 endpoint の entry が 0 本でも、記録外の entry が残るなら state を残し案内する (HL-G3 形)", async () => {
+    const r = await plantResidue("project-local", deadPid());
+    const other = await addUnrecordedEntries(r.settingsPath);
+    // 記録 endpoint の entry を先に取り除き、記録外だけが残る settings にする。
+    writeFileSync(
+      r.settingsPath,
+      JSON.stringify(
+        computeDetachedSettings(
+          JSON.parse(readFileSync(r.settingsPath, "utf8")) as Parameters<
+            typeof computeDetachedSettings
+          >[0],
+          { onlyEndpoint: r.deadEndpoint },
+        ).settings,
+      ),
+    );
+    expect(actradeckUrls(r.settingsPath).filter((u) => u === r.deadEndpoint).length).toBe(0);
+    const otherCount = actradeckUrls(r.settingsPath).filter((u) => u === other).length;
+    expect(otherCount).toBeGreaterThan(0);
+    const stateBefore = readFileSync(r.statePath, "utf8");
+    const logs: string[] = [];
+    const res = cleanupStaleWiring({
+      statePath: r.statePath,
+      settingsPath: r.settingsPath,
+      scope: "project-local",
+      cwd,
+      writeApproved: true,
+      log: (m) => logs.push(m),
+    });
+    expect(res).toBe("detached-entries-remain");
+    expect(readFileSync(r.statePath, "utf8")).toBe(stateBefore);
+    expect(actradeckUrls(r.settingsPath).filter((u) => u === other).length).toBe(otherCount);
+    const log = logs.join("\n");
+    expect(log).toContain(ENTRIES_REMAIN_MSG);
+    expect(log).toContain(NONE_PHRASE);
+    expect(log).not.toContain(REMOVED_PHRASE);
+    expect(log).not.toContain(DETACHED_MSG);
+    zeroRecordedExecuted += 1;
+  });
+});
+
 describe("INV-ATTACH-DENY-CLEANUP: 並走起動との競合 — 後始末の判定の後に起動した daemon の配線と state は残す (R1 unblock・QA-DC-1 ≡ TDA-DC-1)", () => {
   let raceExecuted = 0;
   afterAll(() => {
@@ -971,6 +1099,8 @@ describe("INV-ATTACH-DENY-CLEANUP: 並走起動との競合 — 後始末の判�
     assertAIntact(res);
     // B の後始末は実際に走った。A の merge が死んだ endpoint の entry を既に消しているので外すものは無く、
     // A の entry が残っているので state は消さずに案内を出す (SEC-DC-R2-1)。その後 A が state を書いた。
+    // 残余⑧: この案内どおり `daemon stop` を打つと、state を書き終えた A を止めて全 entry を外す
+    // (全停止で、A だけ動き続ける半開にはならない・SEC R3 の probe p8 で実測。この test は stop を打たない)。
     const log = res.logs.join("\n");
     expect(log).toContain(ENTRIES_REMAIN_MSG);
     expect(log).toContain(NONE_PHRASE);

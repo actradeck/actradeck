@@ -109,7 +109,7 @@ export function removeDaemonStateIfUnchanged(
   }
 }
 
-/** state file を削除する (stop / 拒否経路の後始末)。 */
+/** state file を無条件に削除する (現在の呼び出し元は runStop のみ・拒否経路の後始末は CAS 版の removeDaemonStateIfUnchanged を使う)。 */
 export function removeDaemonState(path: string): void {
   try {
     rmSync(path, { force: true });

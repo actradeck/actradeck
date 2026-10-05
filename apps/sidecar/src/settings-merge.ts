@@ -393,9 +393,11 @@ export function mergeAttachHooks(opts: MergeOptions): MergeResult {
  * 検出は canonical な {@link isActradeckEntry} / {@link groupHasActradeckEntry} を共有する
  * (NO 二重実装 — `__actradeck` 検出器を別実装しない。security-gate-reuse-canonical-parser)。
  *
- * TDA-2 (sweep 019f1991): 唯一の呼び出しは同 module の {@link settingsFileHasActradeckHook} ゆえ
- * **module-private** (非 export)。malformed hooks の非 throw 回帰 (SEC-1/QA-1/SEC-R1) は file 経由の
- * settingsFileHasActradeckHook / computeAgentVisibility で transitive に固定済 (直 importer 不要)。
+ * export されており、呼び出し元は 2 つ: 同 module の {@link settingsFileHasActradeckHook} (診断) と、
+ * 拒否経路の後始末 (daemon-cli の detachWiredSettings) が detach 後に ActraDeck entry が残っているかを
+ * 判定する箇所 (SEC-ENV-4 R2・SEC-DC-R2-1)。後者は marker の無い legacy 署名 entry も数える。
+ * malformed hooks の非 throw 回帰 (SEC-1/QA-1/SEC-R1) は file 経由の settingsFileHasActradeckHook /
+ * computeAgentVisibility で transitive に固定済。
  */
 export function hasActradeckHookInSettings(settings: ClaudeSettingsFile): boolean {
   // SEC-1≡QA-1 (decision 019f1991): readSettings はトップレベルが object かのみ検証し hooks の
