@@ -149,6 +149,30 @@ export const SUITES = {
     pattern: "INV-HOOK-SHIM-FAIL-CLOSED",
     minTests: 204,
   },
+  // QA-DC-3 (SEC-ENV-4 R1): the refused-start cleanup of a dead daemon's wiring. Its in-file
+  // afterAll counters catch a single skipped row, but skipping a whole describe also skips that
+  // describe's afterAll. Same report and two-layer shape as sidecar-approval-fail-closed.
+  // `minTests` is the exact count in the full sidecar report this step reads, measured at SEC-ENV-4
+  // R3: 64 = 45 (denial x scope table, stale + alive rows, plus the table-shape test)
+  // + 9 (cleanup boundaries) + 3 (entries left on other ports keep the state, SEC-DC-R2-1)
+  // + 3 (remaining-entry shapes: marker-less legacy literal / env entries, no recorded-port entry)
+  // + 2 (concurrent start races R1 / R2) in inv-attach-deny-cleanup.test.ts, + 2 (single read of
+  // the state file / state delete failure) in inv-attach-deny-cleanup-fs.test.ts. At 64, skipping
+  // or renaming any one matched describe fails the gate. Raise it by hand when tests are added.
+  // What this entry does not catch: an early return at the top of an `it`, a removed `expect`, or a
+  // removed afterAll counter check — the gate sees only each test's status.
+  "sidecar-attach-deny-cleanup": {
+    label: "sidecar attach refused-start cleanup INV (INV-ATTACH-DENY-CLEANUP)",
+    pattern: "INV-ATTACH-DENY-CLEANUP",
+    minTests: 64,
+  },
+  // QA-DC-3: the real-process SIGHUP detach of the attach CLI (inv-attach-deny-cleanup.test.ts, its
+  // own describe with 1 test). Same limits as above: an early return inside the test is not caught.
+  "sidecar-attach-sighup": {
+    label: "sidecar attach SIGHUP detach INV (INV-ATTACH-SIGHUP-DETACH)",
+    pattern: "INV-ATTACH-SIGHUP-DETACH",
+    minTests: 1,
+  },
 };
 
 function main() {

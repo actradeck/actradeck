@@ -201,6 +201,22 @@ scope と安全ガード:
   `project` と `project-local` の daemon は起動したディレクトリに属するので、両方のコマンドをそこで
   実行します。旧 daemon が稼働したまま `attach` を実行しても「既に稼働中」と表示されるだけで、旧 entry は
   残ります。`./scripts/ad-attach`（`stop` と `service` を含む）が操作するのは `user` scope の daemon だけです。
+- **daemon が正常に終了しなかった場合**: daemon は `SIGINT` / `SIGTERM` / `SIGHUP`（実行中の端末を
+  閉じたときなど）で自分の entry を外します。`SIGKILL` のように処理できない形で終了すると、entry は
+  settings に残り、誰も listen していない port を向いたままになります。同じ scope で次に起動が成功すると
+  置き換わります。起動が拒否された場合（token の検査に通らない等）は、その scope に記録された daemon が
+  既に終了していれば entry を外します。外すのはその daemon に記録された port を向いた entry だけなので、
+  同じ scope で稼働中の daemon（拒否された起動が後始末をしている間に起動したものを含む）の entry は
+  残ります。例外は、その瞬間に起動した daemon が終了した daemon と同じ port を得た場合で、その entry は
+  外れますが `daemon status` は稼働中と表示します。`daemon stop --scope <scope>` で止めてから起動し
+  直してください。`user` と `project`
+  scope では `--yes` を付けたときだけ外し、付けていなければファイルを変更せず、外すための
+  `daemon stop --scope <scope>` コマンドを表示します。`daemon stop --scope <scope>` は daemon の
+  プロセスが既に終了していても、その scope の記録が残っていれば使えます。起動が拒否された場合、記録された
+  port の entry を外した後もほかの port を向いた ActraDeck の entry が settings に残っていれば、記録を
+  消さずに同じコマンドを表示します。拒否された起動が後始末をしている間に同じ scope で別の daemon が
+  起動すると、表示されたコマンドがその新しい daemon を指すことがあり、実行するとその daemon を止めて
+  settings にある ActraDeck の entry を（ほかの port のものも含めて）すべて外します。
 
 ---
 

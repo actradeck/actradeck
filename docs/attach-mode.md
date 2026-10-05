@@ -222,6 +222,26 @@ Scope and safety guards:
   both commands there. Running `attach` while the old daemon is still up only reports that it is
   already running and leaves the old entries in place. `./scripts/ad-attach` (its `stop` and
   `service` commands included) acts on the `user`-scope daemon only.
+- **When the daemon did not shut down cleanly.** The daemon removes its entries on `SIGINT`,
+  `SIGTERM` and `SIGHUP` (for example when you close the terminal it runs in). If it is killed in
+  a way it cannot handle, such as `SIGKILL`, its entries stay in the settings file and point at a
+  port nothing listens on. The next successful start in the same scope replaces them. A start that
+  is refused (for example because the token check fails) removes them if the daemon recorded for
+  that scope is no longer running. It removes only the entries that point at the port recorded for
+  that daemon, so a daemon that is running in the same scope, including one that starts while the
+  refused start is cleaning up, keeps its entries. The exception is a daemon that starts at that
+  moment and is given the same port as the daemon that exited: its entries are removed while
+  `daemon status` still reports it as running. Stop it with `daemon stop --scope <scope>` and start
+  it again.
+  For `user` and `project` scope a refused start removes them only when you passed `--yes`;
+  otherwise it leaves the file unchanged and prints the `daemon stop --scope <scope>` command that
+  removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited,
+  as long as the record for that scope is still there. A refused start keeps that record, and
+  prints the same command, when ActraDeck entries for other ports are still in the settings file
+  after it has removed the ones for the recorded port. If another daemon starts in the same scope
+  while a refused start is cleaning up, the printed command can refer to that new daemon, and
+  running it stops that daemon and removes every ActraDeck entry from the settings file, including
+  entries for other ports.
 
 ---
 
