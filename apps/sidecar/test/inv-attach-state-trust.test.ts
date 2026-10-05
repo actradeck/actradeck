@@ -196,6 +196,20 @@ describe("INV-ATTACH-STATE-TRUST: scope の artifact path は realpath 正規化
     );
     try {
       expect(out.status).toBe("started");
+      // runStart は新しい形で書く: 物理 settings path と、Linux では自プロセスの boot_id + start ticks。
+      const written = readState(out.statePath, {
+        settingsPath: settingsOf(),
+        scope: "project-local",
+      });
+      expect(written.kind).toBe("state");
+      if (written.kind !== "state") throw new Error("unreachable");
+      expect(written.state.settingsPath).toBe(settingsOf());
+      if (LINUX) {
+        expect(written.state.procIdentity).toEqual({
+          bootId: bootIdNow(),
+          startTicks: ticksOf(process.pid),
+        });
+      }
       const args = parseDaemonArgs(["daemon", "status"], cwd);
       expect(runStatus(args, rt(logs)).running).toBe(true);
       expect(entries(settingsOf())).toBeGreaterThan(0);
@@ -556,6 +570,14 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
       rt(logs, unknown),
     );
     expect(out.status).toBe("already-running");
+    // 拒否起動 (env mode・token 未設定) の後始末も同じ述語 (runtime の identity) を使う。
+    const denied = await runStart(
+      parseDaemonArgs(["attach", "--token-mode", "env"], cwd),
+      { wsUrl: "ws://x", dbPath: join(cwd, "c.db") },
+      rt(logs, unknown),
+    );
+    expect(denied.status).toBe("denied-env-token-missing");
+    expect(readFileSync(settingsPath, "utf8")).toBe(before);
     expect(
       cleanupStaleWiring({
         statePath,
