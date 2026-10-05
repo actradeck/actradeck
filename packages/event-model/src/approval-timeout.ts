@@ -104,9 +104,12 @@ export function hookTimeoutSecondsFor(approvalTimeoutMs: number): number {
  * が常に成り立つ (不正値は既定へ・上限超過は上限へ倒れたうえで順序を保つ)。shim の args に
  * 焼き込む値はこの関数から**だけ**作ること (手書きリテラル禁止・`hookTimeoutSecondsFor` と同じ規律)。
  * ms のまま返すのは、shim の deadline が CC の settings スキーマ (秒) を通らないため。
+ * 整数に切り上げて返す: shim の `--deadline-ms` は正の整数しか受け付けない (小数の承認待ちを渡すと
+ * 引数不正で恒久 block になる・QA-HS-6 / SEC-HS-9)。切り上げは順序を崩さない
+ * (clamp < ceil(clamp + 15s) ≤ clamp + 16s ≤ hook timeout)。
  */
 export function shimDeadlineMsFor(approvalTimeoutMs: number): number {
-  return clampApprovalTimeoutMs(approvalTimeoutMs) + APPROVAL_SHIM_MARGIN_MS;
+  return Math.ceil(clampApprovalTimeoutMs(approvalTimeoutMs) + APPROVAL_SHIM_MARGIN_MS);
 }
 
 /**

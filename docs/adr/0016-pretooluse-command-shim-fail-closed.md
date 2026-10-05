@@ -26,14 +26,20 @@ not honored for `PermissionRequest`. A command hook's own timeout is also non-bl
 ## Decision
 
 1. **Only `PreToolUse` moves to a command hook.** The hook runs a small shim shipped in the
-   sidecar build (`node <dist>/hook-shim.js` in exec form, no shell). The shim forwards the hook
-   input to the daemon:
-   - a 2xx response with a JSON object body is printed unchanged and the shim exits 0, so allow,
-     deny and "no opinion" keep their current meaning;
-   - anything else (connection failure, non-2xx including 403, a non-JSON body, the connection
-     dropping while waiting, the shim's own deadline, oversized input, no token, bad arguments)
-     exits 2 with a fixed message on stderr naming the cause and the commands to restart or
-     detach the daemon. Token values and request bodies are never printed.
+   sidecar build (`node <dist>/hook-shim.js` in exec form, no shell). That file always runs the
+   shim; it does not check how it was started. The shim forwards the hook input to the daemon at
+   `http://127.0.0.1:<port>/hook`:
+   - a 200 response with a JSON object body is printed unchanged and the shim exits 0, so allow,
+     deny and "no opinion" (`{}`) keep their current meaning;
+   - anything else (connection failure, any other status including 403 and 204, an empty or
+     non-JSON body, the connection dropping while waiting, the shim's own deadline, oversized
+     input, no usable token, bad arguments, or stdout that cannot be written) exits 2.
+
+   Claude Code shows a blocking hook's stderr to the model as the reason for the block, so the
+   shim's stderr is only the cause (a fixed list of words) and one fixed sentence telling the
+   model to ask the user to check the ActraDeck daemon. It does not name commands, settings, the
+   endpoint or the `--on-unreachable` switch; how to recover is documented for operators, not
+   told to the agent. Token values, request and response bodies and arguments are never printed.
 
    The shim has no risk classifier and no policy; the daemon stays the only place that decides.
 2. **`PermissionRequest` and the observation hooks stay HTTP.** Exit 2 cannot block
@@ -43,8 +49,9 @@ not honored for `PermissionRequest`. A command hook's own timeout is also non-bl
    attach scope; the value is written into the hook arguments, and an unknown value means block.
    Managed sessions always block. Detaching (`daemon stop`) removes the hooks as today.
 4. **The token is not passed on the command line.** Literal attach and managed sessions read it
-   from a 0600 file; `env` token-mode reads it from the Claude Code process environment. The
-   command hook is not subject to `allowedHttpHookUrls` or `httpHookAllowedEnvVars`.
+   from a file given by absolute path, which must be a regular file (not a symlink or FIFO) that
+   only its owner can read; `env` token-mode reads it from the Claude Code process environment.
+   The command hook is not subject to `allowedHttpHookUrls` or `httpHookAllowedEnvVars`.
 5. **Three timeouts in a fixed order, derived from one source.** The approval wait (300 s by
    default) ends before the shim's deadline (315 s), which ends before the Claude Code hook
    timeout (330 s). `INV-APPROVAL-TIMEOUT-ORDERING` is extended to cover all three.
@@ -55,14 +62,17 @@ not honored for `PermissionRequest`. A command hook's own timeout is also non-bl
 ## Consequences
 
 - While an attached daemon is down, every `PreToolUse` in the scope it is wired to is blocked
-  (for `user` scope, every project). Claude and the user see why on stderr. Running the daemon as
-  a service, cleaning up wiring left by a crashed daemon, and a `daemon status` warning ship in the
-  same release to keep that window short and visible.
+  (for `user` scope, every project). The block message says only that ActraDeck could not decide
+  and asks for the daemon to be checked. Running the daemon as a service, cleaning up wiring left
+  by a crashed daemon, and a `daemon status` warning ship in the same release to keep that window
+  short and visible.
 - Each `PreToolUse` costs one extra process start; the measured latency will be documented.
 - Still not covered: a mod that handles `tool.check` can approve a blocked call unless the hook is
   in managed settings; `allowManagedHooksOnly` or `disableAllHooks` turn ActraDeck's hooks off
   entirely (the same as detaching); lowering the hook timeout below the shim deadline reopens the
-  timeout case.
+  timeout case; if the shim cannot be started at all (missing file or Node runtime), Claude Code
+  treats that as a non-blocking error; a token file on a network file system that stops
+  responding can keep the shim from exiting before the hook timeout.
 
 ## Alternatives considered
 

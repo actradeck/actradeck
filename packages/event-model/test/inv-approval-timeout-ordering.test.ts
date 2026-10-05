@@ -131,6 +131,11 @@ describe("INV-APPROVAL-TIMEOUT-ORDERING", () => {
       MAX_APPROVAL_TIMEOUT_MS + 1,
       MAX_APPROVAL_TIMEOUT_MS + 60_000,
       0.5, // 下限未満の正の小数 → 既定へ
+      // 下限以上の小数 (QA-HS-6): shim deadline は整数で返る (shim の --deadline-ms は整数のみ受理)。
+      1.5,
+      1_000.5,
+      DEFAULT_APPROVAL_TIMEOUT_MS + 0.5,
+      MAX_APPROVAL_TIMEOUT_MS - 0.5,
       0,
       -0,
       -1,
@@ -210,6 +215,8 @@ describe("INV-APPROVAL-TIMEOUT-ORDERING", () => {
     expect(shimDeadlineMsFor(-1)).toBe(315_000);
     expect(shimDeadlineMsFor(MAX_APPROVAL_TIMEOUT_MS + 1)).toBe(MAX_APPROVAL_TIMEOUT_MS + 15_000);
     expect(shimDeadlineMsFor(1_000)).toBe(16_000);
+    expect(shimDeadlineMsFor(1_000.5)).toBe(16_001);
+    expect(shimDeadlineMsFor(MAX_APPROVAL_TIMEOUT_MS - 0.5)).toBe(MAX_APPROVAL_TIMEOUT_MS + 15_000);
   });
 
   /**
