@@ -1,32 +1,42 @@
 /**
- * daemon-state — Attach daemon の PID/endpoint state file 管理 (ADR 019ea476 D1)。
+ * daemon-state — Attach daemon の state file 管理 (ADR 019ea476 D1・state 信用規則 = Triangle ADR 01a10ddb D3)。
  *
- * state file: `~/.actradeck/daemon/<scope-hash>.json` (0600)。
- * - **token 値は記録しない** (env 変数名の参照のみ)。
- * - 二重起動防止 (pid 生存判定) / stale 判定 (削除は CAS) / OS 割当 port を記録。
+ * state file: `~/.actradeck/daemon/<scopeKey>.json` (0600)。
+ * - **token 値は記録しない** (token mode だけを記録する)。
+ * - 二重起動防止・stale 判定 (同一性は process-identity.ts)・OS 割当 port を記録する。
  *
- * scope は「どの settings file に配線したか」で一意化する。scope-hash は settings の絶対パスの
- * sha256 短縮。複数 project は (MVP では) それぞれ別 scope = 別 state file になりうるが、
- * 単一 daemon に scope を束ねる拡張 (--isolated 等) は forward-compat。
+ * **state 信用規則 (1 本)**:
+ * - scope の artifact の path (state / lock / token file) は settings path から**導出**する
+ *   ({@link scopeArtifacts})。state の中身から path を取り出して読み書きしない。
+ * - state の読み取りは {@link readState} 1 本で、結果は `absent | corrupt | state` の 3 値。形の検証は
+ *   {@link asDaemonState} 1 か所。記録された `settingsPath` と `scope` は導出値との**整合検査**にだけ使い、
+ *   一致しなければ corrupt (pid も信用しない)。
  */
 import { createHash } from "node:crypto";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
-import { readJsonObject, writeJson0600 } from "./fs-atomic.js";
+import { writeJson0600 } from "./fs-atomic.js";
+import type { ProcIdentity } from "./process-identity.js";
+import { HOOK_TOKEN_ENV_VAR, type TokenMode } from "./settings-merge.js";
+
+export type AttachScope = "project-local" | "project" | "user";
+const ATTACH_SCOPES: readonly string[] = ["project-local", "project", "user"];
 
 export interface DaemonState {
   readonly pid: number;
-  /** 安定 hook endpoint (loopback + OS 割当 port)。 */
+  /** 安定 hook endpoint (`http://127.0.0.1:<port>/hook`)。 */
   readonly endpoint: string;
-  /** literal token-mode 時の env 変数名のみ (値は書かない)。env-mode の参照記録。 */
-  readonly hookTokenEnvVar?: string;
-  /** 配線した settings file の絶対パス群。detach 対象。 */
-  readonly wiredSettingsPaths: readonly string[];
-  /** 配線 scope (project-local | project | user)。 */
-  readonly scope: string;
+  /** 配線 scope。導出値と一致しなければ corrupt。 */
+  readonly scope: AttachScope;
+  /** 配線した settings file の正規化済み絶対 path ({@link scopeArtifacts} の canonicalSettingsPath)。整合検査用。 */
+  readonly settingsPath: string;
   readonly startedAt: string;
+  /** token の配線方式 (値は書かない)。 */
+  readonly tokenMode: TokenMode;
+  /** 書いた daemon プロセスの同一性 (Linux のみ・無ければ etime で照合する)。 */
+  readonly procIdentity?: ProcIdentity;
 }
 
 /** daemon state ディレクトリ (~/.actradeck/daemon)。 */
@@ -34,39 +44,192 @@ export function daemonStateDir(home: string = homedir()): string {
   return join(home, ".actradeck", "daemon");
 }
 
-/** settings file の絶対パスから scope-hash を導出する (12 桁短縮 sha256)。 */
-export function scopeHash(settingsPath: string): string {
-  return createHash("sha256").update(resolve(settingsPath)).digest("hex").slice(0, 12);
+/**
+ * 絶対パスの 12 桁短縮 sha256 (lexical・realpath を通さない)。approval の repo scope と、
+ * {@link scopeArtifacts} の scopeKey (正規化済み path に掛ける) が使う。
+ */
+export function scopeHash(path: string): string {
+  return createHash("sha256").update(resolve(path)).digest("hex").slice(0, 12);
 }
 
-/** scope に対応する state file パス。 */
-export function stateFilePath(settingsPath: string, home: string = homedir()): string {
-  return join(daemonStateDir(home), `${scopeHash(settingsPath)}.json`);
-}
-
-/** PID が生存しているか (signal 0 で確認, 権限不足は生存とみなす)。 */
-export function isPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // ESRCH = 不在 (死亡)。EPERM = 存在するが権限なし → 生存扱い。
-    return (err as NodeJS.ErrnoException).code === "EPERM";
+/**
+ * path を物理 path へ正規化する: 存在する最長の祖先を realpath で解決し、存在しない残りの成分は
+ * lexical に足す。symlink を含まない path では `resolve(path)` と同じ文字列になる。
+ */
+export function canonicalPath(path: string): string {
+  const abs = resolve(path);
+  const tail: string[] = [];
+  let head = abs;
+  for (;;) {
+    try {
+      const real = realpathSync(head);
+      return tail.length === 0 ? real : join(real, ...tail.reverse());
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return abs;
+      tail.push(basename(head));
+      head = parent;
+    }
   }
 }
 
-/** state file を読む (無ければ undefined, JSON 不正は undefined)。 */
-export function readDaemonState(path: string): DaemonState | undefined {
-  return asDaemonState(readJsonObject(path));
+export interface ScopeArtifacts {
+  /** 正規化済み settings path の 12 桁短縮 sha256 (symlink を含まない path では旧 scopeHash と同値)。 */
+  readonly scopeKey: string;
+  /** 正規化済み settings path (state の settingsPath と照合する値)。 */
+  readonly canonicalSettingsPath: string;
+  readonly statePath: string;
+  /** scope lock (PR-B で使う・ここでは導出だけ)。 */
+  readonly lockPath: string;
+  /** hook token file (T-B で使う・ここでは導出だけ)。 */
+  readonly tokenPath: string;
 }
 
-/** state として使える形か (JSON object + pid:number + endpoint:string)。readDaemonState と CAS 経路の単一出所。 */
-function asDaemonState(parsed: unknown): DaemonState | undefined {
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const s = parsed as Partial<DaemonState>;
-  if (typeof s.pid !== "number" || typeof s.endpoint !== "string") return undefined;
-  return parsed as DaemonState;
+/**
+ * settings path から scope の artifact path を導出する (単一出所)。symlink 経由の cwd と物理 cwd は
+ * 同じ scopeKey になる (同じ物理 settings に 2 つの state を作らない)。
+ */
+export function scopeArtifacts(settingsPath: string, home: string = homedir()): ScopeArtifacts {
+  const canonicalSettingsPath = canonicalPath(settingsPath);
+  const scopeKey = scopeHash(canonicalSettingsPath);
+  const dir = daemonStateDir(home);
+  return {
+    scopeKey,
+    canonicalSettingsPath,
+    statePath: join(dir, `${scopeKey}.json`),
+    lockPath: join(dir, `${scopeKey}.lock`),
+    tokenPath: join(dir, `${scopeKey}.hook-token`),
+  };
+}
+
+/** {@link asDaemonState} が照合する導出値。 */
+export interface StateExpectation {
+  readonly settingsPath: string;
+  readonly scope: AttachScope;
+}
+
+const ENDPOINT_RE = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/hook$/;
+const BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function asProcIdentity(v: unknown): ProcIdentity | undefined {
+  if (!isRecord(v)) return undefined;
+  const { bootId, startTicks } = v;
+  if (typeof bootId !== "string" || !BOOT_ID_RE.test(bootId)) return undefined;
+  if (typeof startTicks !== "number" || !Number.isSafeInteger(startTicks) || startTicks < 0) {
+    return undefined;
+  }
+  return { bootId, startTicks };
+}
+
+/**
+ * state として信用できる形か (唯一の形検証)。信用できれば既知の項目だけを持つ新しい object を返し、
+ * そうでなければ undefined (= corrupt)。
+ *
+ * - pid は正の整数・endpoint は `http://127.0.0.1:<1-65535>/hook`・scope は導出値と一致・startedAt は
+ *   parse 可能・procIdentity は任意 (あるなら形が合うこと)。
+ * - 新しい形: `settingsPath` (導出値と一致) + `tokenMode` (`literal` | `env`)。`wiredSettingsPaths` を併せ持つ
+ *   state は corrupt。
+ * - 旧い形 (legacy): `settingsPath` も `tokenMode` も無く、`wiredSettingsPaths` が**導出値と一致する要素 1 個の
+ *   配列**のときだけ受理する (`[]`・複数・非配列・欠落は corrupt)。`hookTokenEnvVar` があれば (値は
+ *   `ACTRADECK_HOOK_TOKEN` に限る) `tokenMode: "env"`、無ければ `"literal"` に読み替える。
+ */
+export function asDaemonState(parsed: unknown, expect: StateExpectation): DaemonState | undefined {
+  if (!isRecord(parsed)) return undefined;
+  const { pid, endpoint, scope, startedAt } = parsed;
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 || pid > 0x7fffffff) {
+    return undefined;
+  }
+  if (typeof endpoint !== "string") return undefined;
+  const port = ENDPOINT_RE.exec(endpoint)?.[1];
+  if (port === undefined || Number(port) < 1 || Number(port) > 65535) return undefined;
+  if (typeof scope !== "string" || !ATTACH_SCOPES.includes(scope) || scope !== expect.scope) {
+    return undefined;
+  }
+  if (typeof startedAt !== "string" || !Number.isFinite(Date.parse(startedAt))) return undefined;
+  let procIdentity: ProcIdentity | undefined;
+  if (parsed.procIdentity !== undefined) {
+    procIdentity = asProcIdentity(parsed.procIdentity);
+    if (procIdentity === undefined) return undefined;
+  }
+
+  let tokenMode: TokenMode;
+  if ("settingsPath" in parsed || "tokenMode" in parsed) {
+    if ("wiredSettingsPaths" in parsed || "hookTokenEnvVar" in parsed) return undefined;
+    const sp = parsed.settingsPath;
+    if (typeof sp !== "string" || !isAbsolute(sp) || sp !== expect.settingsPath) return undefined;
+    if (parsed.tokenMode !== "literal" && parsed.tokenMode !== "env") return undefined;
+    tokenMode = parsed.tokenMode;
+  } else {
+    const wired = parsed.wiredSettingsPaths;
+    if (!Array.isArray(wired) || wired.length !== 1 || wired[0] !== expect.settingsPath) {
+      return undefined;
+    }
+    const envVar = parsed.hookTokenEnvVar;
+    if (envVar !== undefined && envVar !== HOOK_TOKEN_ENV_VAR) return undefined;
+    tokenMode = envVar === undefined ? "literal" : "env";
+  }
+  return {
+    pid,
+    endpoint,
+    scope: expect.scope,
+    settingsPath: expect.settingsPath,
+    startedAt,
+    tokenMode,
+    ...(procIdentity !== undefined ? { procIdentity } : {}),
+  };
+}
+
+/** {@link readState} の結果。`raw` は判定に使った state の生バイト列 (CAS 削除の比較値)。 */
+export type StateRead =
+  | { readonly kind: "absent" }
+  | { readonly kind: "corrupt"; readonly raw?: string }
+  | { readonly kind: "state"; readonly state: DaemonState; readonly raw: string };
+
+/**
+ * state file を 1 回だけ読み、3 値で返す (唯一の reader)。判定に使う state と CAS の比較値 (`raw`) は
+ * 同じ 1 回の読み取りから取る。無ければ absent、読めない・JSON でない・形が合わない・導出値と整合しない
+ * なら corrupt。
+ */
+export function readState(statePath: string, expect: StateExpectation): StateRead {
+  let raw: string;
+  try {
+    raw = readFileSync(statePath, "utf8");
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT"
+      ? { kind: "absent" }
+      : { kind: "corrupt" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { kind: "corrupt", raw };
+  }
+  const state = asDaemonState(parsed, expect);
+  return state === undefined ? { kind: "corrupt", raw } : { kind: "state", state, raw };
+}
+
+/**
+ * state file を 0600 で atomic 書込する。**token 値を含めてはならない** (型で token mode のみ許可)。
+ * 読む側と同じ {@link asDaemonState} を通らない state は書かずに throw する (書いた state が次の読み取りで
+ * corrupt になる経路を作らない)。
+ */
+export function writeDaemonState(path: string, state: DaemonState): void {
+  assertDaemonStateShape(state);
+  writeJson0600(path, state, { dirMode: 0o700 });
+}
+
+/** {@link writeDaemonState} が書ける形か (読む側と同じ検証)。配線より前に呼んで、配線だけ残る経路を作らない。 */
+export function assertDaemonStateShape(state: DaemonState): void {
+  if (
+    asDaemonState(state, { settingsPath: state.settingsPath, scope: state.scope }) === undefined
+  ) {
+    throw new Error("daemon state の形が不正なため書き込みません");
+  }
 }
 
 /** state file の生バイト列 (無い・読めないなら undefined)。CAS 削除の比較用。 */
@@ -76,11 +239,6 @@ function readStateRaw(path: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** state file を 0600 で atomic 書込する。**token 値を含めてはならない** (型で env 名のみ許可)。 */
-export function writeDaemonState(path: string, state: DaemonState): void {
-  writeJson0600(path, state, { dirMode: 0o700 });
 }
 
 /** state file のいまの中身が `expectedRaw` と同じか (CAS の比較だけを行う・削除しない)。 */
@@ -115,38 +273,5 @@ export function removeDaemonState(path: string): void {
     rmSync(path, { force: true });
   } catch {
     /* best-effort */
-  }
-}
-
-/**
- * 既存 daemon の生存判定。
- * - state 無し → 起動可 (alive=false)。
- * - state 有り + pid 生存 → 二重起動 (alive=true, state を返す)。
- * - state 有り + pid 死亡 → stale (alive=false, stale=true)。起動可。stale state は起動が成功して
- *   上書きされるか、拒否経路の後始末 (`cleanupStaleWiring`) か `daemon stop` が消す。
- *
- * `raw` は判定に使った state の生バイト列 (`removeDaemonStateIfUnchanged` の比較に渡す)。判定と同じ
- * 1 回の読み取りから取るので、判定した state と比較する state がずれない。
- */
-export function checkExistingDaemon(path: string): {
-  alive: boolean;
-  stale: boolean;
-  state?: DaemonState;
-  raw?: string;
-} {
-  const raw = readStateRaw(path);
-  const state = raw === undefined ? undefined : parseDaemonState(raw);
-  if (state === undefined || raw === undefined) return { alive: false, stale: false };
-  if (isPidAlive(state.pid)) return { alive: true, stale: false, state, raw };
-  // pid 死亡 = stale。
-  return { alive: false, stale: true, state, raw };
-}
-
-/** 生バイト列を readDaemonState と同じ検査に掛ける。 */
-function parseDaemonState(raw: string): DaemonState | undefined {
-  try {
-    return asDaemonState(JSON.parse(raw));
-  } catch {
-    return undefined;
   }
 }

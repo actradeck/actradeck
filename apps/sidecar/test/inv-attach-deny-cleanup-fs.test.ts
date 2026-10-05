@@ -2,8 +2,10 @@
  * INV-ATTACH-DENY-CLEANUP (fs 注入・SEC-ENV-4 R2): `node:fs` を素通しで包み、ほかの test に影響させずに
  * 2 つを固定する。
  *
- * - QA-DC-R2-3: `checkExistingDaemon` は stale 判定に使う state と、CAS の比較値 (`raw`) を**同じ 1 回の
- *   読み取り**から取る。2 回読むと、その間に書かれた state を判定と比較で取り違える。
+ * - QA-DC-R2-3 / TDA-DC-R3-5: state の唯一の reader `readState` は、判定に使う state と CAS の比較値
+ *   (`raw`) を**同じ 1 回の読み取り**から取る。2 回読むと、その間に書かれた state を判定と比較で取り違える。
+ *   読取り回数ではなく、1 回目の読み取りの直後に state file を書き換える注入で挙動として固定する (読む API
+ *   を変えても、2 回目の読み取りは書き換え後の中身を返すので RED になる)。
  * - SEC-DC-R2-2: state の削除に失敗したら、後始末は「消しました」と報告しない (戻り値も区別する)。
  *
  * temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。
@@ -16,20 +18,29 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cleanupStaleWiring, resolveSettingsPath } from "../src/daemon-cli.js";
-import { checkExistingDaemon, stateFilePath, writeDaemonState } from "../src/daemon-state.js";
+import { canonicalPath, readState, scopeArtifacts, writeDaemonState } from "../src/daemon-state.js";
 import { mergeAttachHooks } from "../src/settings-merge.js";
 
-/** 注入: 指定 path の readFileSync 回数を数える / 指定 path の rmSync を失敗させる。未設定なら素通し。 */
+/**
+ * 注入: 指定 path を readFileSync で 1 回読んだ直後に、その file を `rewriteTo` の中身へ書き換える (1 回だけ) /
+ * 指定 path の rmSync を失敗させる。未設定なら素通し。
+ */
 const fsHook = vi.hoisted(() => ({
-  countPath: undefined as string | undefined,
-  reads: 0,
+  rewritePath: undefined as string | undefined,
+  rewriteTo: "",
+  rewrites: 0,
   failRmPath: undefined as string | undefined,
 }));
 vi.mock("node:fs", async (importOriginal) => {
   const orig = await importOriginal<typeof import("node:fs")>();
   const readFileSync = ((...args: Parameters<typeof orig.readFileSync>) => {
-    if (fsHook.countPath !== undefined && String(args[0]) === fsHook.countPath) fsHook.reads += 1;
-    return orig.readFileSync(...args);
+    const out = orig.readFileSync(...args);
+    if (fsHook.rewritePath !== undefined && String(args[0]) === fsHook.rewritePath) {
+      fsHook.rewritePath = undefined;
+      fsHook.rewrites += 1;
+      orig.writeFileSync(String(args[0]), fsHook.rewriteTo);
+    }
+    return out;
   }) as typeof orig.readFileSync;
   const rmSync = ((...args: Parameters<typeof orig.rmSync>) => {
     if (fsHook.failRmPath !== undefined && String(args[0]) === fsHook.failRmPath) {
@@ -51,9 +62,9 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "actradeck-denyfs-cwd-"));
 });
 afterEach(() => {
-  fsHook.countPath = undefined;
+  fsHook.rewritePath = undefined;
   fsHook.failRmPath = undefined;
-  fsHook.reads = 0;
+  fsHook.rewrites = 0;
   rmSync(home, { recursive: true, force: true });
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -70,13 +81,14 @@ function plantStale(): { settingsPath: string; statePath: string; stateRaw: stri
     tokenMode: "literal",
     token: "tok-denyfs-0123456789abcdef0123456789",
   });
-  const statePath = stateFilePath(settingsPath, home);
+  const statePath = scopeArtifacts(settingsPath, home).statePath;
   writeDaemonState(statePath, {
     pid: spawnSync(process.execPath, ["-e", ""]).pid,
     endpoint,
-    wiredSettingsPaths: [settingsPath],
     scope: "project-local",
+    settingsPath: canonicalPath(settingsPath),
     startedAt: new Date(0).toISOString(),
+    tokenMode: "literal",
   });
   return { settingsPath, statePath, stateRaw: readFileSync(statePath, "utf8") };
 }
@@ -84,18 +96,55 @@ function plantStale(): { settingsPath: string; statePath: string; stateRaw: stri
 describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗を「消しました」と報告しない (fs 注入)", () => {
   let executed = 0;
   afterAll(() => {
-    expect(executed).toBe(2);
+    expect(executed).toBe(3);
   });
 
-  it("checkExistingDaemon は state file を 1 回だけ読み、判定した state と raw は同じ読み取りから来る (QA-DC-R2-3)", () => {
-    const { statePath, stateRaw } = plantStale();
-    fsHook.countPath = statePath;
-    fsHook.reads = 0;
-    const existing = checkExistingDaemon(statePath);
-    expect(fsHook.reads).toBe(1);
-    expect(existing.stale).toBe(true);
-    expect(existing.raw).toBe(stateRaw);
-    expect(JSON.parse(existing.raw as string)).toEqual(existing.state);
+  it("readState が判定した state と raw は同じ 1 回の読み取りから来る (読み取りの直後の書き換えを拾わない・QA-DC-R2-3 / TDA-DC-R3-5)", () => {
+    const { settingsPath, statePath, stateRaw } = plantStale();
+    const expectation = {
+      settingsPath: canonicalPath(settingsPath),
+      scope: "project-local",
+    } as const;
+    // 書き換え後の中身は、同じ形で pid と endpoint だけが違う state (2 回目に読めば別の値になる)。
+    const rewritten = stateRaw.replace(/"pid": \d+/, '"pid": 1').replace(":9/hook", ":1/hook");
+    expect(rewritten).not.toBe(stateRaw);
+    fsHook.rewriteTo = rewritten;
+    fsHook.rewritePath = statePath;
+    const read = readState(statePath, expectation);
+    expect(fsHook.rewrites).toBe(1);
+    expect(readFileSync(statePath, "utf8")).toBe(rewritten);
+    expect(read.kind).toBe("state");
+    if (read.kind !== "state") throw new Error("unreachable");
+    expect(read.raw).toBe(stateRaw);
+    expect(read.state.endpoint).toBe("http://127.0.0.1:9/hook");
+    expect(read.state.pid).toBe((JSON.parse(stateRaw) as { pid: number }).pid);
+    // 対照 (POSITIVE): 注入が無ければ同じ reader は書き換え後の中身をそのまま読む。
+    const again = readState(statePath, expectation);
+    expect(again.kind === "state" ? again.raw : undefined).toBe(rewritten);
+    expect(again.kind === "state" ? again.state.endpoint : undefined).toBe(
+      "http://127.0.0.1:1/hook",
+    );
+    executed += 1;
+  });
+
+  it("後始末は判定に使った読み取りのバイト列で CAS する (読み取りの直後に state が書き換わったら消さない)", () => {
+    const { settingsPath, statePath, stateRaw } = plantStale();
+    const rewritten = stateRaw.replace(/"pid": \d+/, '"pid": 1');
+    fsHook.rewriteTo = rewritten;
+    fsHook.rewritePath = statePath;
+    const logs: string[] = [];
+    const res = cleanupStaleWiring({
+      statePath,
+      settingsPath,
+      scope: "project-local",
+      cwd,
+      writeApproved: true,
+      log: (m) => logs.push(m),
+    });
+    expect(fsHook.rewrites).toBe(1);
+    expect(res).toBe("detached-state-changed");
+    expect(readFileSync(statePath, "utf8")).toBe(rewritten);
+    expect(logs.join("\n")).not.toContain(DETACHED_MSG);
     executed += 1;
   });
 

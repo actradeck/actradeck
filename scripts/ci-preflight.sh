@@ -354,6 +354,8 @@ run_verify_job() {
   # sidecar-attach-sighup suites (attach refused-start cleanup / SIGHUP detach INV ran).
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-deny-cleanup
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-sighup
+  # Task 01a10c42 PR-A: mirrors ci.yml - same report, the attach state trust INV ran.
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-state-trust
 
   step "verify: Test (webui coverage gate)"
   pnpm --filter @actradeck/webui run test:coverage

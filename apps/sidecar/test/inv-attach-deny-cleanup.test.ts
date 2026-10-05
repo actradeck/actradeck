@@ -38,11 +38,13 @@ import {
   type StartOutcome,
 } from "../src/daemon-cli.js";
 import {
-  isPidAlive,
+  canonicalPath,
+  type DaemonState,
   removeDaemonStateIfUnchanged,
-  stateFilePath,
+  scopeArtifacts,
   writeDaemonState,
 } from "../src/daemon-state.js";
+import { captureSelfIdentity } from "../src/process-identity.js";
 import {
   ACTRADECK_MARKER,
   computeDetachedSettings,
@@ -55,16 +57,16 @@ import { HOOK_TOKEN_HEADER } from "../src/settings-injection.js";
 import { tsxBin } from "./helpers/lock-test-support.js";
 
 /**
- * 競合の決定的注入点 (R1 unblock・TDA の probe R2 と同じ形)。`checkExistingDaemon` の戻り値は本物のまま、
- * 戻る直前に `race.fire` を 1 回だけ同期実行する。未設定なら素通し (他の test には影響しない)。
+ * 競合の決定的注入点 (R1 unblock・TDA の probe R2 と同じ形)。state の唯一の reader `readState` の戻り値は
+ * 本物のまま、戻る直前に `race.fire` を 1 回だけ同期実行する。未設定なら素通し (他の test には影響しない)。
  */
 const race = vi.hoisted(() => ({ fire: undefined as undefined | (() => void), fired: 0 }));
 vi.mock("../src/daemon-state.js", async (importOriginal) => {
   const orig = await importOriginal<typeof import("../src/daemon-state.js")>();
   return {
     ...orig,
-    checkExistingDaemon: (p: string) => {
-      const r = orig.checkExistingDaemon(p);
+    readState: (...a: Parameters<typeof orig.readState>) => {
+      const r = orig.readState(...a);
       const f = race.fire;
       if (f !== undefined) {
         race.fire = undefined;
@@ -116,8 +118,30 @@ function deadPid(): number {
   const r = spawnSync(process.execPath, ["-e", ""]);
   const pid = r.pid;
   expect(Number.isInteger(pid) && pid > 0).toBe(true);
-  expect(isPidAlive(pid)).toBe(false);
+  expect(() => process.kill(pid, 0)).toThrow(/ESRCH/);
   return pid;
+}
+
+/**
+ * runStart が書くのと同じ形の state (新 shape・自プロセスの同一性つき・token mode は残骸の配線と同じ)。
+ * pid と endpoint だけを差し替える。pid が自プロセスなら同一性も一致する (= 生きている daemon)。
+ */
+function stateOf(
+  settingsPath: string,
+  scope: AttachScope,
+  pid: number,
+  endpoint: string,
+): DaemonState {
+  const identity = captureSelfIdentity();
+  return {
+    pid,
+    endpoint,
+    scope,
+    settingsPath: canonicalPath(settingsPath),
+    startedAt: new Date().toISOString(),
+    tokenMode: scope === "project" ? "env" : "literal",
+    ...(identity !== undefined ? { procIdentity: identity } : {}),
+  };
 }
 
 /** listen して閉じた (= 今は誰も bind していない) loopback port。 */
@@ -144,11 +168,7 @@ interface Residue {
  * crash した daemon の残骸を作る: 利用者 hook + 死んだ port を向いた ActraDeck 配線 + state file。
  * 配線は本番と同じ mergeAttachHooks で書く (手書きの entry を作らない)。
  */
-async function plantResidue(
-  scope: AttachScope,
-  pid: number,
-  extraWired: readonly string[] = [],
-): Promise<Residue> {
+async function plantResidue(scope: AttachScope, pid: number): Promise<Residue> {
   const settingsPath = resolveSettingsPath(scope, cwd, home);
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(
@@ -168,14 +188,8 @@ async function plantResidue(
     tokenMode,
     ...(tokenMode === "literal" ? { token: GOOD_TOKEN } : {}),
   });
-  const statePath = stateFilePath(settingsPath, home);
-  writeDaemonState(statePath, {
-    pid,
-    endpoint: deadEndpoint,
-    wiredSettingsPaths: [settingsPath, ...extraWired],
-    scope,
-    startedAt: new Date(0).toISOString(),
-  });
+  const statePath = scopeArtifacts(settingsPath, home).statePath;
+  writeDaemonState(statePath, stateOf(settingsPath, scope, pid, deadEndpoint));
   const settingsBefore = readFileSync(settingsPath, "utf8");
   expect(actradeckEntries(settingsPath).length).toBeGreaterThan(0);
   expect(settingsBefore).toContain(deadEndpoint);
@@ -482,13 +496,10 @@ describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daem
       const { rt } = makeRuntime(logs, row.runtime, {
         ...(row.confirm !== undefined ? { confirm: row.confirm } : {}),
         onStarted: () => {
-          writeDaemonState(r.statePath, {
-            pid: process.pid,
-            endpoint: r.deadEndpoint,
-            wiredSettingsPaths: [r.settingsPath],
-            scope: row.scope,
-            startedAt: new Date(1).toISOString(),
-          });
+          writeDaemonState(
+            r.statePath,
+            stateOf(r.settingsPath, row.scope, process.pid, r.deadEndpoint),
+          );
           aliveState = readFileSync(r.statePath, "utf8");
         },
       });
@@ -520,12 +531,22 @@ describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daem
 });
 
 describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
-  it("state が当該 scope 以外の settings を含むなら書かない (state から別 file への書込を誘導させない)", async () => {
+  it("state が当該 scope 以外の settings を記録していたら corrupt として書かない (state から別 file への書込を誘導させない)", async () => {
     const other = join(home, "elsewhere", "settings.json");
     mkdirSync(dirname(other), { recursive: true });
     writeFileSync(other, JSON.stringify({ hooks: {} }));
     const otherBefore = readFileSync(other, "utf8");
-    const r = await plantResidue("project-local", deadPid(), [other]);
+    const r = await plantResidue("project-local", deadPid());
+    // 旧い形 (wiredSettingsPaths) で当該 scope と別 file の 2 件を記録した state に差し替える。
+    const legacy = {
+      pid: deadPid(),
+      endpoint: r.deadEndpoint,
+      wiredSettingsPaths: [r.settingsPath, other],
+      scope: "project-local",
+      startedAt: new Date(0).toISOString(),
+    };
+    writeFileSync(r.statePath, JSON.stringify(legacy));
+    const stateBefore = readFileSync(r.statePath, "utf8");
     const logs: string[] = [];
     const res = cleanupStaleWiring({
       statePath: r.statePath,
@@ -535,11 +556,12 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
       writeApproved: true,
       log: (m) => logs.push(m),
     });
-    expect(res).toBe("left-needs-confirm");
+    expect(res).toBe("state-invalid");
     expect(readFileSync(r.settingsPath, "utf8")).toBe(r.settingsBefore);
     expect(readFileSync(other, "utf8")).toBe(otherBefore);
-    expect(readFileSync(r.statePath, "utf8")).toBe(r.stateBefore);
+    expect(readFileSync(r.statePath, "utf8")).toBe(stateBefore);
     expect(logs.join("\n")).toContain(`${STOP_HINT} project-local --cwd ${cwd}`);
+    expect(logs.join("\n")).not.toContain(DETACHED_MSG);
     // 対照: 当該 scope だけなら外す。
     const r2 = await plantResidue("project-local", deadPid());
     expect(
@@ -651,13 +673,10 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
 
     // daemon stop は利用者が明示した停止なので endpoint を問わず全部外す (runStop は onlyEndpoint を渡さない)。
     writeFileSync(r.settingsPath, JSON.stringify(a));
-    writeDaemonState(r.statePath, {
-      pid: deadPid(),
-      endpoint: r.deadEndpoint,
-      wiredSettingsPaths: [r.settingsPath],
-      scope: "project-local",
-      startedAt: new Date(0).toISOString(),
-    });
+    writeDaemonState(
+      r.statePath,
+      stateOf(r.settingsPath, "project-local", deadPid(), r.deadEndpoint),
+    );
     runStop(parseDaemonArgs(["daemon", "stop"], cwd), {
       home,
       log: () => undefined,
@@ -669,13 +688,12 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
 
   it("state の削除は判定に使ったバイト列と同じときだけ (CAS)", () => {
     const statePath = join(home, ".actradeck", "daemon", "cas.json");
-    const st = {
-      pid: 1,
-      endpoint: "http://127.0.0.1:1/hook",
-      wiredSettingsPaths: [],
-      scope: "project-local",
-      startedAt: new Date(0).toISOString(),
-    };
+    const st = stateOf(
+      join(home, "cas-settings.json"),
+      "project-local",
+      1,
+      "http://127.0.0.1:1/hook",
+    );
     writeDaemonState(statePath, st);
     const raw = readFileSync(statePath, "utf8");
     writeDaemonState(statePath, { ...st, startedAt: new Date(1).toISOString() });
@@ -692,7 +710,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     const logs: string[] = [];
     expect(
       cleanupStaleWiring({
-        statePath: stateFilePath(settingsPath, home),
+        statePath: scopeArtifacts(settingsPath, home).statePath,
         settingsPath,
         scope: "project-local",
         cwd,
@@ -745,6 +763,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     expect(stop.status).toBe("stopped");
     expect(stop.detached).toBe(true);
     expect(stop.killedPid).toBeUndefined(); // 死んだ pid には何も送れていない
+    expect(stop.kill).toBe("skipped-dead");
     expect(actradeckEntries(r.settingsPath)).toEqual([]);
     expect(existsSync(r.statePath)).toBe(false);
   });
@@ -843,17 +862,14 @@ describe("INV-ATTACH-DENY-CLEANUP: 記録外の ActraDeck entry が残るなら 
   it("判定の後に state が書き換わっていたら detached-state-changed を返し、state を消さない (QA-DC-R2-2 / R2-3)", async () => {
     const r = await plantResidue("project-local", deadPid());
     let rewritten = "";
-    // checkExistingDaemon が state を読んだ直後 (戻る直前) に別の daemon が state を書く。後始末が判定と
+    // readState が state を読んだ直後 (戻る直前) に別の daemon が state を書く。後始末が判定と
     // 別の読み取りで CAS の比較値を取ると、書き換え後の値と一致して消してしまう。
     race.fired = 0;
     race.fire = () => {
-      writeDaemonState(r.statePath, {
-        pid: process.pid,
-        endpoint: "http://127.0.0.1:1/hook",
-        wiredSettingsPaths: [r.settingsPath],
-        scope: "project-local",
-        startedAt: new Date(2).toISOString(),
-      });
+      writeDaemonState(
+        r.statePath,
+        stateOf(r.settingsPath, "project-local", process.pid, "http://127.0.0.1:1/hook"),
+      );
       rewritten = readFileSync(r.statePath, "utf8");
     };
     const logs: string[] = [];
@@ -1039,13 +1055,10 @@ describe("INV-ATTACH-DENY-CLEANUP: 並走起動との競合 — 後始末の判�
         aCount = actradeckUrls(r.settingsPath).filter((u) => u === hookEndpoint).length;
       };
       const aWriteState = (): void => {
-        writeDaemonState(r.statePath, {
-          pid: process.pid,
-          endpoint: hookEndpoint,
-          wiredSettingsPaths: [r.settingsPath],
-          scope: "project-local",
-          startedAt: new Date().toISOString(),
-        });
+        writeDaemonState(
+          r.statePath,
+          stateOf(r.settingsPath, "project-local", process.pid, hookEndpoint),
+        );
         aState = readFileSync(r.statePath, "utf8");
       };
       if (interleave === "between-merge-and-state") aMerge();
@@ -1128,7 +1141,7 @@ const sidecarRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 describe("INV-ATTACH-SIGHUP-DETACH: 実 attach CLI は SIGHUP で detach + shutdown する (SEC-ENV-4)", () => {
   it("SIGHUP (端末クローズ) で settings から ActraDeck entry が消え state も消える", async () => {
     const settingsPath = resolveSettingsPath("project-local", cwd, home);
-    const statePath = stateFilePath(settingsPath, home);
+    const statePath = scopeArtifacts(settingsPath, home).statePath;
     // 実 CLI (src/cli.ts を tsx で)。新しいプロセスグループで起動し、端末クローズと同じく SIGHUP を
     // グループへ送る。env は最小限 (実 HOME・token・backend へは触れない)。
     const child = spawn(tsxBin, [join(sidecarRoot, "src", "cli.ts"), "attach"], {
