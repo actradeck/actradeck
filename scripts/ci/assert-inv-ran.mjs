@@ -180,18 +180,20 @@ export const SUITES = {
   },
   // Task 01a10c42 PR-A (Triangle ADR 01a10ddb D3 / D7): the attach state trust rule (artifact
   // paths derived from the realpath of the settings path, the single 3-way state reader and its
-  // shape table, the corrupt branch) and the process identity check before `daemon stop` signals
-  // a pid (real child processes). `minTests` is the exact count in the full sidecar report this
-  // step reads, measured on Linux when the entry was added: 64 = 3 (artifact paths) + 36 (shape
-  // table: 4 accepted + 30 corrupt rows + not-JSON/absent + writer check) + 2 (corrupt branch)
-  // + 7 (stop vs identity, real processes) + 2 (alive judgement) + 14 (identity branches with
-  // injected OS sources + parsers), all in inv-attach-state-trust.test.ts. Five rows run on Linux
-  // only (`it.runIf`), so the count is lower elsewhere; CI runs on Linux. Its in-file afterAll
-  // counters catch a skipped row; this entry also catches a skipped describe.
+  // shape table, the corrupt branch, the fallback read of the path older builds used, and the
+  // project / user scopes that share one settings file when cwd is the home directory) and the
+  // process identity check before `daemon stop` signals a pid (real child processes). `minTests`
+  // is the exact count in the full sidecar report this step reads, measured on Linux: 70 = 3
+  // (artifact paths) + 36 (shape table: 4 accepted + 30 corrupt rows + not-JSON/absent + writer
+  // check) + 2 (corrupt branch) + 7 (stop vs identity, real processes) + 2 (alive judgement)
+  // + 4 (fallback to the older state path) + 2 (cwd = home, one real attach CLI) + 14 (identity
+  // branches with injected OS sources + parsers), all in inv-attach-state-trust.test.ts. Five
+  // rows run on Linux only (`it.runIf`), so the count is lower elsewhere; CI runs on Linux. Its
+  // in-file afterAll counters catch a skipped row; this entry also catches a skipped describe.
   "sidecar-attach-state-trust": {
     label: "sidecar attach state trust / process identity INV (INV-ATTACH-STATE-TRUST)",
     pattern: "INV-ATTACH-STATE-TRUST",
-    minTests: 64,
+    minTests: 70,
   },
 };
 

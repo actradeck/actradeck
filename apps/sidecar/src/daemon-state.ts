@@ -10,7 +10,10 @@
  *   ({@link scopeArtifacts})。state の中身から path を取り出して読み書きしない。
  * - state の読み取りは {@link readState} 1 本で、結果は `absent | corrupt | state` の 3 値。形の検証は
  *   {@link asDaemonState} 1 か所。記録された `settingsPath` と `scope` は導出値との**整合検査**にだけ使い、
- *   一致しなければ corrupt (pid も信用しない)。
+ *   一致しなければ corrupt (pid も信用しない)。scope ラベルは、別の scope が**同じ物理 settings file** を
+ *   指すとき (cwd が home で project と user が同じ file) だけ、その scope のラベルも受け入れる。
+ * - 旧い dist は state path を symlink を解決しない settings path から導出していた。新しい path に state が
+ *   無いときだけ、reader の中で旧い path を読む (symlink を含まない path では同じ path なので何もしない)。
  */
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, rmSync } from "node:fs";
@@ -22,7 +25,7 @@ import type { ProcIdentity } from "./process-identity.js";
 import { HOOK_TOKEN_ENV_VAR, type TokenMode } from "./settings-merge.js";
 
 export type AttachScope = "project-local" | "project" | "user";
-const ATTACH_SCOPES: readonly string[] = ["project-local", "project", "user"];
+export const ATTACH_SCOPES: readonly AttachScope[] = ["project-local", "project", "user"];
 
 export interface DaemonState {
   readonly pid: number;
@@ -79,6 +82,13 @@ export interface ScopeArtifacts {
   /** 正規化済み settings path (state の settingsPath と照合する値)。 */
   readonly canonicalSettingsPath: string;
   readonly statePath: string;
+  /** symlink を解決しない settings path (`resolve()`)。旧い dist が state に書いた値。 */
+  readonly lexicalSettingsPath: string;
+  /**
+   * 旧い dist の state path (lexical な settings path の scopeHash)。symlink を含まない path では
+   * statePath と同じ。新しい path に state が無いときだけ {@link readState} が読む。
+   */
+  readonly legacyStatePath: string;
   /** scope lock (PR-B で使う・ここでは導出だけ)。 */
   readonly lockPath: string;
   /** hook token file (T-B で使う・ここでは導出だけ)。 */
@@ -91,12 +101,15 @@ export interface ScopeArtifacts {
  */
 export function scopeArtifacts(settingsPath: string, home: string = homedir()): ScopeArtifacts {
   const canonicalSettingsPath = canonicalPath(settingsPath);
+  const lexicalSettingsPath = resolve(settingsPath);
   const scopeKey = scopeHash(canonicalSettingsPath);
   const dir = daemonStateDir(home);
   return {
     scopeKey,
     canonicalSettingsPath,
     statePath: join(dir, `${scopeKey}.json`),
+    lexicalSettingsPath,
+    legacyStatePath: join(dir, `${scopeHash(lexicalSettingsPath)}.json`),
     lockPath: join(dir, `${scopeKey}.lock`),
     tokenPath: join(dir, `${scopeKey}.hook-token`),
   };
@@ -105,7 +118,11 @@ export function scopeArtifacts(settingsPath: string, home: string = homedir()): 
 /** {@link asDaemonState} が照合する導出値。 */
 export interface StateExpectation {
   readonly settingsPath: string;
-  readonly scope: AttachScope;
+  /**
+   * 受け入れる scope ラベル。要求した scope と、同じ物理 settings file を指す scope だけ
+   * (daemon-cli の `acceptedScopes` が導出する)。
+   */
+  readonly scopes: readonly AttachScope[];
 }
 
 const ENDPOINT_RE = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/hook$/;
@@ -146,9 +163,8 @@ export function asDaemonState(parsed: unknown, expect: StateExpectation): Daemon
   if (typeof endpoint !== "string") return undefined;
   const port = ENDPOINT_RE.exec(endpoint)?.[1];
   if (port === undefined || Number(port) < 1 || Number(port) > 65535) return undefined;
-  if (typeof scope !== "string" || !ATTACH_SCOPES.includes(scope) || scope !== expect.scope) {
-    return undefined;
-  }
+  const label = expect.scopes.find((s) => s === scope);
+  if (label === undefined) return undefined;
   if (typeof startedAt !== "string" || !Number.isFinite(Date.parse(startedAt))) return undefined;
   let procIdentity: ProcIdentity | undefined;
   if (parsed.procIdentity !== undefined) {
@@ -175,7 +191,7 @@ export function asDaemonState(parsed: unknown, expect: StateExpectation): Daemon
   return {
     pid,
     endpoint,
-    scope: expect.scope,
+    scope: label,
     settingsPath: expect.settingsPath,
     startedAt,
     tokenMode,
@@ -183,34 +199,54 @@ export function asDaemonState(parsed: unknown, expect: StateExpectation): Daemon
   };
 }
 
-/** {@link readState} の結果。`raw` は判定に使った state の生バイト列 (CAS 削除の比較値)。 */
+/**
+ * {@link readState} の結果。`path` は読んだ state file (新しい path か旧い path)・`raw` は判定に使った
+ * state の生バイト列 (CAS 削除の比較値)。後始末・stop が消すのは `path` の file。
+ */
 export type StateRead =
   | { readonly kind: "absent" }
-  | { readonly kind: "corrupt"; readonly raw?: string }
-  | { readonly kind: "state"; readonly state: DaemonState; readonly raw: string };
+  | { readonly kind: "corrupt"; readonly path: string; readonly raw?: string }
+  | {
+      readonly kind: "state";
+      readonly path: string;
+      readonly state: DaemonState;
+      readonly raw: string;
+    };
 
 /**
- * state file を 1 回だけ読み、3 値で返す (唯一の reader)。判定に使う state と CAS の比較値 (`raw`) は
- * 同じ 1 回の読み取りから取る。無ければ absent、読めない・JSON でない・形が合わない・導出値と整合しない
- * なら corrupt。
+ * scope の state を読み、3 値で返す (唯一の reader)。新しい path を読み、そこに state が**無い**ときだけ
+ * 旧い dist の path ({@link ScopeArtifacts.legacyStatePath}) を読む (旧い path の state は lexical な
+ * settings path と照合する)。新しい path が corrupt なら旧い path は読まない。
  */
-export function readState(statePath: string, expect: StateExpectation): StateRead {
+export function readState(art: ScopeArtifacts, scopes: readonly AttachScope[]): StateRead {
+  const primary = readStateAt(art.statePath, { settingsPath: art.canonicalSettingsPath, scopes });
+  if (primary.kind !== "absent" || art.legacyStatePath === art.statePath) return primary;
+  return readStateAt(art.legacyStatePath, { settingsPath: art.lexicalSettingsPath, scopes });
+}
+
+/**
+ * state file を 1 回だけ読み、3 値で返す。判定に使う state と CAS の比較値 (`raw`) は同じ 1 回の読み取り
+ * から取る。無ければ absent、読めない・JSON でない・形が合わない・導出値と整合しないなら corrupt。
+ */
+function readStateAt(statePath: string, expect: StateExpectation): StateRead {
   let raw: string;
   try {
     raw = readFileSync(statePath, "utf8");
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "ENOENT"
       ? { kind: "absent" }
-      : { kind: "corrupt" };
+      : { kind: "corrupt", path: statePath };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { kind: "corrupt", raw };
+    return { kind: "corrupt", path: statePath, raw };
   }
   const state = asDaemonState(parsed, expect);
-  return state === undefined ? { kind: "corrupt", raw } : { kind: "state", state, raw };
+  return state === undefined
+    ? { kind: "corrupt", path: statePath, raw }
+    : { kind: "state", path: statePath, state, raw };
 }
 
 /**
@@ -226,7 +262,7 @@ export function writeDaemonState(path: string, state: DaemonState): void {
 /** {@link writeDaemonState} が書ける形か (読む側と同じ検証)。配線より前に呼んで、配線だけ残る経路を作らない。 */
 export function assertDaemonStateShape(state: DaemonState): void {
   if (
-    asDaemonState(state, { settingsPath: state.settingsPath, scope: state.scope }) === undefined
+    asDaemonState(state, { settingsPath: state.settingsPath, scopes: [state.scope] }) === undefined
   ) {
     throw new Error("daemon state の形が不正なため書き込みません");
   }

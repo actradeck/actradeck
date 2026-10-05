@@ -549,6 +549,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     const stateBefore = readFileSync(r.statePath, "utf8");
     const logs: string[] = [];
     const res = cleanupStaleWiring({
+      home,
       statePath: r.statePath,
       settingsPath: r.settingsPath,
       scope: "project-local",
@@ -566,6 +567,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     const r2 = await plantResidue("project-local", deadPid());
     expect(
       cleanupStaleWiring({
+        home,
         statePath: r2.statePath,
         settingsPath: r2.settingsPath,
         scope: "project-local",
@@ -582,6 +584,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     writeFileSync(r.settingsPath, "{ not json");
     const logs: string[] = [];
     const res = cleanupStaleWiring({
+      home,
       statePath: r.statePath,
       settingsPath: r.settingsPath,
       scope: "project-local",
@@ -603,6 +606,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
       writeFileSync(r.settingsPath, "{ not json");
       const logs: string[] = [];
       const res = cleanupStaleWiring({
+        home,
         statePath: r.statePath,
         settingsPath: r.settingsPath,
         scope,
@@ -657,6 +661,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     // 拒否経路の後始末 (state.endpoint = 死んだ endpoint) も同じ結果。
     expect(
       cleanupStaleWiring({
+        home,
         statePath: r.statePath,
         settingsPath: r.settingsPath,
         scope: "project-local",
@@ -710,6 +715,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     const logs: string[] = [];
     expect(
       cleanupStaleWiring({
+        home,
         statePath: scopeArtifacts(settingsPath, home).statePath,
         settingsPath,
         scope: "project-local",
@@ -874,6 +880,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 記録外の ActraDeck entry が残るなら 
     };
     const logs: string[] = [];
     const res = cleanupStaleWiring({
+      home,
       statePath: r.statePath,
       settingsPath: r.settingsPath,
       scope: "project-local",
@@ -1001,6 +1008,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 残存判定の形 — marker の無い legac
     const stateBefore = readFileSync(r.statePath, "utf8");
     const logs: string[] = [];
     const res = cleanupStaleWiring({
+      home,
       statePath: r.statePath,
       settingsPath: r.settingsPath,
       scope: "project-local",

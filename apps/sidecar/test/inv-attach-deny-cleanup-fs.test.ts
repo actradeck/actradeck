@@ -101,16 +101,13 @@ describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗
 
   it("readState が判定した state と raw は同じ 1 回の読み取りから来る (読み取りの直後の書き換えを拾わない・QA-DC-R2-3 / TDA-DC-R3-5)", () => {
     const { settingsPath, statePath, stateRaw } = plantStale();
-    const expectation = {
-      settingsPath: canonicalPath(settingsPath),
-      scope: "project-local",
-    } as const;
+    const art = scopeArtifacts(settingsPath, home);
     // 書き換え後の中身は、同じ形で pid と endpoint だけが違う state (2 回目に読めば別の値になる)。
     const rewritten = stateRaw.replace(/"pid": \d+/, '"pid": 1').replace(":9/hook", ":1/hook");
     expect(rewritten).not.toBe(stateRaw);
     fsHook.rewriteTo = rewritten;
     fsHook.rewritePath = statePath;
-    const read = readState(statePath, expectation);
+    const read = readState(art, ["project-local"]);
     expect(fsHook.rewrites).toBe(1);
     expect(readFileSync(statePath, "utf8")).toBe(rewritten);
     expect(read.kind).toBe("state");
@@ -119,7 +116,7 @@ describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗
     expect(read.state.endpoint).toBe("http://127.0.0.1:9/hook");
     expect(read.state.pid).toBe((JSON.parse(stateRaw) as { pid: number }).pid);
     // 対照 (POSITIVE): 注入が無ければ同じ reader は書き換え後の中身をそのまま読む。
-    const again = readState(statePath, expectation);
+    const again = readState(art, ["project-local"]);
     expect(again.kind === "state" ? again.raw : undefined).toBe(rewritten);
     expect(again.kind === "state" ? again.state.endpoint : undefined).toBe(
       "http://127.0.0.1:1/hook",
@@ -134,6 +131,7 @@ describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗
     fsHook.rewritePath = statePath;
     const logs: string[] = [];
     const res = cleanupStaleWiring({
+      home,
       statePath,
       settingsPath,
       scope: "project-local",
@@ -153,6 +151,7 @@ describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗
     fsHook.failRmPath = statePath;
     const logs: string[] = [];
     const res = cleanupStaleWiring({
+      home,
       statePath,
       settingsPath,
       scope: "project-local",
@@ -172,6 +171,7 @@ describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗
     const { settingsPath: s2, statePath: p2 } = plantStale();
     expect(
       cleanupStaleWiring({
+        home,
         statePath: p2,
         settingsPath: s2,
         scope: "project-local",

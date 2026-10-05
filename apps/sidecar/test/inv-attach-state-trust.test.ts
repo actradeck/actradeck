@@ -8,6 +8,10 @@
  * - corrupt: 拒否起動の後始末は書かずに `state-invalid`・`daemon stop` は全 detach + state 削除で kill しない。
  * - V8: `daemon stop` は記録 pid が記録した daemon と同一だと確かめられたときだけ SIGTERM を送る。生きている
  *   無関係の子プロセス (自分で spawn したもの) の pid を state に入れても、その子は止まらない。
+ * - upgrade の窓: 新しい path に state が無いときは、旧い dist の path (symlink を解決しない settings path の
+ *   scopeHash) を reader の中で読む。start / stop / status / 拒否起動の後始末がすべて同じ reader を通る。
+ * - cwd が home: project と user が同じ settings file を指すときは、どちらの scope ラベルの state も受け入れる
+ *   (別 file を指す scope のラベルは corrupt のまま)。
  *
  * temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。signal は自分で spawn した子にだけ届く。
  */
@@ -23,7 +27,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -56,6 +61,8 @@ import {
   type Signal0Result,
 } from "../src/process-identity.js";
 import { isActradeckEntry, mergeAttachHooks } from "../src/settings-merge.js";
+
+import { tsxBin } from "./helpers/lock-test-support.js";
 
 const LINUX = process.platform === "linux";
 const DEAD_ENDPOINT = "http://127.0.0.1:9/hook";
@@ -154,6 +161,9 @@ describe("INV-ATTACH-STATE-TRUST: scope の artifact path は realpath 正規化
       const a = scopeArtifacts(p, home);
       expect(a.scopeKey, scope).toBe(scopeHash(p));
       expect(a.canonicalSettingsPath, scope).toBe(p);
+      // 旧い dist の path も同じ path (fallback は何もしない)。
+      expect(a.lexicalSettingsPath, scope).toBe(p);
+      expect(a.legacyStatePath, scope).toBe(a.statePath);
       const dir = join(home, ".actradeck", "daemon");
       expect(a.statePath).toBe(join(dir, `${scopeHash(p)}.json`));
       expect(a.lockPath).toBe(join(dir, `${scopeHash(p)}.lock`));
@@ -197,10 +207,7 @@ describe("INV-ATTACH-STATE-TRUST: scope の artifact path は realpath 正規化
     try {
       expect(out.status).toBe("started");
       // runStart は新しい形で書く: 物理 settings path と、Linux では自プロセスの boot_id + start ticks。
-      const written = readState(out.statePath, {
-        settingsPath: settingsOf(),
-        scope: "project-local",
-      });
+      const written = readState(scopeArtifacts(settingsOf(), home), ["project-local"]);
       expect(written.kind).toBe("state");
       if (written.kind !== "state") throw new Error("unreachable");
       expect(written.state.settingsPath).toBe(settingsOf());
@@ -311,7 +318,7 @@ describe("INV-ATTACH-STATE-TRUST: state の形検証は 1 か所・legacy は要
     const { statePath } = scopeArtifacts(sp, home);
     mkdirSync(dirname(statePath), { recursive: true });
     writeFileSync(statePath, body);
-    return readState(statePath, { settingsPath: sp, scope: "project-local" });
+    return readState(scopeArtifacts(sp, home), ["project-local"]);
   };
 
   for (const [name, mut, mode] of ACCEPT) {
@@ -338,10 +345,8 @@ describe("INV-ATTACH-STATE-TRUST: state の形検証は 1 か所・legacy は要
   }
   it("corrupt: JSON でない / absent: file が無い", () => {
     expect(read("{ not json").kind).toBe("corrupt");
-    const missing = join(home, "nope.json");
-    expect(readState(missing, { settingsPath: settingsOf(), scope: "project-local" }).kind).toBe(
-      "absent",
-    );
+    rmSync(scopeArtifacts(settingsOf(), home).statePath);
+    expect(readState(scopeArtifacts(settingsOf(), home), ["project-local"]).kind).toBe("absent");
     rows += 2;
   });
   it("書く側も同じ検証を通す (読めない state は書かずに throw)", () => {
@@ -383,14 +388,14 @@ describe("INV-ATTACH-STATE-TRUST: corrupt な state は pid を信用しない (
       cwd,
       writeApproved: true,
     };
-    expect(cleanupStaleWiring({ ...base, log: (m) => logs.push(m) })).toBe("state-invalid");
+    expect(cleanupStaleWiring({ home, ...base, log: (m) => logs.push(m) })).toBe("state-invalid");
     expect(readFileSync(settingsPath, "utf8")).toBe(before);
     expect(readFileSync(statePath, "utf8")).toBe(raw);
     expect(logs.join("\n")).toContain(INVALID_MSG);
     expect(logs.join("\n")).toContain(`agentmon daemon stop --scope project-local --cwd ${cwd}`);
     plant({ pid: deadPid });
     const logs2: string[] = [];
-    expect(cleanupStaleWiring({ ...base, log: (m) => logs2.push(m) })).toBe("detached");
+    expect(cleanupStaleWiring({ home, ...base, log: (m) => logs2.push(m) })).toBe("detached");
     expect(entries(settingsPath)).toBe(0);
     expect(logs2.join("\n")).not.toContain(INVALID_MSG);
   });
@@ -538,6 +543,7 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
       ).rejects.toThrow("would start");
       expect(
         cleanupStaleWiring({
+          home,
           statePath,
           settingsPath,
           scope: "project-local",
@@ -580,6 +586,7 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
     expect(readFileSync(settingsPath, "utf8")).toBe(before);
     expect(
       cleanupStaleWiring({
+        home,
         statePath,
         settingsPath,
         scope: "project-local",
@@ -593,6 +600,224 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
     // 対照: 注入なしでは、この state (startedAt は子の起動より前) は stale (etime) として外れる。
     expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt(logs)).liveness).toBe("dead");
     expect(running(child)).toBe(true);
+  });
+});
+
+describe("INV-ATTACH-STATE-TRUST: 新しい path に state が無ければ旧い dist の path を同じ reader で読む (upgrade の窓)", () => {
+  /** symlink cwd で動く旧い dist の daemon の残り方: lexical な path の scopeHash に legacy 形の state。 */
+  function plantOld(pid: number, startedAt = new Date().toISOString()) {
+    const link = join(home, "link-to-cwd");
+    symlinkSync(cwd, link);
+    const settingsPath = resolveSettingsPath("project-local", link, home);
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    mergeAttachHooks({ settingsPath, endpoint: DEAD_ENDPOINT, tokenMode: "literal", token: TOKEN });
+    const art = scopeArtifacts(settingsPath, home);
+    // POSITIVE 対: symlink を含むので旧い path は新しい path と別。
+    expect(art.legacyStatePath).not.toBe(art.statePath);
+    const raw = JSON.stringify({
+      pid,
+      endpoint: DEAD_ENDPOINT,
+      wiredSettingsPaths: [art.lexicalSettingsPath],
+      scope: "project-local",
+      startedAt,
+    });
+    mkdirSync(dirname(art.legacyStatePath), { recursive: true });
+    writeFileSync(art.legacyStatePath, raw);
+    return { link, settingsPath, art, raw };
+  }
+
+  it("旧い path の生きた daemon: start は already-running・status は稼働中・拒否起動は触らない・stop は止めて外し旧い state を消す", async () => {
+    const child = await spawnBystander();
+    const { link, settingsPath, art, raw } = plantOld(child.pid);
+    const before = readFileSync(settingsPath, "utf8");
+    const logs: string[] = [];
+    const env = { wsUrl: "ws://x", dbPath: join(cwd, "u.db") };
+    expect((await runStart(parseDaemonArgs(["attach"], link), env, rt(logs))).status).toBe(
+      "already-running",
+    );
+    expect(runStatus(parseDaemonArgs(["daemon", "status"], link), rt(logs)).running).toBe(true);
+    const denied = await runStart(
+      parseDaemonArgs(["attach", "--token-mode", "env"], link),
+      env,
+      rt(logs),
+    );
+    expect(denied.status).toBe("denied-env-token-missing");
+    expect(readFileSync(settingsPath, "utf8")).toBe(before);
+    expect(readFileSync(art.legacyStatePath, "utf8")).toBe(raw);
+    const exited = new Promise<NodeJS.Signals | null>((r) =>
+      child.once("exit", (_c, sig) => r(sig)),
+    );
+    const stop = runStop(parseDaemonArgs(["daemon", "stop"], link), rt(logs));
+    expect(stop).toMatchObject({ status: "stopped", kill: "sent", killedPid: child.pid });
+    expect(await exited).toBe("SIGTERM");
+    expect(entries(settingsPath)).toBe(0);
+    expect(existsSync(art.legacyStatePath)).toBe(false);
+    expect(existsSync(art.statePath)).toBe(false);
+  });
+
+  it("旧い path の stale state: 拒否起動の後始末が配線を外し、旧い path の state を消す", async () => {
+    const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
+    const { link, settingsPath, art } = plantOld(deadPid);
+    const logs: string[] = [];
+    const out = await runStart(
+      parseDaemonArgs(["attach", "--token-mode", "env"], link),
+      { wsUrl: "ws://x", dbPath: join(cwd, "s.db") },
+      rt(logs),
+    );
+    expect(out.status).toBe("denied-env-token-missing");
+    expect(entries(settingsPath)).toBe(0);
+    expect(existsSync(art.legacyStatePath)).toBe(false);
+    expect(logs.join("\n")).toContain("stale state を消しました");
+  });
+
+  it("旧い path の stale state の上で起動が成功したら、新しい path に書いて旧い path の state を消す", async () => {
+    const deadPid = spawnSync(process.execPath, ["-e", ""]).pid;
+    const { link, art } = plantOld(deadPid);
+    const daemons: AttachDaemon[] = [];
+    const logs: string[] = [];
+    const out = await runStart(
+      parseDaemonArgs(["attach"], link),
+      { wsUrl: "ws://127.0.0.1:1/ingest/ws", dbPath: join(cwd, "n.db") },
+      {
+        ...rt(logs),
+        startDaemon: async (o) => {
+          const d = new AttachDaemon({ wsUrl: o.wsUrl, dbPath: o.dbPath, host: "127.0.0.1" });
+          const { hookEndpoint } = await d.start();
+          daemons.push(d);
+          return { daemon: d, hookEndpoint, hookToken: d.hookAuthToken };
+        },
+      },
+    );
+    try {
+      expect(out.status).toBe("started");
+      expect(logs.join("\n")).toContain(`stale state を検出 (pid=${deadPid} 死亡)`);
+      expect(existsSync(art.statePath)).toBe(true);
+      expect(existsSync(art.legacyStatePath)).toBe(false);
+    } finally {
+      await daemons[0]?.shutdown();
+      runStop(parseDaemonArgs(["daemon", "stop"], link), rt(logs));
+    }
+  });
+
+  it("新しい path に state があれば (corrupt でも) 旧い path は読まない", async () => {
+    const child = await spawnBystander();
+    const { link, art } = plantOld(child.pid);
+    writeFileSync(art.statePath, "{ not json");
+    const status = runStatus(parseDaemonArgs(["daemon", "status"], link), rt([]));
+    expect(status).toMatchObject({ running: false, corrupt: true });
+    // 対照 (POSITIVE): 新しい path を消せば旧い path の生きた daemon が見える。
+    rmSync(art.statePath);
+    expect(runStatus(parseDaemonArgs(["daemon", "status"], link), rt([])).running).toBe(true);
+  });
+});
+
+const sidecarRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+describe("INV-ATTACH-STATE-TRUST: cwd が home のとき project と user は同じ settings file を指し、どちらの scope でも止められる", () => {
+  it("実 attach CLI を user scope で home から起動 → `daemon stop --scope project` (cwd = home) が kill して外す", async () => {
+    const child = spawn(
+      tsxBin,
+      [join(sidecarRoot, "src", "cli.ts"), "attach", "--scope", "user", "--yes"],
+      {
+        cwd: home,
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: home,
+          ACTRADECK_WS_URL: "ws://127.0.0.1:1",
+          ACTRADECK_DB: join(home, "cli.db"),
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+        detached: true,
+      },
+    );
+    const pgid = child.pid as number;
+    let stderr = "";
+    child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
+    const groupGone = async (ms: number): Promise<boolean> => {
+      const deadline = Date.now() + ms;
+      for (;;) {
+        try {
+          process.kill(-pgid, 0);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ESRCH") return true;
+        }
+        if (Date.now() >= deadline) return false;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    };
+    try {
+      const deadline = Date.now() + 20_000;
+      while (!stderr.includes("常駐中") && Date.now() < deadline) {
+        if (await groupGone(0)) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(stderr, stderr).toContain("常駐中");
+      const userSettings = resolveSettingsPath("user", home, home);
+      expect(resolveSettingsPath("project", home, home)).toBe(userSettings);
+      expect(entries(userSettings)).toBeGreaterThan(0);
+      const logs: string[] = [];
+      const status = runStatus(
+        parseDaemonArgs(["daemon", "status", "--scope", "project"], home),
+        rt(logs),
+      );
+      expect(status.running).toBe(true);
+      expect(status.state?.scope).toBe("user");
+      const stop = runStop(
+        parseDaemonArgs(["daemon", "stop", "--scope", "project"], home),
+        rt(logs),
+      );
+      expect(stop.kill).toBe("sent");
+      expect(await groupGone(15_000), `attach CLI survived SIGTERM: ${stderr}`).toBe(true);
+      expect(entries(userSettings)).toBe(0);
+      expect(existsSync(scopeArtifacts(userSettings, home).statePath)).toBe(false);
+    } finally {
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch {
+        /* 既に終了 */
+      }
+      expect(await groupGone(5_000), "process group survived the group kill").toBe(true);
+    }
+  }, 40_000);
+
+  it("project ラベルの state も `--scope user` で止まる (cwd = home)・別 file を指す scope のラベルは corrupt のまま", async () => {
+    const child = await spawnBystander();
+    const userSettings = resolveSettingsPath("user", home, home);
+    mkdirSync(dirname(userSettings), { recursive: true });
+    mergeAttachHooks({ settingsPath: userSettings, endpoint: DEAD_ENDPOINT, tokenMode: "env" });
+    const art = scopeArtifacts(userSettings, home);
+    const state = (scope: AttachScope, settingsPath: string): DaemonState => ({
+      pid: child.pid,
+      endpoint: DEAD_ENDPOINT,
+      scope,
+      settingsPath: canonicalPath(settingsPath),
+      startedAt: new Date().toISOString(),
+      tokenMode: "env",
+    });
+    // 対照 (cwd ≠ home): project の settings file は user と別。user ラベルの state は corrupt で kill しない。
+    const projectSettings = resolveSettingsPath("project", cwd, home);
+    mkdirSync(dirname(projectSettings), { recursive: true });
+    writeFileSync(projectSettings, "{}");
+    writeDaemonState(
+      scopeArtifacts(projectSettings, home).statePath,
+      state("user", projectSettings),
+    );
+    const foreign = runStop(parseDaemonArgs(["daemon", "stop", "--scope", "project"], cwd), rt([]));
+    expect(foreign.kill).toBe("skipped-corrupt");
+    expect(running(child)).toBe(true);
+    // project-local は home でも別 file (settings.local.json): user ラベルは corrupt。
+    const localSettings = resolveSettingsPath("project-local", home, home);
+    writeDaemonState(scopeArtifacts(localSettings, home).statePath, state("user", localSettings));
+    expect(runStatus(parseDaemonArgs(["daemon", "status"], home), rt([])).corrupt).toBe(true);
+    // 同じ file: project ラベルの state を user scope で止める。
+    writeDaemonState(art.statePath, state("project", userSettings));
+    const exited = new Promise<NodeJS.Signals | null>((r) =>
+      child.once("exit", (_c, sig) => r(sig)),
+    );
+    const stop = runStop(parseDaemonArgs(["daemon", "stop", "--scope", "user"], home), rt([]));
+    expect(stop).toMatchObject({ status: "stopped", kill: "sent", killedPid: child.pid });
+    expect(await exited).toBe("SIGTERM");
+    expect(entries(userSettings)).toBe(0);
   });
 });
 
