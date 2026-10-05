@@ -29,6 +29,9 @@ function exitBlock(cause: HookShimCause): void {
   process.stderr.write(formatHookShimStderr(cause), () => exitWith(EXIT_BLOCK));
 }
 
+// Node 22 / Linux の pipe では EPIPE は write の callback に渡り、この listener を外しても
+// INV は緑のまま (変異で実測・callback と冗長)。'error' が listener 無しで emit されると例外で
+// exit 1 (= non-blocking) になるので、版差に備えて残す。
 process.stdout.on("error", () => exitBlock("output_failed"));
 // stderr にも書けないなら理由は伝えられないが、block の exit code だけは返す。
 process.stderr.on("error", () => exitWith(EXIT_BLOCK));

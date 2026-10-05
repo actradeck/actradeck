@@ -140,14 +140,14 @@ export const SUITES = {
   // table of failure sources; its in-file afterAll counter catches a skipped/early-returned
   // case, and this entry is the CI-side second layer that also refuses a skipped/todo suite
   // and - through `minTests` - a table that silently shrank. `minTests` is the exact count in
-  // the full sidecar report this step reads (measured 203 after the R1 unblock: 95 table cases
-  // in the real-process describe + 94 in-process (one case is process-only) + 2 entry wiring +
+  // the full sidecar report this step reads (measured 204 after the R1 unblock: 96 table cases
+  // in the real-process describe + 94 in-process (two cases are process-only) + 2 entry wiring +
   // 1 hold/cleanup + 1 deadline timer + 10 binding tests, all in
   // inv-hook-shim-fail-closed.test.ts). Raise it by hand when cases are added.
   "sidecar-hook-shim": {
     label: "sidecar PreToolUse hook shim (INV-HOOK-SHIM-FAIL-CLOSED)",
     pattern: "INV-HOOK-SHIM-FAIL-CLOSED",
-    minTests: 203,
+    minTests: 204,
   },
 };
 

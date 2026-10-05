@@ -38,13 +38,17 @@
 import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -206,6 +210,8 @@ interface Case {
   /** 変種の生成元にする (env = token を env から読む版 / allow = kill-switch 版)。 */
   readonly envVariant?: boolean | undefined;
   readonly allowVariant?: boolean | undefined;
+  /** 起動前の準備 (戻り値は後始末)。 */
+  readonly setup?: ((ctx: Ctx) => () => void) | undefined;
 }
 
 /** 既定 deadline は**実際に settings へ焼かれる導出値** (bad_args にならないことも同時に固定する)。 */
@@ -424,6 +430,25 @@ const BASE_CASES: readonly Case[] = [
     name: "token file が FIFO (塞がらずに即 block)",
     server: OK_EMPTY_OBJECT,
     args: withSpec((ctx) => ({ tokenFile: tok(ctx, "fifo.token") })),
+    cause: "token_unavailable",
+    reachesServer: false,
+    maxElapsedMs: 5_000,
+    processOnly: true,
+  },
+  {
+    // 通常ファイル以外の拒否 (fstat の isFile)。中身の入った FIFO は O_NONBLOCK で開けて token も
+    // 読めてしまうので、isFile の検査だけが止める (書き手は閉じ、test 側の読み手で pipe を保つ)。
+    name: "token file が中に token の入った FIFO (通常ファイル以外を拒否)",
+    server: ok200(DENY_BODY),
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "fifo-data.token") })),
+    setup: (ctx) => {
+      const path = tok(ctx, "fifo-data.token");
+      const reader = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      const writer = openSync(path, fsConstants.O_WRONLY);
+      writeSync(writer, `${FAKE_TOKEN_FILE}\n`);
+      closeSync(writer);
+      return () => closeSync(reader);
+    },
     cause: "token_unavailable",
     reachesServer: false,
     maxElapsedMs: 5_000,
@@ -965,6 +990,7 @@ beforeAll(() => {
   writeFileSync(at("empty.token"), "", { mode: 0o600 });
   mkdirSync(at("token-dir"), { mode: 0o700 });
   execFileSync("mkfifo", ["-m", "600", at("fifo.token")]);
+  execFileSync("mkfifo", ["-m", "600", at("fifo-data.token")]);
   symlinkSync(at("hook.token"), at("symlink.token"));
   writeFileSync(at("open.token"), `${FAKE_TOKEN_FILE}\n`, { mode: 0o644 });
   chmodSync(at("open.token"), 0o644); // umask に依存しない
@@ -1013,8 +1039,10 @@ afterAll(() => {
 
 async function check(c: Case, run: typeof runProcess): Promise<void> {
   const srv = await startServer(c.server);
+  let teardown: (() => void) | undefined;
   try {
     const ctx: Ctx = { port: srv.port, dir: workDir };
+    teardown = c.setup?.(ctx);
     const spec = (c.args ?? defaultSpec)(ctx);
     const env = c.env ?? {};
     const stdin = c.stdin ?? HOOK_INPUT;
@@ -1076,6 +1104,7 @@ async function check(c: Case, run: typeof runProcess): Promise<void> {
     if (c.minElapsedMs !== undefined) expect(elapsed).toBeGreaterThanOrEqual(c.minElapsedMs);
     if (c.maxElapsedMs !== undefined) expect(elapsed).toBeLessThan(c.maxElapsedMs);
   } finally {
+    teardown?.();
     await srv.close();
   }
 }

@@ -268,6 +268,7 @@ async function readToken(args: ShimArgs, io: HookShimIo): Promise<string> {
       if (!st.isFile()) fail("token_unavailable");
       if ((st.mode & 0o077) !== 0) fail("token_unavailable");
       // 所有者の検査は root で動くときだけ意味を持つ (非 root は他人の 0600 file をそもそも開けない)。
+      // よって非 root の CI では INV が届かない (変異で実測・開示済みの残余)。
       const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
       if (uid !== undefined && st.uid !== uid) fail("token_unavailable");
       // サイズは fstat の申告に頼らず、上限 +1 bytes までしか読まないことで抑える (procfs の
