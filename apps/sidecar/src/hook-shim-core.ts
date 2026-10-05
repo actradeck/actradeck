@@ -270,7 +270,8 @@ async function readToken(args: ShimArgs, io: HookShimIo): Promise<string> {
       // 所有者の検査は root で動くときだけ意味を持つ (非 root は他人の 0600 file をそもそも開けない)。
       const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
       if (uid !== undefined && st.uid !== uid) fail("token_unavailable");
-      if (st.size > HOOK_SHIM_MAX_TOKEN_FILE_BYTES) fail("token_unavailable");
+      // サイズは fstat の申告に頼らず、上限 +1 bytes までしか読まないことで抑える (procfs の
+      // size 0 の file でも無界に読まない)。
       const buf = Buffer.alloc(HOOK_SHIM_MAX_TOKEN_FILE_BYTES + 1);
       let n = 0;
       for (;;) {
@@ -279,6 +280,8 @@ async function readToken(args: ShimArgs, io: HookShimIo): Promise<string> {
         n += bytesRead;
         if (n >= buf.length) break;
       }
+      // 上限を超えた file は token の形 (≤ 1024 字・空白なし) でも必ず落ちるので、この検査は
+      // 冗長 (変異しても exit code は変わらない・QA-HS-5)。読む量の上限を明示するために残す。
       if (n > HOOK_SHIM_MAX_TOKEN_FILE_BYTES) fail("token_unavailable");
       raw = buf.subarray(0, n).toString("utf8");
     } catch {
