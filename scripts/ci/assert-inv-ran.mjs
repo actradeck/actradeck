@@ -79,6 +79,17 @@ export const SUITES = {
     label: "comment-strip scan normalisation (INV-STRIP-COMMENTS)",
     pattern: "INV-STRIP-COMMENTS",
   },
+  // TDA-HS-5 (task 01a108ac-cd47): INV-APPROVAL-TIMEOUT-ORDERING pins approval wait < shim
+  // deadline < Claude Code hook timeout. If the hook timeout is reached first, the hook stops
+  // gating (upstream treats it as non-blocking). Before this entry a `describe.skip` on the suite
+  // plus a margin edit kept every gate green (measured by the TDA lane). Same report as
+  // strip-comments. `minTests` is the exact count in the full event-model report this step reads
+  // (8, all in inv-approval-timeout-ordering.test.ts). Raise it by hand when tests are added.
+  "event-model-timeout-ordering": {
+    label: "approval timeout ordering (INV-APPROVAL-TIMEOUT-ORDERING)",
+    pattern: "INV-APPROVAL-TIMEOUT-ORDERING",
+    minTests: 8,
+  },
   // QA-FLV2-R2-4 (task 01a058f0): the advisory file-lock invariants guard the persistent
   // allowlist / per-repo policy / attach settings writers (security.md "advisory file lock").
   // They ride the same sidecar JSON report as sidecar-egress / sidecar-linear. Matched by the
@@ -129,13 +140,14 @@ export const SUITES = {
   // table of failure sources; its in-file afterAll counter catches a skipped/early-returned
   // case, and this entry is the CI-side second layer that also refuses a skipped/todo suite
   // and - through `minTests` - a table that silently shrank. `minTests` is the exact count in
-  // the full sidecar report this step reads (measured 132: two table describes x 62 cases +
-  // 1 hold/cleanup case + 7 binding tests, all in inv-hook-shim-fail-closed.test.ts). Raise it
-  // by hand when cases are added.
+  // the full sidecar report this step reads (measured 203 after the R1 unblock: 95 table cases
+  // in the real-process describe + 94 in-process (one case is process-only) + 2 entry wiring +
+  // 1 hold/cleanup + 1 deadline timer + 10 binding tests, all in
+  // inv-hook-shim-fail-closed.test.ts). Raise it by hand when cases are added.
   "sidecar-hook-shim": {
     label: "sidecar PreToolUse hook shim (INV-HOOK-SHIM-FAIL-CLOSED)",
     pattern: "INV-HOOK-SHIM-FAIL-CLOSED",
-    minTests: 132,
+    minTests: 203,
   },
 };
 
