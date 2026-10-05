@@ -97,7 +97,11 @@ function isLoopbackHostHeader(value: string | undefined): boolean {
  */
 export { tokenEquals };
 
-const MAX_BODY = 4 * 1024 * 1024; // 4MB 上限 (巨大 payload 防御)。
+/**
+ * 4MB 上限 (巨大 payload 防御)。PreToolUse command shim (`hook-shim.ts`) の stdin 上限
+ * `HOOK_SHIM_MAX_INPUT_BYTES` と同値でなければならない (INV-HOOK-SHIM-FAIL-CLOSED が一致を固定)。
+ */
+export const HOOK_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -105,7 +109,7 @@ function readBody(req: IncomingMessage): Promise<string> {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => {
       size += c.length;
-      if (size > MAX_BODY) {
+      if (size > HOOK_MAX_BODY_BYTES) {
         reject(new Error("payload too large"));
         req.destroy();
         return;

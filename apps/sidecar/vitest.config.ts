@@ -24,7 +24,9 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**/*.ts"],
       // cli.ts は exec エントリ (process.argv/exit/PTY 起動) で e2e 担保。index.ts は re-export。
-      exclude: ["src/cli.ts", "src/index.ts", "src/**/*.{test,spec}.ts"],
+      // hook-shim.ts は PreToolUse shim の exec エントリ (process に結線するだけ) で、
+      // INV-HOOK-SHIM-FAIL-CLOSED が実プロセスとして起動して担保する (in-process の計測に乗らない)。
+      exclude: ["src/cli.ts", "src/index.ts", "src/hook-shim.ts", "src/**/*.{test,spec}.ts"],
       reporter: ["text", "json-summary"],
       // QA-3: testing.md 目標を CI 強制 (閾値割れで exit≠0)。コアは include 全体で底上げ。
       thresholds: {
@@ -102,6 +104,10 @@ export default defineConfig({
         //   per-file-coverage-floor-below-worst-not-best)。fn は少関数ゆえ coarse (1 関数脱落で ~12pt 降下)
         //   だが margin 内で実 erosion を捕捉する。
         "src/codex-spawn-manager.ts": { statements: 85, branches: 80, functions: 82, lines: 84 },
+        // TDA-HS-11 (task 01a108ac-cd47): PreToolUse shim の本体 (承認ゲートの transport 境界)。
+        //   実測 (全 suite・R1 unblock 後) 96.53 / 90.29 / 90.47 / 99.3。floor はその 4〜5pt 下
+        //   (per-file-coverage-floor-below-worst-not-best・単発実測ゆえ余裕を広めに取る)。
+        "src/hook-shim-core.ts": { statements: 92, branches: 85, functions: 85, lines: 94 },
       },
     },
   },
