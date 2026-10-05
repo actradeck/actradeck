@@ -83,17 +83,30 @@ export function writeDaemonState(path: string, state: DaemonState): void {
   writeJson0600(path, state, { dirMode: 0o700 });
 }
 
+/** state file のいまの中身が `expectedRaw` と同じか (CAS の比較だけを行う・削除しない)。 */
+export function isDaemonStateUnchanged(path: string, expectedRaw: string): boolean {
+  return readStateRaw(path) === expectedRaw;
+}
+
 /**
  * state file を、いまの中身が `expectedRaw` と同じときだけ削除する (CAS・SEC-ENV-4 R1 / QA-DC-1 ≡
  * TDA-DC-1)。stale と判定した後で別の daemon が同じ scope に state を書いていたら消さない。
  *
  * **比較と削除の間は原子的でない**: 比較した直後・削除の直前に別の daemon が state を書くと、その state を
- * 消す (lock の外・開示済みの残余)。削除したら true。
+ * 消す (lock の外・開示済みの残余)。結果は 消した (`removed`)・中身が変わっていた (`changed`)・削除に
+ * 失敗した (`rm-failed`・SEC-DC-R2-2: 失敗を「消した」と報告しないため区別する)。
  */
-export function removeDaemonStateIfUnchanged(path: string, expectedRaw: string): boolean {
-  if (readStateRaw(path) !== expectedRaw) return false;
-  removeDaemonState(path);
-  return true;
+export function removeDaemonStateIfUnchanged(
+  path: string,
+  expectedRaw: string,
+): "removed" | "changed" | "rm-failed" {
+  if (!isDaemonStateUnchanged(path, expectedRaw)) return "changed";
+  try {
+    rmSync(path, { force: true });
+    return "removed";
+  } catch {
+    return "rm-failed";
+  }
 }
 
 /** state file を削除する (stop / 拒否経路の後始末)。 */

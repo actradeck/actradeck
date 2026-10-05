@@ -14,6 +14,7 @@ import {
   type DaemonState,
   readDaemonState,
   removeDaemonState,
+  isDaemonStateUnchanged,
   removeDaemonStateIfUnchanged,
   stateFilePath,
   writeDaemonState,
@@ -21,6 +22,7 @@ import {
 import {
   detachAttachHooks,
   type DetachScope,
+  hasActradeckHookInSettings,
   HOOK_TOKEN_ENV_VAR,
   mergeAttachHooks,
   previewAttachHooks,
@@ -250,15 +252,22 @@ export function tokenModeLeaksToTrackedFile(scope: AttachScope, tokenMode: Token
  * state に記録された配線 (wiredSettingsPaths) を detach する。runStop と拒否経路の後始末
  * (cleanupStaleWiring) の単一出所。detach 自体は `detachAttachHooks` (withFileLock で直列化・
  * ユーザー hooks は温存) に委ねる。`scope.onlyEndpoint` を渡すとその endpoint を向く entry だけを外す
- * (runStop は渡さず全 ActraDeck entry を外す)。1 件でも外したら true。
+ * (runStop は渡さず全 ActraDeck entry を外す)。
+ * `detached` は 1 件でも外したか。`remaining` は detach 後 (lock 内で書いた / 読んだ settings) に
+ * ActraDeck entry が 1 本でも残っているか (SEC-DC-R2-1)。
  */
-function detachWiredSettings(state: DaemonState, scope: DetachScope = {}): boolean {
+function detachWiredSettings(
+  state: DaemonState,
+  scope: DetachScope = {},
+): { detached: boolean; remaining: boolean } {
   let detached = false;
+  let remaining = false;
   for (const p of state.wiredSettingsPaths) {
     const res = detachAttachHooks(p, undefined, scope);
     if (res.removed) detached = true;
+    if (hasActradeckHookInSettings(res.settings)) remaining = true;
   }
-  return detached;
+  return { detached, remaining };
 }
 
 /**
@@ -275,7 +284,9 @@ export type StaleCleanup =
   | "no-state"
   | "alive-untouched"
   | "detached"
+  | "detached-entries-remain"
   | "detached-state-changed"
+  | "detached-state-rm-failed"
   | "left-needs-confirm"
   | "detach-failed";
 
@@ -287,18 +298,22 @@ export type StaleCleanup =
  * self-heal が上書きするが、拒否された起動はそこまで進まないので、ここで片付ける。
  *
  * - state の pid が**死んでいる (stale)** ときだけ動く。判定は `checkExistingDaemon` の 1 回の読み取り
- *   (lock の外)。判定の時点で生きている daemon の state なら何もしない。
+ *   (lock の外)。判定の時点で生きている daemon の state なら何もしない (判定の後に起動した daemon の
+ *   扱いは下の endpoint 限定と残る穴を参照)。
  * - 外すのは **stale state に記録された endpoint を向く ActraDeck entry だけ** (`onlyEndpoint`)。
  *   判定の後で同じ scope に別の daemon が起動し、別の endpoint で配線していても、その entry は残る。
- * - state は**判定に使ったバイト列と同じときだけ**消す (`removeDaemonStateIfUnchanged`)。判定の後で別の
- *   daemon が state を書いていたら消さない。
+ * - state は**判定に使ったバイト列と同じとき**で、かつ detach 後に ActraDeck entry が 1 本も残って
+ *   いないときだけ消す (`removeDaemonStateIfUnchanged`)。判定の後で別の daemon が state を書いていたら
+ *   消さない。
  * - **残る穴 (実測に bound・R1 unblock の開示)**:
  *   ① 新しい daemon が死んだ daemon と**同じ port** を得て、その endpoint で配線した場合、その entry は
  *   endpoint で区別できず外れる (state の CAS は効くので state は残る)。
  *   ② state の比較と削除の間は原子的でない (lock の外)。比較の直後・削除の直前に別の daemon が state を
  *   書くと、その state を消す (配線は endpoint が違えば残る)。
- *   ③ stale state に記録されていない死んだ entry (別の endpoint の残骸) は外さない。次の成功起動の
- *   self-heal か `daemon stop` で外れる。
+ *   ③ stale state に記録されていない死んだ entry (別の endpoint の残骸) は外さない。外した後も
+ *   ActraDeck entry が残っていれば state を消さず {@link stopCommandHint} を出す (SEC-DC-R2-1) ので、
+ *   `daemon stop` か次の成功起動の self-heal で外れる。判定の後に state が書き換わっていた場合は
+ *   案内を出さない (別の daemon が書いた state を止めさせないため)。
  * - `writeApproved` が false (user / project scope で --yes も confirm の承認も無い) なら書かない。
  *   共有/グローバル settings への書込は confirm ゲート (SEC-1) の対象なので、拒否経路でも同じ線を守り、
  *   残っていることと {@link stopCommandHint} だけをログに出す。state は消さない
@@ -330,9 +345,9 @@ export function cleanupStaleWiring(opts: {
     );
     return "left-needs-confirm";
   }
-  let detached: boolean;
+  let res: { detached: boolean; remaining: boolean };
   try {
-    detached = detachWiredSettings(state, { onlyEndpoint: state.endpoint });
+    res = detachWiredSettings(state, { onlyEndpoint: state.endpoint });
   } catch {
     opts.log(
       `[attach] 前回の daemon (pid=${state.pid}) の hook 配線を外せませんでした。` +
@@ -340,18 +355,38 @@ export function cleanupStaleWiring(opts: {
     );
     return "detach-failed";
   }
-  if (!removeDaemonStateIfUnchanged(opts.statePath, existing.raw)) {
+  // 実際に外したかで文言を分ける (SEC-DC-R2-2 ≡ QA-DC-R2-1 ≡ TDA-DC-R2-2: 0 本なら「外しました」と言わない)。
+  const what =
+    `前回の daemon (pid=${state.pid}) の endpoint (${state.endpoint}) を向いた hook 配線` +
+    (res.detached ? "を外しました" : "は既に無くなっていました");
+  // SEC-DC-R2-1: 記録 endpoint 以外の ActraDeck entry がまだ残るなら state を消さない。消すと
+  // `daemon stop` がその配線を見つけられなくなる。判定の後に state が書き換わっていたら (別の daemon が
+  // 起動した可能性) 停止案内は出さず、下の CAS 枝に任せる。
+  if (res.remaining && isDaemonStateUnchanged(opts.statePath, existing.raw)) {
     opts.log(
-      `[attach] 前回の daemon (pid=${state.pid}) の endpoint (${state.endpoint}) を向いた hook 配線を ` +
-        `外しました。state は判定の後に書き換わっていたため消していません (別の daemon が起動した可能性が` +
-        `あります)。`,
+      `[attach] ${what}。ただし ${state.wiredSettingsPaths.join(", ")} にはほかの ActraDeck hook 配線が` +
+        `残っているため、state は残します。外すには \`${hint}\` を実行してください。`,
+    );
+    return "detached-entries-remain";
+  }
+  // remaining かつ state が変わっていた場合も、ここで CAS が "changed" を返すので消さない。
+  const removal = removeDaemonStateIfUnchanged(opts.statePath, existing.raw);
+  if (removal === "changed") {
+    opts.log(
+      `[attach] ${what}。state は判定の後に書き換わっていたため消していません (別の daemon が` +
+        `起動した可能性があります)。`,
     );
     return "detached-state-changed";
   }
+  if (removal === "rm-failed") {
+    opts.log(
+      `[attach] ${what}。stale state は削除できませんでした。\`${hint}\` を実行してください。`,
+    );
+    return "detached-state-rm-failed";
+  }
   opts.log(
-    `[attach] 前回の daemon (pid=${state.pid}) は終了していたため、その endpoint (${state.endpoint}) を` +
-      `向いた hook 配線 (${state.wiredSettingsPaths.join(", ")}) ` +
-      `${detached ? "を外し" : "は既に無かったので"} stale state を消しました。`,
+    `[attach] ${what} (${state.wiredSettingsPaths.join(", ")})。daemon は終了していたため ` +
+      `stale state を消しました。`,
   );
   return "detached";
 }
@@ -386,7 +421,8 @@ export async function runStart(
   }
 
   // SEC-ENV-4: 拒否経路はすべてここを通して返す。stale (pid 死亡) な前回 daemon の配線を片付けてから
-  // 返す (生きている daemon には触らない・confirm が要る scope は承認が無ければ書かず案内だけ)。
+  // 返す (判定の時点で生きている daemon には触らない・判定後の並走は cleanupStaleWiring の docstring・
+  // confirm が要る scope は承認が無ければ書かず案内だけ)。
   // writeApproved は confirm ゲートを通過した時点で true に上がる。
   let writeApproved = !scopeNeedsConfirm(args.scope) || args.yes;
   const deny = (status: DeniedStatus): StartOutcome => {
@@ -560,7 +596,7 @@ export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   }
 
   // 配線済み settings をすべて detach (ユーザー hooks は温存)。
-  const detached = detachWiredSettings(state);
+  const { detached } = detachWiredSettings(state);
 
   // 別プロセスの daemon を停止 (自プロセスなら呼び元が shutdown)。
   let killedPid: number | undefined;

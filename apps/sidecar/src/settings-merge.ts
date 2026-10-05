@@ -397,7 +397,7 @@ export function mergeAttachHooks(opts: MergeOptions): MergeResult {
  * **module-private** (非 export)。malformed hooks の非 throw 回帰 (SEC-1/QA-1/SEC-R1) は file 経由の
  * settingsFileHasActradeckHook / computeAgentVisibility で transitive に固定済 (直 importer 不要)。
  */
-function hasActradeckHookInSettings(settings: ClaudeSettingsFile): boolean {
+export function hasActradeckHookInSettings(settings: ClaudeSettingsFile): boolean {
   // SEC-1≡QA-1 (decision 019f1991): readSettings はトップレベルが object かのみ検証し hooks の
   // 型は見ない。hooks が object 非該当/配列、event 値が非配列、group 要素が null だと .some /
   // group.hooks アクセスで TypeError が uncaught throw し doctor をクラッシュさせる (docstring が謳う

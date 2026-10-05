@@ -235,7 +235,10 @@ Scope and safety guards:
   it again.
   For `user` and `project` scope a refused start removes them only when you passed `--yes`;
   otherwise it leaves the file unchanged and prints the `daemon stop --scope <scope>` command that
-  removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited.
+  removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited,
+  as long as the record for that scope is still there. A refused start keeps that record, and
+  prints the same command, when ActraDeck entries for other ports are still in the settings file
+  after it has removed the ones for the recorded port.
 
 ---
 

@@ -4,8 +4,11 @@
  * daemon が crash (SIGKILL) や端末クローズ (SIGHUP) で落ちると、settings の hook は死んだ port を
  * 向いたまま残る。その port を別プロセスが bind すると hook payload と token を受け取れる。
  *
- * - 拒否された起動 (denied-*) は、前回 daemon の state が stale (pid 死亡) なら配線を外し state を消す。
- *   生きている daemon の配線には触らない。user / project scope で --yes も confirm の承認も無いときは
+ * - 拒否された起動 (denied-*) は、前回 daemon の state が stale (pid 死亡) なら、その state に記録された
+ *   endpoint の配線を外し、ActraDeck の配線がほかに残っていなければ state を消す。判定の時点で生きている
+ *   daemon の配線と state には触らない (判定の後に起動した daemon は「並走起動との競合」describe が覆う・
+ *   同じ port を得た場合は外れる = cleanupStaleWiring の残る穴 ①)。user / project scope で --yes も
+ *   confirm の承認も無いときは
  *   書かずに `daemon stop --scope <scope>` を案内する (confirm ゲートの趣旨を崩さない)。
  * - 起動後の拒否 (denied-env-token-mismatch) も同じ後始末に載る (stale state を先に消して配線だけ残す
  *   経路を塞ぐ・SEC R2 の追記)。
@@ -77,6 +80,12 @@ const GOOD_TOKEN = "tok-deny-cleanup-0123456789abcdef0123";
 const DETACHED_MSG = "stale state を消しました";
 /** 判定の後に state が書き換わっていたので消さなかったときの文言 (R2 の POSITIVE と R1 の negative で同じ literal)。 */
 const STATE_CHANGED_MSG = "state は判定の後に書き換わっていたため消していません";
+/** 記録 endpoint の entry を実際に外したときの文言 (0 本のときの NONE_PHRASE と対)。 */
+const REMOVED_PHRASE = "を向いた hook 配線を外しました";
+/** 記録 endpoint の entry が 1 本も無かったときの文言 (REMOVED_PHRASE と対)。 */
+const NONE_PHRASE = "を向いた hook 配線は既に無くなっていました";
+/** 記録外の ActraDeck entry が残るので state を残したときの文言 (SEC-DC-R2-1)。 */
+const ENTRIES_REMAIN_MSG = "ほかの ActraDeck hook 配線が残っているため、state は残します";
 /** 外さずに案内したときの文言の核 (同上)。 */
 const STOP_HINT = "agentmon daemon stop --scope";
 /** project 系の案内に付く起動ディレクトリ指定 (user 行の negative と project 行の POSITIVE で同じ literal)。 */
@@ -425,6 +434,11 @@ describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daem
         expect(log).toContain(DETACHED_MSG);
         expect(log).toContain(`pid=${r.pid}`);
         expect(log).not.toContain(STOP_HINT);
+        // 記録 endpoint の entry を実際に外したので「外しました」(0 本の文言は出さない)・記録外は無いので
+        // 残存の案内も出さない (SEC-DC-R2-1 / R2-2)。
+        expect(log).toContain(REMOVED_PHRASE);
+        expect(log).not.toContain(NONE_PHRASE);
+        expect(log).not.toContain(ENTRIES_REMAIN_MSG);
       } else {
         // 共有/グローバル settings は書かない (バイト一致)・state も残す (daemon stop が配線を見つけられる)。
         expect(readFileSync(r.settingsPath, "utf8")).toBe(r.settingsBefore);
@@ -456,7 +470,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daem
       staleExecuted += 1;
     });
 
-    it(`alive (対照) × ${row.name} → 生きている daemon の配線と state に触らない`, async () => {
+    it(`alive (対照) × ${row.name} → 判定の時点で生きている daemon の配線と state に触らない`, async () => {
       // mismatch 行: 起動前は stale にしておき (already-running で返らせない)、daemon 起動の直後に
       // 生きている daemon の state へ差し替える。覆うのは「後始末の判定の時点で既に生存 state がある」形
       // だけ。判定の後に並走起動した daemon との競合は「並走起動との競合」describe が覆う。
@@ -626,7 +640,9 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
         writeApproved: true,
         log: () => undefined,
       }),
-    ).toBe("detached");
+    ).toBe("detached-entries-remain");
+    // 記録外の endpoint の entry が残るので state は残す (SEC-DC-R2-1)。
+    expect(existsSync(r.statePath)).toBe(true);
     const after = actradeckUrls(r.settingsPath);
     expect(after.filter((u) => u === liveEndpoint).length).toBe(liveCount);
     expect(after.filter((u) => u === r.deadEndpoint).length).toBe(0);
@@ -663,9 +679,9 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     writeDaemonState(statePath, { ...st, startedAt: new Date(1).toISOString() });
     const changed = readFileSync(statePath, "utf8");
     expect(changed).not.toBe(raw);
-    expect(removeDaemonStateIfUnchanged(statePath, raw)).toBe(false);
+    expect(removeDaemonStateIfUnchanged(statePath, raw)).toBe("changed");
     expect(readFileSync(statePath, "utf8")).toBe(changed);
-    expect(removeDaemonStateIfUnchanged(statePath, changed)).toBe(true);
+    expect(removeDaemonStateIfUnchanged(statePath, changed)).toBe("removed");
     expect(existsSync(statePath)).toBe(false);
   });
 
@@ -745,6 +761,118 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
       expect(readFileSync(r.settingsPath, "utf8"), scope).toContain(USER_HOOK_COMMAND);
       expect(existsSync(r.statePath), scope).toBe(false);
     }
+  });
+});
+
+/**
+ * 記録外の port を向いた ActraDeck entry を settings に足す (merge の self-heal は記録外を消すので、
+ * 別 file で作った entry を event ごとに連結する)。足した endpoint を返す。
+ */
+async function addUnrecordedEntries(settingsPath: string): Promise<string> {
+  const endpoint = `http://127.0.0.1:${await deadPort()}/hook`;
+  const other = join(dirname(settingsPath), `unrecorded-${Date.now()}.json`);
+  mergeAttachHooks({ settingsPath: other, endpoint, tokenMode: "literal", token: GOOD_TOKEN });
+  const a = JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks: Record<string, unknown[]> };
+  const b = JSON.parse(readFileSync(other, "utf8")) as { hooks: Record<string, unknown[]> };
+  for (const [ev, groups] of Object.entries(b.hooks)) {
+    a.hooks[ev] = [...(a.hooks[ev] ?? []), ...groups];
+  }
+  writeFileSync(settingsPath, JSON.stringify(a));
+  rmSync(other, { force: true });
+  return endpoint;
+}
+
+describe("INV-ATTACH-DENY-CLEANUP: 記録外の ActraDeck entry が残るなら state を消さず停止案内を出す (SEC-DC-R2-1)", () => {
+  let remainExecuted = 0;
+  afterAll(() => {
+    expect(remainExecuted).toBe(2);
+  });
+
+  for (const { scope, flags } of [
+    { scope: "project-local", flags: [] as string[] },
+    { scope: "user", flags: ["--yes"] },
+  ] as const) {
+    it(`${scope}: 記録 endpoint の entry だけ外れ、state と案内が残り、続く daemon stop で 0 本になる`, async () => {
+      const r = await plantResidue(scope, deadPid());
+      const unrecorded = await addUnrecordedEntries(r.settingsPath);
+      const unrecordedCount = actradeckUrls(r.settingsPath).filter((u) => u === unrecorded).length;
+      expect(unrecordedCount).toBeGreaterThan(0);
+      expect(
+        actradeckUrls(r.settingsPath).filter((u) => u === r.deadEndpoint).length,
+      ).toBeGreaterThan(0);
+      const stateBefore = readFileSync(r.statePath, "utf8");
+
+      const logs: string[] = [];
+      const out = await runStart(
+        parseDaemonArgs(["attach", "--scope", scope, "--token-mode", "env", ...flags], cwd),
+        { wsUrl: WS, dbPath: join(cwd, "remain.db") },
+        {
+          home,
+          log: (m) => logs.push(m),
+          startDaemon: () => Promise.reject(new Error("must not start")),
+        },
+      );
+      expect(out.status).toBe("denied-env-token-missing");
+      const after = actradeckUrls(r.settingsPath);
+      expect(after.filter((u) => u === r.deadEndpoint).length).toBe(0);
+      expect(after.filter((u) => u === unrecorded).length).toBe(unrecordedCount);
+      // state は残す (バイト一致)・案内を出す。
+      expect(readFileSync(r.statePath, "utf8")).toBe(stateBefore);
+      const log = logs.join("\n");
+      expect(log).toContain(ENTRIES_REMAIN_MSG);
+      expect(log).toContain(expectedHint(scope));
+      expect(log).toContain(REMOVED_PHRASE);
+      expect(log).not.toContain(DETACHED_MSG);
+
+      // 案内どおりの daemon stop で ActraDeck entry が 0 本になる (state が残っているから届く)。
+      const stop = runStop(parseDaemonArgs(["daemon", "stop", "--scope", scope], cwd), {
+        home,
+        log: () => undefined,
+        startDaemon: () => Promise.reject(new Error("unused")),
+      });
+      expect(stop.status).toBe("stopped");
+      expect(actradeckUrls(r.settingsPath)).toEqual([]);
+      expect(readFileSync(r.settingsPath, "utf8")).toContain(USER_HOOK_COMMAND);
+      expect(existsSync(r.statePath)).toBe(false);
+      remainExecuted += 1;
+    });
+  }
+
+  it("判定の後に state が書き換わっていたら detached-state-changed を返し、state を消さない (QA-DC-R2-2 / R2-3)", async () => {
+    const r = await plantResidue("project-local", deadPid());
+    let rewritten = "";
+    // checkExistingDaemon が state を読んだ直後 (戻る直前) に別の daemon が state を書く。後始末が判定と
+    // 別の読み取りで CAS の比較値を取ると、書き換え後の値と一致して消してしまう。
+    race.fired = 0;
+    race.fire = () => {
+      writeDaemonState(r.statePath, {
+        pid: process.pid,
+        endpoint: "http://127.0.0.1:1/hook",
+        wiredSettingsPaths: [r.settingsPath],
+        scope: "project-local",
+        startedAt: new Date(2).toISOString(),
+      });
+      rewritten = readFileSync(r.statePath, "utf8");
+    };
+    const logs: string[] = [];
+    const res = cleanupStaleWiring({
+      statePath: r.statePath,
+      settingsPath: r.settingsPath,
+      scope: "project-local",
+      cwd,
+      writeApproved: true,
+      log: (m) => logs.push(m),
+    });
+    race.fire = undefined;
+    expect(race.fired).toBe(1);
+    expect(res).toBe("detached-state-changed");
+    expect(rewritten.length).toBeGreaterThan(0);
+    expect(readFileSync(r.statePath, "utf8")).toBe(rewritten);
+    const log = logs.join("\n");
+    expect(log).toContain(STATE_CHANGED_MSG);
+    expect(log).toContain(REMOVED_PHRASE);
+    expect(log).not.toContain(DETACHED_MSG);
+    expect(log).not.toContain(ENTRIES_REMAIN_MSG);
   });
 });
 
@@ -841,9 +969,14 @@ describe("INV-ATTACH-DENY-CLEANUP: 並走起動との競合 — 後始末の判�
   it("R1: B の後始末全体が A.merge と A.writeDaemonState の間に入っても A は残る", async () => {
     const res = await runRace("between-merge-and-state");
     assertAIntact(res);
-    // B の後始末は実際に走った (判定時の state = 残骸の state だったので CAS で消し、A が後から書いた)。
-    expect(res.logs.join("\n")).toContain(DETACHED_MSG);
-    expect(res.logs.join("\n")).not.toContain(STATE_CHANGED_MSG);
+    // B の後始末は実際に走った。A の merge が死んだ endpoint の entry を既に消しているので外すものは無く、
+    // A の entry が残っているので state は消さずに案内を出す (SEC-DC-R2-1)。その後 A が state を書いた。
+    const log = res.logs.join("\n");
+    expect(log).toContain(ENTRIES_REMAIN_MSG);
+    expect(log).toContain(NONE_PHRASE);
+    expect(log).not.toContain(REMOVED_PHRASE);
+    expect(log).not.toContain(DETACHED_MSG);
+    expect(log).not.toContain(STATE_CHANGED_MSG);
     raceExecuted += 1;
   });
 
@@ -853,6 +986,9 @@ describe("INV-ATTACH-DENY-CLEANUP: 並走起動との競合 — 後始末の判�
     const log = res.logs.join("\n");
     expect(log).toContain(STATE_CHANGED_MSG);
     expect(log).not.toContain(DETACHED_MSG);
+    // 判定の後に state が変わったので、停止案内 (= 別の daemon を止めさせる案内) は出さない。
+    expect(log).not.toContain(ENTRIES_REMAIN_MSG);
+    expect(log).toContain(NONE_PHRASE);
     raceExecuted += 1;
   });
 });

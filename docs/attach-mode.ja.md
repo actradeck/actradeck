@@ -212,7 +212,9 @@ scope と安全ガード:
   直してください。`user` と `project`
   scope では `--yes` を付けたときだけ外し、付けていなければファイルを変更せず、外すための
   `daemon stop --scope <scope>` コマンドを表示します。`daemon stop --scope <scope>` は daemon の
-  プロセスが既に終了していても使えます。
+  プロセスが既に終了していても、その scope の記録が残っていれば使えます。起動が拒否された場合、記録された
+  port の entry を外した後もほかの port を向いた ActraDeck の entry が settings に残っていれば、記録を
+  消さずに同じコマンドを表示します。
 
 ---
 
