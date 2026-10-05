@@ -183,17 +183,18 @@ export const SUITES = {
   // shape table, the corrupt branch, the fallback read of the path older builds used, and the
   // project / user scopes that share one settings file when cwd is the home directory) and the
   // process identity check before `daemon stop` signals a pid (real child processes). `minTests`
-  // is the exact count in the full sidecar report this step reads, measured on Linux: 70 = 3
+  // is the exact count in the full sidecar report this step reads, measured on Linux: 72 = 3
   // (artifact paths) + 36 (shape table: 4 accepted + 30 corrupt rows + not-JSON/absent + writer
   // check) + 2 (corrupt branch) + 7 (stop vs identity, real processes) + 2 (alive judgement)
-  // + 4 (fallback to the older state path) + 2 (cwd = home, one real attach CLI) + 14 (identity
+  // + 6 (fallback to the older state path, derived-path guard) + 2 (cwd = home, one real attach
+  // CLI) + 14 (identity
   // branches with injected OS sources + parsers), all in inv-attach-state-trust.test.ts. Five
   // rows run on Linux only (`it.runIf`), so the count is lower elsewhere; CI runs on Linux. Its
   // in-file afterAll counters catch a skipped row; this entry also catches a skipped describe.
   "sidecar-attach-state-trust": {
     label: "sidecar attach state trust / process identity INV (INV-ATTACH-STATE-TRUST)",
     pattern: "INV-ATTACH-STATE-TRUST",
-    minTests: 70,
+    minTests: 72,
   },
 };
 

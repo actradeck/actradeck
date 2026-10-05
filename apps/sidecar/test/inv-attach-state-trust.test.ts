@@ -699,6 +699,43 @@ describe("INV-ATTACH-STATE-TRUST: 新しい path に state が無ければ旧い
     }
   });
 
+  it("旧い path の corrupt state: stop は配線を外して旧い path の state を消し、kill しない", async () => {
+    const child = await spawnBystander();
+    const { link, settingsPath, art } = plantOld(child.pid);
+    writeFileSync(art.legacyStatePath, "{ not json");
+    const stop = runStop(parseDaemonArgs(["daemon", "stop"], link), rt([]));
+    expect(stop).toMatchObject({ kill: "skipped-corrupt", state: "corrupt-removed" });
+    expect(entries(settingsPath)).toBe(0);
+    expect(existsSync(art.legacyStatePath)).toBe(false);
+    expect(running(child)).toBe(true);
+  });
+
+  it("後始末は scope / cwd / home から導出していない statePath を拒否する (throw)", () => {
+    const sp = settingsOf();
+    const base = {
+      settingsPath: sp,
+      scope: "project-local" as const,
+      cwd,
+      home,
+      writeApproved: true,
+    };
+    expect(() =>
+      cleanupStaleWiring({
+        ...base,
+        statePath: join(home, "elsewhere.json"),
+        log: () => undefined,
+      }),
+    ).toThrow("scope から導出した値を渡すこと");
+    // 対照 (POSITIVE): 導出した statePath なら throw しない (state が無いので no-state)。
+    expect(
+      cleanupStaleWiring({
+        ...base,
+        statePath: scopeArtifacts(sp, home).statePath,
+        log: () => undefined,
+      }),
+    ).toBe("no-state");
+  });
+
   it("新しい path に state があれば (corrupt でも) 旧い path は読まない", async () => {
     const child = await spawnBystander();
     const { link, art } = plantOld(child.pid);
