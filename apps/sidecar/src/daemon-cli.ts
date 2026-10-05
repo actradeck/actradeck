@@ -186,6 +186,9 @@ export interface DaemonRuntime {
   confirm?: (message: string) => boolean | Promise<boolean>;
 }
 
+/** runStart の拒否 status (すべて deny() を通る)。 */
+type DeniedStatus = Extract<StartOutcome["status"], `denied-${string}`>;
+
 export interface StartOutcome {
   readonly status:
     | "started"
@@ -242,6 +245,85 @@ export function tokenModeLeaksToTrackedFile(scope: AttachScope, tokenMode: Token
 }
 
 /**
+ * state に記録された配線 (wiredSettingsPaths) をすべて detach する。runStop と拒否経路の後始末
+ * (cleanupStaleWiring) の単一出所。detach 自体は `detachAttachHooks` (withFileLock で直列化・
+ * ユーザー hooks は温存) に委ねる。1 件でも外したら true。
+ */
+function detachWiredSettings(state: DaemonState): boolean {
+  let detached = false;
+  for (const p of state.wiredSettingsPaths) {
+    const res = detachAttachHooks(p);
+    if (res.removed) detached = true;
+  }
+  return detached;
+}
+
+/** 拒否経路の後始末の結果 (テストと監査向けに返す・CLI は使わない)。 */
+export type StaleCleanup =
+  | "no-state"
+  | "alive-untouched"
+  | "detached"
+  | "left-needs-confirm"
+  | "detach-failed";
+
+/**
+ * 拒否経路の後始末 (SEC-ENV-4・task 01a10831-8102)。
+ *
+ * daemon が crash (SIGKILL 等) や端末クローズで落ちると、settings の hook は死んだ port を向いたまま
+ * 残る。その port を別プロセスが bind すると hook payload と token を受け取れる。起動が成功すれば
+ * mergeAttachHooks の self-heal が上書きするが、拒否された起動はそこまで進まないので、ここで片付ける。
+ *
+ * - state の pid が**死んでいる (stale)** ときだけ動く。生きている daemon の配線には触らない
+ *   (`checkExistingDaemon` を呼んだ時点で再判定する)。
+ * - `writeApproved` が false (user / project scope で --yes も confirm の承認も無い) なら書かない。
+ *   共有/グローバル settings への書込は confirm ゲート (SEC-1) の対象なので、拒否経路でも同じ線を守り、
+ *   残っていることと `daemon stop --scope <scope>` で外せることだけをログに出す。state は消さない
+ *   (消すと `daemon stop` が配線を見つけられなくなる)。
+ * - state の配線先が当該 scope の settings 1 件以外を含むときも書かない (state から他の file への書込を
+ *   誘導させない)。通常の state は常に `[settingsPath]` だけを持つ。
+ * - detach が失敗したら state を残す (`daemon stop` で再試行できる形を保つ)。値はログに出さない。
+ */
+export function cleanupStaleWiring(opts: {
+  readonly statePath: string;
+  readonly settingsPath: string;
+  readonly scope: AttachScope;
+  readonly cwd: string;
+  readonly writeApproved: boolean;
+  readonly log: (msg: string) => void;
+}): StaleCleanup {
+  const existing = checkExistingDaemon(opts.statePath);
+  if (existing.state === undefined) return "no-state";
+  if (!existing.stale) return "alive-untouched";
+  const state = existing.state;
+  const onlyThisScope = state.wiredSettingsPaths.every((p) => p === opts.settingsPath);
+  if (!opts.writeApproved || !onlyThisScope) {
+    const cwdFlag = opts.scope === "user" ? "" : ` --cwd ${opts.cwd}`;
+    opts.log(
+      `[attach] 前回の daemon (pid=${state.pid}) は終了していますが、その hook 配線 ` +
+        `(${state.wiredSettingsPaths.join(", ")}) は外されていません。死んだ port を向いたままです。` +
+        `外すには \`agentmon daemon stop --scope ${opts.scope}${cwdFlag}\` を実行してください ` +
+        `(${opts.scope} scope の設定は --yes か確認の承認なしには書き換えないため、ここでは外しません)。`,
+    );
+    return "left-needs-confirm";
+  }
+  try {
+    detachWiredSettings(state);
+  } catch {
+    opts.log(
+      `[attach] 前回の daemon (pid=${state.pid}) の hook 配線を外せませんでした。` +
+        `\`agentmon daemon stop --scope ${opts.scope}\` で再試行してください。`,
+    );
+    return "detach-failed";
+  }
+  removeDaemonState(opts.statePath);
+  opts.log(
+    `[attach] 前回の daemon (pid=${state.pid}) は終了していたため、その hook 配線 ` +
+      `(${state.wiredSettingsPaths.join(", ")}) を外し stale state を消しました。`,
+  );
+  return "detached";
+}
+
+/**
  * daemon を起動し settings を配線する。
  * - 二重起動防止 (pid 生存)。stale は掃除。
  * - dry-run は preview のみ (daemon 起動・書込なし)。
@@ -270,6 +352,22 @@ export async function runStart(
     return { status: "dry-run", settingsPath, statePath, previewSettings: preview.settings };
   }
 
+  // SEC-ENV-4: 拒否経路はすべてここを通して返す。stale (pid 死亡) な前回 daemon の配線を片付けてから
+  // 返す (生きている daemon には触らない・confirm が要る scope は承認が無ければ書かず案内だけ)。
+  // writeApproved は confirm ゲートを通過した時点で true に上がる。
+  let writeApproved = !scopeNeedsConfirm(args.scope) || args.yes;
+  const deny = (status: DeniedStatus): StartOutcome => {
+    cleanupStaleWiring({
+      statePath,
+      settingsPath,
+      scope: args.scope,
+      cwd: args.cwd,
+      writeApproved,
+      log: rt.log,
+    });
+    return { status, settingsPath, statePath };
+  };
+
   // SEC-2: project scope (tracked `.claude/settings.json`) で literal token-mode は nonce 平文を
   // **commit され共有される file** に着地させる = 秘匿漏洩。tracked file には nonce を書かず、
   // env token-mode ($VAR + allowedEnvVars, 非リテラル) を要求して中止する (daemon 起動・write 前)。
@@ -278,7 +376,7 @@ export async function runStart(
       `[attach] project scope は tracked file (${settingsPath}) です。literal token-mode は nonce 平文を ` +
         `commit へ漏らすため拒否します。--token-mode env を使うか --scope project-local を選んでください。`,
     );
-    return { status: "denied-token-leak", settingsPath, statePath };
+    return deny("denied-token-leak");
   }
 
   // SEC-FC-2: env token-mode は settings に値を書かず `$ACTRADECK_HOOK_TOKEN` を参照させる。daemon が
@@ -291,7 +389,7 @@ export async function runStart(
         `環境に同じ値を export してください)。未設定のまま起動すると全 hook が認証に失敗し、承認ゲートが ` +
         `働きません。起動を中止します。`,
     );
-    return { status: "denied-env-token-missing", settingsPath, statePath };
+    return deny("denied-env-token-missing");
   }
 
   // SEC-ENV-1: 与えられた値 (env mode の必須値・literal mode の上書き値の両方) がヘッダで往復できない /
@@ -305,7 +403,7 @@ export async function runStart(
       `[attach] ACTRADECK_HOOK_TOKEN の値が使えません (英数字と . _ ~ + / = - のみ・空白なし・32 文字以上が ` +
         `必要です。例: openssl rand -hex 32)。起動を中止します。`,
     );
-    return { status: "denied-hook-token-invalid", settingsPath, statePath };
+    return deny("denied-hook-token-invalid");
   }
 
   // SEC-1: user/project scope は共有/グローバル設定への write = 高リスク。--yes も
@@ -322,8 +420,9 @@ export async function runStart(
         `[attach] ${args.scope} scope の設定変更は確認が必要です。--yes を付けるか確認に応じてください ` +
           `(deny で中止: ${settingsPath} は未変更)。`,
       );
-      return { status: "denied-needs-confirm", settingsPath, statePath };
+      return deny("denied-needs-confirm");
     }
+    writeApproved = true;
   }
 
   // 二重起動防止 + stale 掃除。
@@ -340,8 +439,10 @@ export async function runStart(
     };
   }
   if (existing.stale) {
-    rt.log(`[attach] stale state を掃除 (pid=${existing.state?.pid} 死亡)`);
-    removeDaemonState(statePath);
+    // stale state はここでは消さない (SEC-ENV-4)。起動が成功すれば mergeAttachHooks の self-heal と
+    // writeDaemonState が上書きし、起動後に拒否 (mismatch) されたら deny() が state を手掛かりに配線を外す。
+    // 先に消すと、拒否や startDaemon の失敗で「state だけ失われ配線が残る」(daemon stop で外せない)。
+    rt.log(`[attach] stale state を検出 (pid=${existing.state?.pid} 死亡)。起動後に上書きします。`);
   }
 
   // daemon を起動して安定 endpoint (OS 割当 port) と実 nonce を得る。
@@ -367,7 +468,7 @@ export async function runStart(
       `[attach] daemon が ACTRADECK_HOOK_TOKEN と異なる値で起動しました。env token-mode の hook は認証に ` +
         `失敗するため、起動を中止します。`,
     );
-    return { status: "denied-env-token-mismatch", settingsPath, statePath };
+    return deny("denied-env-token-mismatch");
   }
 
   // settings を非破壊配線 (実 endpoint + daemon が検証に使う実 nonce を書く)。
@@ -424,11 +525,7 @@ export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   }
 
   // 配線済み settings をすべて detach (ユーザー hooks は温存)。
-  let detached = false;
-  for (const p of state.wiredSettingsPaths) {
-    const res = detachAttachHooks(p);
-    if (res.removed) detached = true;
-  }
+  const detached = detachWiredSettings(state);
 
   // 別プロセスの daemon を停止 (自プロセスなら呼び元が shutdown)。
   let killedPid: number | undefined;

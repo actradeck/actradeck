@@ -21,6 +21,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   now make the daemon refuse to start. The accepted values and the steps to move an existing
   `env`-mode setup over are in the `env` token-mode notes of `docs/attach-mode.md`.
 
+- **Fewer cases where attach hook entries are left pointing at a dead port.** The attach daemon
+  now also removes its entries when it receives `SIGHUP`, and a refused `attach` / `daemon start`
+  can now remove the entries left by a daemon that is no longer running. When this happens, and
+  what to run when the entries are still left, is in the notes on unclean shutdown in
+  `docs/attach-mode.md`.
+
 - **Dependency updates for advisories published after the previous round (one critical,
   eight high, four moderate at the time of the change).** Direct bumps: Next.js
   16.3.3 → 16.3.8 (critical advisory) and Fastify 5.12.1 → 5.12.5. Transitive fixes

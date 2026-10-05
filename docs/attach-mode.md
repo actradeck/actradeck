@@ -222,6 +222,15 @@ Scope and safety guards:
   both commands there. Running `attach` while the old daemon is still up only reports that it is
   already running and leaves the old entries in place. `./scripts/ad-attach` (its `stop` and
   `service` commands included) acts on the `user`-scope daemon only.
+- **When the daemon did not shut down cleanly.** The daemon removes its entries on `SIGINT`,
+  `SIGTERM` and `SIGHUP` (for example when you close the terminal it runs in). If it is killed in
+  a way it cannot handle, such as `SIGKILL`, its entries stay in the settings file and point at a
+  port nothing listens on. The next successful start in the same scope replaces them. A start that
+  is refused (for example because the token check fails) removes them if the daemon recorded for
+  that scope is no longer running; it never touches the entries of a daemon that is still running.
+  For `user` and `project` scope a refused start removes them only when you passed `--yes`;
+  otherwise it leaves the file unchanged and prints the `daemon stop --scope <scope>` command that
+  removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited.
 
 ---
 

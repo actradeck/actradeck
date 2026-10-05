@@ -284,7 +284,7 @@ async function mainDaemon(): Promise<void> {
     return;
   }
 
-  // start: daemon を起動して settings を配線し、常駐する (SIGINT/SIGTERM で detach + shutdown)。
+  // start: daemon を起動して settings を配線し、常駐する (SIGINT/SIGTERM/SIGHUP で detach + shutdown)。
   const outcome = await runStart(
     args,
     {
@@ -311,8 +311,10 @@ async function mainDaemon(): Promise<void> {
     await daemon.shutdown();
     process.exit(0);
   };
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  // SIGHUP (端末クローズ) も同じ経路へ (SEC-ENV-4)。既定動作のまま落ちると配線が死んだ port を向いて残る。
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => void shutdown(signal));
+  }
   process.stderr.write(
     `[attach] 常駐中 (endpoint=${outcome.hookEndpoint ?? "?"})。CC を起動すると hook が届きます。Ctrl-C で detach。\n`,
   );
