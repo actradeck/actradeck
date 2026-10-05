@@ -336,7 +336,9 @@ function forward(
           resolve(raw);
         });
         // 本文の途中で切れた (socket destroy 等) 応答: 'end' が来ずに 'error' / 'close' で終わる。
-        // 既に resolve 済みなら reject は no-op。
+        // 既に resolve 済みなら reject は no-op。2 つは意図的に冗長 (どちらか一方で truncate ケースは
+        // block になることを変異で実測済み・INV が固定するのは「両方を消すと RED」まで)。片方だけを
+        // 消す編集は INV では検出されない。
         res.on("error", () => reject(new ShimFailure("unreachable")));
         res.on("close", () => {
           if (!res.complete) reject(new ShimFailure("unreachable"));
