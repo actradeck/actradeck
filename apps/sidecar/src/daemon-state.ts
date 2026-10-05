@@ -3,14 +3,14 @@
  *
  * state file: `~/.actradeck/daemon/<scope-hash>.json` (0600)。
  * - **token 値は記録しない** (env 変数名の参照のみ)。
- * - 二重起動防止 (pid 生存判定) / stale 掃除 / OS 割当 port を記録。
+ * - 二重起動防止 (pid 生存判定) / stale 判定 (削除は CAS) / OS 割当 port を記録。
  *
  * scope は「どの settings file に配線したか」で一意化する。scope-hash は settings の絶対パスの
  * sha256 短縮。複数 project は (MVP では) それぞれ別 scope = 別 state file になりうるが、
  * 単一 daemon に scope を束ねる拡張 (--isolated 等) は forward-compat。
  */
 import { createHash } from "node:crypto";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -58,11 +58,24 @@ export function isPidAlive(pid: number): boolean {
 
 /** state file を読む (無ければ undefined, JSON 不正は undefined)。 */
 export function readDaemonState(path: string): DaemonState | undefined {
-  const parsed = readJsonObject(path);
-  if (parsed === undefined) return undefined;
+  return asDaemonState(readJsonObject(path));
+}
+
+/** state として使える形か (JSON object + pid:number + endpoint:string)。readDaemonState と CAS 経路の単一出所。 */
+function asDaemonState(parsed: unknown): DaemonState | undefined {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
   const s = parsed as Partial<DaemonState>;
   if (typeof s.pid !== "number" || typeof s.endpoint !== "string") return undefined;
-  return parsed as unknown as DaemonState;
+  return parsed as DaemonState;
+}
+
+/** state file の生バイト列 (無い・読めないなら undefined)。CAS 削除の比較用。 */
+function readStateRaw(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 /** state file を 0600 で atomic 書込する。**token 値を含めてはならない** (型で env 名のみ許可)。 */
@@ -70,7 +83,20 @@ export function writeDaemonState(path: string, state: DaemonState): void {
   writeJson0600(path, state, { dirMode: 0o700 });
 }
 
-/** state file を削除する (stop / stale 掃除)。 */
+/**
+ * state file を、いまの中身が `expectedRaw` と同じときだけ削除する (CAS・SEC-ENV-4 R1 / QA-DC-1 ≡
+ * TDA-DC-1)。stale と判定した後で別の daemon が同じ scope に state を書いていたら消さない。
+ *
+ * **比較と削除の間は原子的でない**: 比較した直後・削除の直前に別の daemon が state を書くと、その state を
+ * 消す (lock の外・開示済みの残余)。削除したら true。
+ */
+export function removeDaemonStateIfUnchanged(path: string, expectedRaw: string): boolean {
+  if (readStateRaw(path) !== expectedRaw) return false;
+  removeDaemonState(path);
+  return true;
+}
+
+/** state file を削除する (stop / 拒否経路の後始末)。 */
 export function removeDaemonState(path: string): void {
   try {
     rmSync(path, { force: true });
@@ -83,16 +109,31 @@ export function removeDaemonState(path: string): void {
  * 既存 daemon の生存判定。
  * - state 無し → 起動可 (alive=false)。
  * - state 有り + pid 生存 → 二重起動 (alive=true, state を返す)。
- * - state 有り + pid 死亡 → stale。掃除して起動可 (alive=false, stale=true)。
+ * - state 有り + pid 死亡 → stale (alive=false, stale=true)。起動可。stale state は起動が成功して
+ *   上書きされるか、拒否経路の後始末 (`cleanupStaleWiring`) か `daemon stop` が消す。
+ *
+ * `raw` は判定に使った state の生バイト列 (`removeDaemonStateIfUnchanged` の比較に渡す)。判定と同じ
+ * 1 回の読み取りから取るので、判定した state と比較する state がずれない。
  */
 export function checkExistingDaemon(path: string): {
   alive: boolean;
   stale: boolean;
   state?: DaemonState;
+  raw?: string;
 } {
-  const state = readDaemonState(path);
-  if (state === undefined) return { alive: false, stale: false };
-  if (isPidAlive(state.pid)) return { alive: true, stale: false, state };
+  const raw = readStateRaw(path);
+  const state = raw === undefined ? undefined : parseDaemonState(raw);
+  if (state === undefined || raw === undefined) return { alive: false, stale: false };
+  if (isPidAlive(state.pid)) return { alive: true, stale: false, state, raw };
   // pid 死亡 = stale。
-  return { alive: false, stale: true, state };
+  return { alive: false, stale: true, state, raw };
+}
+
+/** 生バイト列を readDaemonState と同じ検査に掛ける。 */
+function parseDaemonState(raw: string): DaemonState | undefined {
+  try {
+    return asDaemonState(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
 }

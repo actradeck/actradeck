@@ -149,6 +149,22 @@ export const SUITES = {
     pattern: "INV-HOOK-SHIM-FAIL-CLOSED",
     minTests: 204,
   },
+  // QA-DC-3 (SEC-ENV-4 R1): the refused-start cleanup of a dead daemon's wiring
+  // (inv-attach-deny-cleanup.test.ts). Its in-file afterAll counters catch a single skipped row,
+  // but skipping a whole describe also skips that describe's afterAll. Same report and two-layer
+  // shape as sidecar-approval-fail-closed. `minTests` is the exact count in the full sidecar report
+  // this step reads (measured when the entry was added); raise it by hand when tests are added.
+  "sidecar-attach-deny-cleanup": {
+    label: "sidecar attach refused-start cleanup INV (INV-ATTACH-DENY-CLEANUP)",
+    pattern: "INV-ATTACH-DENY-CLEANUP",
+    minTests: 56,
+  },
+  // QA-DC-3: the real-process SIGHUP detach of the attach CLI (same file, its own describe).
+  "sidecar-attach-sighup": {
+    label: "sidecar attach SIGHUP detach INV (INV-ATTACH-SIGHUP-DETACH)",
+    pattern: "INV-ATTACH-SIGHUP-DETACH",
+    minTests: 1,
+  },
 };
 
 function main() {

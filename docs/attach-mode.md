@@ -227,7 +227,12 @@ Scope and safety guards:
   a way it cannot handle, such as `SIGKILL`, its entries stay in the settings file and point at a
   port nothing listens on. The next successful start in the same scope replaces them. A start that
   is refused (for example because the token check fails) removes them if the daemon recorded for
-  that scope is no longer running; it never touches the entries of a daemon that is still running.
+  that scope is no longer running. It removes only the entries that point at the port recorded for
+  that daemon, so a daemon that is running in the same scope, including one that starts while the
+  refused start is cleaning up, keeps its entries. The exception is a daemon that starts at that
+  moment and is given the same port as the daemon that exited: its entries are removed while
+  `daemon status` still reports it as running. Stop it with `daemon stop --scope <scope>` and start
+  it again.
   For `user` and `project` scope a refused start removes them only when you passed `--yes`;
   otherwise it leaves the file unchanged and prints the `daemon stop --scope <scope>` command that
   removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited.

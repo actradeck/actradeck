@@ -205,7 +205,11 @@ scope と安全ガード:
   閉じたときなど）で自分の entry を外します。`SIGKILL` のように処理できない形で終了すると、entry は
   settings に残り、誰も listen していない port を向いたままになります。同じ scope で次に起動が成功すると
   置き換わります。起動が拒否された場合（token の検査に通らない等）は、その scope に記録された daemon が
-  既に終了していれば entry を外します。稼働中の daemon の entry には触りません。`user` と `project`
+  既に終了していれば entry を外します。外すのはその daemon に記録された port を向いた entry だけなので、
+  同じ scope で稼働中の daemon（拒否された起動が後始末をしている間に起動したものを含む）の entry は
+  残ります。例外は、その瞬間に起動した daemon が終了した daemon と同じ port を得た場合で、その entry は
+  外れますが `daemon status` は稼働中と表示します。`daemon stop --scope <scope>` で止めてから起動し
+  直してください。`user` と `project`
   scope では `--yes` を付けたときだけ外し、付けていなければファイルを変更せず、外すための
   `daemon stop --scope <scope>` コマンドを表示します。`daemon stop --scope <scope>` は daemon の
   プロセスが既に終了していても使えます。

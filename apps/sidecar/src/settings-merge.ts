@@ -444,16 +444,35 @@ export interface DetachResult {
   readonly settings: ClaudeSettingsFile;
 }
 
+/** detach の対象を絞る指定。 */
+export interface DetachScope {
+  /**
+   * 指定すると、url がこの endpoint と完全一致する ActraDeck entry **だけ**を外す
+   * ({@link isCanonicalActradeckEntry} と同じ判定)。拒否経路の後始末が、stale state に記録された
+   * 死んだ endpoint の配線だけを外し、同じ scope で並走起動した daemon の配線 (別 endpoint) を残すために
+   * 使う (SEC-ENV-4 R1 / QA-DC-1 ≡ TDA-DC-1)。省略すると従来どおり全 ActraDeck entry (`daemon stop`)。
+   */
+  readonly onlyEndpoint?: string;
+}
+
 /**
  * settings から ActraDeck マーカー entry **のみ** を除去した settings を計算する (純関数)。
  * - ユーザー hooks は温存 (マーカー一致のみ除去)。
  * - ActraDeck group 内の非マーカー hooks (ユーザーが後から同 group に足したもの) は温存。
  * - hooks 群が空になった event キーは削除し、hooks 自体が空なら hooks キーも削除する。
+ * - `scope.onlyEndpoint` があれば、その endpoint を向く ActraDeck entry だけを除去する。
  */
-export function computeDetachedSettings(current: ClaudeSettingsFile): {
+export function computeDetachedSettings(
+  current: ClaudeSettingsFile,
+  scope: DetachScope = {},
+): {
   settings: ClaudeSettingsFile;
   removed: boolean;
 } {
+  const { onlyEndpoint } = scope;
+  const isTarget = (h: unknown): boolean =>
+    isActradeckEntry(h) &&
+    (onlyEndpoint === undefined || isCanonicalActradeckEntry(h, onlyEndpoint));
   const next = clone(current);
   if (next.hooks === undefined) return { settings: next, removed: false };
   let removed = false;
@@ -467,11 +486,11 @@ export function computeDetachedSettings(current: ClaudeSettingsFile): {
         continue;
       }
       const kept = group.hooks.filter((h) => {
-        if (isActradeckEntry(h)) {
+        if (isTarget(h)) {
           removed = true;
-          return false; // ActraDeck entry のみ除去
+          return false; // ActraDeck entry のみ除去 (onlyEndpoint 指定時はその endpoint のものだけ)
         }
-        return true; // ユーザー hooks は温存
+        return true; // ユーザー hooks (と対象外の ActraDeck entry) は温存
       });
       // group 内に hooks が残ればその group を保持 (ユーザーが同 group に足した分を消さない)。
       if (kept.length > 0) {
@@ -510,6 +529,7 @@ function groupHasActradeckEntryOriginally(group: HookGroup): boolean {
 export function detachAttachHooks(
   settingsPath: string,
   lockOptions?: FileLockCallOptions,
+  scope: DetachScope = {},
 ): DetachResult {
   if (!existsSync(settingsPath)) return { removed: false, settings: {} };
   return withFileLock(
@@ -517,7 +537,7 @@ export function detachAttachHooks(
     () => {
       if (!existsSync(settingsPath)) return { removed: false, settings: {} };
       const current = readSettings(settingsPath);
-      const { settings, removed } = computeDetachedSettings(current);
+      const { settings, removed } = computeDetachedSettings(current, scope);
       if (!removed) return { removed: false, settings };
       atomicWrite(settingsPath, settings);
       return { removed: true, settings };

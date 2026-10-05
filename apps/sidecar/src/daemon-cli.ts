@@ -14,11 +14,13 @@ import {
   type DaemonState,
   readDaemonState,
   removeDaemonState,
+  removeDaemonStateIfUnchanged,
   stateFilePath,
   writeDaemonState,
 } from "./daemon-state.js";
 import {
   detachAttachHooks,
+  type DetachScope,
   HOOK_TOKEN_ENV_VAR,
   mergeAttachHooks,
   previewAttachHooks,
@@ -245,17 +247,27 @@ export function tokenModeLeaksToTrackedFile(scope: AttachScope, tokenMode: Token
 }
 
 /**
- * state に記録された配線 (wiredSettingsPaths) をすべて detach する。runStop と拒否経路の後始末
+ * state に記録された配線 (wiredSettingsPaths) を detach する。runStop と拒否経路の後始末
  * (cleanupStaleWiring) の単一出所。detach 自体は `detachAttachHooks` (withFileLock で直列化・
- * ユーザー hooks は温存) に委ねる。1 件でも外したら true。
+ * ユーザー hooks は温存) に委ねる。`scope.onlyEndpoint` を渡すとその endpoint を向く entry だけを外す
+ * (runStop は渡さず全 ActraDeck entry を外す)。1 件でも外したら true。
  */
-function detachWiredSettings(state: DaemonState): boolean {
+function detachWiredSettings(state: DaemonState, scope: DetachScope = {}): boolean {
   let detached = false;
   for (const p of state.wiredSettingsPaths) {
-    const res = detachAttachHooks(p);
+    const res = detachAttachHooks(p, undefined, scope);
     if (res.removed) detached = true;
   }
   return detached;
+}
+
+/**
+ * 配線を外すための停止コマンド (案内文の単一出所・QA-DC-2 ≡ TDA-DC-3)。project / project-local の
+ * state は起動したディレクトリの settings に紐づくので、別ディレクトリから打っても届くよう常に `--cwd`
+ * を付ける。user scope は cwd に依存しないので付けない。
+ */
+export function stopCommandHint(scope: AttachScope, cwd: string): string {
+  return `agentmon daemon stop --scope ${scope}${scope === "user" ? "" : ` --cwd ${cwd}`}`;
 }
 
 /** 拒否経路の後始末の結果 (テストと監査向けに返す・CLI は使わない)。 */
@@ -263,21 +275,33 @@ export type StaleCleanup =
   | "no-state"
   | "alive-untouched"
   | "detached"
+  | "detached-state-changed"
   | "left-needs-confirm"
   | "detach-failed";
 
 /**
  * 拒否経路の後始末 (SEC-ENV-4・task 01a10831-8102)。
  *
- * daemon が crash (SIGKILL 等) や端末クローズで落ちると、settings の hook は死んだ port を向いたまま
- * 残る。その port を別プロセスが bind すると hook payload と token を受け取れる。起動が成功すれば
- * mergeAttachHooks の self-heal が上書きするが、拒否された起動はそこまで進まないので、ここで片付ける。
+ * daemon が crash (SIGKILL 等) で落ちると、settings の hook は死んだ port を向いたまま残る。その port を
+ * 別プロセスが bind すると hook payload と token を受け取れる。起動が成功すれば mergeAttachHooks の
+ * self-heal が上書きするが、拒否された起動はそこまで進まないので、ここで片付ける。
  *
- * - state の pid が**死んでいる (stale)** ときだけ動く。生きている daemon の配線には触らない
- *   (`checkExistingDaemon` を呼んだ時点で再判定する)。
+ * - state の pid が**死んでいる (stale)** ときだけ動く。判定は `checkExistingDaemon` の 1 回の読み取り
+ *   (lock の外)。判定の時点で生きている daemon の state なら何もしない。
+ * - 外すのは **stale state に記録された endpoint を向く ActraDeck entry だけ** (`onlyEndpoint`)。
+ *   判定の後で同じ scope に別の daemon が起動し、別の endpoint で配線していても、その entry は残る。
+ * - state は**判定に使ったバイト列と同じときだけ**消す (`removeDaemonStateIfUnchanged`)。判定の後で別の
+ *   daemon が state を書いていたら消さない。
+ * - **残る穴 (実測に bound・R1 unblock の開示)**:
+ *   ① 新しい daemon が死んだ daemon と**同じ port** を得て、その endpoint で配線した場合、その entry は
+ *   endpoint で区別できず外れる (state の CAS は効くので state は残る)。
+ *   ② state の比較と削除の間は原子的でない (lock の外)。比較の直後・削除の直前に別の daemon が state を
+ *   書くと、その state を消す (配線は endpoint が違えば残る)。
+ *   ③ stale state に記録されていない死んだ entry (別の endpoint の残骸) は外さない。次の成功起動の
+ *   self-heal か `daemon stop` で外れる。
  * - `writeApproved` が false (user / project scope で --yes も confirm の承認も無い) なら書かない。
  *   共有/グローバル settings への書込は confirm ゲート (SEC-1) の対象なので、拒否経路でも同じ線を守り、
- *   残っていることと `daemon stop --scope <scope>` で外せることだけをログに出す。state は消さない
+ *   残っていることと {@link stopCommandHint} だけをログに出す。state は消さない
  *   (消すと `daemon stop` が配線を見つけられなくなる)。
  * - state の配線先が当該 scope の settings 1 件以外を含むときも書かない (state から他の file への書込を
  *   誘導させない)。通常の state は常に `[settingsPath]` だけを持つ。
@@ -292,40 +316,49 @@ export function cleanupStaleWiring(opts: {
   readonly log: (msg: string) => void;
 }): StaleCleanup {
   const existing = checkExistingDaemon(opts.statePath);
-  if (existing.state === undefined) return "no-state";
+  if (existing.state === undefined || existing.raw === undefined) return "no-state";
   if (!existing.stale) return "alive-untouched";
   const state = existing.state;
+  const hint = stopCommandHint(opts.scope, opts.cwd);
   const onlyThisScope = state.wiredSettingsPaths.every((p) => p === opts.settingsPath);
   if (!opts.writeApproved || !onlyThisScope) {
-    const cwdFlag = opts.scope === "user" ? "" : ` --cwd ${opts.cwd}`;
     opts.log(
       `[attach] 前回の daemon (pid=${state.pid}) は終了していますが、その hook 配線 ` +
         `(${state.wiredSettingsPaths.join(", ")}) は外されていません。死んだ port を向いたままです。` +
-        `外すには \`agentmon daemon stop --scope ${opts.scope}${cwdFlag}\` を実行してください ` +
+        `外すには \`${hint}\` を実行してください ` +
         `(${opts.scope} scope の設定は --yes か確認の承認なしには書き換えないため、ここでは外しません)。`,
     );
     return "left-needs-confirm";
   }
+  let detached: boolean;
   try {
-    detachWiredSettings(state);
+    detached = detachWiredSettings(state, { onlyEndpoint: state.endpoint });
   } catch {
     opts.log(
       `[attach] 前回の daemon (pid=${state.pid}) の hook 配線を外せませんでした。` +
-        `\`agentmon daemon stop --scope ${opts.scope}\` で再試行してください。`,
+        `\`${hint}\` で再試行してください。`,
     );
     return "detach-failed";
   }
-  removeDaemonState(opts.statePath);
+  if (!removeDaemonStateIfUnchanged(opts.statePath, existing.raw)) {
+    opts.log(
+      `[attach] 前回の daemon (pid=${state.pid}) の endpoint (${state.endpoint}) を向いた hook 配線を ` +
+        `外しました。state は判定の後に書き換わっていたため消していません (別の daemon が起動した可能性が` +
+        `あります)。`,
+    );
+    return "detached-state-changed";
+  }
   opts.log(
-    `[attach] 前回の daemon (pid=${state.pid}) は終了していたため、その hook 配線 ` +
-      `(${state.wiredSettingsPaths.join(", ")}) を外し stale state を消しました。`,
+    `[attach] 前回の daemon (pid=${state.pid}) は終了していたため、その endpoint (${state.endpoint}) を` +
+      `向いた hook 配線 (${state.wiredSettingsPaths.join(", ")}) ` +
+      `${detached ? "を外し" : "は既に無かったので"} stale state を消しました。`,
   );
   return "detached";
 }
 
 /**
  * daemon を起動し settings を配線する。
- * - 二重起動防止 (pid 生存)。stale は掃除。
+ * - 二重起動防止 (pid 生存)。stale state は起動が成功すれば上書きし、拒否なら deny() の後始末が扱う。
  * - dry-run は preview のみ (daemon 起動・書込なし)。
  * - literal token を settings に書き、state file には **値を記録しない**。
  */
@@ -425,7 +458,7 @@ export async function runStart(
     writeApproved = true;
   }
 
-  // 二重起動防止 + stale 掃除。
+  // 二重起動防止。stale state はここでは消さない (下のコメント)。
   const existing = checkExistingDaemon(statePath);
   if (existing.alive) {
     rt.log(
@@ -442,7 +475,9 @@ export async function runStart(
     // stale state はここでは消さない (SEC-ENV-4)。起動が成功すれば mergeAttachHooks の self-heal と
     // writeDaemonState が上書きし、起動後に拒否 (mismatch) されたら deny() が state を手掛かりに配線を外す。
     // 先に消すと、拒否や startDaemon の失敗で「state だけ失われ配線が残る」(daemon stop で外せない)。
-    rt.log(`[attach] stale state を検出 (pid=${existing.state?.pid} 死亡)。起動後に上書きします。`);
+    rt.log(
+      `[attach] stale state を検出 (pid=${existing.state?.pid} 死亡)。起動に成功したら上書きします。`,
+    );
   }
 
   // daemon を起動して安定 endpoint (OS 割当 port) と実 nonce を得る。

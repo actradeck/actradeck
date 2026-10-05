@@ -323,6 +323,11 @@ jobs:
           RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-approval-fail-closed
           # Task 01a108ac-cd47 (ADR 0016): same report, the PreToolUse shim INV ran.
           RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-hook-shim
+          # QA-DC-3 (SEC-ENV-4): same report, the sidecar-attach-deny-cleanup suite (the attach
+          #   refused-start cleanup INV ran) and the sidecar-attach-sighup suite (the real-process
+          #   SIGHUP detach INV ran).
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-deny-cleanup
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-sighup
 
       # 再#QA-4 (再監査 a547b9f2): webui の coverage 閾値 (vitest.config.ts: realtime core +
       #   liveness-display) を CI で実評価する。plain `vitest run` は閾値を見ないため dormant

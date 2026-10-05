@@ -3,7 +3,7 @@
  *
  * - parseDaemonArgs: attach=start 別名 / scope/token-mode/dry-run/yes / codex 明示エラー。
  * - resolveSettingsPath: scope → settings file。
- * - runStart/runStop/runStatus: 二重起動防止・stale 掃除・settings 配線/detach・state file 0600・
+ * - runStart/runStop/runStatus: 二重起動防止・stale 判定・settings 配線/detach・state file 0600・
  *   token 値を state に書かない。すべて temp HOME / temp cwd (実設定不可侵)。
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
