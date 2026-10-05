@@ -388,6 +388,18 @@ describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daem
       }
       // token 値はログに出さない (POSITIVE 対: 拒否か後始末の文言は出ている)。
       expect(log.length).toBeGreaterThan(0);
+      // POSITIVE 対 (同一リテラル): この値はこの run に実在する。project 以外の残骸は literal mode で
+      // 書いたので settings に値そのものがある。project の残骸は env mode (値を書かず参照だけ) なので、
+      // 値が run に入るのは hookToken に GOOD_TOKEN を渡す行だけ。渡さない project 行 (missing /
+      // invalid / token-leak) ではこの値は run に存在せず、下の negative は何も検査しない (開示)。
+      if (row.scope !== "project") {
+        expect(r.settingsBefore).toContain(GOOD_TOKEN);
+      } else {
+        expect(r.settingsBefore).toContain("$ACTRADECK_HOOK_TOKEN");
+        if (row.hookToken !== undefined && row.hookToken.length > 1) {
+          expect(row.hookToken).toContain(GOOD_TOKEN);
+        }
+      }
       expect(log).not.toContain(GOOD_TOKEN);
       staleExecuted += 1;
     });
