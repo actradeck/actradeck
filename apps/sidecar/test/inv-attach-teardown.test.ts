@@ -955,6 +955,10 @@ describe("INV-ATTACH-TEARDOWN: daemon status の件数は state が無くても�
     const status = runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]));
     expect(status).toMatchObject({ running: false, entries: { recorded: 0, other: n } });
     expect(status).not.toHaveProperty("state");
+    // 対照 (POSITIVE): state があれば status は state を返す。
+    const q = plant();
+    expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]))).toHaveProperty("state");
+    rmSync(q.statePath);
     writeFileSync(p.settingsPath, "{}");
     expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]))).toMatchObject({
       running: false,

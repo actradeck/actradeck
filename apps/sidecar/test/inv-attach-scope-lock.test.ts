@@ -430,6 +430,7 @@ describe("INV-ATTACH-SCOPE-LOCK: lock2 で読み直して判定する (TDA-TD-4 
     const bootId = defaultIdentitySources.readBootId();
     const startTicks = defaultIdentitySources.readStartTicks(other.pid);
     const otherEndpoint = await deadEndpoint();
+    const settingsBefore = readFileSync(r.settingsPath, "utf8");
     let otherState = "";
     let ownEndpoint = "";
     const logs: string[] = [];
@@ -454,7 +455,8 @@ describe("INV-ATTACH-SCOPE-LOCK: lock2 で読み直して判定する (TDA-TD-4 
     );
     expect(out).toMatchObject({ status: "already-running", hookEndpoint: otherEndpoint });
     expect(readFileSync(r.statePath, "utf8")).toBe(otherState);
-    expect(actradeckEndpoints(r.settingsPath)).not.toContain(ownEndpoint);
+    // 配線は書いていない (settings は起動前のバイト列のまま)。
+    expect(readFileSync(r.settingsPath, "utf8")).toBe(settingsBefore);
     expect(ownEndpoint.length).toBeGreaterThan(0);
     // 自分の daemon は止めた (endpoint に届かない)。
     await expect(fetch(ownEndpoint, { method: "POST", body: "{}" })).rejects.toThrow();
@@ -562,7 +564,7 @@ describe("INV-ATTACH-SCOPE-LOCK: daemon 自身の終了 (shutdownSelf) は自分
     expect(readFileSync(r.statePath, "utf8")).toBe(stateBefore);
     expect(readFileSync(r.tokenPath, "utf8")).toBe("token-file-marker");
     // kill しない (記録 pid の子は生きている)。
-    expect(() => process.kill(other.pid, 0)).not.toThrow();
+    expect(defaultIdentitySources.signal0(other.pid)).toBe("exists");
     executed += 1;
   });
 

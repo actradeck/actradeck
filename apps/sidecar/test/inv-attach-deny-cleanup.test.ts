@@ -84,6 +84,28 @@ vi.mock("../src/daemon-state.js", async (importOriginal) => {
   };
 });
 
+/**
+ * detachAttachHooks が返った直後に 1 回だけ同期実行する注入点 (scope lock を取らない書き手が detach の後に
+ * 配線を書く形・未設定なら素通し)。
+ */
+const bypass = vi.hoisted(() => ({ afterDetach: undefined as undefined | (() => void), fired: 0 }));
+vi.mock("../src/settings-merge.js", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../src/settings-merge.js")>();
+  return {
+    ...orig,
+    detachAttachHooks: (...a: Parameters<typeof orig.detachAttachHooks>) => {
+      const r = orig.detachAttachHooks(...a);
+      const f = bypass.afterDetach;
+      if (f !== undefined) {
+        bypass.afterDetach = undefined;
+        bypass.fired += 1;
+        f();
+      }
+      return r;
+    },
+  };
+});
+
 const WS = "ws://127.0.0.1:1/ingest/ws";
 const GOOD_TOKEN = "tok-deny-cleanup-0123456789abcdef0123";
 /** 拒否経路で配線を外したときの文言 (detach 行の POSITIVE と、触らない行の negative で同じ literal)。 */
@@ -120,6 +142,7 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "actradeck-deny-cwd-"));
 });
 afterEach(() => {
+  bypass.afterDetach = undefined;
   rmSync(home, { recursive: true, force: true });
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -835,6 +858,35 @@ describe("INV-ATTACH-DENY-CLEANUP: 記録外の ActraDeck entry も lock の下�
       allExecuted += 1;
     });
   }
+
+  it("lock を取らない書き手が detach の後に配線を書いたら state を残して停止案内を出す (R2 ガード・SEC-DC-R2-1 の案内・scope ごとの完全形)", async () => {
+    let executed = 0;
+    for (const { scope, flags } of [
+      { scope: "project-local", flags: [] as string[] },
+      { scope: "user", flags: ["--yes"] },
+    ] as const) {
+      const r = await plantResidue(scope, deadPid());
+      bypass.fired = 0;
+      bypass.afterDetach = () =>
+        appendEntriesFor(r.settingsPath, "http://127.0.0.1:1/hook", { token: GOOD_TOKEN });
+      const logs: string[] = [];
+      const out = await runStart(
+        parseDaemonArgs(["attach", "--scope", scope, "--token-mode", "env", ...flags], cwd),
+        { wsUrl: WS, dbPath: join(cwd, "bypass.db") },
+        { home, log: (m) => logs.push(m), startDaemon: () => Promise.reject(new Error("no")) },
+      );
+      expect(bypass.fired, scope).toBe(1);
+      expect(cleanupOf(out), scope).toBe("detached-entries-remain");
+      expect(readFileSync(r.statePath, "utf8"), scope).toBe(r.stateBefore);
+      expectNoHandleLoss(r.settingsPath, r.statePath, scope);
+      const log = logs.join("\n");
+      expect(log, scope).toContain(ENTRIES_REMAIN_MSG);
+      expect(log, scope).toContain(expectedHint(scope));
+      expect(log, scope).not.toContain(DETACHED_MSG);
+      executed += 1;
+    }
+    expect(executed).toBe(2);
+  });
 
   it("lock を取らない書き手が判定の後に state を書いたら detached-state-changed を返し、その state を消さない (QA-DC-R2-2 / R2-3・fail-loud)", async () => {
     const r = await plantResidue("project-local", deadPid());

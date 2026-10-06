@@ -156,20 +156,21 @@ export const SUITES = {
   // afterAll counters catch a single skipped row, but skipping a whole describe also skips that
   // describe's afterAll. Same report and two-layer shape as sidecar-approval-fail-closed.
   // `minTests` is the exact count in the full sidecar report this step reads (measured at task
-  // 01a10c42 PR-B2): 65 = 45 (denial x scope table, stale + alive rows, plus the table-shape test)
-  // + 9 (cleanup boundaries) + 3 (entries on other ports are removed too under the scope lock, and
-  // a writer that skips the lock is reported as a changed state) + 4 (removed shapes: marker-less
+  // 01a10c42 PR-B2): 66 = 45 (denial x scope table, stale + alive rows, plus the table-shape test)
+  // + 9 (cleanup boundaries) + 4 (entries on other ports are removed too under the scope lock; a
+  // writer that skips the lock is reported: entries written after the detach keep the state and
+  // print the stop command, a state written after the check is kept as changed) + 4 (removed shapes: marker-less
   // legacy literal / env entries, no recorded-port entry, no ActraDeck entry at all) + 1 (a start
   // that skips the scope lock: its state is kept, its entries are removed) in
   // inv-attach-deny-cleanup.test.ts, + 3 (single read of the state file, the cleanup's CAS using
-  // that read, state delete failure) in inv-attach-deny-cleanup-fs.test.ts. At 65, skipping or
+  // that read, state delete failure) in inv-attach-deny-cleanup-fs.test.ts. At 66, skipping or
   // renaming any one matched describe fails the gate. Raise it by hand when tests are added.
   // What this entry does not catch: an early return at the top of an `it`, a removed `expect`, or a
   // removed afterAll counter check — the gate sees only each test's status.
   "sidecar-attach-deny-cleanup": {
     label: "sidecar attach refused-start cleanup INV (INV-ATTACH-DENY-CLEANUP)",
     pattern: "INV-ATTACH-DENY-CLEANUP",
-    minTests: 65,
+    minTests: 66,
   },
   // QA-DC-3: the real-process SIGHUP detach of the attach CLI (inv-attach-deny-cleanup.test.ts, its
   // own describe with 1 test). Same limits as above: an early return inside the test is not caught.
