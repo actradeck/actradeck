@@ -356,6 +356,8 @@ run_verify_job() {
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-sighup
   # Task 01a10c42 PR-A: mirrors ci.yml - same report, the attach state trust INV ran.
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-state-trust
+  # Task 01a10c42 PR-B1: mirrors ci.yml - same report, the attach teardown INV ran.
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-teardown
 
   step "verify: Test (webui coverage gate)"
   pnpm --filter @actradeck/webui run test:coverage

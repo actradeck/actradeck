@@ -197,6 +197,26 @@ export const SUITES = {
     pattern: "INV-ATTACH-STATE-TRUST",
     minTests: 84,
   },
+  // Task 01a10c42 PR-B1 (Triangle ADR 01a10ddb D2 / D4 / D6): the single teardown of the attach
+  // wiring (detach -> state -> hook token file, required detach range, state and token file kept
+  // while other ActraDeck entries remain or the state changed after the check), `daemon stop` not
+  // reporting a leftover state or token file as stopped, the pure wiring inspection, the state
+  // endpoint form matching the hook shim, and the type floor that a refused start carries the
+  // cleanup result. `minTests` is the exact count in the full sidecar report this step reads:
+  // 21 = 4 (teardown order / range / changed / absent and rm-failed) + 4 (cleanup and stop clean
+  // the token file slot; stop reports a leftover token file or a changed state as incomplete)
+  // + 7 (inspection rows: absent / corrupt / alive / unknown / dead, entry counts, status counts)
+  // + 1 (endpoint vectors against the shim) + 2 (type floors: refused start, required detach
+  // range) in inv-attach-teardown.test.ts,
+  // + 3 (stop with a failing state delete: stale / corrupt; inspection makes no fs call) in
+  // inv-attach-teardown-fs.test.ts. The type floor itself is enforced by the type-check step
+  // (tsc -p apps/sidecar/tsconfig.test.json), not by this gate.
+  // What this entry does not catch: an early return inside an `it` or a removed `expect`.
+  "sidecar-attach-teardown": {
+    label: "sidecar attach teardown / inspection INV (INV-ATTACH-TEARDOWN)",
+    pattern: "INV-ATTACH-TEARDOWN",
+    minTests: 21,
+  },
 };
 
 function main() {
