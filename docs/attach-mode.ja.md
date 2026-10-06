@@ -129,8 +129,9 @@ claude            # いつもどおり起動するだけ → ActraDeck の一覧
 > `./scripts/ad-attach codex service restart`（または `uninstall-all`→`install-all`）を実行してください。
 
 > サービスとして常駐させているときの一時停止は `ad-attach service stop` を使ってください。
-> `ad-attach stop`（= `daemon stop`）は foreground/単発起動向けで、サービスの PID を直接落とすため
-> `systemctl` の状態表示と食い違うことがあります（detach 自体はどちらでも正しく行われます）。
+> `ad-attach stop`（= `daemon stop`）は foreground/単発起動向けで、そのプロセスがその scope に記録された
+> daemon だと確かめられたときにサービスのプロセスへ `SIGTERM` を送るため、`systemctl` の状態表示と
+> 食い違うことがあります（detach 自体はどちらでも正しく行われます）。
 
 `stop`/`uninstall` 時の `SIGTERM` で CLI の shutdown ハンドラが
 `~/.claude/settings.json` から **ActraDeck の hook entry のみ** を可逆 detach します
@@ -205,18 +206,38 @@ scope と安全ガード:
   閉じたときなど）で自分の entry を外します。`SIGKILL` のように処理できない形で終了すると、entry は
   settings に残り、誰も listen していない port を向いたままになります。同じ scope で次に起動が成功すると
   置き換わります。起動が拒否された場合（token の検査に通らない等）は、その scope に記録された daemon が
-  既に終了していれば entry を外します。外すのはその daemon に記録された port を向いた entry だけなので、
+  既に終了していれば（プロセスが終了したか、その pid が別のプロセスに使われている）entry を外します。
+  記録を読めない・検証できない場合や、記録されたプロセスがまだその daemon かを確かめられない場合は、
+  拒否された起動はファイルを変更しません（記録を読めない・検証できない場合は `daemon stop --scope <scope>`
+  コマンドも表示します）。外すのはその daemon に記録された port を向いた entry だけなので、
   同じ scope で稼働中の daemon（拒否された起動が後始末をしている間に起動したものを含む）の entry は
   残ります。例外は、その瞬間に起動した daemon が終了した daemon と同じ port を得た場合で、その entry は
   外れますが `daemon status` は稼働中と表示します。`daemon stop --scope <scope>` で止めてから起動し
   直してください。`user` と `project`
   scope では `--yes` を付けたときだけ外し、付けていなければファイルを変更せず、外すための
   `daemon stop --scope <scope>` コマンドを表示します。`daemon stop --scope <scope>` は daemon の
-  プロセスが既に終了していても、その scope の記録が残っていれば使えます。起動が拒否された場合、記録された
+  プロセスが既に終了していても、その scope の記録が残っていれば使えます。`SIGTERM` を送るのは、記録された
+  daemon だと確かめられたプロセスだけです。確かめられない場合（例: 古い build が書いた記録で、その後に
+  システムの時計が進んだ場合）も entry と記録は外しますが、プロセスは止めずにメッセージを表示するので、
+  そのプロセスは手動で止めてください。記録を読めない・検証できない場合、`daemon stop` はどのプロセスにも
+  signal を送らずに、settings にある ActraDeck の entry をすべて外し、記録を消します。起動が拒否された場合、記録された
   port の entry を外した後もほかの port を向いた ActraDeck の entry が settings に残っていれば、記録を
   消さずに同じコマンドを表示します。拒否された起動が後始末をしている間に同じ scope で別の daemon が
   起動すると、表示されたコマンドがその新しい daemon を指すことがあり、実行するとその daemon を止めて
   settings にある ActraDeck の entry を（ほかの port のものも含めて）すべて外します。
+- **daemon の記録の場所**: 記録は settings file ごとに 1 つ、`~/.actradeck/daemon/` の下にあります。
+  記録は、symbolic link を解決した settings file のディレクトリと、書かれたままのファイル名で決まります。
+  そのため symlink 経由のディレクトリと実体のディレクトリから起動・停止した場合は同じ daemon を指し、
+  settings file 自体が別のファイルへの symbolic link の場合はそれ自身の記録を持ちます。daemon の起動中に
+  settings file のディレクトリの path 上にある symbolic link を付け替えないでください。記録と daemon が
+  書くファイルがずれ、終了後もそのファイルに daemon の entry が残ることがあります。ホームディレクトリでは
+  `project` と `user` の scope が同じファイルを使うので、どちらの scope で起動した daemon も他方の scope で
+  確認・停止でき、`--scope user` はどのディレクトリからでも使えます。
+- **古い build に戻す場合**: この記録形式より前の build は、現在の build が書いた記録を読めず、その
+  `daemon stop` と拒否された起動はエラーで終了します。戻す前に、現在の build で
+  `daemon stop --scope <scope>` を実行してください。daemon が既に終了していて古い build がそのエラーを
+  出す場合は、`~/.actradeck/daemon/` の下にあるその scope の記録ファイルを消してから古い build を
+  起動してください。起動が entry を置き換えます。
 
 ---
 

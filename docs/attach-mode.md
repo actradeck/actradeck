@@ -144,9 +144,9 @@ claude            # just start it as usual → it appears in ActraDeck's list wi
 > in the env of the running processes.
 
 > To temporarily pause while running as a service, use `ad-attach service stop`. `ad-attach stop`
-> (= `daemon stop`) is for foreground / one-shot startup and directly kills the service's PID, so
-> it can disagree with `systemctl`'s status display (the detach itself is done correctly either
-> way).
+> (= `daemon stop`) is for foreground / one-shot startup. It sends `SIGTERM` to the service's
+> process when it can confirm that the process is the daemon recorded for that scope, so it can
+> disagree with `systemctl`'s status display (the detach itself is done correctly either way).
 
 On `SIGTERM` at `stop`/`uninstall`, the CLI's shutdown handler reversibly detaches **only
 ActraDeck's hook entries** from `~/.claude/settings.json` (the hooks you added are preserved).
@@ -227,7 +227,10 @@ Scope and safety guards:
   a way it cannot handle, such as `SIGKILL`, its entries stay in the settings file and point at a
   port nothing listens on. The next successful start in the same scope replaces them. A start that
   is refused (for example because the token check fails) removes them if the daemon recorded for
-  that scope is no longer running. It removes only the entries that point at the port recorded for
+  that scope is no longer running (its process has exited, or its process ID now belongs to another
+  process). If the record cannot be read or validated, or it cannot be confirmed whether the recorded
+  process is still the daemon, a refused start leaves the file unchanged; when the record cannot be
+  read or validated it also prints the `daemon stop --scope <scope>` command. It removes only the entries that point at the port recorded for
   that daemon, so a daemon that is running in the same scope, including one that starts while the
   refused start is cleaning up, keeps its entries. The exception is a daemon that starts at that
   moment and is given the same port as the daemon that exited: its entries are removed while
@@ -236,12 +239,31 @@ Scope and safety guards:
   For `user` and `project` scope a refused start removes them only when you passed `--yes`;
   otherwise it leaves the file unchanged and prints the `daemon stop --scope <scope>` command that
   removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited,
-  as long as the record for that scope is still there. A refused start keeps that record, and
+  as long as the record for that scope is still there. It sends `SIGTERM` only to a process it can
+  confirm is the recorded daemon. When it cannot confirm this (for example for a record written by
+  an older build after the system clock moved forward), it still removes the entries and the record,
+  leaves the process running and prints a message; stop that process yourself. When the record
+  cannot be read or validated, `daemon stop` removes every ActraDeck entry from the settings file
+  and the record without signalling any process. A refused start keeps that record, and
   prints the same command, when ActraDeck entries for other ports are still in the settings file
   after it has removed the ones for the recorded port. If another daemon starts in the same scope
   while a refused start is cleaning up, the printed command can refer to that new daemon, and
   running it stops that daemon and removes every ActraDeck entry from the settings file, including
   entries for other ports.
+- **Where the daemon keeps its record.** There is one record per settings file under
+  `~/.actradeck/daemon/`. It is keyed by the directory of the settings file with symbolic links
+  resolved, plus the file name as written. Starting from a symlinked directory and from the real
+  directory therefore refer to the same daemon, while a settings file that is itself a symbolic link
+  to another file has its own record. Do not repoint a symbolic link on the path of the settings
+  file's directory while a daemon is starting: the record and the file the daemon writes can then
+  differ, and the daemon's entries can stay in that file after it exits. In your home directory the
+  `project` and `user` scopes use the same file, so a daemon started with either scope can be
+  checked and stopped with the other, and `--scope user` works from any directory.
+- **Switching back to an older build.** Builds from before this record format cannot read the record
+  the current build writes: their `daemon stop` and a refused start exit with an error. Before
+  switching back, run `daemon stop --scope <scope>` with the current build. If the daemon has
+  already exited and an older build reports that error, delete the scope's record file under
+  `~/.actradeck/daemon/` and start the older build; the start replaces the entries.
 
 ---
 

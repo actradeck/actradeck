@@ -10,26 +10,33 @@ import { join, resolve } from "node:path";
 
 import { AttachDaemon } from "./attach-daemon.js";
 import {
-  checkExistingDaemon,
+  assertDaemonStateShape,
+  type AttachScope,
   type DaemonState,
-  readDaemonState,
-  removeDaemonState,
   isDaemonStateUnchanged,
+  readState,
+  removeDaemonState,
   removeDaemonStateIfUnchanged,
-  stateFilePath,
+  scopeArtifacts,
+  type ScopeArtifacts,
   writeDaemonState,
 } from "./daemon-state.js";
+import {
+  captureSelfIdentity,
+  type IdentitySources,
+  isDaemonProcess,
+  type ProcessLiveness,
+} from "./process-identity.js";
 import {
   detachAttachHooks,
   type DetachScope,
   hasActradeckHookInSettings,
-  HOOK_TOKEN_ENV_VAR,
   mergeAttachHooks,
   previewAttachHooks,
   type TokenMode,
 } from "./settings-merge.js";
 
-export type AttachScope = "project-local" | "project" | "user";
+export type { AttachScope } from "./daemon-state.js";
 
 /**
  * hook 認証トークンとして使える値か (SEC-ENV-1 ≡ TDA-ENV-4 / SEC-ENV-3・裁定 01a10814)。
@@ -163,6 +170,33 @@ export function resolveSettingsPath(
   }
 }
 
+/** scope の settings path・artifact path・state で受け入れる scope ラベル (args から導出する)。 */
+export interface ScopeTarget {
+  readonly settingsPath: string;
+  readonly artifacts: ScopeArtifacts;
+  readonly scopes: readonly AttachScope[];
+}
+
+/**
+ * args の scope / cwd / home から {@link ScopeTarget} を導出する。state の scope ラベルは要求した scope だけを
+ * 受け入れる。ただし導出した settings file が **user の settings file と同じ** (正規化した path が一致・
+ * cwd が home の project か user) なら project と user の両方を受け入れる: cwd が home のとき project と
+ * user は同じ `~/.claude/settings.json` を指すので、どちらで起動した daemon も、どの cwd からでも user で
+ * (home からなら project でも) 止められる。state に記録された settings path の一致は別途必須 (asDaemonState)。
+ */
+export function scopeTarget(scope: AttachScope, cwd: string, home: string): ScopeTarget {
+  const settingsPath = resolveSettingsPath(scope, cwd, home);
+  const artifacts = scopeArtifacts(settingsPath, home);
+  const userCanonical = scopeArtifacts(
+    resolveSettingsPath("user", cwd, home),
+    home,
+  ).canonicalSettingsPath;
+  const sharesUserFile =
+    scope !== "project-local" && artifacts.canonicalSettingsPath === userCanonical;
+  const scopes: readonly AttachScope[] = sharesUserFile ? ["project", "user"] : [scope];
+  return { settingsPath, artifacts, scopes };
+}
+
 /** start 実行の依存注入 (テスト・実機で差し替え)。 */
 export interface DaemonRuntime {
   /**
@@ -188,6 +222,11 @@ export interface DaemonRuntime {
    * (security.md: 承認は ask/deny 安全側。--yes が無ければ高リスク write を自動実行しない)。
    */
   confirm?: (message: string) => boolean | Promise<boolean>;
+  /**
+   * state の pid が記録した daemon かを判定する OS 情報の源 (process-identity.ts)。未提供なら本番の
+   * `/proc` / `ps`。test が unknown 等を注入するための口。
+   */
+  identity?: IdentitySources;
 }
 
 /** runStart の拒否 status (すべて deny() を通る)。 */
@@ -249,25 +288,19 @@ export function tokenModeLeaksToTrackedFile(scope: AttachScope, tokenMode: Token
 }
 
 /**
- * state に記録された配線 (wiredSettingsPaths) を detach する。runStop と拒否経路の後始末
- * (cleanupStaleWiring) の単一出所。detach 自体は `detachAttachHooks` (withFileLock で直列化・
- * ユーザー hooks は温存) に委ねる。`scope.onlyEndpoint` を渡すとその endpoint を向く entry だけを外す
- * (runStop は渡さず全 ActraDeck entry を外す)。
+ * scope の settings file (args から導出した path・state の中身からは取らない) の配線を detach する。
+ * runStop と拒否経路の後始末 (cleanupStaleWiring) の単一出所。detach 自体は `detachAttachHooks`
+ * (withFileLock で直列化・ユーザー hooks は温存) に委ねる。`scope.onlyEndpoint` を渡すとその endpoint を
+ * 向く entry だけを外す (runStop は渡さず全 ActraDeck entry を外す)。
  * `detached` は 1 件でも外したか。`remaining` は detach 後 (lock 内で書いた / 読んだ settings) に
  * ActraDeck entry が 1 本でも残っているか (SEC-DC-R2-1)。
  */
 function detachWiredSettings(
-  state: DaemonState,
+  settingsPath: string,
   scope: DetachScope = {},
 ): { detached: boolean; remaining: boolean } {
-  let detached = false;
-  let remaining = false;
-  for (const p of state.wiredSettingsPaths) {
-    const res = detachAttachHooks(p, undefined, scope);
-    if (res.removed) detached = true;
-    if (hasActradeckHookInSettings(res.settings)) remaining = true;
-  }
-  return { detached, remaining };
+  const res = detachAttachHooks(settingsPath, undefined, scope);
+  return { detached: res.removed, remaining: hasActradeckHookInSettings(res.settings) };
 }
 
 /**
@@ -282,6 +315,7 @@ export function stopCommandHint(scope: AttachScope, cwd: string): string {
 /** 拒否経路の後始末の結果 (テストと監査向けに返す・CLI は使わない)。 */
 export type StaleCleanup =
   | "no-state"
+  | "state-invalid"
   | "alive-untouched"
   | "detached"
   | "detached-entries-remain"
@@ -297,9 +331,12 @@ export type StaleCleanup =
  * 別プロセスが bind すると hook payload と token を受け取れる。起動が成功すれば mergeAttachHooks の
  * self-heal が上書きするが、拒否された起動はそこまで進まないので、ここで片付ける。
  *
- * - state の pid が**死んでいる (stale)** ときだけ動く。判定は `checkExistingDaemon` の 1 回の読み取り
- *   (lock の外)。判定の時点で生きている daemon の state なら何もしない (判定の後に起動した daemon の
- *   扱いは下の endpoint 限定と残る穴を参照)。
+ * - state の pid が**記録した daemon ではない (stale)** ときだけ動く。判定は `readState` の 1 回の
+ *   読み取り (lock の外) と `isDaemonProcess` (pid の生存 + 開始時刻の照合・pid 再利用は stale)。同一性を
+ *   確かめられない (unknown) ときは生きているとみなして何もしない。判定の時点で生きている daemon の
+ *   state なら何もしない (判定の後に起動した daemon の扱いは下の endpoint 限定と残る穴を参照)。
+ * - state が検証できない (corrupt: 壊れた JSON・形の不一致・導出した settings path / scope と整合しない)
+ *   ときは pid を信用できないので書かずに `state-invalid` を返し、`daemon stop` を案内する。
  * - 外すのは **stale state に記録された endpoint を向く ActraDeck entry だけ** (`onlyEndpoint`)。
  *   判定の後で同じ scope に別の daemon が起動し、別の endpoint で配線していても、その entry は残る。
  * - state は**判定に使ったバイト列と同じとき**で、かつ detach 後に ActraDeck entry が 1 本も残って
@@ -322,8 +359,8 @@ export type StaleCleanup =
  *   共有/グローバル settings への書込は confirm ゲート (SEC-1) の対象なので、拒否経路でも同じ線を守り、
  *   残っていることと {@link stopCommandHint} だけをログに出す。state は消さない
  *   (消すと `daemon stop` が配線を見つけられなくなる)。
- * - state の配線先が当該 scope の settings 1 件以外を含むときも書かない (state から他の file への書込を
- *   誘導させない)。通常の state は常に `[settingsPath]` だけを持つ。
+ * - detach する settings は args から導出した path だけ (state の中身から path を取らない)。当該 scope 以外の
+ *   path を記録した state は corrupt として上の `state-invalid` に落ちる。
  * - detach が失敗したら state を残す (`daemon stop` で再試行できる形を保つ)。値はログに出さない。
  */
 export function cleanupStaleWiring(opts: {
@@ -331,19 +368,33 @@ export function cleanupStaleWiring(opts: {
   readonly settingsPath: string;
   readonly scope: AttachScope;
   readonly cwd: string;
+  readonly home: string;
   readonly writeApproved: boolean;
   readonly log: (msg: string) => void;
+  readonly identity?: IdentitySources;
 }): StaleCleanup {
-  const existing = checkExistingDaemon(opts.statePath);
-  if (existing.state === undefined || existing.raw === undefined) return "no-state";
-  if (!existing.stale) return "alive-untouched";
-  const state = existing.state;
+  const target = scopeTarget(opts.scope, opts.cwd, opts.home);
+  if (target.settingsPath !== opts.settingsPath || target.artifacts.statePath !== opts.statePath) {
+    throw new Error(
+      "cleanupStaleWiring: statePath / settingsPath は scope から導出した値を渡すこと",
+    );
+  }
   const hint = stopCommandHint(opts.scope, opts.cwd);
-  const onlyThisScope = state.wiredSettingsPaths.every((p) => p === opts.settingsPath);
-  if (!opts.writeApproved || !onlyThisScope) {
+  const existing = readState(target.artifacts, target.scopes);
+  if (existing.kind === "absent") return "no-state";
+  if (existing.kind === "corrupt") {
+    opts.log(
+      `[attach] 前回の daemon の state (${existing.path}) を検証できないため、hook 配線には触れていません。` +
+        `外すには \`${hint}\` を実行してください。`,
+    );
+    return "state-invalid";
+  }
+  const state = existing.state;
+  if (isDaemonProcess(state, opts.identity) !== "dead") return "alive-untouched";
+  if (!opts.writeApproved) {
     opts.log(
       `[attach] 前回の daemon (pid=${state.pid}) は終了していますが、その hook 配線 ` +
-        `(${state.wiredSettingsPaths.join(", ")}) は外されていません。死んだ port を向いたままです。` +
+        `(${opts.settingsPath}) は外されていません。死んだ port を向いたままです。` +
         `外すには \`${hint}\` を実行してください ` +
         `(${opts.scope} scope の設定は --yes か確認の承認なしには書き換えないため、ここでは外しません)。`,
     );
@@ -351,7 +402,7 @@ export function cleanupStaleWiring(opts: {
   }
   let res: { detached: boolean; remaining: boolean };
   try {
-    res = detachWiredSettings(state, { onlyEndpoint: state.endpoint });
+    res = detachWiredSettings(opts.settingsPath, { onlyEndpoint: state.endpoint });
   } catch {
     opts.log(
       `[attach] 前回の daemon (pid=${state.pid}) の hook 配線を外せませんでした。` +
@@ -366,15 +417,15 @@ export function cleanupStaleWiring(opts: {
   // SEC-DC-R2-1: 記録 endpoint 以外の ActraDeck entry がまだ残るなら state を消さない。消すと
   // `daemon stop` がその配線を見つけられなくなる。判定の後に state が書き換わっていたら (別の daemon が
   // 起動した可能性) 停止案内は出さず、下の CAS 枝に任せる。
-  if (res.remaining && isDaemonStateUnchanged(opts.statePath, existing.raw)) {
+  if (res.remaining && isDaemonStateUnchanged(existing.path, existing.raw)) {
     opts.log(
-      `[attach] ${what}。ただし ${state.wiredSettingsPaths.join(", ")} にはほかの ActraDeck hook 配線が` +
+      `[attach] ${what}。ただし ${opts.settingsPath} にはほかの ActraDeck hook 配線が` +
         `残っているため、state は残します。外すには \`${hint}\` を実行してください。`,
     );
     return "detached-entries-remain";
   }
   // remaining かつ state が変わっていた場合も、ここで CAS が "changed" を返すので消さない。
-  const removal = removeDaemonStateIfUnchanged(opts.statePath, existing.raw);
+  const removal = removeDaemonStateIfUnchanged(existing.path, existing.raw);
   if (removal === "changed") {
     opts.log(
       `[attach] ${what}。state は判定の後に書き換わっていたため消していません (別の daemon が` +
@@ -389,7 +440,7 @@ export function cleanupStaleWiring(opts: {
     return "detached-state-rm-failed";
   }
   opts.log(
-    `[attach] ${what} (${state.wiredSettingsPaths.join(", ")})。daemon は終了していたため ` +
+    `[attach] ${what} (${opts.settingsPath})。daemon は終了していたため ` +
       `stale state を消しました。`,
   );
   return "detached";
@@ -397,7 +448,8 @@ export function cleanupStaleWiring(opts: {
 
 /**
  * daemon を起動し settings を配線する。
- * - 二重起動防止 (pid 生存)。stale state は起動が成功すれば上書きし、拒否なら deny() の後始末が扱う。
+ * - 二重起動防止 (pid の生存と開始時刻の照合・process-identity.ts)。stale / corrupt な state は起動が成功すれば
+ *   上書きし、拒否なら deny() の後始末が扱う。
  * - dry-run は preview のみ (daemon 起動・書込なし)。
  * - literal token を settings に書き、state file には **値を記録しない**。
  */
@@ -407,8 +459,9 @@ export async function runStart(
   rt: DaemonRuntime,
 ): Promise<StartOutcome> {
   const home = rt.home ?? homedir();
-  const settingsPath = resolveSettingsPath(args.scope, args.cwd, home);
-  const statePath = stateFilePath(settingsPath, home);
+  const target = scopeTarget(args.scope, args.cwd, home);
+  const { settingsPath, artifacts } = target;
+  const statePath = artifacts.statePath;
 
   if (args.dryRun) {
     // dry-run は daemon を起動しないため endpoint/token はプレースホルダ。書き込まない。
@@ -435,8 +488,10 @@ export async function runStart(
       settingsPath,
       scope: args.scope,
       cwd: args.cwd,
+      home,
       writeApproved,
       log: rt.log,
+      ...(rt.identity !== undefined ? { identity: rt.identity } : {}),
     });
     return { status, settingsPath, statePath };
   };
@@ -498,26 +553,32 @@ export async function runStart(
     writeApproved = true;
   }
 
-  // 二重起動防止。stale state はここでは消さない (下のコメント)。
-  const existing = checkExistingDaemon(statePath);
-  if (existing.alive) {
-    rt.log(
-      `[attach] 既に稼働中 (pid=${existing.state?.pid}, endpoint=${existing.state?.endpoint})`,
-    );
-    return {
-      status: "already-running",
-      statePath,
-      settingsPath,
-      ...(existing.state?.endpoint !== undefined ? { hookEndpoint: existing.state.endpoint } : {}),
-    };
-  }
-  if (existing.stale) {
+  // 二重起動防止。同一性を確かめられない (unknown) ときは生きているとみなす (base 同値・ADR 01a10ddc)。
+  // stale / corrupt な state はここでは消さない (下のコメント)。
+  const existing = readState(artifacts, target.scopes);
+  if (existing.kind === "state") {
+    const liveness = isDaemonProcess(existing.state, rt.identity);
+    if (liveness !== "dead") {
+      rt.log(
+        `[attach] 既に稼働中 (pid=${existing.state.pid}, endpoint=${existing.state.endpoint}` +
+          `${liveness === "unknown" ? "・同一性は未確認" : ""})`,
+      );
+      return {
+        status: "already-running",
+        statePath,
+        settingsPath,
+        hookEndpoint: existing.state.endpoint,
+      };
+    }
     // stale state はここでは消さない (SEC-ENV-4)。起動が成功すれば mergeAttachHooks の self-heal と
     // writeDaemonState が上書きし、起動後に拒否 (mismatch) されたら deny() が state を手掛かりに配線を外す。
     // 先に消すと、拒否や startDaemon の失敗で「state だけ失われ配線が残る」(daemon stop で外せない)。
     rt.log(
-      `[attach] stale state を検出 (pid=${existing.state?.pid} 死亡)。起動に成功したら上書きします。`,
+      `[attach] stale state を検出 (pid=${existing.state.pid} 死亡)。起動に成功したら上書きします。`,
     );
+  } else if (existing.kind === "corrupt") {
+    // 検証できない state は pid を信用しない。起動に成功したら上書きする (拒否なら deny() は書かずに案内)。
+    rt.log(`[attach] state (${existing.path}) を検証できません。起動に成功したら上書きします。`);
   }
 
   // daemon を起動して安定 endpoint (OS 割当 port) と実 nonce を得る。
@@ -546,6 +607,20 @@ export async function runStart(
     return deny("denied-env-token-mismatch");
   }
 
+  // state file に記録する内容 (**token 値は書かない** — token mode だけ)。読む側と同じ形検証を配線の前に
+  // 通す (配線だけ書いて state を書けない経路を作らない)。
+  const identity = captureSelfIdentity(rt.identity);
+  const state: DaemonState = {
+    pid: process.pid,
+    endpoint: hookEndpoint,
+    scope: args.scope,
+    settingsPath: artifacts.canonicalSettingsPath,
+    startedAt: new Date().toISOString(),
+    tokenMode: args.tokenMode,
+    ...(identity !== undefined ? { procIdentity: identity } : {}),
+  };
+  assertDaemonStateShape(state);
+
   // settings を非破壊配線 (実 endpoint + daemon が検証に使う実 nonce を書く)。
   const merge = mergeAttachHooks({
     settingsPath,
@@ -554,16 +629,12 @@ export async function runStart(
     ...(args.tokenMode === "literal" ? { token: hookToken } : {}),
   });
 
-  // state file を 0600 で記録 (**token 値は書かない** — env-mode は変数名のみ)。
-  const state: DaemonState = {
-    pid: process.pid,
-    endpoint: hookEndpoint,
-    ...(args.tokenMode === "env" ? { hookTokenEnvVar: HOOK_TOKEN_ENV_VAR } : {}),
-    wiredSettingsPaths: [settingsPath],
-    scope: args.scope,
-    startedAt: new Date().toISOString(),
-  };
   writeDaemonState(statePath, state);
+  // 旧い dist の path で読んだ (stale / corrupt の) state は、新しい path に書いたので消す (判定に使った
+  // バイト列と同じときだけ)。残すと、この daemon の state を消した後に旧い state が再び読まれる。
+  if (existing.kind !== "absent" && existing.path !== statePath && existing.raw !== undefined) {
+    removeDaemonStateIfUnchanged(existing.path, existing.raw);
+  }
 
   rt.log(
     `[attach] daemon 起動 pid=${process.pid} endpoint=${hookEndpoint} scope=${args.scope} ` +
@@ -578,48 +649,105 @@ export async function runStart(
   };
 }
 
+/**
+ * runStop が記録 pid に SIGTERM を送ったか (D7)。送るのは記録した daemon と同一だと確かめられたとき
+ * (`isDaemonProcess` が alive) だけ。
+ * - `sent`: 送った。`send-failed`: 送ろうとして失敗した (その間に終了した等)。
+ * - `self`: 記録 pid が自プロセス (呼び元が shutdown する)。
+ * - `skipped-dead`: 記録した daemon は終了済み (pid 不在・start ticks / boot_id の不一致・Linux 以外の旧形
+ *   state で etime が許容より後の起動を示す)。
+ * - `skipped-identity-unknown`: 同一か確かめられない (権限が無い・`/proc` / `ps` が読めない・Linux の旧形
+ *   state (procIdentity 無し) で etime が許容より後の起動を示す = pid 再利用と時計の前進を区別できない)。
+ *   送らない。
+ * - `skipped-corrupt`: state を検証できず pid を信用できない。送らない。
+ * - `no-state`: state が無い。
+ */
+export type StopKill =
+  | "sent"
+  | "send-failed"
+  | "self"
+  | "skipped-dead"
+  | "skipped-identity-unknown"
+  | "skipped-corrupt"
+  | "no-state";
+
 export interface StopOutcome {
   readonly status: "stopped" | "not-running";
   readonly detached: boolean;
   readonly settingsPaths: readonly string[];
   readonly killedPid?: number;
+  readonly kill: StopKill;
+  /** state を検証できなかった (配線を外し、検証できない state を消した・kill はしない)。 */
+  readonly state?: "corrupt-removed";
 }
 
 /**
  * daemon を停止し settings から ActraDeck hooks を reversible detach する。
- * 別プロセスの daemon が記録されていれば SIGTERM で停止を試みる。
+ * 別プロセスの daemon が記録されていて、記録した daemon と同一だと確かめられたときだけ SIGTERM を送る。
+ * detach する settings は args から導出した path (state の中身からは取らない)。state を検証できない
+ * (corrupt) ときは pid を信用せず、配線を外して state を消し、signal は送らない。
  */
 export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   const home = rt.home ?? homedir();
-  const settingsPath = resolveSettingsPath(args.scope, args.cwd, home);
-  const statePath = stateFilePath(settingsPath, home);
-  const state = readDaemonState(statePath);
-  if (state === undefined) {
-    rt.log(`[attach] 稼働中の daemon がありません (${statePath})`);
-    return { status: "not-running", detached: false, settingsPaths: [] };
+  const target = scopeTarget(args.scope, args.cwd, home);
+  const { settingsPath } = target;
+  const read = readState(target.artifacts, target.scopes);
+  if (read.kind === "absent") {
+    rt.log(`[attach] 稼働中の daemon がありません (${target.artifacts.statePath})`);
+    return { status: "not-running", detached: false, settingsPaths: [], kill: "no-state" };
   }
 
-  // 配線済み settings をすべて detach (ユーザー hooks は温存)。
-  const { detached } = detachWiredSettings(state);
+  // 配線済み settings を detach (ユーザー hooks は温存)。
+  const { detached } = detachWiredSettings(settingsPath);
 
-  // 別プロセスの daemon を停止 (自プロセスなら呼び元が shutdown)。
-  let killedPid: number | undefined;
-  if (state.pid !== process.pid) {
-    try {
-      process.kill(state.pid, "SIGTERM");
-      killedPid = state.pid;
-    } catch {
-      /* 既に死亡 (stale) → state 削除のみ */
+  if (read.kind === "corrupt") {
+    removeDaemonState(read.path);
+    rt.log(
+      `[attach] state (${read.path}) を検証できないため pid には signal を送っていません。` +
+        `hook 配線を外し、state を消しました。daemon がまだ動いていれば手動で止めてください。`,
+    );
+    return {
+      status: "stopped",
+      detached,
+      settingsPaths: [settingsPath],
+      kill: "skipped-corrupt",
+      state: "corrupt-removed",
+    };
+  }
+
+  // 別プロセスの daemon を停止 (自プロセスなら呼び元が shutdown)。同一性を確かめてから送る。
+  const state = read.state;
+  let kill: StopKill;
+  if (state.pid === process.pid) {
+    kill = "self";
+  } else {
+    const liveness: ProcessLiveness = isDaemonProcess(state, rt.identity);
+    if (liveness === "alive") {
+      try {
+        process.kill(state.pid, "SIGTERM");
+        kill = "sent";
+      } catch {
+        kill = "send-failed";
+      }
+    } else {
+      kill = liveness === "dead" ? "skipped-dead" : "skipped-identity-unknown";
     }
   }
+  if (kill === "skipped-identity-unknown") {
+    rt.log(
+      `[attach] pid=${state.pid} が記録した daemon と同一か確かめられないため、signal は送っていません。` +
+        `daemon がまだ動いていれば手動で止めてください。`,
+    );
+  }
 
-  removeDaemonState(statePath);
-  rt.log(`[attach] daemon 停止 + detach (settings ${state.wiredSettingsPaths.length} 件復元)`);
+  removeDaemonState(read.path);
+  rt.log(`[attach] daemon 停止 + detach (settings 1 件復元)`);
   return {
     status: "stopped",
     detached,
-    settingsPaths: state.wiredSettingsPaths,
-    ...(killedPid !== undefined ? { killedPid } : {}),
+    settingsPaths: [settingsPath],
+    kill,
+    ...(kill === "sent" ? { killedPid: state.pid } : {}),
   };
 }
 
@@ -627,27 +755,38 @@ export interface StatusOutcome {
   readonly running: boolean;
   readonly state?: DaemonState;
   readonly statePath: string;
+  /** state の pid が記録した daemon か (state があるときだけ)。 */
+  readonly liveness?: ProcessLiveness;
+  /** state を検証できなかった。 */
+  readonly corrupt?: boolean;
 }
 
-/** daemon の稼働状態を返す (status 表示)。 */
+/** daemon の稼働状態を返す (status 表示)。同一性を確かめられない (unknown) ときは稼働中として表示する。 */
 export function runStatus(args: DaemonArgs, rt: DaemonRuntime): StatusOutcome {
   const home = rt.home ?? homedir();
-  const settingsPath = resolveSettingsPath(args.scope, args.cwd, home);
-  const statePath = stateFilePath(settingsPath, home);
-  const existing = checkExistingDaemon(statePath);
-  if (existing.alive && existing.state) {
-    rt.log(
-      `[attach] 稼働中 pid=${existing.state.pid} endpoint=${existing.state.endpoint} ` +
-        `scope=${existing.state.scope} since=${existing.state.startedAt}`,
-    );
-    return { running: true, state: existing.state, statePath };
-  }
-  if (existing.stale) {
-    rt.log(`[attach] stale state (pid=${existing.state?.pid} 死亡)。daemon は稼働していません。`);
-  } else {
+  const target = scopeTarget(args.scope, args.cwd, home);
+  const statePath = target.artifacts.statePath;
+  const read = readState(target.artifacts, target.scopes);
+  if (read.kind === "absent") {
     rt.log(`[attach] daemon は稼働していません (${statePath})`);
+    return { running: false, statePath };
   }
-  return existing.state !== undefined
-    ? { running: false, state: existing.state, statePath }
-    : { running: false, statePath };
+  if (read.kind === "corrupt") {
+    rt.log(
+      `[attach] state (${read.path}) を検証できません。\`${stopCommandHint(args.scope, args.cwd)}\` で` +
+        `配線を外し state を消せます。`,
+    );
+    return { running: false, statePath, corrupt: true };
+  }
+  const state = read.state;
+  const liveness = isDaemonProcess(state, rt.identity);
+  if (liveness !== "dead") {
+    rt.log(
+      `[attach] 稼働中 pid=${state.pid} endpoint=${state.endpoint} ` +
+        `scope=${state.scope} since=${state.startedAt}${liveness === "unknown" ? " (同一性は未確認)" : ""}`,
+    );
+    return { running: true, state, statePath, liveness };
+  }
+  rt.log(`[attach] stale state (pid=${state.pid} 死亡)。daemon は稼働していません。`);
+  return { running: false, state, statePath, liveness };
 }
