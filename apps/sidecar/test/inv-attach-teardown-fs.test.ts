@@ -25,6 +25,7 @@ import {
 } from "../src/daemon-cli.js";
 import {
   canonicalSettingsPath,
+  compareDaemonState,
   readState,
   scopeArtifacts,
   writeDaemonState,
@@ -34,6 +35,7 @@ import { mergeAttachHooks } from "../src/settings-merge.js";
 /** 指定 path の rmSync を失敗させる / 数えている間の fs 関数呼び出しを数える。未設定なら素通し。 */
 const fsHook = vi.hoisted(() => ({
   failRmPath: undefined as string | undefined,
+  failReadPath: undefined as string | undefined,
   counting: false,
   calls: [] as string[],
 }));
@@ -48,6 +50,13 @@ vi.mock("node:fs", async (importOriginal) => {
     const fn = value as (...a: unknown[]) => unknown;
     wrapped[name] = (...args: unknown[]) => {
       if (fsHook.counting) fsHook.calls.push(name);
+      if (
+        name === "readFileSync" &&
+        fsHook.failReadPath !== undefined &&
+        String(args[0]) === fsHook.failReadPath
+      ) {
+        throw Object.assign(new Error("EACCES (injected)"), { code: "EACCES" });
+      }
       if (
         name === "rmSync" &&
         fsHook.failRmPath !== undefined &&
@@ -73,6 +82,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   fsHook.failRmPath = undefined;
+  fsHook.failReadPath = undefined;
   fsHook.counting = false;
   fsHook.calls = [];
   rmSync(home, { recursive: true, force: true });
@@ -178,5 +188,24 @@ describe("INV-ATTACH-TEARDOWN: inspectStaleWiring は fs を呼ばない (V12・
     fsHook.counting = false;
     expect(res.kind).toBe("stale");
     expect(fsHook.calls).toEqual([]);
+  });
+});
+
+describe("INV-ATTACH-TEARDOWN: 読めない state の CAS 比較 (TDA-TD-2 ≡ QA-TD-2・fs 注入)", () => {
+  it("判定でも読めなかった state は「同じ」・判定で読めた値とは「違う」・無ければ absent (daemon stop は読めない state も消す)", () => {
+    const { statePath } = plantStale();
+    fsHook.failReadPath = statePath;
+    expect(compareDaemonState(statePath, undefined)).toBe("same");
+    expect(compareDaemonState(statePath, "{}")).toBe("changed");
+    // 読めない state は corrupt として扱われ、daemon stop は比較が「同じ」なので消して stopped。
+    const logs: string[] = [];
+    expect(runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs))).toMatchObject({
+      status: "stopped",
+      corrupt: true,
+      state: "removed",
+    });
+    expect(existsSync(statePath)).toBe(false);
+    fsHook.failReadPath = undefined;
+    expect(compareDaemonState(statePath, undefined)).toBe("absent");
   });
 });

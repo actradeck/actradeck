@@ -7,14 +7,14 @@
  *   拒否起動の後始末 (cleanupStaleWiring) と `daemon stop` (runStop) が共有し、token file の slot
  *   (`scopeArtifacts().tokenPath`) もここで消す。runStop は state / token file が残ったら「停止しました」と
  *   報告しない。
- * - D4 型床: 拒否の結果 (DeniedOutcome) は後始末の結果 (cleanupStaleWiring だけが作る brand 型) を必須で
+ * - D4 型床: 拒否の結果 (DeniedOutcome) は後始末の結果 (module の外では cleanupStaleWiring の戻り値でしか得られない brand 型) を必須で
  *   持つ。直に返す拒否は型検査 (tsc -p tsconfig.test.json) で落ちる。
  * - D6 `inspectStaleWiring`: 判定は純関数 (state の読み取り結果 + settings + 生存の述語)。
  * - TDA-STA-6 (a): state が受け入れる endpoint の形は hook shim と同じ受理集合。
  *
  * すべて temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。
  */
-import { spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -34,6 +34,7 @@ import {
   runStatus,
   runStop,
   scopeTarget,
+  type ScopeTarget,
   type StartOutcome,
 } from "../src/daemon-cli.js";
 import {
@@ -45,7 +46,12 @@ import {
   writeDaemonState,
 } from "../src/daemon-state.js";
 import { parseHookShimArgs } from "../src/hook-shim-core.js";
-import { captureSelfIdentity, type ProcessLiveness } from "../src/process-identity.js";
+import {
+  captureSelfIdentity,
+  defaultIdentitySources,
+  type IdentitySources,
+  type ProcessLiveness,
+} from "../src/process-identity.js";
 import {
   ACTRADECK_MARKER,
   countActradeckEntries,
@@ -89,12 +95,17 @@ const CHANGED_MSG = "判定の後に書き換わっていた";
 
 let home: string;
 let cwd: string;
+/** この file が起動した子プロセス (afterEach で残さず止める)。 */
+const children: ChildProcess[] = [];
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "actradeck-teardown-home-"));
   cwd = mkdtempSync(join(tmpdir(), "actradeck-teardown-cwd-"));
 });
 afterEach(() => {
   race.fire = undefined;
+  for (const c of children.splice(0)) {
+    if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+  }
   rmSync(home, { recursive: true, force: true });
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -516,7 +527,7 @@ describe("INV-ATTACH-TEARDOWN: state の endpoint の受理集合は hook shim �
 describe("INV-ATTACH-TEARDOWN: 拒否の結果は後始末の結果を型で必須に持つ (D4 型床)", () => {
   it("cleanup の無い拒否・リテラルの cleanup は型検査で落ちる (tsc -p tsconfig.test.json・実行はしない)", () => {
     const directDeny = (): StartOutcome =>
-      // @ts-expect-error 拒否は cleanup (cleanupStaleWiring だけが作る) を持たないと返せない
+      // @ts-expect-error 拒否は cleanup (module の外では cleanupStaleWiring の戻り値) を持たないと返せない
       ({ status: "denied-token-leak", settingsPath: "/s", statePath: "/p" });
     const literalCleanup = (): StartOutcome => ({
       status: "denied-token-leak",
@@ -551,5 +562,161 @@ describe("INV-ATTACH-TEARDOWN: 拒否の結果は後始末の結果を型で必�
     expect(typeof noTeardownRange).toBe("function");
     // 対照 (POSITIVE): 範囲を渡せば通る (settings が無いので何も外さない)。
     expect(detachAttachHooks(join(cwd, "absent.json"), { kind: "all" }).removed).toBe(false);
+  });
+});
+
+/** 生きている子プロセス (記録 daemon の代役)。自分で起動したものだけを止める。 */
+async function spawnChild(): Promise<{ pid: number; exited: Promise<void> }> {
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+  children.push(child);
+  const exited = new Promise<void>((r) => child.once("exit", () => r()));
+  await new Promise((r) => setTimeout(r, 200));
+  expect(child.pid).toBeGreaterThan(0);
+  return { pid: child.pid as number, exited };
+}
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 子プロセスを記録 daemon とした state (子の同一性つき) + その endpoint の配線 + token file。 */
+function plantFor(pid: number): Planted {
+  const p = plant(pid);
+  const bootId = defaultIdentitySources.readBootId();
+  const startTicks = defaultIdentitySources.readStartTicks(pid);
+  const { procIdentity: _self, ...rest } = stateFor(p.settingsPath, pid);
+  void _self;
+  writeDaemonState(p.statePath, {
+    ...rest,
+    ...(bootId !== undefined && startTicks !== undefined
+      ? { procIdentity: { bootId, startTicks } }
+      : {}),
+  });
+  return { ...p, stateRaw: readFileSync(p.statePath, "utf8") };
+}
+
+/** 後始末が配線を外した後だけ「記録 pid は終了した」と答える同一性の源 (detach の間の終了 / pid 再利用)。 */
+function diesDuringDetach(settingsPath: string): IdentitySources {
+  return {
+    ...defaultIdentitySources,
+    signal0: (pid) =>
+      entries(settingsPath).length > 0 ? defaultIdentitySources.signal0(pid) : "esrch",
+  };
+}
+
+describe("INV-ATTACH-TEARDOWN: daemon stop の SIGTERM は後始末の後・送る直前に同一性を確かめ直す (SEC-TD-1 / QA-TD-1)", () => {
+  it("後始末の間に記録 daemon が終了したら送らない (対照: 終了していなければ送る)", async () => {
+    const child = await spawnChild();
+    const p = plantFor(child.pid);
+    const stop = runStop(parseDaemonArgs(["daemon", "stop"], cwd), {
+      ...rt([]),
+      identity: diesDuringDetach(p.settingsPath),
+    });
+    expect(stop).toMatchObject({ status: "stopped", kill: "skipped-dead" });
+    expect(stop.killedPid).toBeUndefined();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(isRunning(child.pid)).toBe(true);
+    // 対照 (POSITIVE): 同じ子・同じ形で、同一性が変わらなければ送り、子は終了する。
+    plantFor(child.pid);
+    const stop2 = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt([]));
+    expect(stop2).toMatchObject({ status: "stopped", kill: "sent", killedPid: child.pid });
+    await child.exited;
+    expect(isRunning(child.pid)).toBe(false);
+  });
+
+  it("detach が失敗したら投げ、記録 daemon には送らず state / token file / settings も変えない (対照: 読めれば stopped で送る)", async () => {
+    const child = await spawnChild();
+    const p = plantFor(child.pid);
+    writeFileSync(p.settingsPath, "{ not json");
+    expect(() => runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt([]))).toThrow();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(isRunning(child.pid)).toBe(true);
+    expect(readFileSync(p.statePath, "utf8")).toBe(p.stateRaw);
+    expect(readFileSync(p.tokenPath, "utf8")).toBe("token-file-marker");
+    expect(readFileSync(p.settingsPath, "utf8")).toBe("{ not json");
+    // 対照 (POSITIVE): settings が読めれば同じ子に対して stopped で送る。
+    const q = plantFor(child.pid);
+    const stop = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt([]));
+    expect(stop).toMatchObject({
+      status: "stopped",
+      kill: "sent",
+      state: "removed",
+      token: "removed",
+    });
+    expect(entries(q.settingsPath)).toEqual([]);
+    await child.exited;
+    expect(isRunning(child.pid)).toBe(false);
+  });
+});
+
+describe("INV-ATTACH-TEARDOWN: 判定の後に state が無くなっていた場合の結果値 (TDA-TD-2 ≡ QA-TD-2)", () => {
+  /** 後始末が state を消せなかった (無くなっていた) ときの文言。 */
+  const ABSENT_MSG = "state は判定の後に無くなっていました";
+
+  it("拒否起動の後始末は detached-state-absent を返す (detached / changed と言わない)", () => {
+    const p = plant();
+    race.fired = 0;
+    race.fire = () => rmSync(p.statePath);
+    const logs: string[] = [];
+    const target = scopeTarget("project-local", cwd, home);
+    expect(cleanupStaleWiring({ target, writeApproved: true, log: (m) => logs.push(m) })).toBe(
+      "detached-state-absent",
+    );
+    expect(race.fired).toBe(1);
+    expect(entries(p.settingsPath)).toEqual([]);
+    expect(existsSync(p.tokenPath)).toBe(false);
+    const log = logs.join("\n");
+    expect(log).toContain(ABSENT_MSG);
+    expect(log).not.toContain(DETACHED_MSG);
+    expect(log).not.toContain(CHANGED_MSG);
+  });
+
+  it("daemon stop は state が既に無くても後始末を終えたら stopped (incomplete と言わない)", () => {
+    const p = plant();
+    race.fired = 0;
+    race.fire = () => rmSync(p.statePath);
+    const logs: string[] = [];
+    const stop = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs));
+    expect(race.fired).toBe(1);
+    expect(stop).toMatchObject({ status: "stopped", state: "absent", token: "removed" });
+    expect(logs.join("\n")).toContain(STOPPED_MSG);
+  });
+});
+
+describe("INV-ATTACH-TEARDOWN: 後始末は scopeTarget() が発行した target だけを受け取る (SEC-TD-2 ≡ TDA-TD-1)", () => {
+  it("spread で path を差し替えた target は throw で拒否し、導出外の file に触れない (対照: 発行した target は通る)", () => {
+    const p = plant();
+    const victim = join(cwd, "victim.txt");
+    writeFileSync(victim, "precious");
+    const real = scopeTarget("project-local", cwd, home);
+    // brand 型だけなら cast なしに書ける形 (型検査は通る)。
+    const forged: ScopeTarget = { ...real, artifacts: { ...real.artifacts, tokenPath: victim } };
+    expect(forged.artifacts.tokenPath).toBe(victim);
+    expect(() =>
+      cleanupStaleWiring({ target: forged, writeApproved: true, log: () => undefined }),
+    ).toThrow("scopeTarget() が発行したもの");
+    expect(readFileSync(victim, "utf8")).toBe("precious");
+    expect(readFileSync(p.statePath, "utf8")).toBe(p.stateRaw);
+    // 発行した target は凍結されていて、書き換えて偽造することもできない (artifacts / scopes も)。
+    expect(() => {
+      (real.artifacts as { tokenPath: string }).tokenPath = victim;
+    }).toThrow(TypeError);
+    expect(() => {
+      (real as { settingsPath: string }).settingsPath = victim;
+    }).toThrow(TypeError);
+    expect(Object.isFrozen(real.scopes)).toBe(true);
+    expect(real.artifacts.tokenPath).not.toBe(victim);
+    expect(real.settingsPath).not.toBe(victim);
+    // 対照 (POSITIVE): 発行した target は通り (stale なので detached)、token slot は導出した path だけを消す。
+    expect(cleanupStaleWiring({ target: real, writeApproved: true, log: () => undefined })).toBe(
+      "detached",
+    );
+    expect(existsSync(p.tokenPath)).toBe(false);
+    expect(readFileSync(victim, "utf8")).toBe("precious");
   });
 });

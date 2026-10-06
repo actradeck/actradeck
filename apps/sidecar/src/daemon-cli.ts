@@ -177,9 +177,12 @@ declare const scopeTargetBrand: unique symbol;
 
 /**
  * scope の settings path・artifact path・state で受け入れる scope ラベル (args から導出する)。
- * **{@link scopeTarget} だけが作る** (brand・TDA-STA-5): 後始末に手で組み立てた path を渡させない
+ * **{@link scopeTarget} だけが作る** (TDA-STA-5): 後始末に手で組み立てた path を渡させない
  * (state の中身や別の file から path を取らない)。旧 API は statePath / settingsPath を別々に受け取り、
- * 導出値と違えば実行時に throw していた。
+ * 導出値と違えば実行時に throw していた。brand 型だけでは spread (`{ ...t, artifacts: { ...a, tokenPath } }`)
+ * で cast なしに偽造できる (SEC-TD-2 ≡ TDA-TD-1) ので、{@link scopeTarget} は発行した object を module 内の
+ * WeakSet に登録して `Object.freeze` し (artifacts と scopes も)、受け取る側は未登録なら throw する
+ * ({@link assertIssuedScopeTarget})。
  */
 export interface ScopeTarget {
   /** 要求した scope (停止案内に使う)。 */
@@ -209,7 +212,25 @@ export function scopeTarget(scope: AttachScope, cwd: string, home: string): Scop
   const sharesUserFile =
     scope !== "project-local" && artifacts.canonicalSettingsPath === userCanonical;
   const scopes: readonly AttachScope[] = sharesUserFile ? ["project", "user"] : [scope];
-  return { scope, cwd, settingsPath, artifacts, scopes } as ScopeTarget;
+  const target = Object.freeze({
+    scope,
+    cwd,
+    settingsPath,
+    artifacts: Object.freeze(artifacts),
+    scopes: Object.freeze(scopes),
+  }) as ScopeTarget;
+  issuedScopeTargets.add(target);
+  return target;
+}
+
+/** {@link scopeTarget} が発行した target (同一性で照合する・spread した複製は含まない)。 */
+const issuedScopeTargets = new WeakSet<ScopeTarget>();
+
+/** {@link scopeTarget} が発行した target でなければ throw する (SEC-TD-2: 偽造した path を後始末に渡させない)。 */
+function assertIssuedScopeTarget(target: ScopeTarget): void {
+  if (!issuedScopeTargets.has(target)) {
+    throw new Error("ScopeTarget は scopeTarget() が発行したものだけを受け取ります");
+  }
 }
 
 /** start 実行の依存注入 (テスト・実機で差し替え)。 */
@@ -266,9 +287,10 @@ export interface ProceededOutcome extends StartOutcomeFields {
 }
 
 /**
- * 拒否された start の結果 (ADR 01a10ddb D4)。`cleanup` は**必須**で、{@link StaleCleanup} は
- * {@link cleanupStaleWiring} だけが作れる (brand)。よって deny() を通さず直に返す拒否は型検査
- * (`tsc -p tsconfig.test.json`・CI の type-check) で落ちる (TDA-DC-2: 規約頼みだった後始末を型の床にする)。
+ * 拒否された start の結果 (ADR 01a10ddb D4)。`cleanup` は**必須**で、{@link StaleCleanup} は daemon-cli.ts の
+ * module の外では {@link cleanupStaleWiring} の戻り値としてしか得られない (brand・module 内の `cleanupResult`
+ * は例外・SEC-TD-3)。よって deny() を通さず直に返す拒否は型検査 (`tsc -p tsconfig.test.json`・CI の
+ * type-check) で落ちる (TDA-DC-2: 規約頼みだった後始末を型の床にする)。
  */
 export interface DeniedOutcome extends StartOutcomeFields {
   readonly status: DeniedStatus;
@@ -356,8 +378,10 @@ export type StaleCleanupKind =
 
 declare const staleCleanupBrand: unique symbol;
 /**
- * 後始末の結果 ({@link StaleCleanupKind} に brand を付けた型)。作れるのは {@link cleanupStaleWiring} だけで、
- * リテラルを直に書いても型が合わない ({@link DeniedOutcome} の型床・ADR 01a10ddb D4)。値は文字列のまま。
+ * 後始末の結果 ({@link StaleCleanupKind} に brand を付けた型)。daemon-cli.ts の module の外では
+ * {@link cleanupStaleWiring} の戻り値としてしか得られず、リテラルを直に書いても型が合わない
+ * ({@link DeniedOutcome} の型床・ADR 01a10ddb D4)。module の中では `cleanupResult` でも作れる (SEC-TD-3)。
+ * 値は文字列のまま。
  */
 export type StaleCleanup = StaleCleanupKind & { readonly [staleCleanupBrand]: true };
 
@@ -411,6 +435,7 @@ export function cleanupStaleWiring(opts: {
   readonly identity?: IdentitySources;
 }): StaleCleanup {
   const { target } = opts;
+  assertIssuedScopeTarget(target);
   const hint = stopCommandHint(target.scope, target.cwd);
   const inspection = inspectStaleWiring({
     read: readState(target.artifacts, target.scopes),
@@ -740,9 +765,10 @@ export interface StopOutcome {
  * daemon を停止し settings から ActraDeck hooks を reversible detach する。
  * 判定は inspectStaleWiring、後始末は teardownWiring (範囲は全 ActraDeck entry・利用者が明示した停止なので
  * endpoint を問わない) を拒否経路の後始末と共有する。後始末の後で、別プロセスの daemon が記録されていて、
- * 記録した daemon と同一だと確かめられたときだけ SIGTERM を送る。detach する settings は args から導出した
- * path (state の中身からは取らない)。state を検証できない (corrupt) ときは pid を信用せず、signal は送らない。
- * detach が失敗したら state と token file に触らずに例外をそのまま投げる (再試行できる形を保つ)。
+ * 記録した daemon と同一だと確かめられたときだけ SIGTERM を送る (送る直前にもう一度確かめる・SEC-TD-1)。
+ * detach する settings は args から導出した path (state の中身からは取らない)。state を検証できない (corrupt)
+ * ときは pid を信用せず、signal は送らない。detach が失敗したら state と token file に触らず、signal も
+ * 送らずに例外をそのまま投げる (再試行できる形を保つ)。
  */
 export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   const home = rt.home ?? homedir();
@@ -774,15 +800,23 @@ export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
     kill = "skipped-corrupt";
   } else if (inspection.state.pid === process.pid) {
     kill = "self";
-  } else if (inspection.liveness === "alive") {
-    try {
-      process.kill(inspection.state.pid, "SIGTERM");
-      kill = "sent";
-    } catch {
-      kill = "send-failed";
-    }
   } else {
-    kill = inspection.liveness === "dead" ? "skipped-dead" : "skipped-identity-unknown";
+    // SEC-TD-1: 後始末 (settings lock の待ちを含め最長約 2s) の間に daemon が終了し pid が再利用されうるので、
+    // 判定の時点で alive でも送る直前に同じ述語で再判定し、alive のときだけ送る。
+    const liveness =
+      inspection.liveness === "alive"
+        ? isDaemonProcess(inspection.state, rt.identity)
+        : inspection.liveness;
+    if (liveness === "alive") {
+      try {
+        process.kill(inspection.state.pid, "SIGTERM");
+        kill = "sent";
+      } catch {
+        kill = "send-failed";
+      }
+    } else {
+      kill = liveness === "dead" ? "skipped-dead" : "skipped-identity-unknown";
+    }
   }
 
   const complete =

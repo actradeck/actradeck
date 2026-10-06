@@ -53,6 +53,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Changed
 
+- **`daemon stop` no longer reports an unfinished cleanup as stopped.** When it removes the attach
+  hook entries but cannot remove the daemon's record or its hook token file, or the record was
+  rewritten after `daemon stop` read it, it now says so and names what is left instead of
+  reporting that the daemon stopped. The exit code is unchanged.
+
 - **Advisory file lock: takeover and release share one detach procedure.** The rename →
   re-verify → unlink-or-restore steps were written out twice; they now live in a single helper,
   and what differs between the two phases is declared in one table. Production behaviour is
