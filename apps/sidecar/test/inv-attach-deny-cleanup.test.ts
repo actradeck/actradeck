@@ -35,6 +35,8 @@ import {
   runStart,
   runStatus,
   runStop,
+  scopeTarget,
+  type DeniedStatus,
   type StartOutcome,
 } from "../src/daemon-cli.js";
 import {
@@ -266,10 +268,13 @@ interface Row {
 const ENV = ["--token-mode", "env"] as const;
 const LIT = ["--token-mode", "literal"] as const;
 
-/** 拒否経路 × scope の表。left は「confirm が要る scope で --yes も承認も無い」行だけ。 */
-const ROWS: readonly Row[] = [
-  // denied-env-token-missing
-  ...(
+/**
+ * 拒否経路 × scope の表 (拒否 status ごと)。left は「confirm が要る scope で --yes も承認も無い」行だけ。
+ * `satisfies Record<DeniedStatus, …>` で全ての拒否 status に行を型で要求する (ADR 01a10ddb D4・TDA-DC-2:
+ * 行の無い拒否 status を足すと型検査 = tsc -p tsconfig.test.json が RED)。
+ */
+const ROWS_BY_STATUS = {
+  "denied-env-token-missing": (
     [
       ["project-local", [], "detached"],
       ["project", ["--yes"], "detached"],
@@ -287,90 +292,96 @@ const ROWS: readonly Row[] = [
       expect: exp,
     }),
   ),
-  // denied-hook-token-invalid (env mode)
-  ...(
-    [
-      ["project-local", [], "detached"],
-      ["project", ["--yes"], "detached"],
-      ["user", ["--yes"], "detached"],
-      ["project", [], "left"],
-      ["user", [], "left"],
-    ] as const
-  ).map(
-    ([scope, flags, exp]): Row => ({
-      name: `hook-token-invalid (env) × ${scope}${flags.length > 0 ? " --yes" : ""}`,
-      scope,
-      argv: [...ENV, ...flags],
-      hookToken: "a",
+  "denied-hook-token-invalid": [
+    // env mode
+    ...(
+      [
+        ["project-local", [], "detached"],
+        ["project", ["--yes"], "detached"],
+        ["user", ["--yes"], "detached"],
+        ["project", [], "left"],
+        ["user", [], "left"],
+      ] as const
+    ).map(
+      ([scope, flags, exp]): Row => ({
+        name: `hook-token-invalid (env) × ${scope}${flags.length > 0 ? " --yes" : ""}`,
+        scope,
+        argv: [...ENV, ...flags],
+        hookToken: "a",
+        runtime: "normal",
+        status: "denied-hook-token-invalid",
+        expect: exp,
+      }),
+    ),
+    // literal mode (SEC R2 X3 の形)
+    ...(
+      [
+        ["project-local", [], "detached"],
+        ["user", ["--yes"], "detached"],
+        ["user", [], "left"],
+      ] as const
+    ).map(
+      ([scope, flags, exp]): Row => ({
+        name: `hook-token-invalid (literal) × ${scope}${flags.length > 0 ? " --yes" : ""}`,
+        scope,
+        argv: [...LIT, ...flags],
+        hookToken: "a",
+        runtime: "normal",
+        status: "denied-hook-token-invalid",
+        expect: exp,
+      }),
+    ),
+  ],
+  // confirm 未提供 / confirm が false
+  "denied-needs-confirm": [
+    {
+      name: "needs-confirm × project (confirm 未提供)",
+      scope: "project",
+      argv: [...ENV],
+      hookToken: GOOD_TOKEN,
       runtime: "normal",
-      status: "denied-hook-token-invalid",
-      expect: exp,
-    }),
-  ),
-  // denied-hook-token-invalid (literal mode・SEC R2 X3 の形)
-  ...(
-    [
-      ["project-local", [], "detached"],
-      ["user", ["--yes"], "detached"],
-      ["user", [], "left"],
-    ] as const
-  ).map(
-    ([scope, flags, exp]): Row => ({
-      name: `hook-token-invalid (literal) × ${scope}${flags.length > 0 ? " --yes" : ""}`,
-      scope,
-      argv: [...LIT, ...flags],
-      hookToken: "a",
+      status: "denied-needs-confirm",
+      expect: "left",
+    },
+    {
+      name: "needs-confirm × user (confirm 未提供)",
+      scope: "user",
+      argv: [...LIT],
       runtime: "normal",
-      status: "denied-hook-token-invalid",
-      expect: exp,
-    }),
-  ),
-  // denied-needs-confirm (confirm 未提供 / confirm が false)
-  {
-    name: "needs-confirm × project (confirm 未提供)",
-    scope: "project",
-    argv: [...ENV],
-    hookToken: GOOD_TOKEN,
-    runtime: "normal",
-    status: "denied-needs-confirm",
-    expect: "left",
-  },
-  {
-    name: "needs-confirm × user (confirm 未提供)",
-    scope: "user",
-    argv: [...LIT],
-    runtime: "normal",
-    status: "denied-needs-confirm",
-    expect: "left",
-  },
-  {
-    name: "needs-confirm × user (confirm=false)",
-    scope: "user",
-    argv: [...LIT],
-    confirm: false,
-    runtime: "normal",
-    status: "denied-needs-confirm",
-    expect: "left",
-  },
-  // denied-token-leak (project + literal)
-  {
-    name: "token-leak × project --yes",
-    scope: "project",
-    argv: [...LIT, "--yes"],
-    runtime: "normal",
-    status: "denied-token-leak",
-    expect: "detached",
-  },
-  {
-    name: "token-leak × project",
-    scope: "project",
-    argv: [...LIT],
-    runtime: "normal",
-    status: "denied-token-leak",
-    expect: "left",
-  },
-  // denied-env-token-mismatch (startDaemon 後の拒否・confirm ゲートは通過済み)
-  ...(
+      status: "denied-needs-confirm",
+      expect: "left",
+    },
+    {
+      name: "needs-confirm × user (confirm=false)",
+      scope: "user",
+      argv: [...LIT],
+      confirm: false,
+      runtime: "normal",
+      status: "denied-needs-confirm",
+      expect: "left",
+    },
+  ],
+  // project + literal
+  "denied-token-leak": [
+    {
+      name: "token-leak × project --yes",
+      scope: "project",
+      argv: [...LIT, "--yes"],
+      runtime: "normal",
+      status: "denied-token-leak",
+      expect: "detached",
+    },
+    {
+      name: "token-leak × project",
+      scope: "project",
+      argv: [...LIT],
+      runtime: "normal",
+      status: "denied-token-leak",
+      expect: "left",
+    },
+  ],
+  // startDaemon 後の拒否・confirm ゲートは通過済み
+  "denied-env-token-mismatch": (
     [
       ["project-local", [], undefined],
       ["project", ["--yes"], undefined],
@@ -389,7 +400,13 @@ const ROWS: readonly Row[] = [
       expect: "detached",
     }),
   ),
-];
+} satisfies Record<DeniedStatus, readonly Row[]>;
+const ROWS: readonly Row[] = Object.values(ROWS_BY_STATUS).flat();
+
+/** 拒否の結果が持つ後始末の結果 (DeniedOutcome の cleanup・拒否でなければ undefined)。 */
+function cleanupOf(out: StartOutcome): string | undefined {
+  return "cleanup" in out ? out.cleanup : undefined;
+}
 
 describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daemon の配線だけを片付ける (SEC-ENV-4)", () => {
   let staleExecuted = 0;
@@ -406,6 +423,11 @@ describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daem
 
   it("表の構成: 拒否 status 5 種すべてを持ち、行名は相異なる", () => {
     expect(new Set(ROWS.map((r) => r.name)).size).toBe(ROWS.length);
+    // 行は拒否 status ごとの key の下に置く (key と行の status が一致する)。
+    for (const [status, rows] of Object.entries(ROWS_BY_STATUS)) {
+      expect(rows.length, status).toBeGreaterThan(0);
+      for (const r of rows) expect(r.status, r.name).toBe(status);
+    }
     expect([...new Set(ROWS.map((r) => r.status))].sort()).toEqual([
       "denied-env-token-mismatch",
       "denied-env-token-missing",
@@ -438,6 +460,8 @@ describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daem
         rt,
       );
       expect(out.status).toBe(row.status);
+      // 拒否の結果は後始末の結果を持つ (DeniedOutcome の cleanup・ログ文字列でなく値で)。
+      expect(cleanupOf(out)).toBe(row.expect === "detached" ? "detached" : "left-needs-confirm");
       // 拒否なので新しい daemon は常駐しない (mismatch は起動後に止めている)。
       expect(daemons.length).toBe(row.runtime === "mismatch" ? 1 : 0);
       const log = logs.join("\n");
@@ -513,6 +537,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 拒否された起動は stale な前回 daem
         rt,
       );
       expect(out.status).toBe(row.status);
+      expect(cleanupOf(out)).toBe("alive-untouched");
       expect(readFileSync(r.settingsPath, "utf8")).toBe(r.settingsBefore);
       expect(actradeckEntries(r.settingsPath).length).toBeGreaterThan(0);
       if (row.runtime === "mismatch") {
@@ -549,11 +574,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     const stateBefore = readFileSync(r.statePath, "utf8");
     const logs: string[] = [];
     const res = cleanupStaleWiring({
-      home,
-      statePath: r.statePath,
-      settingsPath: r.settingsPath,
-      scope: "project-local",
-      cwd,
+      target: scopeTarget("project-local", cwd, home),
       writeApproved: true,
       log: (m) => logs.push(m),
     });
@@ -567,11 +588,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     const r2 = await plantResidue("project-local", deadPid());
     expect(
       cleanupStaleWiring({
-        home,
-        statePath: r2.statePath,
-        settingsPath: r2.settingsPath,
-        scope: "project-local",
-        cwd,
+        target: scopeTarget("project-local", cwd, home),
         writeApproved: true,
         log: (m) => logs.push(m),
       }),
@@ -584,11 +601,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     writeFileSync(r.settingsPath, "{ not json");
     const logs: string[] = [];
     const res = cleanupStaleWiring({
-      home,
-      statePath: r.statePath,
-      settingsPath: r.settingsPath,
-      scope: "project-local",
-      cwd,
+      target: scopeTarget("project-local", cwd, home),
       writeApproved: true,
       log: (m) => logs.push(m),
     });
@@ -606,11 +619,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
       writeFileSync(r.settingsPath, "{ not json");
       const logs: string[] = [];
       const res = cleanupStaleWiring({
-        home,
-        statePath: r.statePath,
-        settingsPath: r.settingsPath,
-        scope,
-        cwd,
+        target: scopeTarget(scope, cwd, home),
         writeApproved: true,
         log: (m) => logs.push(m),
       });
@@ -624,7 +633,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     expect(executed).toBe(2);
   });
 
-  it("onlyEndpoint は指定 endpoint の entry だけを外す・daemon stop (runStop) は全 ActraDeck entry を外す", async () => {
+  it("範囲 endpoint の detach は指定 endpoint の entry だけを外す・daemon stop (runStop) は全 ActraDeck entry を外す", async () => {
     const r = await plantResidue("project-local", deadPid());
     // 別の endpoint (並走起動した daemon) の配線を同じ settings に足す。merge の self-heal は死んだ
     // endpoint を消すので、別 file で作った entry を event ごとに連結する。
@@ -650,7 +659,8 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     expect(liveCount).toBeGreaterThan(0);
 
     const only = computeDetachedSettings(a as Parameters<typeof computeDetachedSettings>[0], {
-      onlyEndpoint: r.deadEndpoint,
+      kind: "endpoint",
+      endpoint: r.deadEndpoint,
     });
     expect(only.removed).toBe(true);
     const onlyJson = JSON.stringify(only.settings);
@@ -661,11 +671,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     // 拒否経路の後始末 (state.endpoint = 死んだ endpoint) も同じ結果。
     expect(
       cleanupStaleWiring({
-        home,
-        statePath: r.statePath,
-        settingsPath: r.settingsPath,
-        scope: "project-local",
-        cwd,
+        target: scopeTarget("project-local", cwd, home),
         writeApproved: true,
         log: () => undefined,
       }),
@@ -676,7 +682,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     expect(after.filter((u) => u === liveEndpoint).length).toBe(liveCount);
     expect(after.filter((u) => u === r.deadEndpoint).length).toBe(0);
 
-    // daemon stop は利用者が明示した停止なので endpoint を問わず全部外す (runStop は onlyEndpoint を渡さない)。
+    // daemon stop は利用者が明示した停止なので endpoint を問わず全部外す (runStop の範囲は all)。
     writeFileSync(r.settingsPath, JSON.stringify(a));
     writeDaemonState(
       r.statePath,
@@ -715,11 +721,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     const logs: string[] = [];
     expect(
       cleanupStaleWiring({
-        home,
-        statePath: scopeArtifacts(settingsPath, home).statePath,
-        settingsPath,
-        scope: "project-local",
-        cwd,
+        target: scopeTarget("project-local", cwd, home),
         writeApproved: true,
         log: (m) => logs.push(m),
       }),
@@ -880,11 +882,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 記録外の ActraDeck entry が残るなら 
     };
     const logs: string[] = [];
     const res = cleanupStaleWiring({
-      home,
-      statePath: r.statePath,
-      settingsPath: r.settingsPath,
-      scope: "project-local",
-      cwd,
+      target: scopeTarget("project-local", cwd, home),
       writeApproved: true,
       log: (m) => logs.push(m),
     });
@@ -998,7 +996,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 残存判定の形 — marker の無い legac
           JSON.parse(readFileSync(r.settingsPath, "utf8")) as Parameters<
             typeof computeDetachedSettings
           >[0],
-          { onlyEndpoint: r.deadEndpoint },
+          { kind: "endpoint", endpoint: r.deadEndpoint },
         ).settings,
       ),
     );
@@ -1008,11 +1006,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 残存判定の形 — marker の無い legac
     const stateBefore = readFileSync(r.statePath, "utf8");
     const logs: string[] = [];
     const res = cleanupStaleWiring({
-      home,
-      statePath: r.statePath,
-      settingsPath: r.settingsPath,
-      scope: "project-local",
-      cwd,
+      target: scopeTarget("project-local", cwd, home),
       writeApproved: true,
       log: (m) => logs.push(m),
     });

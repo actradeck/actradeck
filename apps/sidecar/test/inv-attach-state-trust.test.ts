@@ -48,6 +48,7 @@ import {
   runStart,
   runStatus,
   runStop,
+  scopeTarget,
 } from "../src/daemon-cli.js";
 import {
   canonicalSettingsPath,
@@ -454,21 +455,15 @@ describe("INV-ATTACH-STATE-TRUST: corrupt な state は pid を信用しない (
     const { settingsPath, statePath, raw } = plantCorrupt(deadPid);
     const before = readFileSync(settingsPath, "utf8");
     const logs: string[] = [];
-    const base = {
-      statePath,
-      settingsPath,
-      scope: "project-local" as const,
-      cwd,
-      writeApproved: true,
-    };
-    expect(cleanupStaleWiring({ home, ...base, log: (m) => logs.push(m) })).toBe("state-invalid");
+    const base = { target: scopeTarget("project-local", cwd, home), writeApproved: true };
+    expect(cleanupStaleWiring({ ...base, log: (m) => logs.push(m) })).toBe("state-invalid");
     expect(readFileSync(settingsPath, "utf8")).toBe(before);
     expect(readFileSync(statePath, "utf8")).toBe(raw);
     expect(logs.join("\n")).toContain(INVALID_MSG);
     expect(logs.join("\n")).toContain(`agentmon daemon stop --scope project-local --cwd ${cwd}`);
     plant({ pid: deadPid });
     const logs2: string[] = [];
-    expect(cleanupStaleWiring({ home, ...base, log: (m) => logs2.push(m) })).toBe("detached");
+    expect(cleanupStaleWiring({ ...base, log: (m) => logs2.push(m) })).toBe("detached");
     expect(entries(settingsPath)).toBe(0);
     expect(logs2.join("\n")).not.toContain(INVALID_MSG);
   });
@@ -480,10 +475,14 @@ describe("INV-ATTACH-STATE-TRUST: corrupt な state は pid を信用しない (
     const status = runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt(logs));
     expect(status).toMatchObject({ running: false, corrupt: true });
     const stop = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs));
+    // 記録が corrupt だったこと (`corrupt`) と state file の後始末 (`state`) は別の項目 (旧: `state:
+    // "corrupt-removed"` は削除の失敗も「消した」と報告しえた・TDA-STA-5)。
     expect(stop).toMatchObject({
       status: "stopped",
       kill: "skipped-corrupt",
-      state: "corrupt-removed",
+      corrupt: true,
+      state: "removed",
+      token: "absent",
     });
     expect(stop.killedPid).toBeUndefined();
     expect(entries(settingsPath)).toBe(0);
@@ -602,7 +601,7 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
         pid: child.pid,
         procIdentity: { bootId: bootIdNow(), startTicks: ticksOf(child.pid) + 1 },
       };
-      const { settingsPath, statePath } = plant(reused);
+      const { settingsPath } = plant(reused);
       const logs: string[] = [];
       expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt(logs))).toMatchObject({
         running: false,
@@ -617,11 +616,7 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
       ).rejects.toThrow("would start");
       expect(
         cleanupStaleWiring({
-          home,
-          statePath,
-          settingsPath,
-          scope: "project-local",
-          cwd,
+          target: scopeTarget("project-local", cwd, home),
           writeApproved: true,
           log: (m) => logs.push(m),
         }),
@@ -634,7 +629,7 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
   it("同一性 unknown は alive 扱い: 後始末は触らない・起動は already-running・status は稼働中 (対照: 注入なしでは stale)", async () => {
     const child = await spawnBystander();
     // 注入なしなら stale と判定される state (Linux: start ticks 不一致・それ以外: etime 許容超過)。
-    const { settingsPath, statePath } = plant({
+    const { settingsPath } = plant({
       pid: child.pid,
       ...(LINUX
         ? { procIdentity: { bootId: bootIdNow(), startTicks: ticksOf(child.pid) + 1 } }
@@ -663,11 +658,7 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
     expect(readFileSync(settingsPath, "utf8")).toBe(before);
     expect(
       cleanupStaleWiring({
-        home,
-        statePath,
-        settingsPath,
-        scope: "project-local",
-        cwd,
+        target: scopeTarget("project-local", cwd, home),
         writeApproved: true,
         log: (m) => logs.push(m),
         identity: unknown,
@@ -811,36 +802,37 @@ describe("INV-ATTACH-STATE-TRUST: 新しい path に state が無ければ旧い
     const { link, settingsPath, art } = plantOld(child.pid);
     writeFileSync(art.legacyStatePath, "{ not json");
     const stop = runStop(parseDaemonArgs(["daemon", "stop"], link), rt([]));
-    expect(stop).toMatchObject({ kill: "skipped-corrupt", state: "corrupt-removed" });
+    expect(stop).toMatchObject({ kill: "skipped-corrupt", corrupt: true, state: "removed" });
     expect(entries(settingsPath)).toBe(0);
     expect(existsSync(art.legacyStatePath)).toBe(false);
     expect(running(child)).toBe(true);
   });
 
-  it("後始末は scope / cwd / home から導出していない statePath を拒否する (throw)", () => {
+  it("後始末の target は scopeTarget が導出したものだけ (手で組み立てた target は型で渡せない・spread の複製を実行時に拒否するのは inv-attach-teardown の test)", () => {
     const sp = settingsOf();
-    const base = {
-      settingsPath: sp,
-      scope: "project-local" as const,
-      cwd,
-      home,
-      writeApproved: true,
-    };
-    expect(() =>
+    // 型の床 (TDA-STA-5): brand の無い手組みの target は渡せない。tsc -p tsconfig.test.json が検査する
+    // (brand を外す変異で @ts-expect-error が未使用になり型検査が RED)。実行はしない。
+    const handBuilt = (): ReturnType<typeof cleanupStaleWiring> =>
       cleanupStaleWiring({
-        ...base,
-        statePath: join(home, "elsewhere.json"),
+        // @ts-expect-error ScopeTarget は scopeTarget() だけが作る (brand)
+        target: {
+          scope: "project-local",
+          cwd,
+          settingsPath: sp,
+          artifacts: { ...scopeArtifacts(sp, home), statePath: join(home, "elsewhere.json") },
+          scopes: ["project-local"],
+        },
+        writeApproved: true,
         log: () => undefined,
-      }),
-    ).toThrow("scope から導出した値を渡すこと");
-    // 対照 (POSITIVE): 導出した statePath なら throw しない (state が無いので no-state)。
-    expect(
-      cleanupStaleWiring({
-        ...base,
-        statePath: scopeArtifacts(sp, home).statePath,
-        log: () => undefined,
-      }),
-    ).toBe("no-state");
+      });
+    expect(typeof handBuilt).toBe("function");
+    // 対照 (POSITIVE): 導出した target は通り (state が無いので no-state)、導出した statePath を指す。
+    const target = scopeTarget("project-local", cwd, home);
+    expect(target.artifacts.statePath).toBe(scopeArtifacts(sp, home).statePath);
+    expect(target.settingsPath).toBe(sp);
+    expect(cleanupStaleWiring({ target, writeApproved: true, log: () => undefined })).toBe(
+      "no-state",
+    );
   });
 
   it("新しい path に state があれば (corrupt でも) 旧い path は読まない", async () => {

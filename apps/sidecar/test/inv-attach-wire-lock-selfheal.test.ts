@@ -103,7 +103,7 @@ describe("INV-ATTACH-WIRE-LOCK: merge/detach は withFileLock で直列化され
     const livePid = process.pid === 1 ? 2 : 1;
     writeFileSync(lockPath, `${livePid}\n`);
     const before = readFileSync(settingsPath, "utf8");
-    expect(() => detachAttachHooks(settingsPath)).toThrow(/failed to acquire/);
+    expect(() => detachAttachHooks(settingsPath, { kind: "all" })).toThrow(/failed to acquire/);
     // detach されていない (lock 取れず)。
     expect(readFileSync(settingsPath, "utf8")).toBe(before);
     rmSync(lockPath, { force: true });
@@ -113,7 +113,7 @@ describe("INV-ATTACH-WIRE-LOCK: merge/detach は withFileLock で直列化され
     mergeAttachHooks(opts(NEW, ["SessionStart"]));
     expect(existsSync(lockPath)).toBe(false); // 自己 unlink 済
     // 続く detach も lock を取れる (リークしていれば fail-loud で落ちる)。
-    const r = detachAttachHooks(settingsPath);
+    const r = detachAttachHooks(settingsPath, { kind: "all" });
     expect(r.removed).toBe(true);
     expect(existsSync(lockPath)).toBe(false);
   });
@@ -250,10 +250,14 @@ describe("INV-ATTACH-WIRE-LOCK: retry budget は本番呼び出し経路で縛�
     writeFileSync(lockPath, `${livePid}\n`);
     let slept = 0;
     expect(() =>
-      detachAttachHooks(settingsPath, {
-        maxRetries: 3,
-        testHooks: { isAlive: () => true, sleep: () => void (slept += 1) },
-      }),
+      detachAttachHooks(
+        settingsPath,
+        { kind: "all" },
+        {
+          maxRetries: 3,
+          testHooks: { isAlive: () => true, sleep: () => void (slept += 1) },
+        },
+      ),
     ).toThrow(/failed to acquire .* after 3 retries/);
     expect(slept).toBe(3);
     rmSync(lockPath, { force: true });
@@ -334,7 +338,7 @@ describe("INV-ATTACH-SELF-HEAL: legacy (marker-less) ActraDeck orphan を署名�
         },
       }),
     );
-    const res = detachAttachHooks(settingsPath);
+    const res = detachAttachHooks(settingsPath, { kind: "all" });
     expect(res.removed).toBe(true);
     const flat = (readJson().hooks?.SessionStart ?? []).flatMap((g) => g.hooks ?? []);
     // legacy ActraDeck entry は除去・ユーザー hook は温存・旧 nonce は消える。
@@ -360,7 +364,7 @@ describe("INV-ATTACH-SELF-HEAL: legacy (marker-less) ActraDeck orphan を署名�
     let flat = (readJson().hooks?.SessionStart ?? []).flatMap((g) => g.hooks ?? []);
     expect(flat).toContainEqual(userHttp);
     // detach も canonical(Stop) のみ除去し、ユーザー HTTP hook は温存。
-    const det = detachAttachHooks(settingsPath);
+    const det = detachAttachHooks(settingsPath, { kind: "all" });
     expect(det.removed).toBe(true);
     flat = (readJson().hooks?.SessionStart ?? []).flatMap((g) => g.hooks ?? []);
     expect(flat).toContainEqual(userHttp);

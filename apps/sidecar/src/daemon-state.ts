@@ -22,7 +22,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { writeJson0600 } from "./fs-atomic.js";
 import type { ProcIdentity } from "./process-identity.js";
-import { HOOK_TOKEN_ENV_VAR, type TokenMode } from "./settings-merge.js";
+import { HOOK_TOKEN_ENV_VAR, isDaemonHookEndpoint, type TokenMode } from "./settings-merge.js";
 
 export type AttachScope = "project-local" | "project" | "user";
 
@@ -107,7 +107,7 @@ export interface ScopeArtifacts {
   readonly legacyStatePath: string;
   /** scope lock (PR-B で使う・ここでは導出だけ)。 */
   readonly lockPath: string;
-  /** hook token file (T-B で使う・ここでは導出だけ)。 */
+  /** hook token file (書くのは T-B・在れば attach-teardown の teardownWiring が消す)。 */
   readonly tokenPath: string;
 }
 
@@ -141,7 +141,6 @@ export interface StateExpectation {
   readonly scopes: readonly AttachScope[];
 }
 
-const ENDPOINT_RE = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/hook$/;
 const BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -162,7 +161,8 @@ function asProcIdentity(v: unknown): ProcIdentity | undefined {
  * state として信用できる形か (唯一の形検証)。信用できれば既知の項目だけを持つ新しい object を返し、
  * そうでなければ undefined (= corrupt)。
  *
- * - pid は正の整数・endpoint は `http://127.0.0.1:<1-65535>/hook`・scope は受理ラベル集合に属する・startedAt は
+ * - pid は正の整数・endpoint は `http://127.0.0.1:<1-65535>/hook` (先頭 0 の無い port・settings-merge の
+ *   `isDaemonHookEndpoint` = hook shim と同じ受理集合)・scope は受理ラベル集合に属する・startedAt は
  *   parse 可能・procIdentity は任意 (あるなら形が合うこと)。
  * - 新しい形: `settingsPath` (導出値と一致) + `tokenMode` (`literal` | `env`)。`wiredSettingsPaths` を併せ持つ
  *   state は corrupt。
@@ -176,9 +176,7 @@ export function asDaemonState(parsed: unknown, expect: StateExpectation): Daemon
   if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 || pid > 0x7fffffff) {
     return undefined;
   }
-  if (typeof endpoint !== "string") return undefined;
-  const port = ENDPOINT_RE.exec(endpoint)?.[1];
-  if (port === undefined || Number(port) < 1 || Number(port) > 65535) return undefined;
+  if (!isDaemonHookEndpoint(endpoint)) return undefined;
   const label = expect.scopes.find((s) => s === scope);
   if (label === undefined) return undefined;
   if (typeof startedAt !== "string" || !Number.isFinite(Date.parse(startedAt))) return undefined;
@@ -284,46 +282,45 @@ export function assertDaemonStateShape(state: DaemonState): void {
   }
 }
 
-/** state file の生バイト列 (無い・読めないなら undefined)。CAS 削除の比較用。 */
-function readStateRaw(path: string): string | undefined {
+/**
+ * state file のいまの中身を、判定に使った読み取りのバイト列 `expectedRaw` と比べる (CAS の比較だけ・削除
+ * しない)。`expectedRaw` が undefined なのは「判定のときに読めなかった (corrupt)」で、いまも読めなければ
+ * 同じ (`same`) とみなす。無ければ `absent`。
+ */
+export function compareDaemonState(
+  path: string,
+  expectedRaw: string | undefined,
+): "same" | "changed" | "absent" {
+  let current: string | undefined;
   try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return undefined;
+    current = readFileSync(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+    current = undefined;
   }
-}
-
-/** state file のいまの中身が `expectedRaw` と同じか (CAS の比較だけを行う・削除しない)。 */
-export function isDaemonStateUnchanged(path: string, expectedRaw: string): boolean {
-  return readStateRaw(path) === expectedRaw;
+  return current === expectedRaw ? "same" : "changed";
 }
 
 /**
- * state file を、いまの中身が `expectedRaw` と同じときだけ削除する (CAS・SEC-ENV-4 R1 / QA-DC-1 ≡
- * TDA-DC-1)。stale と判定した後で別の daemon が同じ scope に state を書いていたら消さない。
+ * state file を、いまの中身が判定に使ったバイト列 `expectedRaw` と同じときだけ削除する (CAS・state の
+ * **唯一の削除**・SEC-ENV-4 R1 / QA-DC-1 ≡ TDA-DC-1・ADR 01a10ddb D2)。stale と判定した後で別の daemon が
+ * 同じ scope に state を書いていたら消さない。
  *
  * **比較と削除の間は原子的でない**: 比較した直後・削除の直前に別の daemon が state を書くと、その state を
- * 消す (lock の外・開示済みの残余)。結果は 消した (`removed`)・中身が変わっていた (`changed`)・削除に
- * 失敗した (`rm-failed`・SEC-DC-R2-2: 失敗を「消した」と報告しないため区別する)。
+ * 消す (lock の外・開示済みの残余・scope lock で閉じるのは PR-B2)。結果は 消した (`removed`)・中身が
+ * 変わっていた (`changed`)・既に無かった (`absent`)・削除に失敗した (`rm-failed`・SEC-DC-R2-2 /
+ * TDA-DC-R3-2: 失敗を「消した」と報告しないため区別する)。
  */
 export function removeDaemonStateIfUnchanged(
   path: string,
-  expectedRaw: string,
-): "removed" | "changed" | "rm-failed" {
-  if (!isDaemonStateUnchanged(path, expectedRaw)) return "changed";
+  expectedRaw: string | undefined,
+): "removed" | "changed" | "absent" | "rm-failed" {
+  const now = compareDaemonState(path, expectedRaw);
+  if (now !== "same") return now;
   try {
     rmSync(path, { force: true });
     return "removed";
   } catch {
     return "rm-failed";
-  }
-}
-
-/** state file を無条件に削除する (現在の呼び出し元は runStop のみ・拒否経路の後始末は CAS 版の removeDaemonStateIfUnchanged を使う)。 */
-export function removeDaemonState(path: string): void {
-  try {
-    rmSync(path, { force: true });
-  } catch {
-    /* best-effort */
   }
 }

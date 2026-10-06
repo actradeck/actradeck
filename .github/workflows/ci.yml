@@ -330,6 +330,8 @@ jobs:
           RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-sighup
           # Task 01a10c42 PR-A: same report, the attach state trust / process identity INV ran.
           RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-state-trust
+          # Task 01a10c42 PR-B1: same report, the attach teardown / inspect / denied-outcome floor INV ran.
+          RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-teardown
 
       # 再#QA-4 (再監査 a547b9f2): webui の coverage 閾値 (vitest.config.ts: realtime core +
       #   liveness-display) を CI で実評価する。plain `vitest run` は閾値を見ないため dormant

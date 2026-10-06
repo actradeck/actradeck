@@ -166,7 +166,7 @@ describe("INV-ATTACH-DETACH-REVERSIBLE: マーカー entry のみ除去しユー
     };
     writeFileSync(settingsPath, JSON.stringify(original));
     mergeAttachHooks(opts());
-    const det = detachAttachHooks(settingsPath);
+    const det = detachAttachHooks(settingsPath, { kind: "all" });
     expect(det.removed).toBe(true);
     const after = readJson(settingsPath);
     // ユーザー hook + permissions が原状どおり残る (ActraDeck entry は消える)。
@@ -179,7 +179,7 @@ describe("INV-ATTACH-DETACH-REVERSIBLE: マーカー entry のみ除去しユー
       { hooks: { PreToolUse: [{ hooks: [userHook] }] } },
       opts(),
     );
-    const { settings, removed } = computeDetachedSettings(merged.settings);
+    const { settings, removed } = computeDetachedSettings(merged.settings, { kind: "all" });
     expect(removed).toBe(true);
     const flat = (
       settings.hooks as Record<string, Array<{ hooks: unknown[] }>>
@@ -198,7 +198,7 @@ describe("INV-ATTACH-DETACH-REVERSIBLE: マーカー entry のみ除去しユー
     groups[0]!.hooks.push({ type: "command", command: "user-added" });
     writeFileSync(settingsPath, JSON.stringify(merged));
 
-    detachAttachHooks(settingsPath);
+    detachAttachHooks(settingsPath, { kind: "all" });
     const after = readJson(settingsPath);
     const remaining = (after.hooks as Record<string, Array<{ hooks: unknown[] }>> | undefined)
       ?.SessionStart;
@@ -214,7 +214,7 @@ describe("INV-ATTACH-DETACH-REVERSIBLE: マーカー entry のみ除去しユー
       JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "x" }] }] } }),
     );
     const before = readFileSync(settingsPath, "utf8");
-    const res = detachAttachHooks(settingsPath);
+    const res = detachAttachHooks(settingsPath, { kind: "all" });
     expect(res.removed).toBe(false);
     expect(readFileSync(settingsPath, "utf8")).toBe(before); // 書き込まない
   });
@@ -264,7 +264,7 @@ describe("INV-WORKITEM-HOOK-INJECTION (B2): task hooks を非破壊 merge / 可�
       JSON.stringify({ hooks: { TaskCreated: [{ hooks: [userHook] }] } }),
     );
     mergeAttachHooks({ settingsPath, endpoint: ENDPOINT, tokenMode: "literal", token: "n" });
-    const det = detachAttachHooks(settingsPath);
+    const det = detachAttachHooks(settingsPath, { kind: "all" });
     expect(det.removed).toBe(true);
     const after = readJson(settingsPath);
     const hooks = (after.hooks ?? {}) as Record<string, Array<{ hooks: unknown[] }>>;
