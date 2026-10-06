@@ -356,7 +356,8 @@ function inspectScope(
  *   案内する。
  * - 外すのは attach-teardown の `teardownWiring` (detach → state → token file の唯一の手順) で、範囲は
  *   **stale state に記録された endpoint を向く ActraDeck entry だけ** (`{ kind: "endpoint" }`・裁定 01a110b2)。
- *   lock を共有しない daemon (別 HOME・別 path・旧い版) の生きた配線は別の endpoint なので残る。
+ *   lock を共有しない daemon (別 HOME・別 path・旧い版) の生きた配線は、記録 endpoint と別の port なら残る
+ *   (同じ port を得ていれば外れる・開示済みの残余)。範囲の正は settings-merge の DetachRange。
  * - state は**判定に使ったバイト列と同じとき**で、かつ detach の後に読み直した settings に ActraDeck entry が
  *   1 本も残っていないときだけ消す (teardownWiring の R2 ガード・裁定 01a11052 ①)。残っていれば state を残して
  *   {@link stopCommandHint} を出す (`detached-entries-remain`)。
@@ -371,7 +372,8 @@ function inspectScope(
  * - **残る穴 (開示・base 同値)**: stale state に記録されていない死んだ entry (別 endpoint の残骸) は外さない。
  *   残っていれば state を残して案内するので、`daemon stop` (範囲は全 ActraDeck entry) か次の成功起動の
  *   self-heal で外れる。lock を共有しない daemon が配線を持つ間に案内どおり `daemon stop` を打つと、その
- *   daemon の配線も外れる (stop は利用者が明示した全外し)。
+ *   daemon の配線も外れる (stop は利用者が明示した全外し)。lock を共有しない書き手とは、state の比較と削除の
+ *   間も原子的でない (daemon-state の removeDaemonStateIfUnchanged)。
  */
 export function cleanupStaleWiring(opts: {
   readonly target: ScopeTarget;

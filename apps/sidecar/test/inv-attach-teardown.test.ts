@@ -45,6 +45,7 @@ import {
   scopeTarget,
   type ScopeTarget,
   type StartOutcome,
+  stopOutcomeExitCode,
 } from "../src/daemon-cli.js";
 import {
   asDaemonState,
@@ -823,7 +824,7 @@ describe("INV-ATTACH-TEARDOWN: 後始末は scopeTarget() が発行した target
   });
 });
 
-describe("INV-ATTACH-TEARDOWN: lock を取らない書き手は fail-loud な結果値で報告する・入力は発行した target から導出する (裁定 01a11052 ① / ② / SEC-TD-R2-3 / SEC-TD-4)", () => {
+describe("INV-ATTACH-TEARDOWN: detach の後に lock を共有しない書き手が書いた配線・判定の後の state の変化は結果値で報告する・入力は発行した target から導出する (裁定 01a11052 ① / ② / SEC-TD-R2-3 / SEC-TD-4)", () => {
   it("範囲 all の detach の後に配線が書かれたら、settings を読み直して state と token file を残す (R2 ガード・対照: 書かれなければ消す)", () => {
     const p = plant();
     bypass.fired = 0;
@@ -856,6 +857,31 @@ describe("INV-ATTACH-TEARDOWN: lock を取らない書き手は fail-loud な結
     );
     expect(logs2.join("\n")).toContain(DETACHED_MSG);
     expect(logs2.join("\n")).not.toContain("ActraDeck hook 配線が残っているため、state は残します");
+  });
+
+  it("daemon stop: 範囲 all の detach の後に配線が書かれたら state を残し incomplete (終了コード 1 の列挙の根拠・対照: 書かれなければ stopped)", () => {
+    const p = plant();
+    bypass.fired = 0;
+    bypass.afterDetach = () => appendEntriesFor(p.settingsPath, OTHER_ENDPOINT);
+    const logs: string[] = [];
+    const stop = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs));
+    expect(bypass.fired).toBe(1);
+    expect(stop).toMatchObject({
+      status: "incomplete",
+      state: "kept-entries-remain",
+      token: "kept",
+    });
+    expect(stopOutcomeExitCode(stop)).toBe(1);
+    expect(readFileSync(p.statePath, "utf8")).toBe(p.stateRaw);
+    expect(logs.join("\n")).not.toContain(STOPPED_MSG);
+    // 対照 (POSITIVE): 書き手が居なければ同じ形で stopped (終了コード 0)。
+    const q = plant();
+    const logs2: string[] = [];
+    const ok = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs2));
+    expect(ok).toMatchObject({ status: "stopped", state: "removed" });
+    expect(stopOutcomeExitCode(ok)).toBe(0);
+    expect(existsSync(q.statePath)).toBe(false);
+    expect(logs2.join("\n")).toContain(STOPPED_MSG);
   });
 
   it("判定の時点で absent なら state の段を通らない (後から現れた state を消さない)・unreadable は読めるようになった state を消さない", () => {

@@ -15,9 +15,11 @@
  *
  * **守備範囲 (開示)**: lock を共有しない書き手 (別 HOME の daemon・bind mount など別 path から同じ settings を
  * 扱う daemon・この lock を持たない旧い版の daemon・手編集) は直列化されない。そのため自動の後始末 (拒否起動・
- * 起動失敗) は記録 endpoint の entry だけを外す (daemon-cli の cleanupStaleWiring)。その書き手の書き込みが結果値
- * (`changed` / 配線の残存) に現れるのは、判定と CAS の間に state が書き換わった並びと、detach と読み直しの間に
- * 配線が書かれた並びだけで、ほかの並びでは何も報告されない。
+ * 起動失敗) は記録 endpoint の entry だけを外す (daemon-cli の cleanupStaleWiring・範囲の正は settings-merge の
+ * DetachRange)。その書き手の配線が記録 endpoint 以外に残っていれば、書かれたのが判定の前でも後でも R2 ガードが
+ * 配線の残存 (`detached-entries-remain`) として報告し、判定と CAS の間に state が書き換われば `changed` になる。
+ * 報告されずに外れる / 失われる形もある: 記録 endpoint と同じ port を得た配線 (外れる)・settings の読み直しの
+ * 後に書かれた配線 (state は消える)・範囲 all (`daemon stop` と自 state の shutdownSelf) で外れる配線。
  */
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";

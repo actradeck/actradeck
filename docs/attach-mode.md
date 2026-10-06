@@ -223,14 +223,17 @@ Scope and safety guards:
   already running and leaves the old entries in place. `./scripts/ad-attach` (its `stop` and
   `service` commands included) acts on the `user`-scope daemon only.
 - **When the daemon did not shut down cleanly.** On `SIGINT`, `SIGTERM` and `SIGHUP` (for example
-  when you close the terminal it runs in) the daemon removes its entries and its record when the
-  record is its own. When there is no record, or the record cannot be read or validated, it removes
+  when you close the terminal it runs in) the daemon removes every ActraDeck entry from the
+  settings file and its record when the record is its own; that includes the entries of a running
+  daemon that uses the same settings file with another `HOME` or through another path. When there
+  is no record, or the record cannot be read or validated, it removes
   only the entries that point at its own port and leaves the record as it is (it prints the
   `daemon stop --scope <scope>` command when the record cannot be validated). When the record
   belongs to another process it changes nothing, and when it cannot take the scope's lock (below) it
   leaves its entries and prints that command. If it is killed in a way it cannot handle, such as
   `SIGKILL`, its entries stay in the settings file and point at a port nothing listens on. The next
-  successful start in the same scope replaces them. A start that is refused (for example because the
+  successful start in the same scope replaces them (a successful start removes every ActraDeck entry
+  that does not point at its own port, including those of such daemons). A start that is refused (for example because the
   token check fails), or that fails while starting the daemon, removes them if the daemon recorded
   for that scope is no longer running (its process has exited, or its process ID now belongs to
   another process); a failed start then exits with the original error. If the record cannot be read
@@ -262,7 +265,9 @@ Scope and safety guards:
   leaves the process running and prints a message; stop that process yourself. When the record
   cannot be read or validated, `daemon stop` removes every ActraDeck entry from the settings file
   and the record without signalling any process. `daemon stop` exits with status 1 when it cannot
-  remove the record or the hook token file, or when the record was rewritten after it read it.
+  remove the record or the hook token file, when the record was rewritten after it read it, or when
+  ActraDeck entries are still in the settings file after it removed them (something that does not
+  take the lock wrote them in between).
 - **Where the daemon keeps its record.** There is one record per settings file under
   `~/.actradeck/daemon/`. It is keyed by the directory of the settings file with symbolic links
   resolved, plus the file name as written. Starting from a symlinked directory and from the real

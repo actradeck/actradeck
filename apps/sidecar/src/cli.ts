@@ -310,8 +310,9 @@ async function mainDaemon(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     process.stderr.write(`[attach] ${signal} → detach + shutdown\n`);
-    // 自分の配線を可逆 detach し state を消す (shutdownSelf: scope lock の下・別の daemon の配線と state には
-    // 触らない・kill しない・失敗しても throw せず shutdown を続ける)。
+    // shutdownSelf (scope lock の下・kill しない・失敗しても throw せず shutdown を続ける): state が自分の pid なら
+    // settings の全 ActraDeck entry (lock を共有しない daemon の配線も含む・base と同じ) と state を外す。state が
+    // 無い / corrupt なら自分の endpoint の entry だけを外し state に触らない。state が別 pid なら何も触らない。
     shutdownSelf(args, rt, hookEndpoint);
     await daemon.shutdown();
     process.exit(0);

@@ -511,11 +511,15 @@ export interface DetachResult {
 /**
  * detach の範囲 (**必須の判別 union・既定値なし**・TDA-DC-R2-4: 既定が広い側だと、範囲を渡し忘れた
  * 新しい呼び出し側が全 entry を外す)。
- * - `all`: 全 ActraDeck entry ({@link isActradeckEntry}・marker と legacy 署名)。`daemon stop`・拒否起動の
- *   後始末・daemon 自身の終了 (state が自分のもの) が scope lock の下で使う (ADR 01a10ddb D1 の (b))。
+ * 範囲の使い分けの正はここ (daemon-cli の各経路と docs はこれを参照する・裁定 01a110b2 / 01a11140):
+ * - `all`: 全 ActraDeck entry ({@link isActradeckEntry}・marker と legacy 署名)。利用者の `daemon stop` と、
+ *   daemon 自身の終了 (shutdownSelf) で state が自分の pid のときの 2 経路だけが scope lock の下で使う。lock を
+ *   共有しない daemon (別 HOME・別 path・旧い版) の生きた配線もこの 2 経路では外れる (base と同じ)。
  * - `endpoint`: その endpoint を向く ActraDeck entry だけ ({@link isCanonicalActradeckEntry} と同じ判定)。
- *   daemon 自身の終了で state が無いときに、自分の endpoint の配線だけを外すために使う (daemon-cli の
- *   shutdownSelf・唯一の消費者)。
+ *   自動の後始末 (拒否起動・起動失敗) が stale state に記録された endpoint を外す (+ R2 ガード) のと、
+ *   shutdownSelf で state が無い / corrupt のときに自分の endpoint を外すのに使う。記録 endpoint と同じ port を
+ *   得た lock 非共有の daemon の配線は外れる (開示済みの残余)。
+ * なお成功した起動の merge は self-heal で自 endpoint 以外の ActraDeck entry を外す (この型を使わない・base と同じ)。
  */
 export type DetachRange =
   | { readonly kind: "all" }

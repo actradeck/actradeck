@@ -203,12 +203,14 @@ scope と安全ガード:
   実行します。旧 daemon が稼働したまま `attach` を実行しても「既に稼働中」と表示されるだけで、旧 entry は
   残ります。`./scripts/ad-attach`（`stop` と `service` を含む）が操作するのは `user` scope の daemon だけです。
 - **daemon が正常に終了しなかった場合**: daemon は `SIGINT` / `SIGTERM` / `SIGHUP`（実行中の端末を
-  閉じたときなど）で、記録が自分のものなら自分の entry と記録を外します。記録が無い場合と、記録を読めない・
+  閉じたときなど）で、記録が自分のものなら settings にある ActraDeck の entry をすべて外し、記録を消します。
+  別の `HOME` や別の path から同じ settings file を使って稼働中の daemon の entry も外れます。記録が無い場合と、記録を読めない・
   検証できない場合は、自分の port を向いた entry だけを外し、記録はそのまま残します（検証できない場合は
   `daemon stop --scope <scope>` コマンドを表示します）。記録が別のプロセスのものなら何も変えず、scope の lock
   （後述）を取れない場合は entry を残して同じコマンドを表示します。`SIGKILL` のように処理できない形で
   終了すると、entry は settings に残り、誰も listen していない port を向いたままになります。同じ scope で
-  次に起動が成功すると置き換わります。起動が拒否された場合（token の検査に通らない等）と daemon の起動に
+  次に起動が成功すると置き換わります（成功した起動は、自分の port を向いていない ActraDeck の entry を、
+  そのような daemon のものも含めてすべて外します）。起動が拒否された場合（token の検査に通らない等）と daemon の起動に
   失敗した場合は、その scope に記録された daemon が既に終了していれば（プロセスが終了したか、その pid が
   別のプロセスに使われている）entry を外します。起動に失敗した場合は、その後で元のエラーで終了します。
   記録を読めない・検証できない場合や、記録されたプロセスがまだその daemon かを確かめられない場合は、
@@ -233,8 +235,8 @@ scope と安全ガード:
   システムの時計が進んだ場合）も entry と記録は外しますが、プロセスは止めずにメッセージを表示するので、
   そのプロセスは手動で止めてください。記録を読めない・検証できない場合、`daemon stop` はどのプロセスにも
   signal を送らずに、settings にある ActraDeck の entry をすべて外し、記録を消します。`daemon stop` は、
-  記録か hook token file を消せなかった場合と、読んだ後に記録が書き換わっていた場合に終了コード 1 で
-  終わります。
+  記録か hook token file を消せなかった場合、読んだ後に記録が書き換わっていた場合、外した後も ActraDeck の
+  entry が settings に残っていた場合（lock を取らないものがその間に書いた）に終了コード 1 で終わります。
 - **daemon の記録の場所**: 記録は settings file ごとに 1 つ、`~/.actradeck/daemon/` の下にあります。
   記録は、symbolic link を解決した settings file のディレクトリと、書かれたままのファイル名で決まります。
   そのため symlink 経由のディレクトリと実体のディレクトリから起動・停止した場合は同じ daemon を指し、

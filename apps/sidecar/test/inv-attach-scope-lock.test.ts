@@ -48,7 +48,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AttachDaemon } from "../src/attach-daemon.js";
 import {
@@ -568,10 +568,10 @@ describe("INV-ATTACH-SCOPE-LOCK: lock2 で読み直して判定する (TDA-TD-4 
   }, 30_000);
 });
 
-describe("INV-ATTACH-SCOPE-LOCK: daemon 自身の終了 (shutdownSelf) は自分の配線だけを外し kill しない (V15)", () => {
+describe("INV-ATTACH-SCOPE-LOCK: daemon 自身の終了 (shutdownSelf) は state が自分なら全 ActraDeck entry、無い / corrupt なら自分の endpoint だけを外し、別 pid なら触らず、kill しない (V15)", () => {
   let executed = 0;
   afterAll(() => {
-    expect(executed).toBe(4);
+    expect(executed).toBe(5);
   });
 
   it("state が自分 (pid が自プロセス) なら全部外し、state と token file を消す", async () => {
@@ -649,6 +649,24 @@ describe("INV-ATTACH-SCOPE-LOCK: daemon 自身の終了 (shutdownSelf) は自分
     expect(readFileSync(r.statePath, "utf8")).toBe("{ not json");
     expect(readFileSync(r.tokenPath, "utf8")).toBe("token-file-marker");
     expect(logs.join("\n")).toContain("agentmon daemon stop --scope project-local");
+    executed += 1;
+  });
+
+  it("state が corrupt で settings に自分の entry しか無くても、自分の entry だけを外し state と token file のバイトは変えない (SEC-SL-R2-3 ≡ TDA-SL-R2-3 ≡ QA-SL-R2-2)", async () => {
+    const r = await plantResidue();
+    writeFileSync(r.statePath, "{ not json");
+    // 自分の endpoint の entry だけ (R2 ガードが state を残す理由になる他の entry が無い形)。
+    expect(actradeckEndpoints(r.settingsPath).every((e) => e === r.endpoint)).toBe(true);
+    expect(actradeckEntries(r.settingsPath).length).toBeGreaterThan(0);
+    expect(shutdownSelf(projectLocal(), stubRuntime(home, []), r.endpoint)).toEqual({
+      kind: "own-endpoint-detached",
+      detached: true,
+      record: "corrupt",
+    });
+    expect(actradeckEntries(r.settingsPath)).toEqual([]);
+    expect(readFileSync(r.settingsPath, "utf8")).toContain(USER_HOOK_COMMAND);
+    expect(readFileSync(r.statePath, "utf8")).toBe("{ not json");
+    expect(readFileSync(r.tokenPath, "utf8")).toBe("token-file-marker");
     executed += 1;
   });
 });
@@ -1035,3 +1053,67 @@ describe.runIf(userNamespaceMount)(
     }, 150_000);
   },
 );
+
+/**
+ * lock2 の範囲の観測点 (TDA-SL-R2-2): mergeAttachHooks / writeDaemonState が呼ばれた時点の scope lock file の
+ * 中身を記録する (`lockPath` を設定している間だけ・未設定なら素通し)。vi.mock は file の先頭へ hoist される。
+ */
+const lockProbe = vi.hoisted(() => ({
+  lockPath: undefined as string | undefined,
+  merge: [] as string[],
+  state: [] as string[],
+}));
+vi.mock("../src/settings-merge.js", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../src/settings-merge.js")>();
+  const fs = await import("node:fs");
+  return {
+    ...orig,
+    mergeAttachHooks: (...a: Parameters<typeof orig.mergeAttachHooks>) => {
+      const p = lockProbe.lockPath;
+      if (p !== undefined)
+        lockProbe.merge.push(fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "absent");
+      return orig.mergeAttachHooks(...a);
+    },
+  };
+});
+vi.mock("../src/daemon-state.js", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../src/daemon-state.js")>();
+  const fs = await import("node:fs");
+  return {
+    ...orig,
+    writeDaemonState: (...a: Parameters<typeof orig.writeDaemonState>) => {
+      const p = lockProbe.lockPath;
+      if (p !== undefined)
+        lockProbe.state.push(fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "absent");
+      return orig.writeDaemonState(...a);
+    },
+  };
+});
+
+describe("INV-ATTACH-SCOPE-LOCK: lock2 は merge と state の書込の間 scope lock を保持する (TDA-SL-R2-2)", () => {
+  it("runStart の mergeAttachHooks と writeDaemonState の呼び出し時点で、scope lock file は自 pid の内容で在る (対照: runStart の後は無い)", async () => {
+    await plantResidue();
+    const target = scopeTarget("project-local", cwd, home);
+    lockProbe.merge = [];
+    lockProbe.state = [];
+    lockProbe.lockPath = target.artifacts.lockPath;
+    let out: Awaited<ReturnType<typeof runStart>>;
+    try {
+      out = await runStart(
+        parseDaemonArgs(["attach"], cwd),
+        { wsUrl: WS, dbPath: join(cwd, "t3.db") },
+        startingRuntime([]),
+      );
+    } finally {
+      lockProbe.lockPath = undefined;
+    }
+    expect(out.status).toBe("started");
+    expect(lockProbe.merge).toEqual([`${process.pid}\n`]);
+    expect(lockProbe.state).toEqual([`${process.pid}\n`]);
+    // 対照 (POSITIVE): 同じ path は lock の外 (runStart の後) では在らない = 上の観測は lock の保持を区別する。
+    expect(existsSync(target.artifacts.lockPath)).toBe(false);
+    expect(shutdownSelf(projectLocal(), stubRuntime(home, []), out.hookEndpoint ?? "").kind).toBe(
+      "torn-down",
+    );
+  }, 30_000);
+});

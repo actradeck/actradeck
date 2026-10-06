@@ -964,7 +964,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 残存判定の形 — marker の無い legac
   let zeroRecordedExecuted = 0;
   afterAll(() => {
     expect(legacyExecuted).toBe(2);
-    expect(zeroRecordedExecuted).toBe(1);
+    expect(zeroRecordedExecuted).toBe(2);
   });
 
   // QA-DC-R3-1 ≡ TDA-DC-R3-3: 残存判定は isActradeckEntry (marker または legacy 署名) で数える。
@@ -1044,6 +1044,34 @@ describe("INV-ATTACH-DENY-CLEANUP: 残存判定の形 — marker の無い legac
     expect(log).toContain(NONE_PHRASE);
     expect(log).not.toContain(REMOVED_PHRASE);
     expect(log).not.toContain(DETACHED_MSG);
+    zeroRecordedExecuted += 1;
+  });
+
+  it("ActraDeck entry が 1 本も無ければ「既に無くなっていました」と言い (「外しました」と言わない)、state は消す", async () => {
+    const r = await plantResidue("project-local", deadPid());
+    writeFileSync(
+      r.settingsPath,
+      JSON.stringify(
+        computeDetachedSettings(
+          JSON.parse(readFileSync(r.settingsPath, "utf8")) as Parameters<
+            typeof computeDetachedSettings
+          >[0],
+          { kind: "all" },
+        ).settings,
+      ),
+    );
+    expect(actradeckEntries(r.settingsPath)).toEqual([]);
+    const logs: string[] = [];
+    const res = cleanupStaleWiring({
+      target: scopeTarget("project-local", cwd, home),
+      writeApproved: true,
+      log: (m) => logs.push(m),
+    });
+    expect(res).toBe("detached");
+    expect(existsSync(r.statePath)).toBe(false);
+    const log = logs.join("\n");
+    expect(log).toContain(NONE_PHRASE);
+    expect(log).not.toContain(REMOVED_PHRASE);
     zeroRecordedExecuted += 1;
   });
 });
