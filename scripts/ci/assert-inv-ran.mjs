@@ -156,12 +156,12 @@ export const SUITES = {
   // afterAll counters catch a single skipped row, but skipping a whole describe also skips that
   // describe's afterAll. Same report and two-layer shape as sidecar-approval-fail-closed.
   // `minTests` is the exact count in the full sidecar report this step reads (measured at task
-  // 01a10c42 PR-B2): 66 = 45 (denial x scope table, stale + alive rows, plus the table-shape test)
-  // + 9 (cleanup boundaries) + 4 (entries on other ports are removed too under the scope lock; a
-  // writer that skips the lock is reported: entries written after the detach keep the state and
-  // print the stop command, a state written after the check is kept as changed) + 4 (removed shapes: marker-less
-  // legacy literal / env entries, no recorded-port entry, no ActraDeck entry at all) + 1 (a start
-  // that skips the scope lock: its state is kept, its entries are removed) in
+  // 01a10c42 PR-B2 R1 unblock): 66 = 45 (denial x scope table, stale + alive rows, plus the
+  // table-shape test) + 9 (cleanup boundaries) + 4 (entries on other ports are left and keep the
+  // state, SEC-DC-R2-1; entries written after the detach by a writer that does not share the scope
+  // lock keep the state; a state written after the check is kept as changed) + 3 (remaining-entry
+  // shapes: marker-less legacy literal / env entries, no recorded-port entry) + 2 (a start that does
+  // not take the scope lock, between its merge and its state write: races R1 / R2) in
   // inv-attach-deny-cleanup.test.ts, + 3 (single read of the state file, the cleanup's CAS using
   // that read, state delete failure) in inv-attach-deny-cleanup-fs.test.ts. At 66, skipping or
   // renaming any one matched describe fails the gate. Raise it by hand when tests are added.
@@ -232,20 +232,26 @@ export const SUITES = {
   // The check of the daemon record and the removal / writing of the wiring run under one lock per
   // scope (a different path from the settings lock), exercised with a separate process holding the
   // lock (real processes, not threads, because the file lock takes over a lock of its own pid).
-  // `minTests` is the exact count in the full sidecar report this step reads: 14 = 2 (a start in
-  // another process holds the lock between its merge and its state write and a refused start
-  // waits and leaves it alone; nested acquisition in one process throws) + 2 (lock unavailable:
-  // cleanup / stop / shutdown change nothing; `daemon stop` exit codes) + 3 (cleanup removes every
-  // ActraDeck entry shape; a failed detach keeps the state and the token file; a failing
-  // startDaemon cleans up and rethrows) + 3 (lock2 re-check: another daemon started meanwhile, a
-  // state that became corrupt, the settings directory symlink repointed during the start) + 4
-  // (the daemon's own shutdown: own state, another pid, no state, corrupt state), all in
-  // inv-attach-scope-lock.test.ts.
+  // `minTests` is the exact count in the full sidecar report this step reads (PR-B2 R1 unblock):
+  // 23 = 2 (a start in another process holds the lock between its merge and its state write and a
+  // refused start waits and leaves it alone; nested acquisition in one process throws) + 2 (lock
+  // unavailable: cleanup / stop / shutdown change nothing; `daemon stop` exit codes) + 3 (the
+  // automatic cleanup removes only the recorded endpoint and `daemon stop` removes every shape; a
+  // failed detach keeps the state and the token file; a failing startDaemon cleans up and
+  // rethrows) + 3 (lock2 re-check: another daemon started meanwhile, a state that became corrupt,
+  // the settings directory symlink repointed during the start) + 4 (the daemon's own shutdown: own
+  // state, another pid, no state, corrupt state) + 2 (a daemon that does not share the lock keeps
+  // its entries: another HOME, an older-build start between merge and record; real CLI) + 3
+  // (another process holds the lock during start: lock1, lock2; lock2 treats an unknown identity
+  // as running) + 4 (real CLI: SIGHUP with another pid's state and with no state, `daemon stop`
+  // exit 1 while the lock is held and when the cleanup is incomplete), all in
+  // inv-attach-scope-lock.test.ts. The bind mount case in the same file needs `unshare -rm` and is
+  // titled outside this pattern, so a runner without user namespaces skips it without failing here.
   // What this entry does not catch: an early return inside an `it` or a removed `expect`.
   "sidecar-attach-scope-lock": {
     label: "sidecar attach scope lock INV (INV-ATTACH-SCOPE-LOCK)",
     pattern: "INV-ATTACH-SCOPE-LOCK",
-    minTests: 14,
+    minTests: 23,
   },
 };
 

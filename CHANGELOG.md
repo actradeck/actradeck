@@ -27,16 +27,11 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   what to run when the entries are still left, is in the notes on unclean shutdown in
   `docs/attach-mode.md`.
 
-- **Attach start, stop and the cleanup of a dead daemon's entries hold a per-scope lock.** A
-  refused `attach` / `daemon start` and `daemon stop` check the daemon's record and remove its hook
-  entries while holding the lock that a starting daemon holds while it writes its entries and its
-  record, so a daemon that starts in the same scope during the cleanup keeps its entries. Under
-  the lock the cleanup removes every ActraDeck entry in the settings file, including entries for
-  other ports. A start that fails while starting the daemon now runs the same cleanup before it
-  exits with the original error. On `SIGINT` / `SIGTERM` / `SIGHUP` the daemon removes the entries
-  and the record only when the record is its own, and only its own entries when there is no record.
-  What is not covered (a daemon of an older build, which does not take the lock) is in the unclean
-  shutdown notes of `docs/attach-mode.md`.
+- **Attach start, stop and the cleanup of a dead daemon's entries hold a per-scope lock, and the
+  daemon's own shutdown no longer touches another daemon's record.** A start that fails while
+  starting the daemon now cleans up a dead daemon's entries like a refused start before it exits with
+  the original error. What the lock covers, which entries each case removes, and what happens when
+  the lock is held are in the unclean shutdown notes of `docs/attach-mode.md`.
 
 - **`daemon stop` signals the attach daemon only when it can confirm the recorded process.** The
   daemon now records its process start time, and `daemon stop` checks it before sending `SIGTERM`,
@@ -67,9 +62,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 - **`daemon stop` no longer reports an unfinished cleanup as stopped.** When it removes the attach
   hook entries but cannot remove the daemon's record or its hook token file, or the record was
   rewritten after `daemon stop` read it, it now says so and names what is left instead of
-  reporting that the daemon stopped. It then exits with status 1, as it also does when another
-  `attach` or `daemon` command holds the scope's lock (the cases are in the unclean shutdown notes
-  of `docs/attach-mode.md`).
+  reporting that the daemon stopped. It then exits with status 1 (the cases are in the unclean
+  shutdown notes of `docs/attach-mode.md`).
 
 - **Advisory file lock: takeover and release share one detach procedure.** The rename →
   re-verify → unlink-or-restore steps were written out twice; they now live in a single helper,

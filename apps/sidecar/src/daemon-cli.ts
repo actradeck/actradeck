@@ -295,9 +295,11 @@ export function stopCommandHint(scope: AttachScope, cwd: string): string {
  * 拒否経路の後始末の結果の値 (テストと監査向けに返す・CLI は使わない)。`detached-*` は teardownWiring の
  * state / token file の結果に対応する (`detached-entries-remain` = kept-entries-remain・`detached-state-changed`
  * = changed・`detached-state-absent` = absent・`detached-state-rm-failed` = rm-failed・
- * `detached-token-rm-failed` = state は消せたが token file を消せなかった)。lock の下で範囲 all の detach の後に
- * これらの `detached-*` (`detached` 以外) になるのは、lock を取らない書き手が居た場合だけ。`lock-unavailable` は
- * scope lock を取得できず何も確かめていない (settings にも state にも触っていない)。
+ * `detached-token-rm-failed` = state は消せたが token file を消せなかった)。`detached-entries-remain` は記録
+ * endpoint 以外の ActraDeck entry (記録外の死骸か、lock を共有しない daemon の配線) が残ったとき、
+ * `detached-state-changed` / `detached-state-absent` は判定の後に state が書き換わった / 消えたとき、
+ * `*-rm-failed` は削除に失敗したとき。`lock-unavailable` は scope lock を取得できず何も確かめていない
+ * (settings にも state にも触っていない)。
  */
 export type StaleCleanupKind =
   | "no-state"
@@ -345,20 +347,19 @@ function inspectScope(
  * 上書きするが、拒否された起動と起動の失敗 (startDaemon の throw) はそこまで進まないので、ここで片付ける。
  *
  * - **scope lock** (attach-scope の withScopeLock) を取ってから判定と除去を行う。runStart の lock2 (merge +
- *   state 書込) も同じ lock の下なので、判定の後に lock を取る daemon が配線・state を書くことはない。lock を
- *   取得できなければ何も確かめずに `lock-unavailable` を返す (throw しない・CLI を wedge させない)。
+ *   state 書込) も同じ lock の下なので、同じ HOME・同じ path から lock を取る daemon が判定の後に配線・state を
+ *   書くことはない。lock を取得できなければ何も確かめずに `lock-unavailable` を返す (throw しない)。
  * - 判定は attach-teardown の `inspectStaleWiring` (runStop / runStatus / runStart と共有) と
  *   `isDaemonProcess` (pid の生存 + 開始時刻の照合・pid 再利用は stale)。state が**記録した daemon ではない
  *   (stale)** ときだけ動く。同一性を確かめられない (unknown) ときは生きているとみなして何もしない。
  * - state が検証できない (corrupt) ときは pid を信用できないので書かずに `state-invalid` を返し、`daemon stop` を
  *   案内する。
  * - 外すのは attach-teardown の `teardownWiring` (detach → state → token file の唯一の手順) で、範囲は
- *   **endpoint を問わず全 ActraDeck entry** (`{ kind: "all" }`・ADR D1 の (b))。lock の下では「state を持たない
- *   生きた daemon の配線」が lock を取る書き手からは作られないので、記録外の endpoint の entry・marker の無い
- *   legacy 署名・command 形も死骸として外す。
+ *   **stale state に記録された endpoint を向く ActraDeck entry だけ** (`{ kind: "endpoint" }`・裁定 01a110b2)。
+ *   lock を共有しない daemon (別 HOME・別 path・旧い版) の生きた配線は別の endpoint なので残る。
  * - state は**判定に使ったバイト列と同じとき**で、かつ detach の後に読み直した settings に ActraDeck entry が
- *   1 本も残っていないときだけ消す (teardownWiring)。どちらかが崩れるのは lock を取らない書き手が居たとき
- *   だけで、その場合は消さずに結果値とログで報告する (fail-loud・裁定 01a11052 ①)。
+ *   1 本も残っていないときだけ消す (teardownWiring の R2 ガード・裁定 01a11052 ①)。残っていれば state を残して
+ *   {@link stopCommandHint} を出す (`detached-entries-remain`)。
  * - `writeApproved` が false (user / project scope で --yes も confirm の承認も無い) なら書かない。
  *   共有/グローバル settings への書込は confirm ゲート (SEC-1) の対象なので、拒否経路でも同じ線を守り、
  *   残っていることと {@link stopCommandHint} だけをログに出す。state は消さない
@@ -367,9 +368,10 @@ function inspectScope(
  *   から path を取らない)。発行していない target (spread で path を差し替えた複製等) は入口で throw する。
  * - detach が失敗したら state も token file も残す (`daemon stop` で再試行できる形を保つ)。値はログに出さない。
  * - token file の削除に失敗したら、state の結果がどの値でもログに書く (SEC-TD-4)。
- * - **残る穴 (開示)**: lock を取らない書き手 (scope lock を持たない旧い版の daemon が同じ scope で並走する
- *   upgrade の窓・手編集) とは直列化されない。その書き込みは `detached-state-changed` /
- *   `detached-entries-remain` として報告されるだけで、範囲 all の detach はその書き手の配線も外す。
+ * - **残る穴 (開示・base 同値)**: stale state に記録されていない死んだ entry (別 endpoint の残骸) は外さない。
+ *   残っていれば state を残して案内するので、`daemon stop` (範囲は全 ActraDeck entry) か次の成功起動の
+ *   self-heal で外れる。lock を共有しない daemon が配線を持つ間に案内どおり `daemon stop` を打つと、その
+ *   daemon の配線も外れる (stop は利用者が明示した全外し)。
  */
 export function cleanupStaleWiring(opts: {
   readonly target: ScopeTarget;
@@ -424,7 +426,7 @@ function cleanupLocked(opts: {
   const td = teardownWiring({
     target,
     expected: expectedStateOf(target, inspection),
-    range: { kind: "all" },
+    range: { kind: "endpoint", endpoint: state.endpoint },
   });
   if (td.kind === "detach-failed") {
     opts.log(
@@ -435,8 +437,7 @@ function cleanupLocked(opts: {
   }
   // 実際に外したかで文言を分ける (SEC-DC-R2-2 ≡ QA-DC-R2-1 ≡ TDA-DC-R2-2: 0 本なら「外しました」と言わない)。
   const what =
-    `前回の daemon (pid=${state.pid}・endpoint ${state.endpoint}) は終了しています。` +
-    `${target.settingsPath} の ActraDeck hook 配線` +
+    `前回の daemon (pid=${state.pid}) の endpoint (${state.endpoint}) を向いた hook 配線` +
     (td.detached ? "を外しました" : "は既に無くなっていました");
   // SEC-TD-4: token file の削除失敗は state の結果がどの値でも報告する。
   const tokenNote =
@@ -445,17 +446,16 @@ function cleanupLocked(opts: {
       : "";
   switch (td.state) {
     case "kept-entries-remain":
-      // 外した後も ActraDeck entry が残る = lock を取らない書き手が居た。state を消すと `daemon stop` が
-      // その配線を見つけられなくなるので残す (R2 ガード・裁定 01a11052 ①)。
+      // 記録 endpoint 以外の ActraDeck entry が残る (記録外の死骸か、lock を共有しない daemon の配線)。
+      // state を消すと `daemon stop` がその配線を見つけられなくなるので残す (R2 ガード・SEC-DC-R2-1)。
       opts.log(
-        `[attach] ${what}。ただし外した後も ${target.settingsPath} に ActraDeck hook 配線が残っているため` +
-          `、state は残します (scope lock を取らない書き手が居る可能性があります)。外すには ` +
-          `\`${hint}\` を実行してください。`,
+        `[attach] ${what}。ただし ${target.settingsPath} にはほかの ActraDeck hook 配線が` +
+          `残っているため、state は残します。外すには \`${hint}\` を実行してください。`,
       );
       return cleanupResult("detached-entries-remain");
     case "changed":
       opts.log(
-        `[attach] ${what}。state は判定の後に書き換わっていたため消していません (scope lock を取らない` +
+        `[attach] ${what}。state は判定の後に書き換わっていたため消していません (scope lock を共有しない` +
           `書き手が居る可能性があります)。\`agentmon daemon status\` で確認してください。`,
       );
       return cleanupResult("detached-state-changed");
@@ -489,6 +489,8 @@ function cleanupLocked(opts: {
  * - **lock2** (scope lock): state を読み直して判定し直す。別の daemon が生きていれば自分の daemon を止めて
  *   `already-running`。stale / 無い / corrupt (TDA-STA-4 (3): lock2 で読み直した上で上書き = base 同値) なら
  *   merge → artifact を再導出して (SEC-STA-R2-1) state を書く → (T-B) hook token file。
+ * - lock1 / lock2 を取得できなければ ScopeLockUnavailableError を投げる (CLI は exit 1)。lock1 では何も変えて
+ *   いない。lock2 では起動した daemon を止めてから投げ、settings も state も書かない。
  * - dry-run は preview のみ (daemon 起動・書込なし)。
  * - literal token を settings に書き、state file には **値を記録しない**。
  */
@@ -938,10 +940,10 @@ export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
  * {@link shutdownSelf} の結果。
  * - `torn-down`: state は自分 (pid が自プロセス) のもの。範囲 all で外し、state と hook token file を片付けた
  *   (`state` / `token` は teardownWiring の結果)。
- * - `own-endpoint-detached`: state が無かった。自分の endpoint を向く entry だけを外した (state にも token file
- *   にも触らない)。
+ * - `own-endpoint-detached`: state が無かった (`record: "absent"`)・検証できなかった (`record: "corrupt"`)。
+ *   自分の endpoint を向く entry だけを外した (state にも token file にも触らない・corrupt なら `daemon stop` を
+ *   案内する)。
  * - `untouched-other`: state は別の daemon (別 pid) のもの。何も触らない。
- * - `untouched-corrupt`: state を検証できない。何も触らず `daemon stop` を案内する。
  * - `detach-failed` / `lock-unavailable`: 外せなかった / scope lock を取得できなかった (ログで案内する)。
  */
 export type ShutdownSelfOutcome =
@@ -951,9 +953,12 @@ export type ShutdownSelfOutcome =
       readonly state: StateTeardown;
       readonly token: TokenTeardown;
     }
-  | { readonly kind: "own-endpoint-detached"; readonly detached: boolean }
+  | {
+      readonly kind: "own-endpoint-detached";
+      readonly detached: boolean;
+      readonly record: "absent" | "corrupt";
+    }
   | { readonly kind: "untouched-other" }
-  | { readonly kind: "untouched-corrupt" }
   | { readonly kind: "detach-failed" }
   | { readonly kind: "lock-unavailable" };
 
@@ -961,10 +966,12 @@ export type ShutdownSelfOutcome =
  * attach daemon 自身の終了 (SIGINT / SIGTERM / SIGHUP の handler・ADR 01a10ddb D1)。runStop (利用者の停止) とは
  * 別の経路で、**kill は決してしない** (INV-ATTACH-NO-KILL と整合)。scope lock の中で state を読み:
  * - state の pid が自プロセス → teardownWiring (範囲 all・state と hook token file も片付ける)。
- * - state が無い → 自分の endpoint (`ownEndpoint`) を向く ActraDeck entry だけを外す (範囲 endpoint)。state には
- *   触らない (判定の後に現れた state を消さない・裁定 01a11052 ②)。token file にも触らない。
+ * - state が無い / corrupt → 自分の endpoint (`ownEndpoint`) を向く ActraDeck entry だけを外す (範囲 endpoint)。
+ *   自分の endpoint は自プロセスが bind しているので、判定なしに自分の配線だと言える。state には触らない (判定の
+ *   後に現れた state を消さない・corrupt は pid を信用できない・裁定 01a11052 ② / 01a110b2)。token file にも
+ *   触らない。corrupt なら `daemon stop` を案内する。
  * - state が別の pid → 何も触らない (後から起動した daemon の配線と state を消さない)。
- * - state が corrupt → 何も触らず `daemon stop` を案内する (pid を信用できない)。
+ * - scope lock を取得できない・detach に失敗した → 外さずに `daemon stop` を案内する。
  * 失敗しても throw しない (handler は daemon の shutdown を続ける)。
  */
 export function shutdownSelf(
@@ -979,19 +986,18 @@ export function shutdownSelf(
   try {
     out = withScopeLock(target, (): ShutdownSelfOutcome => {
       const read = readState(target.artifacts, target.scopes);
-      if (read.kind === "corrupt") return { kind: "untouched-corrupt" };
       if (read.kind === "state" && read.state.pid !== process.pid)
         return { kind: "untouched-other" };
       const own = read.kind === "state";
       const td = teardownWiring({
         target,
-        expected: expectedStateOf(target, read),
+        expected: own ? expectedStateOf(target, read) : { kind: "absent" },
         range: own ? { kind: "all" } : { kind: "endpoint", endpoint: ownEndpoint },
       });
       if (td.kind === "detach-failed") return { kind: "detach-failed" };
       return own
         ? { kind: "torn-down", detached: td.detached, state: td.state, token: td.token }
-        : { kind: "own-endpoint-detached", detached: td.detached };
+        : { kind: "own-endpoint-detached", detached: td.detached, record: read.kind };
     });
   } catch (err) {
     if (!(err instanceof ScopeLockUnavailableError)) {
@@ -1006,13 +1012,15 @@ export function shutdownSelf(
       break;
     case "own-endpoint-detached":
       rt.log(
-        `[attach] state が無いため、この daemon の endpoint を向く hook 配線だけを外しました。`,
+        out.record === "absent"
+          ? `[attach] state が無いため、この daemon の endpoint を向く hook 配線だけを外しました。`
+          : `[attach] state を検証できないため、この daemon の endpoint を向く hook 配線だけを外し、state には` +
+              `触れていません。\`${hint}\` で確認してください。`,
       );
       break;
     case "untouched-other":
       rt.log(`[attach] state は別の daemon のものなので、hook 配線と state には触れていません。`);
       break;
-    case "untouched-corrupt":
     case "detach-failed":
     case "lock-unavailable":
       rt.log(

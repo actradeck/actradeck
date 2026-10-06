@@ -8,8 +8,9 @@
  *
  * **lock**: どちらも lock を取らない。{@link teardownWiring} は呼び出し側が attach-scope の `withScopeLock` を
  * 保持している前提で動く (daemon-cli の後始末・runStop・shutdownSelf はすべて lock の中で呼ぶ・PR-B2)。lock の
- * 下では state の比較と削除の間に lock を取る書き手が割り込まないので、`changed` / `absent` と配線の残存
- * (`kept-entries-remain`) は「lock を取らない書き手 (旧い版の daemon・手編集) が居た」ことの fail-loud な信号になる。
+ * 下では state の比較と削除の間に同じ lock を取る書き手が割り込まないので、`changed` / `absent` は「lock を共有
+ * しない書き手 (別 HOME・別 path・旧い版の daemon・手編集) が判定の後に state を書いた / 消した」ことの信号になる。
+ * 配線の残存 (`kept-entries-remain`) は、範囲 endpoint では記録外の entry が残ったときにも出る。
  */
 import { rmSync } from "node:fs";
 
@@ -94,8 +95,8 @@ export function inspectStaleWiring(input: {
  * state file の後始末の結果。`removed` / `changed` / `absent` / `rm-failed` は daemon-state の
  * removeDaemonStateIfUnchanged と同じ意味。`kept-entries-remain` は detach の後に settings を読み直すと
  * ActraDeck entry が残っていたので消さなかった (R2 ガード・SEC-DC-R2-1: 消すと `daemon stop` がその配線を
- * 見つけられない。範囲 `all` の detach の後に残るのは、lock を取らない書き手が detach の後に書いた場合だけ・
- * 裁定 01a11052 ①で維持)。`untouched` は判定の時点で state が無かった ({@link ExpectedState} の `absent`) ので
+ * 見つけられない・裁定 01a11052 ①で維持)。範囲 `endpoint` では記録外の entry が残れば出る。範囲 `all` では
+ * detach と読み直しの間に lock を共有しない書き手が配線を書いた場合と、読み直しに失敗した場合に出る。`untouched` は判定の時点で state が無かった ({@link ExpectedState} の `absent`) ので
  * state の段を通らなかった。
  */
 export type StateTeardown =

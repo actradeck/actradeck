@@ -3,16 +3,21 @@
  * (Triangle ADR 01a10ddb D1・task 01a10c42 PR-B2)。
  *
  * 起動 (配線 + state の書込)・拒否起動の後始末・`daemon stop`・daemon 自身の終了は、同じ scope の判定
- * (state の読み取り) と除去 / 書込を {@link withScopeLock} の中で行う。判定と除去が同じ lock の下にあるので、
- * 「判定の後に別の daemon が配線・state を書いた」が lock を取る書き手の間では起きない。
+ * (state の読み取り) と除去 / 書込を {@link withScopeLock} の中で行う。lock file は HOME の下
+ * (`~/.actradeck/daemon/<scopeKey>.lock`) にあり、scopeKey は settings の親 dir の realpath から決まるので、
+ * 直列化されるのは **同じ HOME で、同じ path (symlink は解決・bind mount は解決しない) から lock を取る daemon
+ * 同士** だけ (裁定 01a110b2 で ADR 01a10ddb D1 を訂正)。
  *
  * **lock の path は settings の lock と別** (`~/.actradeck/daemon/<scopeKey>.lock`・`scopeArtifacts().lockPath`)。
  * file-lock は自 pid の lock を stale として奪うので、同じ path を入れ子で取ると内側の解放の後で外側が lock
  * 無しで走る (ADR の実測)。順序は常に scope → settings (merge / detach が内側で settings の lock を取る)。
  * 同じ process の中で同じ scope の lock を入れ子で取ろうとしたら throw する (自 pid の奪取を無信号にしない)。
  *
- * **守備範囲 (開示)**: lock を取らない書き手 (この lock を持たない旧い版の daemon・手編集) は直列化されない。
- * その書き込みは後始末の結果値 (`changed` / 配線の残存) として報告されるだけで、防げない。
+ * **守備範囲 (開示)**: lock を共有しない書き手 (別 HOME の daemon・bind mount など別 path から同じ settings を
+ * 扱う daemon・この lock を持たない旧い版の daemon・手編集) は直列化されない。そのため自動の後始末 (拒否起動・
+ * 起動失敗) は記録 endpoint の entry だけを外す (daemon-cli の cleanupStaleWiring)。その書き手の書き込みが結果値
+ * (`changed` / 配線の残存) に現れるのは、判定と CAS の間に state が書き換わった並びと、detach と読み直しの間に
+ * 配線が書かれた並びだけで、ほかの並びでは何も報告されない。
  */
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
