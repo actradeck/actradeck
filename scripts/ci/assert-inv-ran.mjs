@@ -183,19 +183,19 @@ export const SUITES = {
   // read of the path older builds used, the project / user labels of the user settings file) and
   // the process identity check before `daemon stop` signals a pid (real child processes and real
   // attach CLIs). `minTests` is the exact count in the full sidecar report this step reads,
-  // measured on Linux: 82 = 3 (artifact paths) + 36 (shape table: 4 accepted + 30 corrupt rows
+  // measured on Linux: 84 = 3 (artifact paths) + 36 (shape table: 4 accepted + 30 corrupt rows
   // + not-JSON/absent + writer check) + 2 (corrupt branch) + 7 (stop vs identity) + 3 (alive
   // judgement, clock skew) + 6 (older state path, derived-path guard) + 2 (cwd = home) + 3 (user
-  // scope labels from any cwd, runStart / cleanup use the same labels) + 4 (settings file itself a
-  // symlink: user / project-local / monorepo / symlinked HOME) + 1 (ps target pid) + 15 (identity
-  // branches with injected OS sources + parsers), all in inv-attach-state-trust.test.ts. Rows
+  // scope labels from any cwd, runStart / cleanup use the same labels) + 5 (settings file itself a
+  // symlink: user / project-local / monorepo; symlinked HOME in both directions) + 1 (ps target pid)
+  // + 16 (identity branches with strict injected OS sources, the strictness itself, parsers), all in inv-attach-state-trust.test.ts. Rows
   // marked `it.runIf(LINUX)` are reported as skipped elsewhere, which this gate rejects; CI runs on
   // Linux. In-file afterAll counters exist only for the shape table and the stop-vs-identity rows.
   // What this entry does not catch: an early return inside an `it` or a removed `expect`.
   "sidecar-attach-state-trust": {
     label: "sidecar attach state trust / process identity INV (INV-ATTACH-STATE-TRUST)",
     pattern: "INV-ATTACH-STATE-TRUST",
-    minTests: 82,
+    minTests: 84,
   },
 };
 

@@ -1,8 +1,9 @@
 /**
  * INV-ATTACH-STATE-TRUST (Triangle ADR 01a10ddb D3 / D7・task 01a10c42 PR-A)。
  *
- * - V9: scope の artifact path は realpath 正規化した settings path から導出する。symlink 経由の cwd と
- *   物理 cwd は同じ state を指す。symlink を含まない path では旧 `scopeHash(settingsPath)` と同値 (互換)。
+ * - V9: scope の artifact path は settings path から導出する。正規化は親 dir だけを realpath し file 名は
+ *   そのまま (改訂 D3・裁定 01a10e44)。symlink 経由の cwd と物理 cwd は同じ state を指す。symlink を含まない
+ *   path では旧 `scopeHash(settingsPath)` と同値 (互換)。
  * - V10: state の形検証は `asDaemonState` 1 か所・reader は `readState` 1 本 (absent | corrupt | state)。
  *   legacy の `wiredSettingsPaths` は導出 settings path と一致する要素 1 個の配列だけを受理する。
  * - corrupt: 拒否起動の後始末は書かずに `state-invalid`・`daemon stop` は全 detach + state 削除で kill しない。
@@ -113,7 +114,7 @@ const clis: AttachCli[] = [];
 const sidecarRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 async function startAttachCli(
   args: readonly string[],
-  at: { cwd: string; home: string },
+  at: { cwd: string; home: string; env?: Record<string, string> },
 ): Promise<AttachCli> {
   const child = spawn(tsxBin, [join(sidecarRoot, "src", "cli.ts"), "attach", ...args], {
     cwd: at.cwd,
@@ -122,6 +123,7 @@ async function startAttachCli(
       HOME: at.home,
       ACTRADECK_WS_URL: "ws://127.0.0.1:1",
       ACTRADECK_DB: join(at.cwd, `cli-${clis.length}.db`),
+      ...at.env,
     },
     stdio: ["ignore", "ignore", "pipe"],
     detached: true,
@@ -225,7 +227,7 @@ const withSignal0 = (r: Signal0Result): IdentitySources => ({
   signal0: () => r,
 });
 
-describe("INV-ATTACH-STATE-TRUST: scope の artifact path は realpath 正規化した settings path から導出する (V9)", () => {
+describe("INV-ATTACH-STATE-TRUST: scope の artifact path は親 dir を realpath した settings path から導出する (V9)", () => {
   it("symlink を含まない path では旧 scopeHash / 旧 state path と同値 (lockPath / tokenPath は同じ dir の別名)", () => {
     for (const scope of ["project-local", "project", "user"] as const) {
       const p = settingsOf(scope);
@@ -1010,6 +1012,8 @@ describe("INV-ATTACH-STATE-TRUST: settings file 自体が symlink でも state �
       const scopeArgs = scope === "user" ? ["--scope", "user"] : [];
       const a = await startAttachCli(args, { cwd, home });
       expect(entries(settingsPath)).toBeGreaterThan(0);
+      // POSITIVE 対 (下の stateFiles(home) が空の assert と同じ helper): 稼働中は state が 1 件。
+      expect(stateFiles(home)).toHaveLength(1);
       const logs: string[] = [];
       expect(
         runStatus(parseDaemonArgs(["daemon", "status", ...scopeArgs], cwd), rt(logs)).running,
@@ -1026,6 +1030,7 @@ describe("INV-ATTACH-STATE-TRUST: settings file 自体が symlink でも state �
       expect(stateFiles(home)).toEqual([]);
       // 2 回目の寿命: `daemon stop` が見つけて止める。
       const b = await startAttachCli(args, { cwd, home });
+      expect(stateFiles(home)).toHaveLength(1);
       const stop = runStop(parseDaemonArgs(["daemon", "stop", ...scopeArgs], cwd), rt(logs));
       expect(stop.kill).toBe("sent");
       expect(await b.groupGone(15_000), b.stderr()).toBe(true);
@@ -1034,7 +1039,7 @@ describe("INV-ATTACH-STATE-TRUST: settings file 自体が symlink でも state �
     }, 60_000);
   }
 
-  it("monorepo 形: package の settings が root の file への symlink でも、package 側の stop は root の daemon を止めない", async () => {
+  it("monorepo の file symlink 形: package の settings file が root の settings file への symlink なら別の key で、package 側の stop は root の daemon を止めない", async () => {
     const rootSettings = resolveSettingsPath("project-local", cwd, home);
     mkdirSync(dirname(rootSettings), { recursive: true });
     writeFileSync(rootSettings, JSON.stringify({ hooks: {} }));
@@ -1072,6 +1077,26 @@ describe("INV-ATTACH-STATE-TRUST: settings file 自体が symlink でも state �
     expect(await cli.groupGone(15_000), cli.stderr()).toBe(true);
     expect(entries(userSettings)).toBe(0);
   }, 40_000);
+  it("HOME 自体が symlink (逆向き・QA-STA-R2-2): symlink の HOME を cwd にした `--scope project` の daemon を、別の cwd からの `--scope user` が止める", async () => {
+    const homeLink = join(cwd, "home-link");
+    symlinkSync(home, homeLink);
+    const cli = await startAttachCli(["--scope", "project", "--yes", "--token-mode", "env"], {
+      cwd: homeLink,
+      home: homeLink,
+      env: { ACTRADECK_HOOK_TOKEN: "b".repeat(40) },
+    });
+    const userSettings = resolveSettingsPath("user", cwd, homeLink);
+    expect(entries(userSettings)).toBeGreaterThan(0);
+    const logs: string[] = [];
+    const rtLink: DaemonRuntime = { ...rt(logs), home: homeLink };
+    const status = runStatus(parseDaemonArgs(["daemon", "status", "--scope", "user"], cwd), rtLink);
+    expect(status.running).toBe(true);
+    expect(status.state?.scope).toBe("project");
+    const stop = runStop(parseDaemonArgs(["daemon", "stop", "--scope", "user"], cwd), rtLink);
+    expect(stop.kill).toBe("sent");
+    expect(await cli.groupGone(15_000), cli.stderr()).toBe(true);
+    expect(entries(userSettings)).toBe(0);
+  }, 40_000);
 });
 
 describe("INV-ATTACH-STATE-TRUST: etime は記録 pid の経過時間を読む (QA-STA-2)", () => {
@@ -1090,6 +1115,16 @@ describe("INV-ATTACH-STATE-TRUST: etime は記録 pid の経過時間を読む (
 describe("INV-ATTACH-STATE-TRUST: isDaemonProcess の分岐 (OS 情報を注入)", () => {
   const T = Date.parse("2026-10-06T00:00:00.000Z");
   const B = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+  /** 記録 pid。fake の OS 情報源はこの pid の問い合わせにだけ答え、それ以外の pid (自 pid・"self") は throw する。 */
+  const PID = 4242;
+  const only = (pid: number | "self"): void => {
+    if (pid !== PID)
+      throw new Error(`identity source asked about pid ${String(pid)}, expected ${PID}`);
+  };
+  /**
+   * 厳密な fake (QA-STA-R2-1): pid を取る 3 つの問い合わせ (signal0 / readStartTicks / elapsedSeconds) は
+   * 記録 pid 以外で throw する。isDaemonProcess のどの呼び出し site が別の pid を渡しても、その行は RED になる。
+   */
   function src(o: {
     sig?: Signal0Result[];
     boot?: string;
@@ -1098,17 +1133,25 @@ describe("INV-ATTACH-STATE-TRUST: isDaemonProcess の分岐 (OS 情報を注入)
   }): IdentitySources {
     const sig = [...(o.sig ?? ["exists"])];
     return {
-      signal0: () => (sig.length > 1 ? (sig.shift() as Signal0Result) : (sig[0] as Signal0Result)),
+      signal0: (pid) => {
+        only(pid);
+        return sig.length > 1 ? (sig.shift() as Signal0Result) : (sig[0] as Signal0Result);
+      },
       readBootId: () => o.boot,
-      readStartTicks: () => o.ticks,
+      readStartTicks: (pid) => {
+        only(pid);
+        return o.ticks;
+      },
       // 子の開始時刻 = T + elapsedFromStart (ms)・now = T + 600s。
-      elapsedSeconds: () =>
-        o.elapsedFromStart === undefined ? undefined : (600_000 - o.elapsedFromStart) / 1000,
+      elapsedSeconds: (pid) => {
+        only(pid);
+        return o.elapsedFromStart === undefined ? undefined : (600_000 - o.elapsedFromStart) / 1000;
+      },
       now: () => T + 600_000,
     };
   }
   const st = (procIdentity?: ProcIdentity) => ({
-    pid: 4242,
+    pid: PID,
     startedAt: new Date(T).toISOString(),
     ...(procIdentity ? { procIdentity } : {}),
   });
@@ -1153,6 +1196,20 @@ describe("INV-ATTACH-STATE-TRUST: isDaemonProcess の分岐 (OS 情報を注入)
       expect(isDaemonProcess(state, s)).toBe(want);
     });
   }
+  it("fake の OS 情報源は記録 pid 以外の問い合わせに答えない (厳密さ自体の固定)", () => {
+    const s = src({ ticks: 5, elapsedFromStart: 0 });
+    // POSITIVE 対: 記録 pid には答える。
+    expect(s.signal0(PID)).toBe("exists");
+    expect(s.readStartTicks(PID)).toBe(5);
+    expect(s.elapsedSeconds(PID)).toBe(600);
+    for (const other of [process.pid, PID + 1] as const) {
+      expect(() => s.signal0(other)).toThrow(`expected ${PID}`);
+      expect(() => s.readStartTicks(other)).toThrow(`expected ${PID}`);
+      expect(() => s.elapsedSeconds(other)).toThrow(`expected ${PID}`);
+    }
+    expect(() => s.readStartTicks("self")).toThrow(`expected ${PID}`);
+  });
+
   it("parser: /proc stat の comm に `) ` があっても field 22・etime の 4 形", () => {
     const fields = Array.from({ length: 20 }, (_, i) => String(i + 3));
     expect(parseStartTicks(`99 (a) b (c)) ${fields.join(" ")}`)).toBe(22);
