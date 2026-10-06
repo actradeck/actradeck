@@ -10,12 +10,17 @@ import { join, resolve } from "node:path";
 
 import { AttachDaemon } from "./attach-daemon.js";
 import {
+  inspectStaleWiring,
+  type StateTeardown,
+  teardownWiring,
+  type TokenTeardown,
+  type WiringEntries,
+} from "./attach-teardown.js";
+import {
   assertDaemonStateShape,
   type AttachScope,
   type DaemonState,
-  isDaemonStateUnchanged,
   readState,
-  removeDaemonState,
   removeDaemonStateIfUnchanged,
   scopeArtifacts,
   type ScopeArtifacts,
@@ -28,11 +33,9 @@ import {
   type ProcessLiveness,
 } from "./process-identity.js";
 import {
-  detachAttachHooks,
-  type DetachScope,
-  hasActradeckHookInSettings,
   mergeAttachHooks,
   previewAttachHooks,
+  readSettingsForInspection,
   type TokenMode,
 } from "./settings-merge.js";
 
@@ -170,11 +173,26 @@ export function resolveSettingsPath(
   }
 }
 
-/** scope の settings path・artifact path・state で受け入れる scope ラベル (args から導出する)。 */
+declare const scopeTargetBrand: unique symbol;
+
+/**
+ * scope の settings path・artifact path・state で受け入れる scope ラベル (args から導出する)。
+ * **{@link scopeTarget} だけが作る** (TDA-STA-5): 後始末に手で組み立てた path を渡させない
+ * (state の中身や別の file から path を取らない)。旧 API は statePath / settingsPath を別々に受け取り、
+ * 導出値と違えば実行時に throw していた。brand 型だけでは spread (`{ ...t, artifacts: { ...a, tokenPath } }`)
+ * で cast なしに偽造できる (SEC-TD-2 ≡ TDA-TD-1) ので、{@link scopeTarget} は発行した object を module 内の
+ * WeakSet に登録して `Object.freeze` し (artifacts と scopes も)、受け取る側は未登録なら throw する
+ * ({@link assertIssuedScopeTarget})。
+ */
 export interface ScopeTarget {
+  /** 要求した scope (停止案内に使う)。 */
+  readonly scope: AttachScope;
+  /** 起動ディレクトリ (project 系の停止案内の `--cwd`)。 */
+  readonly cwd: string;
   readonly settingsPath: string;
   readonly artifacts: ScopeArtifacts;
   readonly scopes: readonly AttachScope[];
+  readonly [scopeTargetBrand]: true;
 }
 
 /**
@@ -194,7 +212,25 @@ export function scopeTarget(scope: AttachScope, cwd: string, home: string): Scop
   const sharesUserFile =
     scope !== "project-local" && artifacts.canonicalSettingsPath === userCanonical;
   const scopes: readonly AttachScope[] = sharesUserFile ? ["project", "user"] : [scope];
-  return { settingsPath, artifacts, scopes };
+  const target = Object.freeze({
+    scope,
+    cwd,
+    settingsPath,
+    artifacts: Object.freeze(artifacts),
+    scopes: Object.freeze(scopes),
+  }) as ScopeTarget;
+  issuedScopeTargets.add(target);
+  return target;
+}
+
+/** {@link scopeTarget} が発行した target (同一性で照合する・spread した複製は含まない)。 */
+const issuedScopeTargets = new WeakSet<ScopeTarget>();
+
+/** {@link scopeTarget} が発行した target でなければ throw する (SEC-TD-2: 偽造した path を後始末に渡させない)。 */
+function assertIssuedScopeTarget(target: ScopeTarget): void {
+  if (!issuedScopeTargets.has(target)) {
+    throw new Error("ScopeTarget は scopeTarget() が発行したものだけを受け取ります");
+  }
 }
 
 /** start 実行の依存注入 (テスト・実機で差し替え)。 */
@@ -230,24 +266,52 @@ export interface DaemonRuntime {
 }
 
 /** runStart の拒否 status (すべて deny() を通る)。 */
-type DeniedStatus = Extract<StartOutcome["status"], `denied-${string}`>;
+export type DeniedStatus =
+  | "denied-needs-confirm"
+  | "denied-token-leak"
+  | "denied-env-token-missing"
+  | "denied-hook-token-invalid"
+  | "denied-env-token-mismatch";
 
-export interface StartOutcome {
-  readonly status:
-    | "started"
-    | "already-running"
-    | "dry-run"
-    | "denied-needs-confirm"
-    | "denied-token-leak"
-    | "denied-env-token-missing"
-    | "denied-hook-token-invalid"
-    | "denied-env-token-mismatch";
+interface StartOutcomeFields {
   readonly hookEndpoint?: string;
   readonly settingsPath: string;
   readonly statePath: string;
   readonly backupPath?: string;
   readonly previewSettings?: unknown;
 }
+
+/** 拒否以外の start の結果。 */
+export interface ProceededOutcome extends StartOutcomeFields {
+  readonly status: "started" | "already-running" | "dry-run";
+}
+
+/**
+ * 拒否された start の結果 (ADR 01a10ddb D4)。`cleanup` は**必須**で、{@link StaleCleanup} は daemon-cli.ts の
+ * module の外では {@link cleanupStaleWiring} の戻り値としてしか得られない (brand・module 内の `cleanupResult`
+ * は例外・SEC-TD-3)。よって deny() を通さず直に返す拒否は型検査 (`tsc -p tsconfig.test.json`・CI の
+ * type-check) で落ちる (TDA-DC-2: 規約頼みだった後始末を型の床にする)。
+ * **限界 (SEC-TD-R2-4 (a))**: module の外でも暗黙の any を経由すると `cleanup` を埋めて直に返せる。
+ * 例: `JSON.parse` の戻り値の項目を `cleanup` に入れた `DeniedOutcome` のリテラルは `tsc -p tsconfig.test.json`
+ * も eslint も通る (実測)。床が止めるのは型の付いた値で書いた直 return だけ。
+ */
+export interface DeniedOutcome extends StartOutcomeFields {
+  readonly status: DeniedStatus;
+  readonly cleanup: StaleCleanup;
+}
+
+export type StartOutcome = ProceededOutcome | DeniedOutcome;
+
+type IsTrue<T extends true> = T;
+/**
+ * 型床 (D4): `denied-` で始まる status は {@link DeniedOutcome} にしか置けない。拒否を別の union member
+ * (cleanup を持たない形) や {@link ProceededOutcome} の status に足すと、ここが型エラーになる。
+ */
+export type DeniedStatusFloor = IsTrue<
+  [Extract<Exclude<StartOutcome, DeniedOutcome>["status"], `denied-${string}`>] extends [never]
+    ? true
+    : false
+>;
 
 /**
  * start の結果を CLI の終了コードへ写す (TDA-ENV-3 ≡ QA-ENV-4)。拒否はすべて 1 (systemd 等から失敗として
@@ -288,22 +352,6 @@ export function tokenModeLeaksToTrackedFile(scope: AttachScope, tokenMode: Token
 }
 
 /**
- * scope の settings file (args から導出した path・state の中身からは取らない) の配線を detach する。
- * runStop と拒否経路の後始末 (cleanupStaleWiring) の単一出所。detach 自体は `detachAttachHooks`
- * (withFileLock で直列化・ユーザー hooks は温存) に委ねる。`scope.onlyEndpoint` を渡すとその endpoint を
- * 向く entry だけを外す (runStop は渡さず全 ActraDeck entry を外す)。
- * `detached` は 1 件でも外したか。`remaining` は detach 後 (lock 内で書いた / 読んだ settings) に
- * ActraDeck entry が 1 本でも残っているか (SEC-DC-R2-1)。
- */
-function detachWiredSettings(
-  settingsPath: string,
-  scope: DetachScope = {},
-): { detached: boolean; remaining: boolean } {
-  const res = detachAttachHooks(settingsPath, undefined, scope);
-  return { detached: res.removed, remaining: hasActradeckHookInSettings(res.settings) };
-}
-
-/**
  * 配線を外すための停止コマンド (案内文の単一出所・QA-DC-2 ≡ TDA-DC-3)。project / project-local の
  * state は起動したディレクトリの settings に紐づくので、別ディレクトリから打っても届くよう常に `--cwd`
  * を付ける。user scope は cwd に依存しないので付けない。
@@ -312,17 +360,35 @@ export function stopCommandHint(scope: AttachScope, cwd: string): string {
   return `agentmon daemon stop --scope ${scope}${scope === "user" ? "" : ` --cwd ${cwd}`}`;
 }
 
-/** 拒否経路の後始末の結果 (テストと監査向けに返す・CLI は使わない)。 */
-export type StaleCleanup =
+/**
+ * 拒否経路の後始末の結果の値 (テストと監査向けに返す・CLI は使わない)。`detached-*` は teardownWiring の
+ * state / token file の結果に対応する (`detached-entries-remain` = kept-entries-remain・`detached-state-changed`
+ * = changed・`detached-state-absent` = absent・`detached-state-rm-failed` = rm-failed・
+ * `detached-token-rm-failed` = state は消せたが token file を消せなかった)。
+ */
+export type StaleCleanupKind =
   | "no-state"
   | "state-invalid"
   | "alive-untouched"
   | "detached"
   | "detached-entries-remain"
   | "detached-state-changed"
+  | "detached-state-absent"
   | "detached-state-rm-failed"
+  | "detached-token-rm-failed"
   | "left-needs-confirm"
   | "detach-failed";
+
+declare const staleCleanupBrand: unique symbol;
+/**
+ * 後始末の結果 ({@link StaleCleanupKind} に brand を付けた型)。daemon-cli.ts の module の外では
+ * {@link cleanupStaleWiring} の戻り値としてしか得られず、リテラルを直に書いても型が合わない
+ * ({@link DeniedOutcome} の型床・ADR 01a10ddb D4)。module の中では `cleanupResult` でも作れる (SEC-TD-3)。
+ * 値は文字列のまま。
+ */
+export type StaleCleanup = StaleCleanupKind & { readonly [staleCleanupBrand]: true };
+
+const cleanupResult = (kind: StaleCleanupKind): StaleCleanup => kind as StaleCleanup;
 
 /**
  * 拒否経路の後始末 (SEC-ENV-4・task 01a10831-8102)。
@@ -331,18 +397,19 @@ export type StaleCleanup =
  * 別プロセスが bind すると hook payload と token を受け取れる。起動が成功すれば mergeAttachHooks の
  * self-heal が上書きするが、拒否された起動はそこまで進まないので、ここで片付ける。
  *
- * - state の pid が**記録した daemon ではない (stale)** ときだけ動く。判定は `readState` の 1 回の
- *   読み取り (lock の外) と `isDaemonProcess` (pid の生存 + 開始時刻の照合・pid 再利用は stale)。同一性を
- *   確かめられない (unknown) ときは生きているとみなして何もしない。判定の時点で生きている daemon の
- *   state なら何もしない (判定の後に起動した daemon の扱いは下の endpoint 限定と残る穴を参照)。
+ * - 判定は attach-teardown の `inspectStaleWiring` (runStop / runStatus と共有)。`readState` の 1 回の
+ *   読み取り (lock の外) と `isDaemonProcess` (pid の生存 + 開始時刻の照合・pid 再利用は stale)。state が
+ *   **記録した daemon ではない (stale)** ときだけ動く。同一性を確かめられない (unknown) ときは生きている
+ *   とみなして何もしない。判定の時点で生きている daemon の state なら何もしない (判定の後に起動した daemon
+ *   の扱いは下の endpoint 限定と残る穴を参照)。
  * - state が検証できない (corrupt: 壊れた JSON・形の不一致・導出した settings path / scope と整合しない)
  *   ときは pid を信用できないので書かずに `state-invalid` を返し、`daemon stop` を案内する。
- * - 外すのは **stale state に記録された endpoint を向く ActraDeck entry だけ** (`onlyEndpoint`)。
+ * - 外すのは attach-teardown の `teardownWiring` (detach → state → token file の唯一の手順) で、範囲は
+ *   **stale state に記録された endpoint を向く ActraDeck entry だけ** (`{ kind: "endpoint" }`)。
  *   判定の後で同じ scope に別の daemon が起動し、別の endpoint で配線していても、その entry は残る。
  * - state は**判定に使ったバイト列と同じとき**で、かつ detach 後に ActraDeck entry が 1 本も残って
- *   いないときだけ消す (`removeDaemonStateIfUnchanged`)。判定の後で別の daemon が state を書いていたら
- *   消さない。
- * - **残る穴 (実測に bound・R1 unblock の開示)**:
+ *   いないときだけ消す (teardownWiring)。判定の後で別の daemon が state を書いていたら消さない。
+ * - **残る穴 (実測に bound・R1 unblock の開示・根治は scope lock = PR-B2)**:
  *   ① 新しい daemon が死んだ daemon と**同じ port** を得て、その endpoint で配線した場合、その entry は
  *   endpoint で区別できず外れる (state の CAS は効くので state は残る)。
  *   ② state の比較と削除の間は原子的でない (lock の外)。比較の直後・削除の直前に別の daemon が state を
@@ -350,7 +417,7 @@ export type StaleCleanup =
  *   ③ stale state に記録されていない死んだ entry (別の endpoint の残骸) は外さない。外した後も
  *   ActraDeck entry が残っていれば state を消さず {@link stopCommandHint} を出す (SEC-DC-R2-1) ので、
  *   `daemon stop` か次の成功起動の self-heal で外れる。判定の後に state が書き換わっていた場合は
- *   案内を出さない (CAS が `changed` を返す)。
+ *   案内を出さない (`changed`)。
  *   ④ (実装記録の残余⑧) ただし、判定の後に並走起動した daemon が merge を終え、まだ state を書いていない
  *   間に後始末が走ると (race R1 の形)、その daemon の entry を「残っている」と数えて案内を出す。案内
  *   どおり `daemon stop` を打つと、その時点で state を書き終えたその daemon を止め、全 entry を外す
@@ -359,91 +426,102 @@ export type StaleCleanup =
  *   共有/グローバル settings への書込は confirm ゲート (SEC-1) の対象なので、拒否経路でも同じ線を守り、
  *   残っていることと {@link stopCommandHint} だけをログに出す。state は消さない
  *   (消すと `daemon stop` が配線を見つけられなくなる)。
- * - detach する settings は args から導出した path だけ (state の中身から path を取らない)。当該 scope 以外の
- *   path を記録した state は corrupt として上の `state-invalid` に落ちる。
- * - detach が失敗したら state を残す (`daemon stop` で再試行できる形を保つ)。値はログに出さない。
+ * - detach する settings と消す state / token file は {@link scopeTarget} が導出した path だけ (state の中身
+ *   から path を取らない)。`target` は型の上では brand 付きで、実行時は {@link scopeTarget} が発行して凍結した
+ *   object の登録 (WeakSet) と同一性で照合し、spread で path を差し替えた複製は入口で throw する。当該 scope
+ *   以外の path を記録した state は corrupt として上の `state-invalid` に落ちる。
+ * - detach が失敗したら state も token file も残す (`daemon stop` で再試行できる形を保つ)。値はログに出さない。
  */
 export function cleanupStaleWiring(opts: {
-  readonly statePath: string;
-  readonly settingsPath: string;
-  readonly scope: AttachScope;
-  readonly cwd: string;
-  readonly home: string;
+  readonly target: ScopeTarget;
   readonly writeApproved: boolean;
   readonly log: (msg: string) => void;
   readonly identity?: IdentitySources;
 }): StaleCleanup {
-  const target = scopeTarget(opts.scope, opts.cwd, opts.home);
-  if (target.settingsPath !== opts.settingsPath || target.artifacts.statePath !== opts.statePath) {
-    throw new Error(
-      "cleanupStaleWiring: statePath / settingsPath は scope から導出した値を渡すこと",
-    );
-  }
-  const hint = stopCommandHint(opts.scope, opts.cwd);
-  const existing = readState(target.artifacts, target.scopes);
-  if (existing.kind === "absent") return "no-state";
-  if (existing.kind === "corrupt") {
+  const { target } = opts;
+  assertIssuedScopeTarget(target);
+  const hint = stopCommandHint(target.scope, target.cwd);
+  const inspection = inspectStaleWiring({
+    read: readState(target.artifacts, target.scopes),
+    settings: undefined,
+    isDaemonProcess: (s) => isDaemonProcess(s, opts.identity),
+  });
+  if (inspection.kind === "no-state") return cleanupResult("no-state");
+  if (inspection.kind === "corrupt") {
     opts.log(
-      `[attach] 前回の daemon の state (${existing.path}) を検証できないため、hook 配線には触れていません。` +
+      `[attach] 前回の daemon の state (${inspection.path}) を検証できないため、hook 配線には触れていません。` +
         `外すには \`${hint}\` を実行してください。`,
     );
-    return "state-invalid";
+    return cleanupResult("state-invalid");
   }
-  const state = existing.state;
-  if (isDaemonProcess(state, opts.identity) !== "dead") return "alive-untouched";
+  if (inspection.kind === "alive") return cleanupResult("alive-untouched");
+  const { state } = inspection;
   if (!opts.writeApproved) {
     opts.log(
       `[attach] 前回の daemon (pid=${state.pid}) は終了していますが、その hook 配線 ` +
-        `(${opts.settingsPath}) は外されていません。死んだ port を向いたままです。` +
+        `(${target.settingsPath}) は外されていません。死んだ port を向いたままです。` +
         `外すには \`${hint}\` を実行してください ` +
-        `(${opts.scope} scope の設定は --yes か確認の承認なしには書き換えないため、ここでは外しません)。`,
+        `(${target.scope} scope の設定は --yes か確認の承認なしには書き換えないため、ここでは外しません)。`,
     );
-    return "left-needs-confirm";
+    return cleanupResult("left-needs-confirm");
   }
-  let res: { detached: boolean; remaining: boolean };
-  try {
-    res = detachWiredSettings(opts.settingsPath, { onlyEndpoint: state.endpoint });
-  } catch {
+  const td = teardownWiring({
+    settingsPath: target.settingsPath,
+    statePath: inspection.path,
+    tokenPath: target.artifacts.tokenPath,
+    expectedRaw: inspection.raw,
+    range: { kind: "endpoint", endpoint: state.endpoint },
+  });
+  if (td.kind === "detach-failed") {
     opts.log(
       `[attach] 前回の daemon (pid=${state.pid}) の hook 配線を外せませんでした。` +
         `\`${hint}\` で再試行してください。`,
     );
-    return "detach-failed";
+    return cleanupResult("detach-failed");
   }
   // 実際に外したかで文言を分ける (SEC-DC-R2-2 ≡ QA-DC-R2-1 ≡ TDA-DC-R2-2: 0 本なら「外しました」と言わない)。
   const what =
     `前回の daemon (pid=${state.pid}) の endpoint (${state.endpoint}) を向いた hook 配線` +
-    (res.detached ? "を外しました" : "は既に無くなっていました");
-  // SEC-DC-R2-1: 記録 endpoint 以外の ActraDeck entry がまだ残るなら state を消さない。消すと
-  // `daemon stop` がその配線を見つけられなくなる。判定の後に state が書き換わっていたら (別の daemon が
-  // 起動した可能性) 停止案内は出さず、下の CAS 枝に任せる。
-  if (res.remaining && isDaemonStateUnchanged(existing.path, existing.raw)) {
-    opts.log(
-      `[attach] ${what}。ただし ${opts.settingsPath} にはほかの ActraDeck hook 配線が` +
-        `残っているため、state は残します。外すには \`${hint}\` を実行してください。`,
-    );
-    return "detached-entries-remain";
+    (td.detached ? "を外しました" : "は既に無くなっていました");
+  switch (td.state) {
+    case "kept-entries-remain":
+      // SEC-DC-R2-1: 記録 endpoint 以外の ActraDeck entry がまだ残るので state を消さない。消すと
+      // `daemon stop` がその配線を見つけられなくなる。
+      opts.log(
+        `[attach] ${what}。ただし ${target.settingsPath} にはほかの ActraDeck hook 配線が` +
+          `残っているため、state は残します。外すには \`${hint}\` を実行してください。`,
+      );
+      return cleanupResult("detached-entries-remain");
+    case "changed":
+      // 判定の後に state が書き換わっていた (別の daemon が起動した可能性) ので消さず、停止案内も出さない。
+      opts.log(
+        `[attach] ${what}。state は判定の後に書き換わっていたため消していません (別の daemon が` +
+          `起動した可能性があります)。`,
+      );
+      return cleanupResult("detached-state-changed");
+    case "absent":
+      opts.log(`[attach] ${what}。state は判定の後に無くなっていました。`);
+      return cleanupResult("detached-state-absent");
+    case "rm-failed":
+      opts.log(
+        `[attach] ${what}。stale state は削除できませんでした。\`${hint}\` を実行してください。`,
+      );
+      return cleanupResult("detached-state-rm-failed");
+    case "removed":
+      break;
   }
-  // remaining かつ state が変わっていた場合も、ここで CAS が "changed" を返すので消さない。
-  const removal = removeDaemonStateIfUnchanged(existing.path, existing.raw);
-  if (removal === "changed") {
+  if (td.token === "rm-failed") {
     opts.log(
-      `[attach] ${what}。state は判定の後に書き換わっていたため消していません (別の daemon が` +
-        `起動した可能性があります)。`,
+      `[attach] ${what} (${target.settingsPath})。stale state は消しましたが、hook token file ` +
+        `(${target.artifacts.tokenPath}) は削除できませんでした。権限を確認して手動で削除してください。`,
     );
-    return "detached-state-changed";
-  }
-  if (removal === "rm-failed") {
-    opts.log(
-      `[attach] ${what}。stale state は削除できませんでした。\`${hint}\` を実行してください。`,
-    );
-    return "detached-state-rm-failed";
+    return cleanupResult("detached-token-rm-failed");
   }
   opts.log(
-    `[attach] ${what} (${opts.settingsPath})。daemon は終了していたため ` +
+    `[attach] ${what} (${target.settingsPath})。daemon は終了していたため ` +
       `stale state を消しました。`,
   );
-  return "detached";
+  return cleanupResult("detached");
 }
 
 /**
@@ -477,23 +555,19 @@ export async function runStart(
     return { status: "dry-run", settingsPath, statePath, previewSettings: preview.settings };
   }
 
-  // SEC-ENV-4: 拒否経路はすべてここを通して返す。stale (pid 死亡) な前回 daemon の配線を片付けてから
-  // 返す (判定の時点で生きている daemon には触らない・判定後の並走は cleanupStaleWiring の docstring・
-  // confirm が要る scope は承認が無ければ書かず案内だけ)。
-  // writeApproved は confirm ゲートを通過した時点で true に上がる。
+  // SEC-ENV-4: 拒否経路はすべてここを通して返す (DeniedOutcome の cleanup が必須なので、通さない拒否は
+  // 型検査で落ちる・D4)。stale (pid 死亡) な前回 daemon の配線を片付けてから返す (判定の時点で生きている
+  // daemon には触らない・判定後の並走は cleanupStaleWiring の docstring・confirm が要る scope は承認が
+  // 無ければ書かず案内だけ)。writeApproved は confirm ゲートを通過した時点で true に上がる。
   let writeApproved = !scopeNeedsConfirm(args.scope) || args.yes;
-  const deny = (status: DeniedStatus): StartOutcome => {
-    cleanupStaleWiring({
-      statePath,
-      settingsPath,
-      scope: args.scope,
-      cwd: args.cwd,
-      home,
+  const deny = (status: DeniedStatus): DeniedOutcome => {
+    const cleanup = cleanupStaleWiring({
+      target,
       writeApproved,
       log: rt.log,
       ...(rt.identity !== undefined ? { identity: rt.identity } : {}),
     });
-    return { status, settingsPath, statePath };
+    return { status, cleanup, settingsPath, statePath };
   };
 
   // SEC-2: project scope (tracked `.claude/settings.json`) で literal token-mode は nonce 平文を
@@ -672,59 +746,75 @@ export type StopKill =
   | "no-state";
 
 export interface StopOutcome {
-  readonly status: "stopped" | "not-running";
+  /**
+   * - `stopped`: 配線を外し、state と hook token file も片付いた (消した・既に無かった)。
+   * - `incomplete`: 配線は外したが、state か token file が残っている (削除に失敗した・判定の後に書き換わって
+   *   いた)。「停止しました」とは報告しない (TDA-DC-R3-2 / SEC-DC-R3-2(f))。
+   * - `not-running`: state が無い (何もしない)。
+   */
+  readonly status: "stopped" | "incomplete" | "not-running";
   readonly detached: boolean;
   readonly settingsPaths: readonly string[];
   readonly killedPid?: number;
   readonly kill: StopKill;
-  /** state を検証できなかった (配線を外し、検証できない state を消した・kill はしない)。 */
-  readonly state?: "corrupt-removed";
+  /** state file の後始末 (teardownWiring の結果・state が無ければ undefined)。 */
+  readonly state?: StateTeardown;
+  /** hook token file の後始末 (teardownWiring の結果・state が無ければ undefined)。 */
+  readonly token?: TokenTeardown;
+  /** state を検証できなかった (pid を信用せず kill しない)。 */
+  readonly corrupt?: boolean;
 }
 
 /**
  * daemon を停止し settings から ActraDeck hooks を reversible detach する。
- * 別プロセスの daemon が記録されていて、記録した daemon と同一だと確かめられたときだけ SIGTERM を送る。
- * detach する settings は args から導出した path (state の中身からは取らない)。state を検証できない
- * (corrupt) ときは pid を信用せず、配線を外して state を消し、signal は送らない。
+ * 判定は inspectStaleWiring、後始末は teardownWiring (範囲は全 ActraDeck entry・利用者が明示した停止なので
+ * endpoint を問わない) を拒否経路の後始末と共有する。後始末の後で、別プロセスの daemon が記録されていて、
+ * 記録した daemon と同一だと確かめられたときだけ SIGTERM を送る (送る直前にもう一度確かめる・SEC-TD-1)。
+ * detach する settings は args から導出した path (state の中身からは取らない)。state を検証できない (corrupt)
+ * ときは pid を信用せず、signal は送らない。detach が失敗したら state と token file に触らず、signal も
+ * 送らずに例外をそのまま投げる (再試行できる形を保つ)。
  */
 export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   const home = rt.home ?? homedir();
   const target = scopeTarget(args.scope, args.cwd, home);
-  const { settingsPath } = target;
-  const read = readState(target.artifacts, target.scopes);
-  if (read.kind === "absent") {
-    rt.log(`[attach] 稼働中の daemon がありません (${target.artifacts.statePath})`);
+  const { settingsPath, artifacts } = target;
+  const inspection = inspectStaleWiring({
+    read: readState(artifacts, target.scopes),
+    settings: undefined,
+    isDaemonProcess: (s) => isDaemonProcess(s, rt.identity),
+  });
+  if (inspection.kind === "no-state") {
+    rt.log(`[attach] 稼働中の daemon がありません (${artifacts.statePath})`);
     return { status: "not-running", detached: false, settingsPaths: [], kill: "no-state" };
   }
 
-  // 配線済み settings を detach (ユーザー hooks は温存)。
-  const { detached } = detachWiredSettings(settingsPath);
-
-  if (read.kind === "corrupt") {
-    removeDaemonState(read.path);
-    rt.log(
-      `[attach] state (${read.path}) を検証できないため pid には signal を送っていません。` +
-        `hook 配線を外し、state を消しました。daemon がまだ動いていれば手動で止めてください。`,
-    );
-    return {
-      status: "stopped",
-      detached,
-      settingsPaths: [settingsPath],
-      kill: "skipped-corrupt",
-      state: "corrupt-removed",
-    };
-  }
+  // 配線済み settings を detach (ユーザー hooks は温存) → state → token file。
+  const td = teardownWiring({
+    settingsPath,
+    statePath: inspection.path,
+    tokenPath: artifacts.tokenPath,
+    expectedRaw: inspection.raw,
+    range: { kind: "all" },
+  });
+  if (td.kind === "detach-failed") throw td.error;
 
   // 別プロセスの daemon を停止 (自プロセスなら呼び元が shutdown)。同一性を確かめてから送る。
-  const state = read.state;
   let kill: StopKill;
-  if (state.pid === process.pid) {
+  if (inspection.kind === "corrupt") {
+    kill = "skipped-corrupt";
+  } else if (inspection.state.pid === process.pid) {
     kill = "self";
   } else {
-    const liveness: ProcessLiveness = isDaemonProcess(state, rt.identity);
+    // SEC-TD-1: 後始末の間に daemon が終了し pid が再利用されうるので、判定の時点で alive でも送る直前に同じ
+    // 述語で再判定し、alive のときだけ送る。後始末には settings lock の取得待ちが入る (withFileLock の既定
+    // 100 回 × 20ms ≈ 2s。この値は lock 待ちだけで、settings の読み書きと同一性判定の時間は含まない)。
+    const liveness =
+      inspection.liveness === "alive"
+        ? isDaemonProcess(inspection.state, rt.identity)
+        : inspection.liveness;
     if (liveness === "alive") {
       try {
-        process.kill(state.pid, "SIGTERM");
+        process.kill(inspection.state.pid, "SIGTERM");
         kill = "sent";
       } catch {
         kill = "send-failed";
@@ -733,21 +823,63 @@ export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
       kill = liveness === "dead" ? "skipped-dead" : "skipped-identity-unknown";
     }
   }
-  if (kill === "skipped-identity-unknown") {
-    rt.log(
-      `[attach] pid=${state.pid} が記録した daemon と同一か確かめられないため、signal は送っていません。` +
-        `daemon がまだ動いていれば手動で止めてください。`,
+
+  const complete =
+    (td.state === "removed" || td.state === "absent") &&
+    (td.token === "removed" || td.token === "absent");
+  const leftovers: string[] = [];
+  if (td.state === "rm-failed") {
+    leftovers.push(
+      `state (${inspection.path}) を削除できませんでした。権限を確認して手動で削除してください。`,
+    );
+  } else if (td.state === "changed") {
+    leftovers.push(
+      `state (${inspection.path}) は判定の後に書き換わっていたため消していません (別の daemon が起動した` +
+        `可能性があります)。\`agentmon daemon status\` で確認してください。`,
+    );
+  } else if (td.state === "kept-entries-remain") {
+    leftovers.push(
+      `ActraDeck の hook 配線が残っているため state (${inspection.path}) は残しました。`,
+    );
+  }
+  if (td.token === "rm-failed") {
+    leftovers.push(
+      `hook token file (${artifacts.tokenPath}) を削除できませんでした。権限を確認して手動で削除してください。`,
     );
   }
 
-  removeDaemonState(read.path);
-  rt.log(`[attach] daemon 停止 + detach (settings 1 件復元)`);
+  if (inspection.kind === "corrupt") {
+    rt.log(
+      `[attach] state (${inspection.path}) を検証できないため pid には signal を送っていません。` +
+        (complete
+          ? `hook 配線を外し、state を消しました。`
+          : `hook 配線は外しましたが、${leftovers.join("")}`) +
+        `daemon がまだ動いていれば手動で止めてください。`,
+    );
+  } else {
+    if (kill === "skipped-identity-unknown") {
+      rt.log(
+        `[attach] pid=${inspection.state.pid} が記録した daemon と同一か確かめられないため、signal は送っていません。` +
+          `daemon がまだ動いていれば手動で止めてください。`,
+      );
+    }
+    rt.log(
+      complete
+        ? `[attach] daemon 停止 + detach (settings 1 件復元)`
+        : `[attach] hook 配線は外しましたが、停止の後始末が終わっていません。${leftovers.join("")}`,
+    );
+  }
   return {
-    status: "stopped",
-    detached,
+    status: complete ? "stopped" : "incomplete",
+    detached: td.detached,
     settingsPaths: [settingsPath],
     kill,
-    ...(kill === "sent" ? { killedPid: state.pid } : {}),
+    ...(kill === "sent" && inspection.kind !== "corrupt"
+      ? { killedPid: inspection.state.pid }
+      : {}),
+    state: td.state,
+    token: td.token,
+    ...(inspection.kind === "corrupt" ? { corrupt: true } : {}),
   };
 }
 
@@ -759,6 +891,11 @@ export interface StatusOutcome {
   readonly liveness?: ProcessLiveness;
   /** state を検証できなかった。 */
   readonly corrupt?: boolean;
+  /**
+   * settings の ActraDeck entry の数 (記録 endpoint を向くもの / それ以外・inspectStaleWiring)。settings を
+   * 読めなければ undefined。表示はしない (T-B の wired-but-down 警告が使う)。
+   */
+  readonly entries?: WiringEntries;
 }
 
 /** daemon の稼働状態を返す (status 表示)。同一性を確かめられない (unknown) ときは稼働中として表示する。 */
@@ -766,27 +903,31 @@ export function runStatus(args: DaemonArgs, rt: DaemonRuntime): StatusOutcome {
   const home = rt.home ?? homedir();
   const target = scopeTarget(args.scope, args.cwd, home);
   const statePath = target.artifacts.statePath;
-  const read = readState(target.artifacts, target.scopes);
-  if (read.kind === "absent") {
+  const inspection = inspectStaleWiring({
+    read: readState(target.artifacts, target.scopes),
+    settings: readSettingsForInspection(target.settingsPath),
+    isDaemonProcess: (s) => isDaemonProcess(s, rt.identity),
+  });
+  const entries = inspection.entries !== undefined ? { entries: inspection.entries } : {};
+  if (inspection.kind === "no-state") {
     rt.log(`[attach] daemon は稼働していません (${statePath})`);
-    return { running: false, statePath };
+    return { running: false, statePath, ...entries };
   }
-  if (read.kind === "corrupt") {
+  if (inspection.kind === "corrupt") {
     rt.log(
-      `[attach] state (${read.path}) を検証できません。\`${stopCommandHint(args.scope, args.cwd)}\` で` +
+      `[attach] state (${inspection.path}) を検証できません。\`${stopCommandHint(args.scope, args.cwd)}\` で` +
         `配線を外し state を消せます。`,
     );
-    return { running: false, statePath, corrupt: true };
+    return { running: false, statePath, corrupt: true, ...entries };
   }
-  const state = read.state;
-  const liveness = isDaemonProcess(state, rt.identity);
-  if (liveness !== "dead") {
+  const { state, liveness } = inspection;
+  if (inspection.kind === "alive") {
     rt.log(
       `[attach] 稼働中 pid=${state.pid} endpoint=${state.endpoint} ` +
         `scope=${state.scope} since=${state.startedAt}${liveness === "unknown" ? " (同一性は未確認)" : ""}`,
     );
-    return { running: true, state, statePath, liveness };
+    return { running: true, state, statePath, liveness, ...entries };
   }
   rt.log(`[attach] stale state (pid=${state.pid} 死亡)。daemon は稼働していません。`);
-  return { running: false, state, statePath, liveness };
+  return { running: false, state, statePath, liveness, ...entries };
 }

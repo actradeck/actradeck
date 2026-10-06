@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { cleanupStaleWiring, resolveSettingsPath } from "../src/daemon-cli.js";
+import { cleanupStaleWiring, resolveSettingsPath, scopeTarget } from "../src/daemon-cli.js";
 import {
   canonicalSettingsPath,
   readState,
@@ -130,17 +130,13 @@ describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗
   });
 
   it("後始末は判定に使った読み取りのバイト列で CAS する (読み取りの直後に state が書き換わったら消さない)", () => {
-    const { settingsPath, statePath, stateRaw } = plantStale();
+    const { statePath, stateRaw } = plantStale();
     const rewritten = stateRaw.replace(/"pid": \d+/, '"pid": 1');
     fsHook.rewriteTo = rewritten;
     fsHook.rewritePath = statePath;
     const logs: string[] = [];
     const res = cleanupStaleWiring({
-      home,
-      statePath,
-      settingsPath,
-      scope: "project-local",
-      cwd,
+      target: scopeTarget("project-local", cwd, home),
       writeApproved: true,
       log: (m) => logs.push(m),
     });
@@ -152,15 +148,11 @@ describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗
   });
 
   it("state の削除に失敗したら detached-state-rm-failed を返し、「消しました」と言わず停止案内を出す (SEC-DC-R2-2)", () => {
-    const { settingsPath, statePath, stateRaw } = plantStale();
+    const { statePath, stateRaw } = plantStale();
     fsHook.failRmPath = statePath;
     const logs: string[] = [];
     const res = cleanupStaleWiring({
-      home,
-      statePath,
-      settingsPath,
-      scope: "project-local",
-      cwd,
+      target: scopeTarget("project-local", cwd, home),
       writeApproved: true,
       log: (m) => logs.push(m),
     });
@@ -173,14 +165,10 @@ describe("INV-ATTACH-DENY-CLEANUP: state の読み取りは 1 回・削除失敗
     // 対照: 注入を外すと同じ形で detached になり「消しました」と出る (同一リテラルの POSITIVE)。
     fsHook.failRmPath = undefined;
     const logs2: string[] = [];
-    const { settingsPath: s2, statePath: p2 } = plantStale();
+    plantStale();
     expect(
       cleanupStaleWiring({
-        home,
-        statePath: p2,
-        settingsPath: s2,
-        scope: "project-local",
-        cwd,
+        target: scopeTarget("project-local", cwd, home),
         writeApproved: true,
         log: (m) => logs2.push(m),
       }),
