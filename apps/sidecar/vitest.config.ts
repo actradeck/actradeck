@@ -3,9 +3,11 @@ import { defaultExclude, defineConfig } from "vitest/config";
 
 /**
  * Timing-ratio metatests (INV-LITERAL-RULES-LINEAR). They measure wall-clock ratios, so they run in
- * their own project with a later `groupOrder`: vitest finishes every other sidecar file first, and
- * this file then runs with no other test file in parallel. Thresholds, geometry and repeats are
- * unchanged; only the scheduling regime is (task 01a10f9f).
+ * their own project with a later `groupOrder`: vitest finishes every other sidecar test file first,
+ * and this file then runs with no other sidecar test file in parallel. Other packages started by the
+ * same `pnpm -r` run are not ordered by this. Thresholds, geometry and repeats are unchanged; only
+ * the scheduling regime is (task 01a10f9f). Each project gets the production-DB guard through
+ * `extends: true` (INV-TEST-DB-GUARD-WIRING in test/inv-vitest-projects-db-guard.test.ts).
  */
 const TIMING_SENSITIVE_TESTS = ["test/inv-policy-categories.test.ts"];
 
