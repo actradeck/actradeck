@@ -27,6 +27,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   what to run when the entries are still left, is in the notes on unclean shutdown in
   `docs/attach-mode.md`.
 
+- **Attach start, stop and the cleanup of a dead daemon's entries hold a per-scope lock, and the
+  daemon's own shutdown no longer touches another daemon's record.** A start that fails while
+  starting the daemon now cleans up a dead daemon's entries like a refused start before it exits with
+  the original error. What the lock covers, which entries each case removes, and what happens when
+  the lock is held are in the unclean shutdown notes of `docs/attach-mode.md`.
+
 - **`daemon stop` signals the attach daemon only when it can confirm the recorded process.** The
   daemon now records its process start time, and `daemon stop` checks it before sending `SIGTERM`,
   so a process that reused the recorded process ID is not signalled. The record format changed and
@@ -56,7 +62,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 - **`daemon stop` no longer reports an unfinished cleanup as stopped.** When it removes the attach
   hook entries but cannot remove the daemon's record or its hook token file, or the record was
   rewritten after `daemon stop` read it, it now says so and names what is left instead of
-  reporting that the daemon stopped. The exit code is unchanged.
+  reporting that the daemon stopped. It then exits with status 1 (the cases are in the unclean
+  shutdown notes of `docs/attach-mode.md`).
 
 - **Advisory file lock: takeover and release share one detach procedure.** The rename →
   re-verify → unlink-or-restore steps were written out twice; they now live in a single helper,

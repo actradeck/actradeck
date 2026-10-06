@@ -156,19 +156,22 @@ export const SUITES = {
   // afterAll counters catch a single skipped row, but skipping a whole describe also skips that
   // describe's afterAll. Same report and two-layer shape as sidecar-approval-fail-closed.
   // `minTests` is the exact count in the full sidecar report this step reads (measured at task
-  // 01a10c42 PR-A): 65 = 45 (denial x scope table, stale + alive rows, plus the table-shape test)
-  // + 9 (cleanup boundaries) + 3 (entries left on other ports keep the state, SEC-DC-R2-1)
-  // + 3 (remaining-entry shapes: marker-less legacy literal / env entries, no recorded-port entry)
-  // + 2 (concurrent start races R1 / R2) in inv-attach-deny-cleanup.test.ts, + 3 (single read of
-  // the state file, the cleanup's CAS using that read, state delete failure) in
-  // inv-attach-deny-cleanup-fs.test.ts. At 65, skipping or renaming any one matched describe fails
-  // the gate. Raise it by hand when tests are added.
+  // 01a10c42 PR-B2 R2 unblock): 67 = 45 (denial x scope table, stale + alive rows, plus the
+  // table-shape test) + 9 (cleanup boundaries) + 4 (entries on other ports are left and keep the
+  // state, SEC-DC-R2-1; entries written after the detach by a writer that does not share the scope
+  // lock keep the state; a state written after the check is kept as changed) + 4 (remaining-entry
+  // shapes: marker-less legacy literal / env entries, no recorded-port entry; no ActraDeck entry at
+  // all, restored from 146e4ca, QA-SL-R2-1) + 2 (a start that does
+  // not take the scope lock, between its merge and its state write: races R1 / R2) in
+  // inv-attach-deny-cleanup.test.ts, + 3 (single read of the state file, the cleanup's CAS using
+  // that read, state delete failure) in inv-attach-deny-cleanup-fs.test.ts. At 67, skipping or
+  // renaming any one matched describe fails the gate. Raise it by hand when tests are added.
   // What this entry does not catch: an early return at the top of an `it`, a removed `expect`, or a
   // removed afterAll counter check — the gate sees only each test's status.
   "sidecar-attach-deny-cleanup": {
     label: "sidecar attach refused-start cleanup INV (INV-ATTACH-DENY-CLEANUP)",
     pattern: "INV-ATTACH-DENY-CLEANUP",
-    minTests: 65,
+    minTests: 67,
   },
   // QA-DC-3: the real-process SIGHUP detach of the attach CLI (inv-attach-deny-cleanup.test.ts, its
   // own describe with 1 test). Same limits as above: an early return inside the test is not caught.
@@ -214,13 +217,44 @@ export const SUITES = {
   // only settingsPath replaced, a re-frozen copy; issued targets are frozen) in
   // inv-attach-teardown.test.ts, + 4 (stop with a failing state delete: stale / corrupt;
   // inspection makes no fs call; CAS comparison of an unreadable state) in
-  // inv-attach-teardown-fs.test.ts. The type floor itself is enforced by the type-check step
+  // inv-attach-teardown-fs.test.ts. PR-B2 added 6: 4 (a writer that skips the scope lock after
+  // the detach keeps the state and token file; absent / unreadable expectations; state slots and
+  // the issued-target check of teardownWiring; a token file failure reported when the state was
+  // gone) + 2 (`daemon status` entries without a state, and none for unreadable settings) in
+  // inv-attach-teardown.test.ts = 35, + 1 at the PR-B2 R2 unblock (`daemon stop` with entries written
+  // after its detach reports incomplete) = 36. The type floor itself is enforced by the type-check step
   // (tsc -p apps/sidecar/tsconfig.test.json), not by this gate.
   // What this entry does not catch: an early return inside an `it` or a removed `expect`.
   "sidecar-attach-teardown": {
     label: "sidecar attach teardown / inspection INV (INV-ATTACH-TEARDOWN)",
     pattern: "INV-ATTACH-TEARDOWN",
-    minTests: 29,
+    minTests: 36,
+  },
+  // Task 01a10c42 PR-B2 (Triangle ADR 01a10ddb D1 / D4, ruling 01a11052): the attach scope lock.
+  // The check of the daemon record and the removal / writing of the wiring run under one lock per
+  // scope (a different path from the settings lock), exercised with a separate process holding the
+  // lock (real processes, not threads, because the file lock takes over a lock of its own pid).
+  // `minTests` is the exact count in the full sidecar report this step reads (PR-B2 R1 unblock):
+  // 23 = 2 (a start in another process holds the lock between its merge and its state write and a
+  // refused start waits and leaves it alone; nested acquisition in one process throws) + 2 (lock
+  // unavailable: cleanup / stop / shutdown change nothing; `daemon stop` exit codes) + 3 (the
+  // automatic cleanup removes only the recorded endpoint and `daemon stop` removes every shape; a
+  // failed detach keeps the state and the token file; a failing startDaemon cleans up and
+  // rethrows) + 3 (lock2 re-check: another daemon started meanwhile, a state that became corrupt,
+  // the settings directory symlink repointed during the start) + 4 (the daemon's own shutdown: own
+  // state, another pid, no state, corrupt state) + 2 (a daemon that does not share the lock keeps
+  // its entries: another HOME, an older-build start between merge and record; real CLI) + 3
+  // (another process holds the lock during start: lock1, lock2; lock2 treats an unknown identity
+  // as running) + 4 (real CLI: SIGHUP with another pid's state and with no state, `daemon stop`
+  // exit 1 while the lock is held and when the cleanup is incomplete) + 2 (PR-B2 R2 unblock: a corrupt
+  // record with only the daemon's own entries is kept by its shutdown; lock2 holds the scope lock
+  // while it merges and writes the state) = 25, all in inv-attach-scope-lock.test.ts. The bind mount case in the same file needs `unshare -rm` and is
+  // titled outside this pattern, so a runner without user namespaces skips it without failing here.
+  // What this entry does not catch: an early return inside an `it` or a removed `expect`.
+  "sidecar-attach-scope-lock": {
+    label: "sidecar attach scope lock INV (INV-ATTACH-SCOPE-LOCK)",
+    pattern: "INV-ATTACH-SCOPE-LOCK",
+    minTests: 25,
   },
 };
 

@@ -416,8 +416,9 @@ export function mergeAttachHooks(opts: MergeOptions): MergeResult {
  * (NO 二重実装 — `__actradeck` 検出器を別実装しない。security-gate-reuse-canonical-parser)。
  *
  * export されており、呼び出し元は 2 つ: 同 module の {@link settingsFileHasActradeckHook} (診断) と、
- * 配線の後始末 (attach-teardown の teardownWiring) が detach 後に ActraDeck entry が残っているかを
- * 判定する箇所 (SEC-ENV-4 R2・SEC-DC-R2-1)。後者は marker の無い legacy 署名 entry も数える。
+ * 配線の後始末 (attach-teardown の teardownWiring) が detach 後に読み直した settings に ActraDeck entry が
+ * 残っているかを判定する箇所 (R2 ガード・SEC-DC-R2-1・裁定 01a11052 ①)。後者は marker の無い legacy 署名
+ * entry も数える。
  * malformed hooks の非 throw 回帰 (SEC-1/QA-1/SEC-R1) は file 経由の settingsFileHasActradeckHook /
  * computeAgentVisibility で transitive に固定済。
  */
@@ -510,10 +511,15 @@ export interface DetachResult {
 /**
  * detach の範囲 (**必須の判別 union・既定値なし**・TDA-DC-R2-4: 既定が広い側だと、範囲を渡し忘れた
  * 新しい呼び出し側が全 entry を外す)。
- * - `all`: 全 ActraDeck entry ({@link isActradeckEntry}・marker と legacy 署名)。`daemon stop`。
+ * 範囲の使い分けの正はここ (daemon-cli の各経路と docs はこれを参照する・裁定 01a110b2 / 01a11140):
+ * - `all`: 全 ActraDeck entry ({@link isActradeckEntry}・marker と legacy 署名)。利用者の `daemon stop` と、
+ *   daemon 自身の終了 (shutdownSelf) で state が自分の pid のときの 2 経路だけが scope lock の下で使う。lock を
+ *   共有しない daemon (別 HOME・別 path・旧い版) の生きた配線もこの 2 経路では外れる (base と同じ)。
  * - `endpoint`: その endpoint を向く ActraDeck entry だけ ({@link isCanonicalActradeckEntry} と同じ判定)。
- *   拒否経路の後始末が、stale state に記録された死んだ endpoint の配線だけを外し、同じ scope で並走起動した
- *   daemon の配線 (別 endpoint) を残すために使う (SEC-ENV-4 R1 / QA-DC-1 ≡ TDA-DC-1)。
+ *   自動の後始末 (拒否起動・起動失敗) が stale state に記録された endpoint を外す (+ R2 ガード) のと、
+ *   shutdownSelf で state が無い / corrupt のときに自分の endpoint を外すのに使う。記録 endpoint と同じ port を
+ *   得た lock 非共有の daemon の配線は外れる (開示済みの残余)。
+ * なお成功した起動の merge は self-heal で自 endpoint 以外の ActraDeck entry を外す (この型を使わない・base と同じ)。
  */
 export type DetachRange =
   | { readonly kind: "all" }

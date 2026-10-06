@@ -222,20 +222,40 @@ Scope and safety guards:
   both commands there. Running `attach` while the old daemon is still up only reports that it is
   already running and leaves the old entries in place. `./scripts/ad-attach` (its `stop` and
   `service` commands included) acts on the `user`-scope daemon only.
-- **When the daemon did not shut down cleanly.** The daemon removes its entries on `SIGINT`,
-  `SIGTERM` and `SIGHUP` (for example when you close the terminal it runs in). If it is killed in
-  a way it cannot handle, such as `SIGKILL`, its entries stay in the settings file and point at a
-  port nothing listens on. The next successful start in the same scope replaces them. A start that
-  is refused (for example because the token check fails) removes them if the daemon recorded for
-  that scope is no longer running (its process has exited, or its process ID now belongs to another
-  process). If the record cannot be read or validated, or it cannot be confirmed whether the recorded
-  process is still the daemon, a refused start leaves the file unchanged; when the record cannot be
-  read or validated it also prints the `daemon stop --scope <scope>` command. It removes only the entries that point at the port recorded for
-  that daemon, so a daemon that is running in the same scope, including one that starts while the
-  refused start is cleaning up, keeps its entries. The exception is a daemon that starts at that
-  moment and is given the same port as the daemon that exited: its entries are removed while
-  `daemon status` still reports it as running. Stop it with `daemon stop --scope <scope>` and start
-  it again.
+- **When the daemon did not shut down cleanly.** On `SIGINT`, `SIGTERM` and `SIGHUP` (for example
+  when you close the terminal it runs in) the daemon removes every ActraDeck entry from the
+  settings file and its record when the record is its own; that includes the entries of a running
+  daemon that uses the same settings file with another `HOME` or through another path. When there
+  is no record, or the record cannot be read or validated, it removes
+  only the entries that point at its own port and leaves the record as it is (it prints the
+  `daemon stop --scope <scope>` command when the record cannot be validated). When the record
+  belongs to another process it changes nothing, and when it cannot take the scope's lock (below) it
+  leaves its entries and prints that command. If it is killed in a way it cannot handle, such as
+  `SIGKILL`, its entries stay in the settings file and point at a port nothing listens on. The next
+  successful start in the same scope replaces them (a successful start removes every ActraDeck entry
+  that does not point at its own port, including those of such daemons). A start that is refused (for example because the
+  token check fails), or that fails while starting the daemon, removes them if the daemon recorded
+  for that scope is no longer running (its process has exited, or its process ID now belongs to
+  another process); a failed start then exits with the original error. If the record cannot be read
+  or validated, or it cannot be confirmed whether the recorded process is still the daemon, a refused
+  start leaves the file unchanged; when the record cannot be read or validated it also prints the
+  `daemon stop --scope <scope>` command. It removes only the entries that point at the port recorded
+  for that daemon, so a daemon that is running with the same settings file keeps its entries,
+  including one started with another `HOME`, one that reached the file through a bind mount, and one
+  of an older build that has written its entries but not yet its record. The exception is a daemon
+  that is given the same port as the daemon that exited: its entries are removed. When ActraDeck
+  entries for other ports are still in the settings file after it removed the ones for the recorded
+  port, a refused start keeps the record and prints the same command. Running that command stops the
+  recorded daemon and removes every ActraDeck entry from the settings file, including entries for
+  other ports.
+  The record check and the changes are made while holding a lock for the scope
+  (`~/.actradeck/daemon/<key>.lock`). Daemons of this build that use the same `HOME` and reach the
+  settings file through the same path (symbolic links resolved) take the same lock while they write
+  their entries and their record, so a refused start that runs at that moment waits and then leaves
+  that daemon alone. When another `attach` or `daemon` command keeps holding the lock,
+  `attach` / `daemon start` exits with status 1 without changing anything, a refused start gives up
+  after a short wait, leaves the file unchanged and prints a message, and `daemon stop` exits with
+  status 1 without changing anything.
   For `user` and `project` scope a refused start removes them only when you passed `--yes`;
   otherwise it leaves the file unchanged and prints the `daemon stop --scope <scope>` command that
   removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited,
@@ -244,12 +264,10 @@ Scope and safety guards:
   an older build after the system clock moved forward), it still removes the entries and the record,
   leaves the process running and prints a message; stop that process yourself. When the record
   cannot be read or validated, `daemon stop` removes every ActraDeck entry from the settings file
-  and the record without signalling any process. A refused start keeps that record, and
-  prints the same command, when ActraDeck entries for other ports are still in the settings file
-  after it has removed the ones for the recorded port. If another daemon starts in the same scope
-  while a refused start is cleaning up, the printed command can refer to that new daemon, and
-  running it stops that daemon and removes every ActraDeck entry from the settings file, including
-  entries for other ports.
+  and the record without signalling any process. `daemon stop` exits with status 1 when it cannot
+  remove the record or the hook token file, when the record was rewritten after it read it, or when
+  ActraDeck entries are still in the settings file after it removed them (something that does not
+  take the lock wrote them in between).
 - **Where the daemon keeps its record.** There is one record per settings file under
   `~/.actradeck/daemon/`. It is keyed by the directory of the settings file with symbolic links
   resolved, plus the file name as written. Starting from a symlinked directory and from the real

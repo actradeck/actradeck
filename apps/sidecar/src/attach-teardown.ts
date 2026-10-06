@@ -6,12 +6,15 @@
  * 判定をここの純関数で、後始末をここの 1 本の手順で行う。手順 (detach → state → token file) を呼び出し側に
  * 2 本目として書かない。
  *
- * **lock**: どちらも scope lock を取らない (呼び出し側が保持する前提の形・scope lock 自体は PR-B2)。現状は
- * settings の書込だけが settings lock で直列化され、state の比較と削除の間は原子的でない
- * (daemon-state の removeDaemonStateIfUnchanged の開示)。
+ * **lock**: どちらも lock を取らない。{@link teardownWiring} は呼び出し側が attach-scope の `withScopeLock` を
+ * 保持している前提で動く (daemon-cli の後始末・runStop・shutdownSelf はすべて lock の中で呼ぶ・PR-B2)。lock の
+ * 下では state の比較と削除の間に同じ lock を取る書き手が割り込まないので、`changed` / `absent` は「lock を共有
+ * しない書き手 (別 HOME・別 path・旧い版の daemon・手編集) が判定の後に state を書いた / 消した」ことの信号になる。
+ * 配線の残存 (`kept-entries-remain`) は、範囲 endpoint では記録外の entry が残ったときにも出る。
  */
 import { rmSync } from "node:fs";
 
+import { assertIssuedScopeTarget, type ScopeTarget } from "./attach-scope.js";
 import {
   compareDaemonState,
   type DaemonState,
@@ -25,6 +28,7 @@ import {
   detachAttachHooks,
   type DetachRange,
   hasActradeckHookInSettings,
+  readSettingsForInspection,
 } from "./settings-merge.js";
 
 /** settings の ActraDeck entry の数 (記録 endpoint を向くもの / それ以外)。 */
@@ -89,13 +93,24 @@ export function inspectStaleWiring(input: {
 
 /**
  * state file の後始末の結果。`removed` / `changed` / `absent` / `rm-failed` は daemon-state の
- * removeDaemonStateIfUnchanged と同じ意味。`kept-entries-remain` は detach の後も settings に ActraDeck
- * entry が残っているので消さなかった (SEC-DC-R2-1: 消すと `daemon stop` がその配線を見つけられない・
- * 範囲が `all` の detach では残らないので起きない)。
+ * removeDaemonStateIfUnchanged と同じ意味。`kept-entries-remain` は detach の後に settings を読み直すと
+ * ActraDeck entry が残っていたので消さなかった (R2 ガード・SEC-DC-R2-1: 消すと `daemon stop` がその配線を
+ * 見つけられない・裁定 01a11052 ①で維持)。範囲 `endpoint` では記録外の entry が残れば出る。範囲 `all` では
+ * detach と読み直しの間に lock を共有しない書き手が配線を書いた場合と、読み直しに失敗した場合に出る。`untouched` は判定の時点で state が無かった ({@link ExpectedState} の `absent`) ので
+ * state の段を通らなかった。
  */
-export type StateTeardown = "removed" | "changed" | "absent" | "rm-failed" | "kept-entries-remain";
+export type StateTeardown =
+  | "removed"
+  | "changed"
+  | "absent"
+  | "rm-failed"
+  | "kept-entries-remain"
+  | "untouched";
 
-/** hook token file の後始末の結果。`kept` は state を消さなかった (別の daemon のものでありうる) ので触らなかった。 */
+/**
+ * hook token file の後始末の結果。`kept` は state を消さなかった (別の daemon のものでありうる)・判定の時点で
+ * state が無かったので触らなかった。
+ */
 export type TokenTeardown = "removed" | "absent" | "rm-failed" | "kept";
 
 /**
@@ -112,40 +127,80 @@ export type TeardownResult =
       readonly token: TokenTeardown;
     };
 
+/** state file の 2 つの置き場 (`scopeArtifacts` の statePath / 旧い dist の legacyStatePath)。 */
+export type StateSlot = "current" | "legacy";
+
+/**
+ * 判定の時点の state (CAS の比較値・判別 union・TDA-TD-8 (ii) / 裁定 01a11052 ②)。
+ * - `bytes`: 読めた state のバイト列。いまの中身が同じときだけ消す。
+ * - `unreadable`: 読めなかった (corrupt)。いまも読めなければ同じとみなして消す。
+ * - `absent`: state が無かった。state の段を通らない (後から現れた state を消さない)・token file にも触らない。
+ */
+export type ExpectedState =
+  | { readonly kind: "bytes"; readonly slot: StateSlot; readonly raw: string }
+  | { readonly kind: "unreadable"; readonly slot: StateSlot }
+  | { readonly kind: "absent" };
+
+/**
+ * readState の結果 (または同じ path / raw を持つ判定) から {@link ExpectedState} を作る。path は target の
+ * 2 つの置き場のどちらかでなければ throw する (state の path は導出したものだけ・SEC-TD-R2-3)。
+ */
+export function expectedStateOf(
+  target: ScopeTarget,
+  read: { readonly kind: "absent" } | { readonly path: string; readonly raw?: string | undefined },
+): ExpectedState {
+  if (!("path" in read)) return { kind: "absent" };
+  const { statePath, legacyStatePath } = target.artifacts;
+  const slot: StateSlot | undefined =
+    read.path === statePath ? "current" : read.path === legacyStatePath ? "legacy" : undefined;
+  if (slot === undefined) throw new Error("state の path が scope から導出したものではありません");
+  return read.raw === undefined
+    ? { kind: "unreadable", slot }
+    : { kind: "bytes", slot, raw: read.raw };
+}
+
 export interface TeardownContext {
-  /** detach する settings (scope から導出した path)。 */
-  readonly settingsPath: string;
-  /** 消す state file (判定に使った読み取りの path)。 */
-  readonly statePath: string;
-  /** 消す hook token file (scopeArtifacts の tokenPath)。 */
-  readonly tokenPath: string;
-  /** 判定に使った読み取りの state のバイト列 (CAS の比較値・読めなかった corrupt は undefined)。 */
-  readonly expectedRaw: string | undefined;
+  /** scopeTarget() が発行した target (settings / state / token file の path はここから導出する)。 */
+  readonly target: ScopeTarget;
+  /** 判定の時点の state ({@link expectedStateOf})。 */
+  readonly expected: ExpectedState;
   /** detach の範囲 (必須・既定値なし)。 */
   readonly range: DetachRange;
 }
 
 /**
- * 配線の後始末 (唯一の手順・ADR 01a10ddb D2)。順序は固定で **detach → state → token file**。
+ * 配線の後始末 (唯一の手順・ADR 01a10ddb D2)。順序は固定で **detach → state → token file**。呼び出し側は
+ * scope lock を保持していること。path はすべて `ctx.target` から導出する (発行していない target は throw・
+ * SEC-TD-R2-3)。
  * - detach が throw したら state も token file も触らず `detach-failed` を返す。
- * - detach の後も settings に ActraDeck entry が残っていれば state を消さない (`kept-entries-remain`・
- *   判定の後に state が書き換わっていれば `changed`・既に無ければ `absent`)。token file も触らない。
- * - state は removeDaemonStateIfUnchanged (CAS) 1 本で消す。`changed` (判定の後に別の daemon が state を
- *   書いた) なら token file はその daemon のものでありうるので触らない。
- * - token file は在れば消す (無ければ `absent`・消せなければ `rm-failed`)。値は読まない。
+ * - 判定の時点で state が無かった (`absent`) なら detach だけで終わる (state は `untouched`・token は `kept`)。
+ * - detach の後に settings を**読み直して** ActraDeck entry が残っていれば (読めなければ残っているとみなす)
+ *   state を消さない (`kept-entries-remain`・判定の後に state が書き換わっていれば `changed`・既に無ければ
+ *   `absent`)。token file も触らない。
+ * - state は removeDaemonStateIfUnchanged (CAS) 1 本で消す。`changed` (判定の後に別の書き手が state を
+ *   書いた) なら token file はその書き手のものでありうるので触らない。
+ * - token file は在れば消す (無ければ `absent`・消せなければ `rm-failed`)。値は読まない。state が `absent` /
+ *   `rm-failed` でも消して結果を返す (SEC-TD-4: 呼び出し側はどの枝でも token の失敗を報告する)。
  */
 export function teardownWiring(ctx: TeardownContext): TeardownResult {
+  const { target, expected } = ctx;
+  assertIssuedScopeTarget(target);
+  const { settingsPath } = target;
   let detached: boolean;
-  let remaining: boolean;
   try {
-    const res = detachAttachHooks(ctx.settingsPath, ctx.range);
-    detached = res.removed;
-    remaining = hasActradeckHookInSettings(res.settings);
+    detached = detachAttachHooks(settingsPath, ctx.range).removed;
   } catch (error) {
     return { kind: "detach-failed", error };
   }
-  if (remaining) {
-    const now = compareDaemonState(ctx.statePath, ctx.expectedRaw);
+  if (expected.kind === "absent") {
+    return { kind: "done", detached, state: "untouched", token: "kept" };
+  }
+  const statePath =
+    expected.slot === "current" ? target.artifacts.statePath : target.artifacts.legacyStatePath;
+  const expectedRaw = expected.kind === "bytes" ? expected.raw : undefined;
+  const after = readSettingsForInspection(settingsPath);
+  if (after === undefined || hasActradeckHookInSettings(after)) {
+    const now = compareDaemonState(statePath, expectedRaw);
     return {
       kind: "done",
       detached,
@@ -153,8 +208,8 @@ export function teardownWiring(ctx: TeardownContext): TeardownResult {
       token: "kept",
     };
   }
-  const state = removeDaemonStateIfUnchanged(ctx.statePath, ctx.expectedRaw);
-  const token = state === "changed" ? "kept" : removeTokenFile(ctx.tokenPath);
+  const state = removeDaemonStateIfUnchanged(statePath, expectedRaw);
+  const token = state === "changed" ? "kept" : removeTokenFile(target.artifacts.tokenPath);
   return { kind: "done", detached, state, token };
 }
 

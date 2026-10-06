@@ -14,14 +14,23 @@
  *
  * すべて temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。
  */
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { type ChildProcess, spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  expectedStateOf,
   inspectStaleWiring,
   type TeardownContext,
   teardownWiring,
@@ -36,10 +45,10 @@ import {
   scopeTarget,
   type ScopeTarget,
   type StartOutcome,
+  stopOutcomeExitCode,
 } from "../src/daemon-cli.js";
 import {
   asDaemonState,
-  canonicalSettingsPath,
   type DaemonState,
   scopeArtifacts,
   type StateRead,
@@ -47,7 +56,6 @@ import {
 } from "../src/daemon-state.js";
 import { parseHookShimArgs } from "../src/hook-shim-core.js";
 import {
-  captureSelfIdentity,
   defaultIdentitySources,
   type IdentitySources,
   type ProcessLiveness,
@@ -57,10 +65,17 @@ import {
   countActradeckEntries,
   detachAttachHooks,
   endpointOfEntry,
-  isActradeckEntry,
   isDaemonHookEndpoint,
   mergeAttachHooks,
 } from "../src/settings-merge.js";
+
+import {
+  actradeckEntries,
+  appendEntriesFor as appendEntriesForFixture,
+  daemonStateFor,
+  deadPid,
+  stubRuntime,
+} from "./helpers/attach-fixtures.js";
 
 /** runStop の判定 (readState) の直後に 1 回だけ同期実行する注入点 (未設定なら素通し)。 */
 const race = vi.hoisted(() => ({ fire: undefined as undefined | (() => void), fired: 0 }));
@@ -74,6 +89,28 @@ vi.mock("../src/daemon-state.js", async (importOriginal) => {
       if (f !== undefined) {
         race.fire = undefined;
         race.fired += 1;
+        f();
+      }
+      return r;
+    },
+  };
+});
+
+/**
+ * detachAttachHooks が返った直後に 1 回だけ同期実行する注入点 (lock を取らない書き手が detach の後に配線を
+ * 書く形・未設定なら素通し)。
+ */
+const bypass = vi.hoisted(() => ({ afterDetach: undefined as undefined | (() => void), fired: 0 }));
+vi.mock("../src/settings-merge.js", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../src/settings-merge.js")>();
+  return {
+    ...orig,
+    detachAttachHooks: (...a: Parameters<typeof orig.detachAttachHooks>) => {
+      const r = orig.detachAttachHooks(...a);
+      const f = bypass.afterDetach;
+      if (f !== undefined) {
+        bypass.afterDetach = undefined;
+        bypass.fired += 1;
         f();
       }
       return r;
@@ -104,6 +141,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   race.fire = undefined;
+  bypass.afterDetach = undefined;
   for (const c of children.splice(0)) {
     if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
   }
@@ -111,45 +149,15 @@ afterEach(() => {
   rmSync(cwd, { recursive: true, force: true });
 });
 
-function deadPid(): number {
-  const pid = spawnSync(process.execPath, ["-e", ""]).pid;
-  expect(() => process.kill(pid, 0)).toThrow(/ESRCH/);
-  return pid;
-}
-
 function stateFor(settingsPath: string, pid: number, endpoint = DEAD_ENDPOINT): DaemonState {
-  const identity = captureSelfIdentity();
-  return {
-    pid,
-    endpoint,
-    scope: "project-local",
-    settingsPath: canonicalSettingsPath(settingsPath),
-    startedAt: new Date().toISOString(),
-    tokenMode: "literal",
-    ...(identity !== undefined ? { procIdentity: identity } : {}),
-  };
+  return daemonStateFor(settingsPath, { pid, endpoint });
 }
 
-function entries(settingsPath: string): unknown[] {
-  const s = JSON.parse(readFileSync(settingsPath, "utf8")) as {
-    hooks?: Record<string, Array<{ hooks?: unknown[] }>>;
-  };
-  return Object.values(s.hooks ?? {})
-    .flat()
-    .flatMap((g) => g.hooks ?? [])
-    .filter(isActradeckEntry);
-}
+const entries = actradeckEntries;
 
 /** 本番 merge で別 file に作った entry を event ごとに settings へ連結する (self-heal を避けて 2 endpoint を並べる)。 */
 function appendEntriesFor(settingsPath: string, endpoint: string): void {
-  const other = join(dirname(settingsPath), `other-${Date.now()}.json`);
-  mergeAttachHooks({ settingsPath: other, endpoint, tokenMode: "literal", token: TOKEN });
-  const a = JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks: Record<string, unknown[]> };
-  const b = JSON.parse(readFileSync(other, "utf8")) as { hooks: Record<string, unknown[]> };
-  for (const [ev, groups] of Object.entries(b.hooks))
-    a.hooks[ev] = [...(a.hooks[ev] ?? []), ...groups];
-  writeFileSync(settingsPath, JSON.stringify(a));
-  rmSync(other, { force: true });
+  appendEntriesForFixture(settingsPath, endpoint, { token: TOKEN });
 }
 
 interface Planted {
@@ -176,22 +184,20 @@ function plant(pid = deadPid()): Planted {
   };
 }
 
-function ctxOf(p: Planted, range: TeardownContext["range"]): TeardownContext {
+function ctxOf(
+  _p: Planted,
+  range: TeardownContext["range"],
+  raw: string = _p.stateRaw,
+): TeardownContext {
   return {
-    settingsPath: p.settingsPath,
-    statePath: p.statePath,
-    tokenPath: p.tokenPath,
-    expectedRaw: p.stateRaw,
+    target: scopeTarget("project-local", cwd, home),
+    expected: { kind: "bytes", slot: "current", raw },
     range,
   };
 }
 
 function rt(logs: string[]): DaemonRuntime {
-  return {
-    home,
-    log: (m) => logs.push(m),
-    startDaemon: () => Promise.reject(new Error("unused")),
-  };
+  return stubRuntime(home, logs);
 }
 
 describe("INV-ATTACH-TEARDOWN: teardownWiring は detach → state → token file の 1 本の手順 (D2)", () => {
@@ -252,7 +258,7 @@ describe("INV-ATTACH-TEARDOWN: teardownWiring は detach → state → token fil
     expect(readFileSync(p.statePath, "utf8")).toBe(rewritten);
     expect(readFileSync(p.tokenPath, "utf8")).toBe("token-file-marker");
     // 対照 (POSITIVE): 比較値をいまの中身にすれば消える。
-    expect(teardownWiring({ ...ctxOf(p, { kind: "all" }), expectedRaw: rewritten })).toMatchObject({
+    expect(teardownWiring(ctxOf(p, { kind: "all" }, rewritten))).toMatchObject({
       state: "removed",
       token: "removed",
     });
@@ -558,7 +564,10 @@ describe("INV-ATTACH-TEARDOWN: 拒否の結果は後始末の結果を型で必�
       detachAttachHooks("/x");
     const noTeardownRange = (): unknown =>
       // @ts-expect-error teardownWiring の範囲も必須
-      teardownWiring({ settingsPath: "/s", statePath: "/p", tokenPath: "/t", expectedRaw: "" });
+      teardownWiring({
+        target: scopeTarget("project-local", cwd, home),
+        expected: { kind: "absent" },
+      });
     expect(typeof noRange).toBe("function");
     expect(typeof noTeardownRange).toBe("function");
     // 対照 (POSITIVE): 範囲を渡せば通る (settings が無いので何も外さない)。
@@ -812,5 +821,189 @@ describe("INV-ATTACH-TEARDOWN: 後始末は scopeTarget() が発行した target
     );
     expect(existsSync(p.tokenPath)).toBe(false);
     expect(readFileSync(victim, "utf8")).toBe("precious");
+  });
+});
+
+describe("INV-ATTACH-TEARDOWN: detach の後に lock を共有しない書き手が書いた配線・判定の後の state の変化は結果値で報告する・入力は発行した target から導出する (裁定 01a11052 ① / ② / SEC-TD-R2-3 / SEC-TD-4)", () => {
+  it("範囲 all の detach の後に配線が書かれたら、settings を読み直して state と token file を残す (R2 ガード・対照: 書かれなければ消す)", () => {
+    const p = plant();
+    bypass.fired = 0;
+    bypass.afterDetach = () => appendEntriesFor(p.settingsPath, OTHER_ENDPOINT);
+    expect(teardownWiring(ctxOf(p, { kind: "all" }))).toEqual({
+      kind: "done",
+      detached: true,
+      state: "kept-entries-remain",
+      token: "kept",
+    });
+    expect(bypass.fired).toBe(1);
+    expect(readFileSync(p.statePath, "utf8")).toBe(p.stateRaw);
+    expect(readFileSync(p.tokenPath, "utf8")).toBe("token-file-marker");
+    // 拒否起動の後始末も同じ値を返し、state を残して案内する。
+    const q = plant();
+    bypass.afterDetach = () => appendEntriesFor(q.settingsPath, OTHER_ENDPOINT);
+    const logs: string[] = [];
+    const target = scopeTarget("project-local", cwd, home);
+    expect(cleanupStaleWiring({ target, writeApproved: true, log: (m) => logs.push(m) })).toBe(
+      "detached-entries-remain",
+    );
+    expect(readFileSync(q.statePath, "utf8")).toBe(q.stateRaw);
+    expect(logs.join("\n")).toContain("ActraDeck hook 配線が残っているため、state は残します");
+    expect(logs.join("\n")).not.toContain(DETACHED_MSG);
+    // 対照 (POSITIVE): 書き手が居なければ同じ形で消し、「消しました」と言う。
+    plant();
+    const logs2: string[] = [];
+    expect(cleanupStaleWiring({ target, writeApproved: true, log: (m) => logs2.push(m) })).toBe(
+      "detached",
+    );
+    expect(logs2.join("\n")).toContain(DETACHED_MSG);
+    expect(logs2.join("\n")).not.toContain("ActraDeck hook 配線が残っているため、state は残します");
+  });
+
+  it("daemon stop: 範囲 all の detach の後に配線が書かれたら state を残し incomplete (終了コード 1 の列挙の根拠・対照: 書かれなければ stopped)", () => {
+    const p = plant();
+    bypass.fired = 0;
+    bypass.afterDetach = () => appendEntriesFor(p.settingsPath, OTHER_ENDPOINT);
+    const logs: string[] = [];
+    const stop = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs));
+    expect(bypass.fired).toBe(1);
+    expect(stop).toMatchObject({
+      status: "incomplete",
+      state: "kept-entries-remain",
+      token: "kept",
+    });
+    expect(stopOutcomeExitCode(stop)).toBe(1);
+    expect(readFileSync(p.statePath, "utf8")).toBe(p.stateRaw);
+    expect(logs.join("\n")).not.toContain(STOPPED_MSG);
+    // 対照 (POSITIVE): 書き手が居なければ同じ形で stopped (終了コード 0)。
+    const q = plant();
+    const logs2: string[] = [];
+    const ok = runStop(parseDaemonArgs(["daemon", "stop"], cwd), rt(logs2));
+    expect(ok).toMatchObject({ status: "stopped", state: "removed" });
+    expect(stopOutcomeExitCode(ok)).toBe(0);
+    expect(existsSync(q.statePath)).toBe(false);
+    expect(logs2.join("\n")).toContain(STOPPED_MSG);
+  });
+
+  it("判定の時点で absent なら state の段を通らない (後から現れた state を消さない)・unreadable は読めるようになった state を消さない", () => {
+    const p = plant();
+    const target = scopeTarget("project-local", cwd, home);
+    // absent: detach はするが、その後に在る state も token file も消さない。
+    expect(
+      teardownWiring({ target, expected: { kind: "absent" }, range: { kind: "all" } }),
+    ).toEqual({ kind: "done", detached: true, state: "untouched", token: "kept" });
+    expect(readFileSync(p.statePath, "utf8")).toBe(p.stateRaw);
+    expect(readFileSync(p.tokenPath, "utf8")).toBe("token-file-marker");
+    // unreadable: いま読める state は「判定の時点で読めなかった」ものと違うので changed (消さない)。
+    const q = plant();
+    expect(
+      teardownWiring({
+        target,
+        expected: { kind: "unreadable", slot: "current" },
+        range: { kind: "all" },
+      }),
+    ).toMatchObject({ state: "changed", token: "kept" });
+    expect(readFileSync(q.statePath, "utf8")).toBe(q.stateRaw);
+    // 対照 (POSITIVE): bytes で判定したバイト列なら消す。
+    expect(
+      teardownWiring({
+        target,
+        expected: { kind: "bytes", slot: "current", raw: q.stateRaw },
+        range: { kind: "all" },
+      }),
+    ).toMatchObject({ state: "removed", token: "removed" });
+  });
+
+  it("expectedStateOf は target の 2 つの置き場 (current / legacy) だけを受け入れる・teardownWiring は発行していない target を拒否する", () => {
+    const target = scopeTarget("project-local", cwd, home);
+    expect(expectedStateOf(target, { path: target.artifacts.statePath, raw: "x" })).toEqual({
+      kind: "bytes",
+      slot: "current",
+      raw: "x",
+    });
+    expect(expectedStateOf(target, { path: target.artifacts.statePath })).toEqual({
+      kind: "unreadable",
+      slot: "current",
+    });
+    expect(expectedStateOf(target, { kind: "absent" })).toEqual({ kind: "absent" });
+    expect(() => expectedStateOf(target, { path: join(cwd, "elsewhere.json"), raw: "x" })).toThrow(
+      "導出したものではありません",
+    );
+    // 旧い dist の置き場 (symlink 経由の cwd では statePath と別 path)。
+    const link = join(home, "cwd-link");
+    symlinkSync(cwd, link);
+    const viaLink = scopeTarget("project-local", link, home);
+    expect(viaLink.artifacts.legacyStatePath).not.toBe(viaLink.artifacts.statePath);
+    expect(expectedStateOf(viaLink, { path: viaLink.artifacts.legacyStatePath, raw: "y" })).toEqual(
+      { kind: "bytes", slot: "legacy", raw: "y" },
+    );
+    // 発行していない target (spread) は teardownWiring の入口で throw し、settings にも触らない。
+    const p = plant();
+    const before = readFileSync(p.settingsPath, "utf8");
+    const forged: ScopeTarget = { ...target };
+    expect(() =>
+      teardownWiring({ target: forged, expected: { kind: "absent" }, range: { kind: "all" } }),
+    ).toThrow("scopeTarget() が発行したもの");
+    expect(readFileSync(p.settingsPath, "utf8")).toBe(before);
+  });
+
+  it("後始末: state が判定の後に無くなり token file も消せなかったら、token の失敗も報告する (SEC-TD-4・対照: token が消せれば言わない)", () => {
+    const p = plant();
+    rmSync(p.tokenPath);
+    mkdirSync(join(p.tokenPath, "x"), { recursive: true });
+    race.fired = 0;
+    race.fire = () => rmSync(p.statePath);
+    const logs: string[] = [];
+    const target = scopeTarget("project-local", cwd, home);
+    expect(cleanupStaleWiring({ target, writeApproved: true, log: (m) => logs.push(m) })).toBe(
+      "detached-state-absent",
+    );
+    expect(race.fired).toBe(1);
+    expect(logs.join("\n")).toContain(TOKEN_LEFT_MSG);
+    // 対照 (POSITIVE): token file が消せれば同じ枝で token の文言を出さない。
+    rmSync(p.tokenPath, { recursive: true, force: true });
+    const q = plant();
+    race.fire = () => rmSync(q.statePath);
+    const logs2: string[] = [];
+    expect(cleanupStaleWiring({ target, writeApproved: true, log: (m) => logs2.push(m) })).toBe(
+      "detached-state-absent",
+    );
+    expect(existsSync(q.tokenPath)).toBe(false);
+    expect(logs2.join("\n")).not.toContain(TOKEN_LEFT_MSG);
+  });
+});
+
+describe("INV-ATTACH-TEARDOWN: daemon status の件数は state が無くても返し、読めない settings を 0 本と言わない (QA-TD-3)", () => {
+  it("state が無い: settings の ActraDeck entry を other として数える (対照: entry が無ければ 0 本)", () => {
+    const p = plant();
+    rmSync(p.statePath);
+    const n = entries(p.settingsPath).length;
+    expect(n).toBeGreaterThan(0);
+    const status = runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]));
+    expect(status).toMatchObject({ running: false, entries: { recorded: 0, other: n } });
+    expect(status).not.toHaveProperty("state");
+    // 対照 (POSITIVE): state があれば status は state を返す。
+    const q = plant();
+    expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]))).toHaveProperty("state");
+    rmSync(q.statePath);
+    writeFileSync(p.settingsPath, "{}");
+    expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]))).toMatchObject({
+      running: false,
+      entries: { recorded: 0, other: 0 },
+    });
+  });
+
+  it("settings が読めない (JSON でない) なら entries を返さない (対照: 読めれば返す)", () => {
+    const p = plant();
+    writeFileSync(p.settingsPath, "{ not json");
+    const unreadable = runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]));
+    expect(unreadable).toMatchObject({ running: false, liveness: "dead" });
+    expect(unreadable).not.toHaveProperty("entries");
+    rmSync(p.statePath);
+    expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]))).not.toHaveProperty(
+      "entries",
+    );
+    // 対照 (POSITIVE): 同じ形で settings が読めれば entries を返す。
+    writeFileSync(p.settingsPath, "{}");
+    expect(runStatus(parseDaemonArgs(["daemon", "status"], cwd), rt([]))).toHaveProperty("entries");
   });
 });
