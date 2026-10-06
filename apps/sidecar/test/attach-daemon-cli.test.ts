@@ -14,8 +14,11 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AttachDaemon } from "../src/attach-daemon.js";
 import {
+  cleanupStaleWiring,
   CodexAttachUnsupportedError,
   type DaemonRuntime,
+  type DeniedStatusFloor,
+  isDeniedOutcome,
   parseDaemonArgs,
   resolveSettingsPath,
   isUsableHookToken,
@@ -23,6 +26,8 @@ import {
   runStatus,
   runStop,
   scopeNeedsConfirm,
+  scopeTarget,
+  type StartOutcome,
   startOutcomeExitCode,
   tokenModeLeaksToTrackedFile,
 } from "../src/daemon-cli.js";
@@ -588,18 +593,31 @@ describe("INV-ATTACH-HOOK-AUTH-ENV: 使えないトークンでは起動しな�
     runStop(args, ok.rt);
   });
 
-  it("終了コード: 拒否はすべて 1・それ以外は 0 (TDA-ENV-3 ≡ QA-ENV-4)", () => {
-    const table: readonly [Parameters<typeof startOutcomeExitCode>[0], 0 | 1][] = [
-      ["started", 0],
-      ["already-running", 0],
-      ["dry-run", 0],
-      ["denied-needs-confirm", 1],
-      ["denied-token-leak", 1],
-      ["denied-env-token-missing", 1],
-      ["denied-hook-token-invalid", 1],
-      ["denied-env-token-mismatch", 1],
+  it("終了コード: 拒否はすべて 1・それ以外は 0 (TDA-ENV-3 ≡ QA-ENV-4)・status の綴りでなく union の所属で決まる (TDA-TD-6 ≡ QA-TD-4)", () => {
+    // 拒否の結果は cleanupStaleWiring が返した後始末の結果を持つ (DeniedOutcome)。
+    const target = scopeTarget("project-local", cwd, home);
+    const cleanup = cleanupStaleWiring({ target, writeApproved: true, log: () => undefined });
+    const base = { settingsPath: target.settingsPath, statePath: target.artifacts.statePath };
+    const table: readonly [StartOutcome, 0 | 1][] = [
+      [{ ...base, status: "started" }, 0],
+      [{ ...base, status: "already-running" }, 0],
+      [{ ...base, status: "dry-run" }, 0],
+      [{ ...base, status: "denied-needs-confirm", cleanup }, 1],
+      [{ ...base, status: "denied-token-leak", cleanup }, 1],
+      [{ ...base, status: "denied-env-token-missing", cleanup }, 1],
+      [{ ...base, status: "denied-hook-token-invalid", cleanup }, 1],
+      [{ ...base, status: "denied-env-token-mismatch", cleanup }, 1],
     ];
-    for (const [status, code] of table) expect(startOutcomeExitCode(status), status).toBe(code);
-    expect(new Set(table.map(([s]) => s)).size).toBe(table.length);
+    for (const [outcome, code] of table) {
+      expect(startOutcomeExitCode(outcome), outcome.status).toBe(code);
+      expect(isDeniedOutcome(outcome), outcome.status).toBe(code === 1);
+    }
+    expect(new Set(table.map(([o]) => o.status)).size).toBe(table.length);
+    // 綴りに依存しない: 拒否の status を持たない形でも cleanup を持てば 1 (型の外から作った値で挙動を確かめる)。
+    const unnamedDenial = { ...base, status: "started", cleanup } as unknown as StartOutcome;
+    expect(startOutcomeExitCode(unnamedDenial)).toBe(1);
+    // DeniedStatusFloor は型として残す (この参照を消すと型検査で落ちる・floor の削除は無音にならない)。
+    const floor: DeniedStatusFloor = true;
+    expect(floor).toBe(true);
   });
 });

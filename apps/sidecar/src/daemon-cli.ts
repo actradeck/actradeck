@@ -6,15 +6,24 @@
  * テスト可能にし、実 daemon 起動 (常駐ループ) は startDaemon が担う。
  */
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { AttachDaemon } from "./attach-daemon.js";
 import {
+  assertIssuedScopeTarget,
+  ScopeLockUnavailableError,
+  scopeTarget,
+  type ScopeTarget,
+  withScopeLock,
+} from "./attach-scope.js";
+import {
+  expectedStateOf,
   inspectStaleWiring,
   type StateTeardown,
   teardownWiring,
   type TokenTeardown,
   type WiringEntries,
+  type WiringInspection,
 } from "./attach-teardown.js";
 import {
   assertDaemonStateShape,
@@ -23,7 +32,6 @@ import {
   readState,
   removeDaemonStateIfUnchanged,
   scopeArtifacts,
-  type ScopeArtifacts,
   writeDaemonState,
 } from "./daemon-state.js";
 import {
@@ -33,6 +41,7 @@ import {
   type ProcessLiveness,
 } from "./process-identity.js";
 import {
+  type ClaudeSettingsFile,
   mergeAttachHooks,
   previewAttachHooks,
   readSettingsForInspection,
@@ -40,6 +49,14 @@ import {
 } from "./settings-merge.js";
 
 export type { AttachScope } from "./daemon-state.js";
+// scope の対象と scope lock は attach-scope.ts が単一出所 (PR-B2 で移した・既存の import 先を保つ)。
+export {
+  resolveSettingsPath,
+  ScopeLockUnavailableError,
+  scopeTarget,
+  type ScopeTarget,
+  withScopeLock,
+} from "./attach-scope.js";
 
 /**
  * hook 認証トークンとして使える値か (SEC-ENV-1 ≡ TDA-ENV-4 / SEC-ENV-3・裁定 01a10814)。
@@ -152,87 +169,6 @@ export function parseDaemonArgs(argv: readonly string[], cwd: string = process.c
   return { action, scope, cwd: resolve(cwdArg), dryRun, yes, tokenMode };
 }
 
-/**
- * scope から配線対象の settings file 絶対パスを解決する (ADR D2)。
- * - project-local: <cwd>/.claude/settings.local.json (gitignore 対象, 既定)。
- * - project:       <cwd>/.claude/settings.json (共有)。
- * - user:          ~/.claude/settings.json (高リスク)。
- */
-export function resolveSettingsPath(
-  scope: AttachScope,
-  cwd: string,
-  home: string = homedir(),
-): string {
-  switch (scope) {
-    case "project-local":
-      return join(cwd, ".claude", "settings.local.json");
-    case "project":
-      return join(cwd, ".claude", "settings.json");
-    case "user":
-      return join(home, ".claude", "settings.json");
-  }
-}
-
-declare const scopeTargetBrand: unique symbol;
-
-/**
- * scope の settings path・artifact path・state で受け入れる scope ラベル (args から導出する)。
- * **{@link scopeTarget} だけが作る** (TDA-STA-5): 後始末に手で組み立てた path を渡させない
- * (state の中身や別の file から path を取らない)。旧 API は statePath / settingsPath を別々に受け取り、
- * 導出値と違えば実行時に throw していた。brand 型だけでは spread (`{ ...t, artifacts: { ...a, tokenPath } }`)
- * で cast なしに偽造できる (SEC-TD-2 ≡ TDA-TD-1) ので、{@link scopeTarget} は発行した object を module 内の
- * WeakSet に登録して `Object.freeze` し (artifacts と scopes も)、受け取る側は未登録なら throw する
- * ({@link assertIssuedScopeTarget})。
- */
-export interface ScopeTarget {
-  /** 要求した scope (停止案内に使う)。 */
-  readonly scope: AttachScope;
-  /** 起動ディレクトリ (project 系の停止案内の `--cwd`)。 */
-  readonly cwd: string;
-  readonly settingsPath: string;
-  readonly artifacts: ScopeArtifacts;
-  readonly scopes: readonly AttachScope[];
-  readonly [scopeTargetBrand]: true;
-}
-
-/**
- * args の scope / cwd / home から {@link ScopeTarget} を導出する。state の scope ラベルは要求した scope だけを
- * 受け入れる。ただし導出した settings file が **user の settings file と同じ** (正規化した path が一致・
- * cwd が home の project か user) なら project と user の両方を受け入れる: cwd が home のとき project と
- * user は同じ `~/.claude/settings.json` を指すので、どちらで起動した daemon も、どの cwd からでも user で
- * (home からなら project でも) 止められる。state に記録された settings path の一致は別途必須 (asDaemonState)。
- */
-export function scopeTarget(scope: AttachScope, cwd: string, home: string): ScopeTarget {
-  const settingsPath = resolveSettingsPath(scope, cwd, home);
-  const artifacts = scopeArtifacts(settingsPath, home);
-  const userCanonical = scopeArtifacts(
-    resolveSettingsPath("user", cwd, home),
-    home,
-  ).canonicalSettingsPath;
-  const sharesUserFile =
-    scope !== "project-local" && artifacts.canonicalSettingsPath === userCanonical;
-  const scopes: readonly AttachScope[] = sharesUserFile ? ["project", "user"] : [scope];
-  const target = Object.freeze({
-    scope,
-    cwd,
-    settingsPath,
-    artifacts: Object.freeze(artifacts),
-    scopes: Object.freeze(scopes),
-  }) as ScopeTarget;
-  issuedScopeTargets.add(target);
-  return target;
-}
-
-/** {@link scopeTarget} が発行した target (同一性で照合する・spread した複製は含まない)。 */
-const issuedScopeTargets = new WeakSet<ScopeTarget>();
-
-/** {@link scopeTarget} が発行した target でなければ throw する (SEC-TD-2: 偽造した path を後始末に渡させない)。 */
-function assertIssuedScopeTarget(target: ScopeTarget): void {
-  if (!issuedScopeTargets.has(target)) {
-    throw new Error("ScopeTarget は scopeTarget() が発行したものだけを受け取ります");
-  }
-}
-
 /** start 実行の依存注入 (テスト・実機で差し替え)。 */
 export interface DaemonRuntime {
   /**
@@ -281,9 +217,10 @@ interface StartOutcomeFields {
   readonly previewSettings?: unknown;
 }
 
-/** 拒否以外の start の結果。 */
+/** 拒否以外の start の結果。`cleanup` を持たない (終了コードは `cleanup` の有無 = union の所属で決まる)。 */
 export interface ProceededOutcome extends StartOutcomeFields {
   readonly status: "started" | "already-running" | "dry-run";
+  readonly cleanup?: never;
 }
 
 /**
@@ -306,6 +243,8 @@ type IsTrue<T extends true> = T;
 /**
  * 型床 (D4): `denied-` で始まる status は {@link DeniedOutcome} にしか置けない。拒否を別の union member
  * (cleanup を持たない形) や {@link ProceededOutcome} の status に足すと、ここが型エラーになる。
+ * **綴りに依存する** (`denied-` で始まらない拒否は検査しない・TDA-TD-6)。終了コードはこの floor ではなく
+ * union の所属から導出する ({@link startOutcomeExitCode})。test がこの型を参照するので、削除は型検査で落ちる。
  */
 export type DeniedStatusFloor = IsTrue<
   [Extract<Exclude<StartOutcome, DeniedOutcome>["status"], `denied-${string}`>] extends [never]
@@ -313,27 +252,19 @@ export type DeniedStatusFloor = IsTrue<
     : false
 >;
 
+/** 拒否の結果か (union の所属: 後始末の結果 `cleanup` を持つのは {@link DeniedOutcome} だけ)。 */
+export function isDeniedOutcome(outcome: StartOutcome): outcome is DeniedOutcome {
+  return outcome.cleanup !== undefined;
+}
+
 /**
- * start の結果を CLI の終了コードへ写す (TDA-ENV-3 ≡ QA-ENV-4)。拒否はすべて 1 (systemd 等から失敗として
- * 見える)。網羅 switch なので status を足すと型検査がここでの扱いを要求する。
+ * start の結果を CLI の終了コードへ写す (TDA-ENV-3 ≡ QA-ENV-4)。拒否 ({@link DeniedOutcome}) はすべて 1
+ * (systemd 等から失敗として見える)・それ以外は 0。status の綴りではなく union の所属で決める
+ * (TDA-TD-6 ≡ QA-TD-4・裁定 01a11052 ⑤): 拒否は cleanup を必須に持つ型にしか置けないので、新しい拒否 status
+ * も自動的に 1 になる。
  */
-export function startOutcomeExitCode(status: StartOutcome["status"]): 0 | 1 {
-  switch (status) {
-    case "started":
-    case "already-running":
-    case "dry-run":
-      return 0;
-    case "denied-needs-confirm":
-    case "denied-token-leak":
-    case "denied-env-token-missing":
-    case "denied-hook-token-invalid":
-    case "denied-env-token-mismatch":
-      return 1;
-    default: {
-      const unreachable: never = status;
-      return unreachable;
-    }
-  }
+export function startOutcomeExitCode(outcome: StartOutcome): 0 | 1 {
+  return isDeniedOutcome(outcome) ? 1 : 0;
 }
 
 /** scope が高リスク (共有/グローバル設定 write) で確認を要するか。 */
@@ -364,7 +295,9 @@ export function stopCommandHint(scope: AttachScope, cwd: string): string {
  * 拒否経路の後始末の結果の値 (テストと監査向けに返す・CLI は使わない)。`detached-*` は teardownWiring の
  * state / token file の結果に対応する (`detached-entries-remain` = kept-entries-remain・`detached-state-changed`
  * = changed・`detached-state-absent` = absent・`detached-state-rm-failed` = rm-failed・
- * `detached-token-rm-failed` = state は消せたが token file を消せなかった)。
+ * `detached-token-rm-failed` = state は消せたが token file を消せなかった)。lock の下で範囲 all の detach の後に
+ * これらの `detached-*` (`detached` 以外) になるのは、lock を取らない書き手が居た場合だけ。`lock-unavailable` は
+ * scope lock を取得できず何も確かめていない (settings にも state にも触っていない)。
  */
 export type StaleCleanupKind =
   | "no-state"
@@ -377,7 +310,8 @@ export type StaleCleanupKind =
   | "detached-state-rm-failed"
   | "detached-token-rm-failed"
   | "left-needs-confirm"
-  | "detach-failed";
+  | "detach-failed"
+  | "lock-unavailable";
 
 declare const staleCleanupBrand: unique symbol;
 /**
@@ -390,47 +324,52 @@ export type StaleCleanup = StaleCleanupKind & { readonly [staleCleanupBrand]: tr
 
 const cleanupResult = (kind: StaleCleanupKind): StaleCleanup => kind as StaleCleanup;
 
+/** scope の state を読み、配線の状態を判定する (読み取りは readState 1 本・判定は inspectStaleWiring 1 本)。 */
+function inspectScope(
+  target: ScopeTarget,
+  identity: IdentitySources | undefined,
+  settings?: ClaudeSettingsFile,
+): WiringInspection {
+  return inspectStaleWiring({
+    read: readState(target.artifacts, target.scopes),
+    settings,
+    isDaemonProcess: (s) => isDaemonProcess(s, identity),
+  });
+}
+
 /**
- * 拒否経路の後始末 (SEC-ENV-4・task 01a10831-8102)。
+ * 拒否経路の後始末 (SEC-ENV-4・task 01a10831-8102・scope lock の下で行う = ADR 01a10ddb D1 / D4)。
  *
  * daemon が crash (SIGKILL 等) で落ちると、settings の hook は死んだ port を向いたまま残る。その port を
- * 別プロセスが bind すると hook payload と token を受け取れる。起動が成功すれば mergeAttachHooks の
- * self-heal が上書きするが、拒否された起動はそこまで進まないので、ここで片付ける。
+ * 別プロセスが bind すると hook payload と token を受け取れる。起動が成功すれば lock2 の merge の self-heal が
+ * 上書きするが、拒否された起動と起動の失敗 (startDaemon の throw) はそこまで進まないので、ここで片付ける。
  *
- * - 判定は attach-teardown の `inspectStaleWiring` (runStop / runStatus と共有)。`readState` の 1 回の
- *   読み取り (lock の外) と `isDaemonProcess` (pid の生存 + 開始時刻の照合・pid 再利用は stale)。state が
- *   **記録した daemon ではない (stale)** ときだけ動く。同一性を確かめられない (unknown) ときは生きている
- *   とみなして何もしない。判定の時点で生きている daemon の state なら何もしない (判定の後に起動した daemon
- *   の扱いは下の endpoint 限定と残る穴を参照)。
- * - state が検証できない (corrupt: 壊れた JSON・形の不一致・導出した settings path / scope と整合しない)
- *   ときは pid を信用できないので書かずに `state-invalid` を返し、`daemon stop` を案内する。
+ * - **scope lock** (attach-scope の withScopeLock) を取ってから判定と除去を行う。runStart の lock2 (merge +
+ *   state 書込) も同じ lock の下なので、判定の後に lock を取る daemon が配線・state を書くことはない。lock を
+ *   取得できなければ何も確かめずに `lock-unavailable` を返す (throw しない・CLI を wedge させない)。
+ * - 判定は attach-teardown の `inspectStaleWiring` (runStop / runStatus / runStart と共有) と
+ *   `isDaemonProcess` (pid の生存 + 開始時刻の照合・pid 再利用は stale)。state が**記録した daemon ではない
+ *   (stale)** ときだけ動く。同一性を確かめられない (unknown) ときは生きているとみなして何もしない。
+ * - state が検証できない (corrupt) ときは pid を信用できないので書かずに `state-invalid` を返し、`daemon stop` を
+ *   案内する。
  * - 外すのは attach-teardown の `teardownWiring` (detach → state → token file の唯一の手順) で、範囲は
- *   **stale state に記録された endpoint を向く ActraDeck entry だけ** (`{ kind: "endpoint" }`)。
- *   判定の後で同じ scope に別の daemon が起動し、別の endpoint で配線していても、その entry は残る。
- * - state は**判定に使ったバイト列と同じとき**で、かつ detach 後に ActraDeck entry が 1 本も残って
- *   いないときだけ消す (teardownWiring)。判定の後で別の daemon が state を書いていたら消さない。
- * - **残る穴 (実測に bound・R1 unblock の開示・根治は scope lock = PR-B2)**:
- *   ① 新しい daemon が死んだ daemon と**同じ port** を得て、その endpoint で配線した場合、その entry は
- *   endpoint で区別できず外れる (state の CAS は効くので state は残る)。
- *   ② state の比較と削除の間は原子的でない (lock の外)。比較の直後・削除の直前に別の daemon が state を
- *   書くと、その state を消す (配線は endpoint が違えば残る)。
- *   ③ stale state に記録されていない死んだ entry (別の endpoint の残骸) は外さない。外した後も
- *   ActraDeck entry が残っていれば state を消さず {@link stopCommandHint} を出す (SEC-DC-R2-1) ので、
- *   `daemon stop` か次の成功起動の self-heal で外れる。判定の後に state が書き換わっていた場合は
- *   案内を出さない (`changed`)。
- *   ④ (実装記録の残余⑧) ただし、判定の後に並走起動した daemon が merge を終え、まだ state を書いていない
- *   間に後始末が走ると (race R1 の形)、その daemon の entry を「残っている」と数えて案内を出す。案内
- *   どおり `daemon stop` を打つと、その時点で state を書き終えたその daemon を止め、全 entry を外す
- *   (daemon だけ動き続けて配線が無い、という半開にはならない・SEC R3 の probe p8 で実測)。
+ *   **endpoint を問わず全 ActraDeck entry** (`{ kind: "all" }`・ADR D1 の (b))。lock の下では「state を持たない
+ *   生きた daemon の配線」が lock を取る書き手からは作られないので、記録外の endpoint の entry・marker の無い
+ *   legacy 署名・command 形も死骸として外す。
+ * - state は**判定に使ったバイト列と同じとき**で、かつ detach の後に読み直した settings に ActraDeck entry が
+ *   1 本も残っていないときだけ消す (teardownWiring)。どちらかが崩れるのは lock を取らない書き手が居たとき
+ *   だけで、その場合は消さずに結果値とログで報告する (fail-loud・裁定 01a11052 ①)。
  * - `writeApproved` が false (user / project scope で --yes も confirm の承認も無い) なら書かない。
  *   共有/グローバル settings への書込は confirm ゲート (SEC-1) の対象なので、拒否経路でも同じ線を守り、
  *   残っていることと {@link stopCommandHint} だけをログに出す。state は消さない
  *   (消すと `daemon stop` が配線を見つけられなくなる)。
  * - detach する settings と消す state / token file は {@link scopeTarget} が導出した path だけ (state の中身
- *   から path を取らない)。`target` は型の上では brand 付きで、実行時は {@link scopeTarget} が発行して凍結した
- *   object の登録 (WeakSet) と同一性で照合し、spread で path を差し替えた複製は入口で throw する。当該 scope
- *   以外の path を記録した state は corrupt として上の `state-invalid` に落ちる。
+ *   から path を取らない)。発行していない target (spread で path を差し替えた複製等) は入口で throw する。
  * - detach が失敗したら state も token file も残す (`daemon stop` で再試行できる形を保つ)。値はログに出さない。
+ * - token file の削除に失敗したら、state の結果がどの値でもログに書く (SEC-TD-4)。
+ * - **残る穴 (開示)**: lock を取らない書き手 (scope lock を持たない旧い版の daemon が同じ scope で並走する
+ *   upgrade の窓・手編集) とは直列化されない。その書き込みは `detached-state-changed` /
+ *   `detached-entries-remain` として報告されるだけで、範囲 all の detach はその書き手の配線も外す。
  */
 export function cleanupStaleWiring(opts: {
   readonly target: ScopeTarget;
@@ -440,12 +379,29 @@ export function cleanupStaleWiring(opts: {
 }): StaleCleanup {
   const { target } = opts;
   assertIssuedScopeTarget(target);
+  try {
+    return withScopeLock(target, () => cleanupLocked(opts));
+  } catch (err) {
+    if (!(err instanceof ScopeLockUnavailableError)) throw err;
+    opts.log(
+      `[attach] scope lock (${target.artifacts.lockPath}) を取得できなかったため、前回の daemon の hook 配線は` +
+        `確認していません。同じ scope の attach / daemon コマンドが終わってから ` +
+        `\`${stopCommandHint(target.scope, target.cwd)}\` か \`agentmon daemon status\` で確認してください。`,
+    );
+    return cleanupResult("lock-unavailable");
+  }
+}
+
+/** {@link cleanupStaleWiring} の本体 (scope lock の中で呼ぶ)。 */
+function cleanupLocked(opts: {
+  readonly target: ScopeTarget;
+  readonly writeApproved: boolean;
+  readonly log: (msg: string) => void;
+  readonly identity?: IdentitySources;
+}): StaleCleanup {
+  const { target } = opts;
   const hint = stopCommandHint(target.scope, target.cwd);
-  const inspection = inspectStaleWiring({
-    read: readState(target.artifacts, target.scopes),
-    settings: undefined,
-    isDaemonProcess: (s) => isDaemonProcess(s, opts.identity),
-  });
+  const inspection = inspectScope(target, opts.identity);
   if (inspection.kind === "no-state") return cleanupResult("no-state");
   if (inspection.kind === "corrupt") {
     opts.log(
@@ -466,11 +422,9 @@ export function cleanupStaleWiring(opts: {
     return cleanupResult("left-needs-confirm");
   }
   const td = teardownWiring({
-    settingsPath: target.settingsPath,
-    statePath: inspection.path,
-    tokenPath: target.artifacts.tokenPath,
-    expectedRaw: inspection.raw,
-    range: { kind: "endpoint", endpoint: state.endpoint },
+    target,
+    expected: expectedStateOf(target, inspection),
+    range: { kind: "all" },
   });
   if (td.kind === "detach-failed") {
     opts.log(
@@ -481,53 +435,60 @@ export function cleanupStaleWiring(opts: {
   }
   // 実際に外したかで文言を分ける (SEC-DC-R2-2 ≡ QA-DC-R2-1 ≡ TDA-DC-R2-2: 0 本なら「外しました」と言わない)。
   const what =
-    `前回の daemon (pid=${state.pid}) の endpoint (${state.endpoint}) を向いた hook 配線` +
+    `前回の daemon (pid=${state.pid}・endpoint ${state.endpoint}) は終了しています。` +
+    `${target.settingsPath} の ActraDeck hook 配線` +
     (td.detached ? "を外しました" : "は既に無くなっていました");
+  // SEC-TD-4: token file の削除失敗は state の結果がどの値でも報告する。
+  const tokenNote =
+    td.token === "rm-failed"
+      ? `hook token file (${target.artifacts.tokenPath}) は削除できませんでした。権限を確認して手動で削除してください。`
+      : "";
   switch (td.state) {
     case "kept-entries-remain":
-      // SEC-DC-R2-1: 記録 endpoint 以外の ActraDeck entry がまだ残るので state を消さない。消すと
-      // `daemon stop` がその配線を見つけられなくなる。
+      // 外した後も ActraDeck entry が残る = lock を取らない書き手が居た。state を消すと `daemon stop` が
+      // その配線を見つけられなくなるので残す (R2 ガード・裁定 01a11052 ①)。
       opts.log(
-        `[attach] ${what}。ただし ${target.settingsPath} にはほかの ActraDeck hook 配線が` +
-          `残っているため、state は残します。外すには \`${hint}\` を実行してください。`,
+        `[attach] ${what}。ただし外した後も ${target.settingsPath} に ActraDeck hook 配線が残っているため` +
+          `、state は残します (scope lock を取らない書き手が居る可能性があります)。外すには ` +
+          `\`${hint}\` を実行してください。`,
       );
       return cleanupResult("detached-entries-remain");
     case "changed":
-      // 判定の後に state が書き換わっていた (別の daemon が起動した可能性) ので消さず、停止案内も出さない。
       opts.log(
-        `[attach] ${what}。state は判定の後に書き換わっていたため消していません (別の daemon が` +
-          `起動した可能性があります)。`,
+        `[attach] ${what}。state は判定の後に書き換わっていたため消していません (scope lock を取らない` +
+          `書き手が居る可能性があります)。\`agentmon daemon status\` で確認してください。`,
       );
       return cleanupResult("detached-state-changed");
     case "absent":
-      opts.log(`[attach] ${what}。state は判定の後に無くなっていました。`);
+      opts.log(`[attach] ${what}。state は判定の後に無くなっていました。${tokenNote}`);
       return cleanupResult("detached-state-absent");
     case "rm-failed":
       opts.log(
-        `[attach] ${what}。stale state は削除できませんでした。\`${hint}\` を実行してください。`,
+        `[attach] ${what}。stale state は削除できませんでした。\`${hint}\` を実行してください。${tokenNote}`,
       );
       return cleanupResult("detached-state-rm-failed");
     case "removed":
+    case "untouched":
       break;
   }
   if (td.token === "rm-failed") {
-    opts.log(
-      `[attach] ${what} (${target.settingsPath})。stale state は消しましたが、hook token file ` +
-        `(${target.artifacts.tokenPath}) は削除できませんでした。権限を確認して手動で削除してください。`,
-    );
+    opts.log(`[attach] ${what}。stale state は消しましたが、${tokenNote}`);
     return cleanupResult("detached-token-rm-failed");
   }
-  opts.log(
-    `[attach] ${what} (${target.settingsPath})。daemon は終了していたため ` +
-      `stale state を消しました。`,
-  );
+  opts.log(`[attach] ${what}。stale state を消しました。`);
   return cleanupResult("detached");
 }
 
 /**
- * daemon を起動し settings を配線する。
- * - 二重起動防止 (pid の生存と開始時刻の照合・process-identity.ts)。stale / corrupt な state は起動が成功すれば
- *   上書きし、拒否なら deny() の後始末が扱う。
+ * daemon を起動し settings を配線する (二段の transaction・ADR 01a10ddb D1)。
+ * - 拒否の判定 (token-leak / env / invalid / confirm) は lock の外。拒否は deny() の後始末 (scope lock の下) を通る。
+ * - **lock1** (scope lock): state を読み inspectStaleWiring で判定し、記録した daemon が生きていれば
+ *   (同一性を確かめられない unknown も) `already-running`。lock1 は早期拒否の最適化で、正は lock2。
+ * - startDaemon は lock の外 (async)。throw したら同じ後始末 (stale のみ・lock の下) を走らせてから元の例外を
+ *   投げ直す。env token-mode の不一致は daemon を止めて deny()。
+ * - **lock2** (scope lock): state を読み直して判定し直す。別の daemon が生きていれば自分の daemon を止めて
+ *   `already-running`。stale / 無い / corrupt (TDA-STA-4 (3): lock2 で読み直した上で上書き = base 同値) なら
+ *   merge → artifact を再導出して (SEC-STA-R2-1) state を書く → (T-B) hook token file。
  * - dry-run は preview のみ (daemon 起動・書込なし)。
  * - literal token を settings に書き、state file には **値を記録しない**。
  */
@@ -627,44 +588,63 @@ export async function runStart(
     writeApproved = true;
   }
 
-  // 二重起動防止。同一性を確かめられない (unknown) ときは生きているとみなす (base 同値・ADR 01a10ddc)。
-  // stale / corrupt な state はここでは消さない (下のコメント)。
-  const existing = readState(artifacts, target.scopes);
-  if (existing.kind === "state") {
-    const liveness = isDaemonProcess(existing.state, rt.identity);
-    if (liveness !== "dead") {
-      rt.log(
-        `[attach] 既に稼働中 (pid=${existing.state.pid}, endpoint=${existing.state.endpoint}` +
-          `${liveness === "unknown" ? "・同一性は未確認" : ""})`,
-      );
-      return {
-        status: "already-running",
-        statePath,
-        settingsPath,
-        hookEndpoint: existing.state.endpoint,
-      };
-    }
-    // stale state はここでは消さない (SEC-ENV-4)。起動が成功すれば mergeAttachHooks の self-heal と
-    // writeDaemonState が上書きし、起動後に拒否 (mismatch) されたら deny() が state を手掛かりに配線を外す。
-    // 先に消すと、拒否や startDaemon の失敗で「state だけ失われ配線が残る」(daemon stop で外せない)。
+  // lock1: 二重起動の早期判定。同一性を確かめられない (unknown) ときは生きているとみなす (base 同値・
+  // ADR 01a10ddc)。判定は inspectStaleWiring 1 本 (TDA-TD-4)。stale / corrupt な state はここでは消さない:
+  // 先に消すと、拒否や startDaemon の失敗で「state だけ失われ配線が残る」(daemon stop で外せない)。
+  const early = withScopeLock(target, () => inspectScope(target, rt.identity));
+  if (early.kind === "alive") {
     rt.log(
-      `[attach] stale state を検出 (pid=${existing.state.pid} 死亡)。起動に成功したら上書きします。`,
+      `[attach] 既に稼働中 (pid=${early.state.pid}, endpoint=${early.state.endpoint}` +
+        `${early.liveness === "unknown" ? "・同一性は未確認" : ""})`,
     );
-  } else if (existing.kind === "corrupt") {
-    // 検証できない state は pid を信用しない。起動に成功したら上書きする (拒否なら deny() は書かずに案内)。
-    rt.log(`[attach] state (${existing.path}) を検証できません。起動に成功したら上書きします。`);
+    return {
+      status: "already-running",
+      statePath,
+      settingsPath,
+      hookEndpoint: early.state.endpoint,
+    };
+  }
+  if (early.kind === "stale") {
+    // TDA-DC-6: 実測どおりの文言 (成功なら lock2 で置き換え・失敗 / 拒否なら後始末が片付ける)。
+    rt.log(
+      `[attach] stale state を検出 (pid=${early.state.pid} 死亡)。起動に成功すればこの daemon の配線と ` +
+        `state に置き換え、起動に失敗・拒否した場合は前回の配線と state を片付けます。`,
+    );
+  } else if (early.kind === "corrupt") {
+    rt.log(
+      `[attach] state (${early.path}) を検証できません。起動に成功すれば上書きします (起動に失敗・拒否した` +
+        `場合は書き換えずに案内します)。`,
+    );
   }
 
-  // daemon を起動して安定 endpoint (OS 割当 port) と実 nonce を得る。
-  const { daemon, hookEndpoint, hookToken } = await rt.startDaemon({
-    wsUrl: env.wsUrl,
-    dbPath: env.dbPath,
-    ...(env.ingestToken !== undefined ? { ingestToken: env.ingestToken } : {}),
-    ...(env.hookToken !== undefined && env.hookToken.length > 0
-      ? { hookToken: env.hookToken }
-      : {}),
-    tokenMode: args.tokenMode,
-  });
+  // daemon を起動して安定 endpoint (OS 割当 port) と実 nonce を得る (lock の外)。
+  let started: Awaited<ReturnType<DaemonRuntime["startDaemon"]>>;
+  try {
+    started = await rt.startDaemon({
+      wsUrl: env.wsUrl,
+      dbPath: env.dbPath,
+      ...(env.ingestToken !== undefined ? { ingestToken: env.ingestToken } : {}),
+      ...(env.hookToken !== undefined && env.hookToken.length > 0
+        ? { hookToken: env.hookToken }
+        : {}),
+      tokenMode: args.tokenMode,
+    });
+  } catch (err) {
+    // ADR D4 の throw 経路: 拒否と同じ後始末 (stale のみ・scope lock の下) を走らせてから元の例外を投げ直す
+    // (fail-loud は保つ・exit 1 は cli の main().catch)。後始末自体の失敗で元の例外を隠さない。
+    try {
+      cleanupStaleWiring({
+        target,
+        writeApproved,
+        log: rt.log,
+        ...(rt.identity !== undefined ? { identity: rt.identity } : {}),
+      });
+    } catch {
+      rt.log(`[attach] 起動の失敗の後で前回の配線の後始末にも失敗しました。`);
+    }
+    throw err;
+  }
+  const { daemon, hookEndpoint, hookToken } = started;
 
   // QA-ENV-1 ≡ TDA-ENV-1: env mode では settings に値を書かず、CC は自分の環境の
   // ACTRADECK_HOOK_TOKEN を送る。daemon が別の値 (自前の nonce 等) で照合していると全 hook が 403 に
@@ -684,7 +664,7 @@ export async function runStart(
   // state file に記録する内容 (**token 値は書かない** — token mode だけ)。読む側と同じ形検証を配線の前に
   // 通す (配線だけ書いて state を書けない経路を作らない)。
   const identity = captureSelfIdentity(rt.identity);
-  const state: DaemonState = {
+  const draft: DaemonState = {
     pid: process.pid,
     endpoint: hookEndpoint,
     scope: args.scope,
@@ -693,33 +673,71 @@ export async function runStart(
     tokenMode: args.tokenMode,
     ...(identity !== undefined ? { procIdentity: identity } : {}),
   };
-  assertDaemonStateShape(state);
+  assertDaemonStateShape(draft);
 
-  // settings を非破壊配線 (実 endpoint + daemon が検証に使う実 nonce を書く)。
-  const merge = mergeAttachHooks({
-    settingsPath,
-    endpoint: hookEndpoint,
-    tokenMode: args.tokenMode,
-    ...(args.tokenMode === "literal" ? { token: hookToken } : {}),
-  });
-
-  writeDaemonState(statePath, state);
-  // 旧い dist の path で読んだ (stale / corrupt の) state は、新しい path に書いたので消す (判定に使った
-  // バイト列と同じときだけ)。残すと、この daemon の state を消した後に旧い state が再び読まれる。
-  if (existing.kind !== "absent" && existing.path !== statePath && existing.raw !== undefined) {
-    removeDaemonStateIfUnchanged(existing.path, existing.raw);
+  // lock2: 判定し直してから配線と state を書く (lock1 の後に別の daemon が起動していれば負けた側が止まる)。
+  let wired:
+    | { readonly kind: "lost"; readonly other: DaemonState; readonly unknown: boolean }
+    | { readonly kind: "wired"; readonly backupPath?: string; readonly statePath: string };
+  try {
+    wired = withScopeLock(target, () => {
+      const now = inspectScope(target, rt.identity);
+      if (now.kind === "alive") {
+        return { kind: "lost", other: now.state, unknown: now.liveness === "unknown" } as const;
+      }
+      // settings を非破壊配線 (実 endpoint + daemon が検証に使う実 nonce を書く)。
+      const merge = mergeAttachHooks({
+        settingsPath,
+        endpoint: hookEndpoint,
+        tokenMode: args.tokenMode,
+        ...(args.tokenMode === "literal" ? { token: hookToken } : {}),
+      });
+      // SEC-STA-R2-1: merge の後で artifact を再導出し、merge が実際に書いた settings の物理 path で state を
+      // 書く (起動中に親 dir の symlink が付け替わっても、state の同一性と配線の書込先を揃える)。
+      const post = scopeArtifacts(settingsPath, target.home);
+      writeDaemonState(post.statePath, { ...draft, settingsPath: post.canonicalSettingsPath });
+      // 別の path (旧い dist の path・付け替え前の path) で判定した state は、判定に使ったバイト列と同じときだけ
+      // 消す (残すと、この daemon の state を消した後に旧い state が再び読まれる)。
+      if (now.kind !== "no-state" && now.path !== post.statePath && now.raw !== undefined) {
+        removeDaemonStateIfUnchanged(now.path, now.raw);
+      }
+      // (T-B) hook token file はここで `post.tokenPath` に書く: settings merge の後・lock2 の中 (逆順だと
+      // settings が旧 port を向く間に生きた token が旧 port へ送られる・ADR D2)。
+      return {
+        kind: "wired",
+        statePath: post.statePath,
+        ...(merge.backupPath !== undefined ? { backupPath: merge.backupPath } : {}),
+      } as const;
+    });
+  } catch (err) {
+    // lock2 を取れない / 配線か state の書込に失敗: 起動した daemon を止めて投げ直す。
+    await daemon.shutdown();
+    throw err;
+  }
+  if (wired.kind === "lost") {
+    await daemon.shutdown();
+    rt.log(
+      `[attach] 起動の間に別の daemon (pid=${wired.other.pid}, endpoint=${wired.other.endpoint}` +
+        `${wired.unknown ? "・同一性は未確認" : ""}) が稼働を始めたため、この daemon は止めました。`,
+    );
+    return {
+      status: "already-running",
+      statePath,
+      settingsPath,
+      hookEndpoint: wired.other.endpoint,
+    };
   }
 
   rt.log(
     `[attach] daemon 起動 pid=${process.pid} endpoint=${hookEndpoint} scope=${args.scope} ` +
-      `settings=${settingsPath}${merge.backupPath ? ` backup=${merge.backupPath}` : ""}`,
+      `settings=${settingsPath}${wired.backupPath ? ` backup=${wired.backupPath}` : ""}`,
   );
   return {
     status: "started",
     hookEndpoint,
     settingsPath,
-    statePath,
-    ...(merge.backupPath !== undefined ? { backupPath: merge.backupPath } : {}),
+    statePath: wired.statePath,
+    ...(wired.backupPath !== undefined ? { backupPath: wired.backupPath } : {}),
   };
 }
 
@@ -735,6 +753,7 @@ export async function runStart(
  *   送らない。
  * - `skipped-corrupt`: state を検証できず pid を信用できない。送らない。
  * - `no-state`: state が無い。
+ * - `skipped-lock-unavailable`: scope lock を取得できず、何も確かめていない。送らない。
  */
 export type StopKill =
   | "sent"
@@ -743,7 +762,8 @@ export type StopKill =
   | "skipped-dead"
   | "skipped-identity-unknown"
   | "skipped-corrupt"
-  | "no-state";
+  | "no-state"
+  | "skipped-lock-unavailable";
 
 export interface StopOutcome {
   /**
@@ -751,8 +771,10 @@ export interface StopOutcome {
    * - `incomplete`: 配線は外したが、state か token file が残っている (削除に失敗した・判定の後に書き換わって
    *   いた)。「停止しました」とは報告しない (TDA-DC-R3-2 / SEC-DC-R3-2(f))。
    * - `not-running`: state が無い (何もしない)。
+   * - `lock-unavailable`: scope lock を取得できなかった (何も確かめず・何も変えていない)。
+   * 終了コードは {@link stopOutcomeExitCode} (`incomplete` / `lock-unavailable` は 1・裁定 01a11052 ③)。
    */
-  readonly status: "stopped" | "incomplete" | "not-running";
+  readonly status: "stopped" | "incomplete" | "not-running" | "lock-unavailable";
   readonly detached: boolean;
   readonly settingsPaths: readonly string[];
   readonly killedPid?: number;
@@ -766,37 +788,65 @@ export interface StopOutcome {
 }
 
 /**
- * daemon を停止し settings から ActraDeck hooks を reversible detach する。
- * 判定は inspectStaleWiring、後始末は teardownWiring (範囲は全 ActraDeck entry・利用者が明示した停止なので
- * endpoint を問わない) を拒否経路の後始末と共有する。後始末の後で、別プロセスの daemon が記録されていて、
- * 記録した daemon と同一だと確かめられたときだけ SIGTERM を送る (送る直前にもう一度確かめる・SEC-TD-1)。
+ * `daemon stop` の結果を CLI の終了コードへ写す。後始末が終わっていない (`incomplete`: state か hook token file が
+ * 残った) と scope lock を取得できなかった (`lock-unavailable`) は 1 (fail-loud・利用者が手で片付ける必要がある・
+ * 裁定 01a11052 ③)。`stopped` / `not-running` は 0。
+ */
+export function stopOutcomeExitCode(outcome: StopOutcome): 0 | 1 {
+  return outcome.status === "incomplete" || outcome.status === "lock-unavailable" ? 1 : 0;
+}
+
+/**
+ * daemon を停止し settings から ActraDeck hooks を reversible detach する (利用者が明示した停止)。
+ * **scope lock の中で** 判定 (inspectStaleWiring) と後始末 (teardownWiring・範囲は endpoint を問わず全
+ * ActraDeck entry) を行い、lock を外した後で、別プロセスの daemon が記録されていて記録した daemon と同一だと
+ * 確かめられたときだけ SIGTERM を送る (送る直前にもう一度確かめる・SEC-TD-1)。終了は待たない。
  * detach する settings は args から導出した path (state の中身からは取らない)。state を検証できない (corrupt)
  * ときは pid を信用せず、signal は送らない。detach が失敗したら state と token file に触らず、signal も
- * 送らずに例外をそのまま投げる (再試行できる形を保つ)。
+ * 送らずに例外をそのまま投げる (再試行できる形を保つ)。scope lock を取得できなければ何もせず
+ * `lock-unavailable` を返す。
  */
 export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   const home = rt.home ?? homedir();
   const target = scopeTarget(args.scope, args.cwd, home);
   const { settingsPath, artifacts } = target;
-  const inspection = inspectStaleWiring({
-    read: readState(artifacts, target.scopes),
-    settings: undefined,
-    isDaemonProcess: (s) => isDaemonProcess(s, rt.identity),
-  });
-  if (inspection.kind === "no-state") {
+  let locked:
+    | { readonly inspection: WiringInspection & { readonly kind: "no-state" } }
+    | {
+        readonly inspection: Exclude<WiringInspection, { readonly kind: "no-state" }>;
+        readonly td: Extract<ReturnType<typeof teardownWiring>, { readonly kind: "done" }>;
+      };
+  try {
+    locked = withScopeLock(target, () => {
+      const inspection = inspectScope(target, rt.identity);
+      if (inspection.kind === "no-state") return { inspection };
+      // 配線済み settings を detach (ユーザー hooks は温存) → state → token file。
+      const td = teardownWiring({
+        target,
+        expected: expectedStateOf(target, inspection),
+        range: { kind: "all" },
+      });
+      if (td.kind === "detach-failed") throw td.error;
+      return { inspection, td };
+    });
+  } catch (err) {
+    if (!(err instanceof ScopeLockUnavailableError)) throw err;
+    rt.log(
+      `[attach] scope lock (${artifacts.lockPath}) を取得できなかったため、停止していません。同じ scope の ` +
+        `attach / daemon コマンドが終わってから再実行してください。`,
+    );
+    return {
+      status: "lock-unavailable",
+      detached: false,
+      settingsPaths: [],
+      kill: "skipped-lock-unavailable",
+    };
+  }
+  if (!("td" in locked)) {
     rt.log(`[attach] 稼働中の daemon がありません (${artifacts.statePath})`);
     return { status: "not-running", detached: false, settingsPaths: [], kill: "no-state" };
   }
-
-  // 配線済み settings を detach (ユーザー hooks は温存) → state → token file。
-  const td = teardownWiring({
-    settingsPath,
-    statePath: inspection.path,
-    tokenPath: artifacts.tokenPath,
-    expectedRaw: inspection.raw,
-    range: { kind: "all" },
-  });
-  if (td.kind === "detach-failed") throw td.error;
+  const { inspection, td } = locked;
 
   // 別プロセスの daemon を停止 (自プロセスなら呼び元が shutdown)。同一性を確かめてから送る。
   let kill: StopKill;
@@ -805,9 +855,10 @@ export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   } else if (inspection.state.pid === process.pid) {
     kill = "self";
   } else {
-    // SEC-TD-1: 後始末の間に daemon が終了し pid が再利用されうるので、判定の時点で alive でも送る直前に同じ
-    // 述語で再判定し、alive のときだけ送る。後始末には settings lock の取得待ちが入る (withFileLock の既定
-    // 100 回 × 20ms ≈ 2s。この値は lock 待ちだけで、settings の読み書きと同一性判定の時間は含まない)。
+    // SEC-TD-1: 後始末の間 (と lock の解放の後) に daemon が終了し pid が再利用されうるので、判定の時点で alive
+    // でも送る直前に同じ述語で再判定し、alive のときだけ送る。後始末には settings lock の取得待ちが入る
+    // (withFileLock の既定 100 回 × 20ms ≈ 2s。この値は lock 待ちだけで、settings の読み書きと同一性判定の時間は
+    // 含まない)。
     const liveness =
       inspection.liveness === "alive"
         ? isDaemonProcess(inspection.state, rt.identity)
@@ -883,6 +934,95 @@ export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   };
 }
 
+/**
+ * {@link shutdownSelf} の結果。
+ * - `torn-down`: state は自分 (pid が自プロセス) のもの。範囲 all で外し、state と hook token file を片付けた
+ *   (`state` / `token` は teardownWiring の結果)。
+ * - `own-endpoint-detached`: state が無かった。自分の endpoint を向く entry だけを外した (state にも token file
+ *   にも触らない)。
+ * - `untouched-other`: state は別の daemon (別 pid) のもの。何も触らない。
+ * - `untouched-corrupt`: state を検証できない。何も触らず `daemon stop` を案内する。
+ * - `detach-failed` / `lock-unavailable`: 外せなかった / scope lock を取得できなかった (ログで案内する)。
+ */
+export type ShutdownSelfOutcome =
+  | {
+      readonly kind: "torn-down";
+      readonly detached: boolean;
+      readonly state: StateTeardown;
+      readonly token: TokenTeardown;
+    }
+  | { readonly kind: "own-endpoint-detached"; readonly detached: boolean }
+  | { readonly kind: "untouched-other" }
+  | { readonly kind: "untouched-corrupt" }
+  | { readonly kind: "detach-failed" }
+  | { readonly kind: "lock-unavailable" };
+
+/**
+ * attach daemon 自身の終了 (SIGINT / SIGTERM / SIGHUP の handler・ADR 01a10ddb D1)。runStop (利用者の停止) とは
+ * 別の経路で、**kill は決してしない** (INV-ATTACH-NO-KILL と整合)。scope lock の中で state を読み:
+ * - state の pid が自プロセス → teardownWiring (範囲 all・state と hook token file も片付ける)。
+ * - state が無い → 自分の endpoint (`ownEndpoint`) を向く ActraDeck entry だけを外す (範囲 endpoint)。state には
+ *   触らない (判定の後に現れた state を消さない・裁定 01a11052 ②)。token file にも触らない。
+ * - state が別の pid → 何も触らない (後から起動した daemon の配線と state を消さない)。
+ * - state が corrupt → 何も触らず `daemon stop` を案内する (pid を信用できない)。
+ * 失敗しても throw しない (handler は daemon の shutdown を続ける)。
+ */
+export function shutdownSelf(
+  args: DaemonArgs,
+  rt: DaemonRuntime,
+  ownEndpoint: string,
+): ShutdownSelfOutcome {
+  const home = rt.home ?? homedir();
+  const target = scopeTarget(args.scope, args.cwd, home);
+  const hint = stopCommandHint(target.scope, target.cwd);
+  let out: ShutdownSelfOutcome;
+  try {
+    out = withScopeLock(target, (): ShutdownSelfOutcome => {
+      const read = readState(target.artifacts, target.scopes);
+      if (read.kind === "corrupt") return { kind: "untouched-corrupt" };
+      if (read.kind === "state" && read.state.pid !== process.pid)
+        return { kind: "untouched-other" };
+      const own = read.kind === "state";
+      const td = teardownWiring({
+        target,
+        expected: expectedStateOf(target, read),
+        range: own ? { kind: "all" } : { kind: "endpoint", endpoint: ownEndpoint },
+      });
+      if (td.kind === "detach-failed") return { kind: "detach-failed" };
+      return own
+        ? { kind: "torn-down", detached: td.detached, state: td.state, token: td.token }
+        : { kind: "own-endpoint-detached", detached: td.detached };
+    });
+  } catch (err) {
+    if (!(err instanceof ScopeLockUnavailableError)) {
+      rt.log(`[attach] 終了時の hook 配線の後始末に失敗しました。\`${hint}\` で外してください。`);
+      return { kind: "detach-failed" };
+    }
+    out = { kind: "lock-unavailable" };
+  }
+  switch (out.kind) {
+    case "torn-down":
+      rt.log(`[attach] detach (state ${out.state}・hook token file ${out.token})`);
+      break;
+    case "own-endpoint-detached":
+      rt.log(
+        `[attach] state が無いため、この daemon の endpoint を向く hook 配線だけを外しました。`,
+      );
+      break;
+    case "untouched-other":
+      rt.log(`[attach] state は別の daemon のものなので、hook 配線と state には触れていません。`);
+      break;
+    case "untouched-corrupt":
+    case "detach-failed":
+    case "lock-unavailable":
+      rt.log(
+        `[attach] 終了時に hook 配線を外せませんでした (${out.kind})。\`${hint}\` で外してください。`,
+      );
+      break;
+  }
+  return out;
+}
+
 export interface StatusOutcome {
   readonly running: boolean;
   readonly state?: DaemonState;
@@ -903,11 +1043,11 @@ export function runStatus(args: DaemonArgs, rt: DaemonRuntime): StatusOutcome {
   const home = rt.home ?? homedir();
   const target = scopeTarget(args.scope, args.cwd, home);
   const statePath = target.artifacts.statePath;
-  const inspection = inspectStaleWiring({
-    read: readState(target.artifacts, target.scopes),
-    settings: readSettingsForInspection(target.settingsPath),
-    isDaemonProcess: (s) => isDaemonProcess(s, rt.identity),
-  });
+  const inspection = inspectScope(
+    target,
+    rt.identity,
+    readSettingsForInspection(target.settingsPath),
+  );
   const entries = inspection.entries !== undefined ? { entries: inspection.entries } : {};
   if (inspection.kind === "no-state") {
     rt.log(`[attach] daemon は稼働していません (${statePath})`);

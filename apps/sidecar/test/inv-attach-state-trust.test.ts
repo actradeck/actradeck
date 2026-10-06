@@ -562,6 +562,12 @@ describe("INV-ATTACH-STATE-TRUST: alive 判定は同じ述語・unknown は aliv
           rt(logs),
         ),
       ).rejects.toThrow("would start");
+      // 起動の失敗 (startDaemon の throw) でも後始末が走り、stale な配線を外す (PR-B2・ADR D4 の throw 経路)。
+      expect(entries(settingsPath)).toBe(0);
+      expect(running(child)).toBe(true);
+      // 拒否起動の後始末も同じ判定 (pid 再利用は stale) で外す: 同じ state を置き直して確かめる。
+      plant(reused);
+      expect(entries(settingsPath)).toBeGreaterThan(0);
       expect(
         cleanupStaleWiring({
           target: scopeTarget("project-local", cwd, home),

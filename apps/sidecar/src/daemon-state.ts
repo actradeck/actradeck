@@ -83,9 +83,10 @@ function canonicalDir(path: string): string {
  * 親 directory の symlink (symlink 経由の cwd・package の `.claude` dir 自体を root の dir への symlink にした
  * monorepo・symlink の HOME) は同じ値に集約する。settings file 自体だけを別 file への symlink にした場合は
  * 別の値になる (file 名を解決しない)。
- * **残余 (開示・SEC-STA-R2-1)**: 値は導出した時点の親 dir の物理 path で決まる。daemon の起動中 (導出から
- * settings への書込までの数十 ms) に親 dir の symlink を別の dir へ付け替えると、state の値と実際に書いた
- * file がずれ、終了後もその file に配線が残りうる。起動中の付け替えは避けること。
+ * **残余 (開示・SEC-STA-R2-1)**: 値は導出した時点の親 dir の物理 path で決まる。runStart は settings への
+ * 書込 (merge) の**後**でもう一度導出して state を書く (PR-B2) ので、daemon の起動待ちの間の付け替えでは
+ * state と書込先は揃う (INV-ATTACH-SCOPE-LOCK で実測)。merge と再導出の間の付け替え・scope lock の key
+ * (起動の初めに導出した値) とのずれは残る。起動中の付け替えは避けること。
  */
 export function canonicalSettingsPath(settingsPath: string): string {
   const abs = resolve(settingsPath);
@@ -105,7 +106,7 @@ export interface ScopeArtifacts {
    * statePath と同じ。新しい path に state が無いときだけ {@link readState} が読む。
    */
   readonly legacyStatePath: string;
-  /** scope lock (PR-B で使う・ここでは導出だけ)。 */
+  /** scope lock (attach-scope の withScopeLock が取る・settings の lock とは別 path)。 */
   readonly lockPath: string;
   /** hook token file (書くのは T-B・在れば attach-teardown の teardownWiring が消す)。 */
   readonly tokenPath: string;
@@ -306,8 +307,9 @@ export function compareDaemonState(
  * **唯一の削除**・SEC-ENV-4 R1 / QA-DC-1 ≡ TDA-DC-1・ADR 01a10ddb D2)。stale と判定した後で別の daemon が
  * 同じ scope に state を書いていたら消さない。
  *
- * **比較と削除の間は原子的でない**: 比較した直後・削除の直前に別の daemon が state を書くと、その state を
- * 消す (lock の外・開示済みの残余・scope lock で閉じるのは PR-B2)。結果は 消した (`removed`)・中身が
+ * **比較と削除の間は原子的でない**: 比較した直後・削除の直前に別の書き手が state を書くと、その state を
+ * 消す。呼び出し側 (attach-teardown の teardownWiring・runStart の lock2) は scope lock を保持しているので、
+ * lock を取る書き手はこの間に割り込まない (lock を取らない書き手は残余)。結果は 消した (`removed`)・中身が
  * 変わっていた (`changed`)・既に無かった (`absent`)・削除に失敗した (`rm-failed`・SEC-DC-R2-2 /
  * TDA-DC-R3-2: 失敗を「消した」と報告しないため区別する)。
  */

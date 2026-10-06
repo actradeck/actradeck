@@ -42,7 +42,9 @@ import {
   runStart,
   runStatus,
   runStop,
+  shutdownSelf,
   startOutcomeExitCode,
+  stopOutcomeExitCode,
 } from "./daemon-cli.js";
 import { HOOK_TOKEN_ENV_VAR } from "./settings-merge.js";
 
@@ -280,7 +282,8 @@ async function mainDaemon(): Promise<void> {
     return;
   }
   if (args.action === "stop") {
-    runStop(args, rt);
+    // 後始末が終わっていない (incomplete) / scope lock を取得できなかったら exit 1 (裁定 01a11052 ③)。
+    process.exitCode = stopOutcomeExitCode(runStop(args, rt));
     return;
   }
 
@@ -297,17 +300,19 @@ async function mainDaemon(): Promise<void> {
   );
   if (outcome.status !== "started" || runningDaemon === undefined) {
     // dry-run / already-running / denied-* は常駐しない (daemon も起動済でない)。
-    process.exitCode = startOutcomeExitCode(outcome.status);
+    process.exitCode = startOutcomeExitCode(outcome);
     return;
   }
   const daemon = runningDaemon;
+  const hookEndpoint = outcome.hookEndpoint ?? "";
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     process.stderr.write(`[attach] ${signal} → detach + shutdown\n`);
-    // settings から ActraDeck hooks を可逆 detach し state を消す。
-    runStop(args, rt);
+    // 自分の配線を可逆 detach し state を消す (shutdownSelf: scope lock の下・別の daemon の配線と state には
+    // 触らない・kill しない・失敗しても throw せず shutdown を続ける)。
+    shutdownSelf(args, rt, hookEndpoint);
     await daemon.shutdown();
     process.exit(0);
   };
