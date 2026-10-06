@@ -21,10 +21,11 @@
  * **残余 (開示)**: etime 経路は秒単位の切り捨てと wall-clock (state 書込時刻と現在時刻) に依存する。
  * - 許容 2s 以内の pid 再利用 (state 書込 → daemon 死亡 → 同じ pid の新プロセス起動が 2 秒以内) は alive と
  *   誤判定する (kill しうる)。
- * - 書込後に時計が**戻された**場合 (QA-STA-7)、戻った量だけ「再利用された pid の起動」が早く見えるので、
- *   戻り量 − 2s より後に起動した再利用プロセスまでを alive と誤判定する (kill しうる)。
- * - 書込後に時計が**進んだ**場合、Linux 以外では生きた daemon を dead と誤判定しうる (配線を外す・kill は
- *   しない)。Linux は上記のとおり unknown に倒す。
+ * - 書込後に時計が**戻された**場合 (SEC-STA-R2-2)、state 書込から「戻り量 + 2s」以内に起動した再利用 pid は
+ *   alive と誤判定しうる (kill しうる)。本関数に OS 情報を注入して実測: 戻り量 0 / 5s / 10s で、書込から
+ *   2s / 7s / 12s 後までに起動したプロセスが alive (boot_id の可読・不可読で同じ)。
+ * - 書込後に時計が**進んだ**場合: Linux (boot_id が読める) は上記のとおり unknown に倒す (生きた旧 daemon を
+ *   dead にしないことを実プロセスで実測)。Linux 以外の挙動は未実測。
  * - Windows では `ps` が無く常に unknown。
  */
 import { execFileSync } from "node:child_process";

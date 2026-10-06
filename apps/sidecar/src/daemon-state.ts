@@ -30,7 +30,7 @@ export interface DaemonState {
   readonly pid: number;
   /** 安定 hook endpoint (`http://127.0.0.1:<port>/hook`)。 */
   readonly endpoint: string;
-  /** 配線 scope。導出値と一致しなければ corrupt。 */
+  /** 配線 scope。読む側が受け入れるラベル集合 (StateExpectation.scopes) に属さなければ corrupt。 */
   readonly scope: AttachScope;
   /** 配線した settings file の正規化済み絶対 path ({@link scopeArtifacts} の canonicalSettingsPath)。整合検査用。 */
   readonly settingsPath: string;
@@ -80,7 +80,12 @@ function canonicalDir(path: string): string {
  * **親 directory だけ** realpath し ({@link canonicalDir})、最終成分 (file 名) は lexical のまま足す。
  * settings の書込 (`fs-atomic.ts` の tmp + rename) は file 自体の symlink を通常 file に置き換えるので、
  * 最終成分まで解決すると起動の前後で値が変わる。書込が置き換える単位は (物理 dir, 名前) なのでそれに揃える。
- * 親 directory の symlink (symlink 経由の cwd・monorepo の package dir・symlink の HOME) は同じ値に集約する。
+ * 親 directory の symlink (symlink 経由の cwd・package の `.claude` dir 自体を root の dir への symlink にした
+ * monorepo・symlink の HOME) は同じ値に集約する。settings file 自体だけを別 file への symlink にした場合は
+ * 別の値になる (file 名を解決しない)。
+ * **残余 (開示・SEC-STA-R2-1)**: 値は導出した時点の親 dir の物理 path で決まる。daemon の起動中 (導出から
+ * settings への書込までの数十 ms) に親 dir の symlink を別の dir へ付け替えると、state の値と実際に書いた
+ * file がずれ、終了後もその file に配線が残りうる。起動中の付け替えは避けること。
  */
 export function canonicalSettingsPath(settingsPath: string): string {
   const abs = resolve(settingsPath);
@@ -157,7 +162,7 @@ function asProcIdentity(v: unknown): ProcIdentity | undefined {
  * state として信用できる形か (唯一の形検証)。信用できれば既知の項目だけを持つ新しい object を返し、
  * そうでなければ undefined (= corrupt)。
  *
- * - pid は正の整数・endpoint は `http://127.0.0.1:<1-65535>/hook`・scope は導出値と一致・startedAt は
+ * - pid は正の整数・endpoint は `http://127.0.0.1:<1-65535>/hook`・scope は受理ラベル集合に属する・startedAt は
  *   parse 可能・procIdentity は任意 (あるなら形が合うこと)。
  * - 新しい形: `settingsPath` (導出値と一致) + `tokenMode` (`literal` | `env`)。`wiredSettingsPaths` を併せ持つ
  *   state は corrupt。

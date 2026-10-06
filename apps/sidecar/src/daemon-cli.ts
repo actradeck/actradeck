@@ -654,8 +654,11 @@ export async function runStart(
  * (`isDaemonProcess` が alive) だけ。
  * - `sent`: 送った。`send-failed`: 送ろうとして失敗した (その間に終了した等)。
  * - `self`: 記録 pid が自プロセス (呼び元が shutdown する)。
- * - `skipped-dead`: 記録した daemon は終了済み (pid 不在・または pid が別のプロセスに再利用されている)。
- * - `skipped-identity-unknown`: 同一か確かめられない (権限が無い・`/proc` / `ps` が読めない)。送らない。
+ * - `skipped-dead`: 記録した daemon は終了済み (pid 不在・start ticks / boot_id の不一致・Linux 以外の旧形
+ *   state で etime が許容より後の起動を示す)。
+ * - `skipped-identity-unknown`: 同一か確かめられない (権限が無い・`/proc` / `ps` が読めない・Linux の旧形
+ *   state (procIdentity 無し) で etime が許容より後の起動を示す = pid 再利用と時計の前進を区別できない)。
+ *   送らない。
  * - `skipped-corrupt`: state を検証できず pid を信用できない。送らない。
  * - `no-state`: state が無い。
  */

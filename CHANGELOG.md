@@ -27,6 +27,14 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   what to run when the entries are still left, is in the notes on unclean shutdown in
   `docs/attach-mode.md`.
 
+- **`daemon stop` signals the attach daemon only when it can confirm the recorded process.** The
+  daemon now records its process start time, and `daemon stop` checks it before sending `SIGTERM`,
+  so a process that reused the recorded process ID is not signalled. The record format changed and
+  its location now follows the settings file's directory with symbolic links resolved. What happens
+  when the check is inconclusive or the record cannot be validated, where the record lives, and
+  what to do before switching back to an older build are in the unclean shutdown, record location
+  and older build notes of `docs/attach-mode.md`.
+
 - **Dependency updates for advisories published after the previous round (one critical,
   eight high, four moderate at the time of the change).** Direct bumps: Next.js
   16.3.3 → 16.3.8 (critical advisory) and Fastify 5.12.1 → 5.12.5. Transitive fixes
