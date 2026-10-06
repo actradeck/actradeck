@@ -1,5 +1,13 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { defaultExclude, defineConfig } from "vitest/config";
+
+/**
+ * Timing-ratio metatests (INV-LITERAL-RULES-LINEAR). They measure wall-clock ratios, so they run in
+ * their own project with a later `groupOrder`: vitest finishes every other sidecar file first, and
+ * this file then runs with no other test file in parallel. Thresholds, geometry and repeats are
+ * unchanged; only the scheduling regime is (task 01a10f9f).
+ */
+const TIMING_SENSITIVE_TESTS = ["test/inv-policy-categories.test.ts"];
 
 // Resolve the workspace event-model package to its TS source so tests do not
 // require a prior build step (Phase 0). Phase 2 may revisit if build artifacts
@@ -19,7 +27,25 @@ export default defineConfig({
     environment: "node",
     // SEC-2 (裁定 019fc4c6): production-DB ガード (event-model test-db-guard の単一出所)。
     setupFiles: ["./test/setup-env.ts"],
-    include: ["src/**/*.{test,spec}.ts", "test/**/*.{test,spec}.ts"],
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "sidecar",
+          include: ["src/**/*.{test,spec}.ts", "test/**/*.{test,spec}.ts"],
+          exclude: [...defaultExclude, ...TIMING_SENSITIVE_TESTS],
+          sequence: { groupOrder: 0 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "sidecar-timing",
+          include: TIMING_SENSITIVE_TESTS,
+          sequence: { groupOrder: 1 },
+        },
+      },
+    ],
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
