@@ -808,7 +808,7 @@ describe("INV-ATTACH-STATE-TRUST: 新しい path に state が無ければ旧い
     expect(running(child)).toBe(true);
   });
 
-  it("後始末の target は scopeTarget が導出したものだけ (手で組み立てた path は型で渡せない・旧: 実行時 throw)", () => {
+  it("後始末の target は scopeTarget が導出したものだけ (手で組み立てた target は型で渡せない・spread の複製を実行時に拒否するのは inv-attach-teardown の test)", () => {
     const sp = settingsOf();
     // 型の床 (TDA-STA-5): brand の無い手組みの target は渡せない。tsc -p tsconfig.test.json が検査する
     // (brand を外す変異で @ts-expect-error が未使用になり型検査が RED)。実行はしない。

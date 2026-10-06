@@ -291,6 +291,9 @@ export interface ProceededOutcome extends StartOutcomeFields {
  * module の外では {@link cleanupStaleWiring} の戻り値としてしか得られない (brand・module 内の `cleanupResult`
  * は例外・SEC-TD-3)。よって deny() を通さず直に返す拒否は型検査 (`tsc -p tsconfig.test.json`・CI の
  * type-check) で落ちる (TDA-DC-2: 規約頼みだった後始末を型の床にする)。
+ * **限界 (SEC-TD-R2-4 (a))**: module の外でも暗黙の any を経由すると `cleanup` を埋めて直に返せる。
+ * 例: `JSON.parse` の戻り値の項目を `cleanup` に入れた `DeniedOutcome` のリテラルは `tsc -p tsconfig.test.json`
+ * も eslint も通る (実測)。床が止めるのは型の付いた値で書いた直 return だけ。
  */
 export interface DeniedOutcome extends StartOutcomeFields {
   readonly status: DeniedStatus;
@@ -424,8 +427,9 @@ const cleanupResult = (kind: StaleCleanupKind): StaleCleanup => kind as StaleCle
  *   残っていることと {@link stopCommandHint} だけをログに出す。state は消さない
  *   (消すと `daemon stop` が配線を見つけられなくなる)。
  * - detach する settings と消す state / token file は {@link scopeTarget} が導出した path だけ (state の中身
- *   から path を取らない・`target` は brand 付きで手では組み立てられない)。当該 scope 以外の path を記録した
- *   state は corrupt として上の `state-invalid` に落ちる。
+ *   から path を取らない)。`target` は型の上では brand 付きで、実行時は {@link scopeTarget} が発行して凍結した
+ *   object の登録 (WeakSet) と同一性で照合し、spread で path を差し替えた複製は入口で throw する。当該 scope
+ *   以外の path を記録した state は corrupt として上の `state-invalid` に落ちる。
  * - detach が失敗したら state も token file も残す (`daemon stop` で再試行できる形を保つ)。値はログに出さない。
  */
 export function cleanupStaleWiring(opts: {
@@ -801,8 +805,9 @@ export function runStop(args: DaemonArgs, rt: DaemonRuntime): StopOutcome {
   } else if (inspection.state.pid === process.pid) {
     kill = "self";
   } else {
-    // SEC-TD-1: 後始末 (settings lock の待ちを含め最長約 2s) の間に daemon が終了し pid が再利用されうるので、
-    // 判定の時点で alive でも送る直前に同じ述語で再判定し、alive のときだけ送る。
+    // SEC-TD-1: 後始末の間に daemon が終了し pid が再利用されうるので、判定の時点で alive でも送る直前に同じ
+    // 述語で再判定し、alive のときだけ送る。後始末には settings lock の取得待ちが入る (withFileLock の既定
+    // 100 回 × 20ms ≈ 2s。この値は lock 待ちだけで、settings の読み書きと同一性判定の時間は含まない)。
     const liveness =
       inspection.liveness === "alive"
         ? isDaemonProcess(inspection.state, rt.identity)

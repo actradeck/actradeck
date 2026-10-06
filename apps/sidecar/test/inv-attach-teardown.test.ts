@@ -81,6 +81,7 @@ vi.mock("../src/daemon-state.js", async (importOriginal) => {
   };
 });
 
+const LINUX = process.platform === "linux";
 const TOKEN = "tok-teardown-0123456789abcdef0123456789";
 const DEAD_ENDPOINT = "http://127.0.0.1:9/hook";
 const OTHER_ENDPOINT = "http://127.0.0.1:10/hook";
@@ -609,7 +610,58 @@ function diesDuringDetach(settingsPath: string): IdentitySources {
   };
 }
 
+/**
+ * 後始末が配線を外した後だけ start ticks の答えを `after` に変える同一性の源 (SEC-TD-1 の R1 evidence と同じ形:
+ * `after = ticks + 1` は pid 再利用、`after = undefined` は ticks が読めない = 同一性 unknown)。
+ */
+function ticksChangeDuringDetach(
+  settingsPath: string,
+  ticks: number,
+  after: number | undefined,
+): IdentitySources {
+  return {
+    ...defaultIdentitySources,
+    readStartTicks: (pid) =>
+      pid === "self"
+        ? defaultIdentitySources.readStartTicks(pid)
+        : entries(settingsPath).length > 0
+          ? ticks
+          : after,
+  };
+}
+
 describe("INV-ATTACH-TEARDOWN: daemon stop の SIGTERM は後始末の後・送る直前に同一性を確かめ直す (SEC-TD-1 / QA-TD-1)", () => {
+  it.runIf(LINUX)(
+    "後始末の間に pid が再利用された (start ticks +1)・同一性を確かめられなくなった (ticks が読めない) なら送らない (SEC-TD-R2-1: R1 の evidence の形・対照: 変わらなければ送る)",
+    async () => {
+      const child = await spawnChild();
+      const ticks = defaultIdentitySources.readStartTicks(child.pid);
+      expect(ticks).toBeTypeOf("number");
+      const t = ticks as number;
+      const stop = (identity: IdentitySources) =>
+        runStop(parseDaemonArgs(["daemon", "stop"], cwd), { ...rt([]), identity });
+
+      const p = plantFor(child.pid);
+      const reused = stop(ticksChangeDuringDetach(p.settingsPath, t, t + 1));
+      expect(reused).toMatchObject({ status: "stopped", kill: "skipped-dead" });
+      expect(reused.killedPid).toBeUndefined();
+
+      const q = plantFor(child.pid);
+      const unknown = stop(ticksChangeDuringDetach(q.settingsPath, t, undefined));
+      expect(unknown).toMatchObject({ status: "stopped", kill: "skipped-identity-unknown" });
+      expect(unknown.killedPid).toBeUndefined();
+      await new Promise((r) => setTimeout(r, 200));
+      expect(isRunning(child.pid)).toBe(true);
+
+      // 対照 (POSITIVE): 同じ注入の形で ticks が変わらなければ送り、子は終了する。
+      const r = plantFor(child.pid);
+      const same = stop(ticksChangeDuringDetach(r.settingsPath, t, t));
+      expect(same).toMatchObject({ status: "stopped", kill: "sent", killedPid: child.pid });
+      await child.exited;
+      expect(isRunning(child.pid)).toBe(false);
+    },
+  );
+
   it("後始末の間に記録 daemon が終了したら送らない (対照: 終了していなければ送る)", async () => {
     const child = await spawnChild();
     const p = plantFor(child.pid);
@@ -689,6 +741,48 @@ describe("INV-ATTACH-TEARDOWN: 判定の後に state が無くなっていた場
 });
 
 describe("INV-ATTACH-TEARDOWN: 後始末は scopeTarget() が発行した target だけを受け取る (SEC-TD-2 ≡ TDA-TD-1)", () => {
+  it("artifacts はそのまま settingsPath だけ差し替えた target・凍結し直した spread も拒否する (SEC-TD-R2-2: R1 の vector・対照: 発行した target は通る)", () => {
+    const p = plant();
+    const real = scopeTarget("project-local", cwd, home);
+    // R1 の vector 2: 別の settings を detach させる。
+    const other = join(cwd, "other-settings.json");
+    writeFileSync(other, "{}");
+    mergeAttachHooks({
+      settingsPath: other,
+      endpoint: DEAD_ENDPOINT,
+      tokenMode: "literal",
+      token: TOKEN,
+    });
+    const otherBefore = readFileSync(other, "utf8");
+    expect(otherBefore).toContain(DEAD_ENDPOINT);
+    const sameArtifacts: ScopeTarget = { ...real, settingsPath: other };
+    expect(sameArtifacts.artifacts).toBe(real.artifacts);
+    expect(() =>
+      cleanupStaleWiring({ target: sameArtifacts, writeApproved: true, log: () => undefined }),
+    ).toThrow("scopeTarget() が発行したもの");
+    expect(readFileSync(other, "utf8")).toBe(otherBefore);
+    // 凍結した spread (凍結しているかでは見分けない)。
+    const victim = join(cwd, "victim-frozen.txt");
+    writeFileSync(victim, "precious");
+    const frozenForged: ScopeTarget = Object.freeze({
+      ...real,
+      artifacts: Object.freeze({ ...real.artifacts, tokenPath: victim }),
+    });
+    expect(Object.isFrozen(frozenForged)).toBe(true);
+    expect(() =>
+      cleanupStaleWiring({ target: frozenForged, writeApproved: true, log: () => undefined }),
+    ).toThrow("scopeTarget() が発行したもの");
+    expect(readFileSync(victim, "utf8")).toBe("precious");
+    expect(readFileSync(p.statePath, "utf8")).toBe(p.stateRaw);
+    // 対照 (POSITIVE): 発行した target は通り、自分の settings だけを外す (other と victim は残る)。
+    expect(cleanupStaleWiring({ target: real, writeApproved: true, log: () => undefined })).toBe(
+      "detached",
+    );
+    expect(entries(p.settingsPath)).toEqual([]);
+    expect(readFileSync(other, "utf8")).toBe(otherBefore);
+    expect(readFileSync(victim, "utf8")).toBe("precious");
+  });
+
   it("spread で path を差し替えた target は throw で拒否し、導出外の file に触れない (対照: 発行した target は通る)", () => {
     const p = plant();
     const victim = join(cwd, "victim.txt");

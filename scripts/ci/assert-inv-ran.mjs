@@ -203,13 +203,15 @@ export const SUITES = {
   // reporting a leftover state or token file as stopped, the pure wiring inspection, the state
   // endpoint form matching the hook shim, and the type floor that a refused start carries the
   // cleanup result. `minTests` is the exact count in the full sidecar report this step reads:
-  // 27 = 4 (teardown order / range / changed / absent and rm-failed) + 4 (cleanup and stop clean
+  // 29 = 4 (teardown order / range / changed / absent and rm-failed) + 4 (cleanup and stop clean
   // the token file slot; stop reports a leftover token file or a changed state as incomplete)
   // + 7 (inspection rows: absent / corrupt / alive / unknown / dead, entry counts, status counts)
   // + 1 (endpoint vectors against the shim) + 2 (type floors: refused start, required detach
-  // range) + 2 (stop re-checks the identity right before SIGTERM; a failed detach throws without
-  // signalling, real child processes) + 2 (state gone after the check: cleanup and stop results)
-  // + 1 (cleanup rejects a target not issued by scopeTarget(), issued targets are frozen) in
+  // range) + 3 (stop re-checks the identity right before SIGTERM: the process exited, or its pid was
+  // reused / its identity became unreadable (that row is `it.runIf(LINUX)`); a failed detach throws
+  // without signalling; real child processes) + 2 (state gone after the check: cleanup and stop
+  // results) + 2 (cleanup rejects a target not issued by scopeTarget(): spread copies, a copy with
+  // only settingsPath replaced, a re-frozen copy; issued targets are frozen) in
   // inv-attach-teardown.test.ts, + 4 (stop with a failing state delete: stale / corrupt;
   // inspection makes no fs call; CAS comparison of an unreadable state) in
   // inv-attach-teardown-fs.test.ts. The type floor itself is enforced by the type-check step
@@ -218,7 +220,7 @@ export const SUITES = {
   "sidecar-attach-teardown": {
     label: "sidecar attach teardown / inspection INV (INV-ATTACH-TEARDOWN)",
     pattern: "INV-ATTACH-TEARDOWN",
-    minTests: 27,
+    minTests: 29,
   },
 };
 
