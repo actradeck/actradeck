@@ -9,7 +9,6 @@
  *
  * temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。
  */
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -24,13 +23,14 @@ import {
   runStop,
 } from "../src/daemon-cli.js";
 import {
-  canonicalSettingsPath,
   compareDaemonState,
   readState,
   scopeArtifacts,
   writeDaemonState,
 } from "../src/daemon-state.js";
 import { mergeAttachHooks } from "../src/settings-merge.js";
+
+import { daemonStateFor, deadPid, stubRuntime } from "./helpers/attach-fixtures.js";
 
 /** 指定 path の rmSync を失敗させる / 数えている間の fs 関数呼び出しを数える。未設定なら素通し。 */
 const fsHook = vi.hoisted(() => ({
@@ -40,34 +40,26 @@ const fsHook = vi.hoisted(() => ({
   calls: [] as string[],
 }));
 vi.mock("node:fs", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("node:fs")>();
-  const wrapped: Record<string, unknown> = {};
-  for (const [name, value] of Object.entries(orig)) {
-    if (typeof value !== "function" || name === "default") {
-      wrapped[name] = value;
-      continue;
-    }
-    const fn = value as (...a: unknown[]) => unknown;
-    wrapped[name] = (...args: unknown[]) => {
+  const { injectedErrno, wrapNodeFs } = await import("./helpers/attach-fs-mock.js");
+  return wrapNodeFs(await importOriginal<typeof import("node:fs")>(), {
+    before(name, args) {
       if (fsHook.counting) fsHook.calls.push(name);
       if (
         name === "readFileSync" &&
         fsHook.failReadPath !== undefined &&
         String(args[0]) === fsHook.failReadPath
       ) {
-        throw Object.assign(new Error("EACCES (injected)"), { code: "EACCES" });
+        throw injectedErrno("EACCES");
       }
       if (
         name === "rmSync" &&
         fsHook.failRmPath !== undefined &&
         String(args[0]) === fsHook.failRmPath
       ) {
-        throw Object.assign(new Error("EACCES (injected)"), { code: "EACCES" });
+        throw injectedErrno("EACCES");
       }
-      return fn(...args);
-    };
-  }
-  return { ...wrapped, default: wrapped };
+    },
+  });
 });
 
 const STOPPED_MSG = "daemon 停止 + detach";
@@ -90,7 +82,7 @@ afterEach(() => {
 });
 
 function rt(logs: string[]): DaemonRuntime {
-  return { home, log: (m) => logs.push(m), startDaemon: () => Promise.reject(new Error("unused")) };
+  return stubRuntime(home, logs);
 }
 
 /** 死んだ pid の state + その endpoint を向いた配線 (本番 mergeAttachHooks で作る)。 */
@@ -106,14 +98,14 @@ function plantStale(): { settingsPath: string; statePath: string } {
     token: "tok-teardownfs-0123456789abcdef01234567",
   });
   const statePath = scopeArtifacts(settingsPath, home).statePath;
-  writeDaemonState(statePath, {
-    pid: spawnSync(process.execPath, ["-e", ""]).pid,
-    endpoint,
-    scope: "project-local",
-    settingsPath: canonicalSettingsPath(settingsPath),
-    startedAt: new Date(0).toISOString(),
-    tokenMode: "literal",
-  });
+  writeDaemonState(
+    statePath,
+    daemonStateFor(
+      settingsPath,
+      { pid: deadPid(), endpoint, startedAt: new Date(0).toISOString() },
+      { identity: false },
+    ),
+  );
   return { settingsPath, statePath };
 }
 

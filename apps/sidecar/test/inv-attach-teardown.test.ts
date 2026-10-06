@@ -14,7 +14,7 @@
  *
  * すべて temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。
  */
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,7 +39,6 @@ import {
 } from "../src/daemon-cli.js";
 import {
   asDaemonState,
-  canonicalSettingsPath,
   type DaemonState,
   scopeArtifacts,
   type StateRead,
@@ -47,7 +46,6 @@ import {
 } from "../src/daemon-state.js";
 import { parseHookShimArgs } from "../src/hook-shim-core.js";
 import {
-  captureSelfIdentity,
   defaultIdentitySources,
   type IdentitySources,
   type ProcessLiveness,
@@ -57,10 +55,17 @@ import {
   countActradeckEntries,
   detachAttachHooks,
   endpointOfEntry,
-  isActradeckEntry,
   isDaemonHookEndpoint,
   mergeAttachHooks,
 } from "../src/settings-merge.js";
+
+import {
+  actradeckEntries,
+  appendEntriesFor as appendEntriesForFixture,
+  daemonStateFor,
+  deadPid,
+  stubRuntime,
+} from "./helpers/attach-fixtures.js";
 
 /** runStop の判定 (readState) の直後に 1 回だけ同期実行する注入点 (未設定なら素通し)。 */
 const race = vi.hoisted(() => ({ fire: undefined as undefined | (() => void), fired: 0 }));
@@ -111,45 +116,15 @@ afterEach(() => {
   rmSync(cwd, { recursive: true, force: true });
 });
 
-function deadPid(): number {
-  const pid = spawnSync(process.execPath, ["-e", ""]).pid;
-  expect(() => process.kill(pid, 0)).toThrow(/ESRCH/);
-  return pid;
-}
-
 function stateFor(settingsPath: string, pid: number, endpoint = DEAD_ENDPOINT): DaemonState {
-  const identity = captureSelfIdentity();
-  return {
-    pid,
-    endpoint,
-    scope: "project-local",
-    settingsPath: canonicalSettingsPath(settingsPath),
-    startedAt: new Date().toISOString(),
-    tokenMode: "literal",
-    ...(identity !== undefined ? { procIdentity: identity } : {}),
-  };
+  return daemonStateFor(settingsPath, { pid, endpoint });
 }
 
-function entries(settingsPath: string): unknown[] {
-  const s = JSON.parse(readFileSync(settingsPath, "utf8")) as {
-    hooks?: Record<string, Array<{ hooks?: unknown[] }>>;
-  };
-  return Object.values(s.hooks ?? {})
-    .flat()
-    .flatMap((g) => g.hooks ?? [])
-    .filter(isActradeckEntry);
-}
+const entries = actradeckEntries;
 
 /** 本番 merge で別 file に作った entry を event ごとに settings へ連結する (self-heal を避けて 2 endpoint を並べる)。 */
 function appendEntriesFor(settingsPath: string, endpoint: string): void {
-  const other = join(dirname(settingsPath), `other-${Date.now()}.json`);
-  mergeAttachHooks({ settingsPath: other, endpoint, tokenMode: "literal", token: TOKEN });
-  const a = JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks: Record<string, unknown[]> };
-  const b = JSON.parse(readFileSync(other, "utf8")) as { hooks: Record<string, unknown[]> };
-  for (const [ev, groups] of Object.entries(b.hooks))
-    a.hooks[ev] = [...(a.hooks[ev] ?? []), ...groups];
-  writeFileSync(settingsPath, JSON.stringify(a));
-  rmSync(other, { force: true });
+  appendEntriesForFixture(settingsPath, endpoint, { token: TOKEN });
 }
 
 interface Planted {
@@ -187,11 +162,7 @@ function ctxOf(p: Planted, range: TeardownContext["range"]): TeardownContext {
 }
 
 function rt(logs: string[]): DaemonRuntime {
-  return {
-    home,
-    log: (m) => logs.push(m),
-    startDaemon: () => Promise.reject(new Error("unused")),
-  };
+  return stubRuntime(home, logs);
 }
 
 describe("INV-ATTACH-TEARDOWN: teardownWiring は detach → state → token file の 1 本の手順 (D2)", () => {

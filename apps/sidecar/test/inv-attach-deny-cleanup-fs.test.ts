@@ -10,7 +10,6 @@
  *
  * temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。
  */
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,13 +17,10 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cleanupStaleWiring, resolveSettingsPath, scopeTarget } from "../src/daemon-cli.js";
-import {
-  canonicalSettingsPath,
-  readState,
-  scopeArtifacts,
-  writeDaemonState,
-} from "../src/daemon-state.js";
+import { readState, scopeArtifacts, writeDaemonState } from "../src/daemon-state.js";
 import { mergeAttachHooks } from "../src/settings-merge.js";
+
+import { daemonStateFor, deadPid } from "./helpers/attach-fixtures.js";
 
 /**
  * 注入: 指定 path を readFileSync で 1 回読んだ直後に、その file を `rewriteTo` の中身へ書き換える (1 回だけ) /
@@ -37,23 +33,29 @@ const fsHook = vi.hoisted(() => ({
   failRmPath: undefined as string | undefined,
 }));
 vi.mock("node:fs", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("node:fs")>();
-  const readFileSync = ((...args: Parameters<typeof orig.readFileSync>) => {
-    const out = orig.readFileSync(...args);
-    if (fsHook.rewritePath !== undefined && String(args[0]) === fsHook.rewritePath) {
-      fsHook.rewritePath = undefined;
-      fsHook.rewrites += 1;
-      orig.writeFileSync(String(args[0]), fsHook.rewriteTo);
-    }
-    return out;
-  }) as typeof orig.readFileSync;
-  const rmSync = ((...args: Parameters<typeof orig.rmSync>) => {
-    if (fsHook.failRmPath !== undefined && String(args[0]) === fsHook.failRmPath) {
-      throw Object.assign(new Error("EACCES (injected)"), { code: "EACCES" });
-    }
-    return orig.rmSync(...args);
-  }) as typeof orig.rmSync;
-  return { ...orig, default: { ...orig, readFileSync, rmSync }, readFileSync, rmSync };
+  const { injectedErrno, wrapNodeFs } = await import("./helpers/attach-fs-mock.js");
+  return wrapNodeFs(await importOriginal<typeof import("node:fs")>(), {
+    before(name, args) {
+      if (
+        name === "rmSync" &&
+        fsHook.failRmPath !== undefined &&
+        String(args[0]) === fsHook.failRmPath
+      ) {
+        throw injectedErrno("EACCES");
+      }
+    },
+    after(name, args, _out, orig) {
+      if (
+        name === "readFileSync" &&
+        fsHook.rewritePath !== undefined &&
+        String(args[0]) === fsHook.rewritePath
+      ) {
+        fsHook.rewritePath = undefined;
+        fsHook.rewrites += 1;
+        (orig.writeFileSync as (p: string, d: string) => void)(String(args[0]), fsHook.rewriteTo);
+      }
+    },
+  });
 });
 
 const DETACHED_MSG = "stale state を消しました";
@@ -87,14 +89,14 @@ function plantStale(): { settingsPath: string; statePath: string; stateRaw: stri
     token: "tok-denyfs-0123456789abcdef0123456789",
   });
   const statePath = scopeArtifacts(settingsPath, home).statePath;
-  writeDaemonState(statePath, {
-    pid: spawnSync(process.execPath, ["-e", ""]).pid,
-    endpoint,
-    scope: "project-local",
-    settingsPath: canonicalSettingsPath(settingsPath),
-    startedAt: new Date(0).toISOString(),
-    tokenMode: "literal",
-  });
+  writeDaemonState(
+    statePath,
+    daemonStateFor(
+      settingsPath,
+      { pid: deadPid(), endpoint, startedAt: new Date(0).toISOString() },
+      { identity: false },
+    ),
+  );
   return { settingsPath, statePath, stateRaw: readFileSync(statePath, "utf8") };
 }
 

@@ -16,12 +16,10 @@
  *
  * すべて temp HOME / temp cwd で動かす (実 ~/.claude・~/.actradeck に触れない)。
  */
-import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -40,23 +38,28 @@ import {
   type StartOutcome,
 } from "../src/daemon-cli.js";
 import {
-  canonicalSettingsPath,
   type DaemonState,
   removeDaemonStateIfUnchanged,
   scopeArtifacts,
   writeDaemonState,
 } from "../src/daemon-state.js";
-import { captureSelfIdentity } from "../src/process-identity.js";
 import {
   ACTRADECK_MARKER,
   computeDetachedSettings,
-  isActradeckEntry,
   mergeAttachHooks,
   type TokenMode,
 } from "../src/settings-merge.js";
 import { HOOK_TOKEN_HEADER } from "../src/settings-injection.js";
 
-import { tsxBin } from "./helpers/lock-test-support.js";
+import {
+  actradeckEndpoints,
+  actradeckEntries,
+  appendEntriesFor,
+  daemonStateFor,
+  deadPid,
+  killAttachCli,
+  startAttachCli,
+} from "./helpers/attach-fixtures.js";
 
 /**
  * 競合の決定的注入点 (R1 unblock・TDA の probe R2 と同じ形)。state の唯一の reader `readState` の戻り値は
@@ -115,15 +118,6 @@ afterEach(() => {
   rmSync(cwd, { recursive: true, force: true });
 });
 
-/** 実際に終了したプロセスの pid (stale state の pid)。 */
-function deadPid(): number {
-  const r = spawnSync(process.execPath, ["-e", ""]);
-  const pid = r.pid;
-  expect(Number.isInteger(pid) && pid > 0).toBe(true);
-  expect(() => process.kill(pid, 0)).toThrow(/ESRCH/);
-  return pid;
-}
-
 /**
  * runStart が書くのと同じ形の state (新 shape・自プロセスの同一性つき・token mode は残骸の配線と同じ)。
  * pid と endpoint だけを差し替える。pid が自プロセスなら同一性も一致する (= 生きている daemon)。
@@ -134,16 +128,12 @@ function stateOf(
   pid: number,
   endpoint: string,
 ): DaemonState {
-  const identity = captureSelfIdentity();
-  return {
+  return daemonStateFor(settingsPath, {
     pid,
     endpoint,
     scope,
-    settingsPath: canonicalSettingsPath(settingsPath),
-    startedAt: new Date().toISOString(),
     tokenMode: scope === "project" ? "env" : "literal",
-    ...(identity !== undefined ? { procIdentity: identity } : {}),
-  };
+  });
 }
 
 /** listen して閉じた (= 今は誰も bind していない) loopback port。 */
@@ -205,19 +195,8 @@ async function plantResidue(scope: AttachScope, pid: number): Promise<Residue> {
   };
 }
 
-function actradeckUrls(settingsPath: string): string[] {
-  return actradeckEntries(settingsPath).map((e) => String((e as { url?: unknown }).url));
-}
-
-function actradeckEntries(settingsPath: string): unknown[] {
-  const s = JSON.parse(readFileSync(settingsPath, "utf8")) as {
-    hooks?: Record<string, Array<{ hooks?: unknown[] }>>;
-  };
-  return Object.values(s.hooks ?? {})
-    .flat()
-    .flatMap((g) => g.hooks ?? [])
-    .filter(isActradeckEntry);
-}
+/** settings の ActraDeck entry が向く endpoint (本番の endpointOfEntry で取り出す・TDA-TD-3)。 */
+const actradeckUrls = actradeckEndpoints;
 
 type RuntimeKind = "normal" | "mismatch";
 
@@ -638,20 +617,10 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
     // 別の endpoint (並走起動した daemon) の配線を同じ settings に足す。merge の self-heal は死んだ
     // endpoint を消すので、別 file で作った entry を event ごとに連結する。
     const liveEndpoint = `http://127.0.0.1:${await deadPort()}/hook`;
-    const other = join(cwd, "other.json");
-    mergeAttachHooks({
-      settingsPath: other,
-      endpoint: liveEndpoint,
-      tokenMode: "literal",
-      token: GOOD_TOKEN,
-    });
+    appendEntriesFor(r.settingsPath, liveEndpoint, { token: GOOD_TOKEN });
     const a = JSON.parse(readFileSync(r.settingsPath, "utf8")) as {
       hooks: Record<string, unknown[]>;
     };
-    const b = JSON.parse(readFileSync(other, "utf8")) as { hooks: Record<string, unknown[]> };
-    for (const [ev, groups] of Object.entries(b.hooks))
-      a.hooks[ev] = [...(a.hooks[ev] ?? []), ...groups];
-    writeFileSync(r.settingsPath, JSON.stringify(a));
     const urlsBefore = actradeckUrls(r.settingsPath);
     const deadCount = urlsBefore.filter((u) => u === r.deadEndpoint).length;
     const liveCount = urlsBefore.filter((u) => u === liveEndpoint).length;
@@ -799,15 +768,7 @@ describe("INV-ATTACH-DENY-CLEANUP: 後始末の境界", () => {
  */
 async function addUnrecordedEntries(settingsPath: string): Promise<string> {
   const endpoint = `http://127.0.0.1:${await deadPort()}/hook`;
-  const other = join(dirname(settingsPath), `unrecorded-${Date.now()}.json`);
-  mergeAttachHooks({ settingsPath: other, endpoint, tokenMode: "literal", token: GOOD_TOKEN });
-  const a = JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks: Record<string, unknown[]> };
-  const b = JSON.parse(readFileSync(other, "utf8")) as { hooks: Record<string, unknown[]> };
-  for (const [ev, groups] of Object.entries(b.hooks)) {
-    a.hooks[ev] = [...(a.hooks[ev] ?? []), ...groups];
-  }
-  writeFileSync(settingsPath, JSON.stringify(a));
-  rmSync(other, { force: true });
+  appendEntriesFor(settingsPath, endpoint, { token: GOOD_TOKEN });
   return endpoint;
 }
 
@@ -1138,67 +1099,30 @@ describe("INV-ATTACH-DENY-CLEANUP: 並走起動との競合 — 後始末の判�
   });
 });
 
-const sidecarRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-
 describe("INV-ATTACH-SIGHUP-DETACH: 実 attach CLI は SIGHUP で detach + shutdown する (SEC-ENV-4)", () => {
   it("SIGHUP (端末クローズ) で settings から ActraDeck entry が消え state も消える", async () => {
     const settingsPath = resolveSettingsPath("project-local", cwd, home);
     const statePath = scopeArtifacts(settingsPath, home).statePath;
     // 実 CLI (src/cli.ts を tsx で)。新しいプロセスグループで起動し、端末クローズと同じく SIGHUP を
-    // グループへ送る。env は最小限 (実 HOME・token・backend へは触れない)。
-    const child = spawn(tsxBin, [join(sidecarRoot, "src", "cli.ts"), "attach"], {
-      cwd,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: home,
-        ACTRADECK_WS_URL: "ws://127.0.0.1:1",
-        ACTRADECK_DB: join(cwd, "sighup.db"),
-      },
-      stdio: ["ignore", "ignore", "pipe"],
-      detached: true,
-    });
-    const pgid = child.pid as number;
-    expect(Number.isInteger(pgid) && pgid > 0).toBe(true);
-    let stderr = "";
-    child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
-    const groupGone = async (timeoutMs: number): Promise<boolean> => {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        try {
-          process.kill(-pgid, 0);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ESRCH") return true;
-        }
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      return false;
-    };
+    // グループへ送る。env は最小限 (実 HOME・token・backend へは触れない)。常駐に入るまで待つ
+    // (配線と state の書込はその前に終わっている)。
+    const cli = await startAttachCli([], { cwd, home, db: join(cwd, "sighup.db") });
     try {
-      // 常駐に入るまで待つ (配線と state の書込はその前に終わっている)。
-      const deadline = Date.now() + 20_000;
-      while (!stderr.includes("常駐中") && Date.now() < deadline) {
-        if (await groupGone(0)) break;
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      expect(stderr, stderr).toContain("常駐中");
       // POSITIVE: 起動中は配線と state がある (以降の「消えた」が空の settings で恒真にならない)。
       expect(actradeckEntries(settingsPath).length).toBeGreaterThan(0);
       expect(existsSync(statePath)).toBe(true);
 
-      process.kill(-pgid, "SIGHUP");
-      expect(await groupGone(15_000), `process group survived SIGHUP: ${stderr}`).toBe(true);
+      process.kill(-cli.pgid, "SIGHUP");
+      expect(await cli.groupGone(15_000), `process group survived SIGHUP: ${cli.stderr()}`).toBe(
+        true,
+      );
 
-      expect(stderr).toContain("SIGHUP → detach + shutdown");
+      expect(cli.stderr()).toContain("SIGHUP → detach + shutdown");
       expect(actradeckEntries(settingsPath)).toEqual([]);
       expect(existsSync(statePath)).toBe(false);
     } finally {
-      try {
-        process.kill(-pgid, "SIGKILL");
-      } catch {
-        /* 既に終了 */
-      }
       // グループの残存 0 を確認する (孤児を残さない)。
-      expect(await groupGone(5_000), "process group survived the group kill").toBe(true);
+      await killAttachCli(cli);
     }
   }, 40_000);
 });
