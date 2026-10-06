@@ -105,9 +105,12 @@ export default defineConfig({
         //   だが margin 内で実 erosion を捕捉する。
         "src/codex-spawn-manager.ts": { statements: 85, branches: 80, functions: 82, lines: 84 },
         // TDA-HS-11 (task 01a108ac-cd47): PreToolUse shim の本体 (承認ゲートの transport 境界)。
-        //   実測 (全 suite・R1 unblock 後) 96.53 / 90.29 / 90.47 / 99.3。floor はその 4〜5pt 下
-        //   (per-file-coverage-floor-below-worst-not-best・単発実測ゆえ余裕を広めに取る)。
-        "src/hook-shim-core.ts": { statements: 92, branches: 85, functions: 85, lines: 94 },
+        //   実測 (全 suite の test:coverage・task 01a10ce3 後・2026-10-06) 97.66 / 93.06 / 90.47 /
+        //   99.29 (branches は stdin 読取り例外の写像行 Q24 の追加で 92.07 から上昇)。この file を
+        //   import するのは shim INV だけで、R2 監査では 5 回とも同値 (決定的)。floor はその 4〜5pt 下に
+        //   締めた (TDA-HS-R2-1 (h)・per-file-coverage-floor-below-worst-not-best)。functions は 21 中
+        //   19 で、被覆済みの関数が 1 つ未被覆になると 18 / 21 = 85.7 で floor を割る。
+        "src/hook-shim-core.ts": { statements: 93, branches: 88, functions: 86, lines: 95 },
       },
     },
   },

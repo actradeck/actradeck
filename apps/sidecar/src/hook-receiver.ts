@@ -98,7 +98,7 @@ function isLoopbackHostHeader(value: string | undefined): boolean {
 export { tokenEquals };
 
 /**
- * 4MB 上限 (巨大 payload 防御)。PreToolUse command shim (`hook-shim.ts`) の stdin 上限
+ * 4MB 上限 (巨大 payload 防御)。PreToolUse command shim の本体 (`hook-shim-core.ts`) の stdin 上限
  * `HOOK_SHIM_MAX_INPUT_BYTES` と同値でなければならない (INV-HOOK-SHIM-FAIL-CLOSED が一致を固定)。
  */
 export const HOOK_MAX_BODY_BYTES = 4 * 1024 * 1024;

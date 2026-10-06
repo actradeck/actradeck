@@ -6,7 +6,8 @@
  * このファイルは **library** で、直接起動しても何もしない。CC が起動する entry は `hook-shim.ts`
  * (`dist/hook-shim.js`) で、そちらは判定なしで常に {@link runHookShim} を呼ぶ (SEC-HS-2: 旧版は
  * 1 ファイルで「直接起動されたか」を argv から判定しており、判定が偽になる起動形では何もせず exit 0
- * = gate が無音で外れた)。
+ * = gate が無音で外れた)。entry はこのファイルを dynamic import し、読めないときは exit 2 にする
+ * (SEC-HS-R2-1・詳細は entry の docstring)。
  *
  * ## なぜ要るか
  * Claude Code の HTTP フックは、接続失敗・非 2xx・timeout をすべて **non-blocking** として扱う
@@ -20,8 +21,11 @@
  * stdin の hook JSON (上限 {@link HOOK_SHIM_MAX_INPUT_BYTES} = daemon の受信上限と同値) を読み切り、
  * `POST http://127.0.0.1:<port>/hook` へ {@link HOOK_SHIM_TOKEN_HEADER} 付きで転送する。結果は 2 通りだけ:
  * - **200 + JSON object の body** → body を **逐語** (再整形しない) で stdout へ書き exit 0
- *   (allow / deny / `{}` の意味論は daemon が決める)。daemon の応答はすべてこの形 (hook-receiver の
- *   `respond` は常に `JSON.stringify` した object を 200 で返す)。
+ *   (allow / deny / `{}` の意味論は daemon が決める)。daemon の**判定の応答** (allow / deny / `{}`) は
+ *   この形 (hook-receiver の `respond` が `JSON.stringify` した object を 200 で返す)。daemon は判定以外に
+ *   403 (認証失敗) と 404 (method / path 不一致) も返し、shim はそれぞれ `unauthorized` /
+ *   `bad_response` で block する (hook-receiver.ts の `respond` 呼び出しは 2026-10-06 時点でこの 3 status
+ *   のみ。受信上限を超える body は daemon が接続を切るが、shim はその手前で `input_too_large` にする)。
  * - **それ以外すべて** → stderr に固定文 + exit 2。判定できないものは block (床・fail-closed)。
  *   200 以外の 2xx (204 等)・空 body・BOM 付き body・配列 / null / 非 JSON / 不正 UTF-8・応答上限
  *   超過も、daemon が返さない形なので block する (SEC-HS-7)。cause は closed enum {@link HookShimCause}。
@@ -79,7 +83,11 @@ export const HOOK_SHIM_TOKEN_HEADER = "X-ActraDeck-Hook-Token";
  */
 export const HOOK_SHIM_MAX_INPUT_BYTES = 4 * 1024 * 1024;
 
-/** daemon 応答の上限 (bytes)。承認応答は数百 bytes であり、これを超えるものは壊れた応答とみなす。 */
+/**
+ * daemon 応答の上限 (bytes)。承認応答は数百 bytes であり、これを超えるものは壊れた応答とみなす。
+ * 値 (1 MiB) は INV-HOOK-SHIM-FAIL-CLOSED が pin する (境界行はこの定数から作るので、値を変える
+ * 編集は境界行と一緒に動き、値 pin だけが捕まえる・QA-HS-R2-2 M58)。
+ */
 export const HOOK_SHIM_MAX_RESPONSE_BYTES = 1024 * 1024;
 
 /**
@@ -98,7 +106,9 @@ export const HOOK_SHIM_MAX_TOKEN_LENGTH = 1024;
 /**
  * 引数不正で終わるときに stdin を読み捨てる上限時間 (ms)。deadline が読めないので固定値を使う
  * (SEC-HS-10: 読み切らずに exit すると書き手側が EPIPE を受け、CC の版によっては non-blocking に
- * 化けうる)。CC の hook timeout より十分短い。
+ * 化けうる)。CC の hook timeout より十分短いこと (= 承認待ちを最短にしたときの shim deadline より
+ * 短く、よってその hook timeout より短い) と値 10s は INV-HOOK-SHIM-FAIL-CLOSED が pin する
+ * (QA-HS-R2-2 M13)。export しているのはその pin のため (module 外の runtime 消費者は無い)。
  */
 export const HOOK_SHIM_BAD_ARGS_DRAIN_MS = 10_000;
 
@@ -117,9 +127,11 @@ export type HookShimCause = (typeof HOOK_SHIM_CAUSES)[number];
 
 /**
  * block 時に stderr へ出す固定文 (cause 行の次の行)。モデルに届くので、gate を外す手順・コマンド・
- * endpoint を含めない (SEC-HS-3)。
+ * endpoint を含めない (SEC-HS-3)。export しない: module 外の消費者は無く、test は文面を意図的に
+ * 逐語で持つ (TDA-HS-R2-1 (i))。entry (`hook-shim.ts`) の床は core を読めないときにも走るので、同じ
+ * 文を含む stderr 全文を 2 コピー目として持つ (一致は INV が挙動で固定)。
  */
-export const HOOK_SHIM_BLOCK_MESSAGE =
+const HOOK_SHIM_BLOCK_MESSAGE =
   "This tool call was blocked because ActraDeck could not get an approval decision for it. " +
   "Ask the user to check the ActraDeck daemon; do not change ActraDeck settings or processes yourself.";
 
@@ -458,6 +470,7 @@ export async function runHookShim(
   } catch (e) {
     // work 内の失敗は各段が ShimFailure に写像する。ShimFailure でないのは stdin の読取りエラー
     // (fd が閉じている等) だけで、daemon に問い合わせられなかったものとして unreachable に倒す。
+    // この写像は in-process の「stdin の iterator が throw」行が pin する (QA-HS-R2-4 Q24)。
     const cause: HookShimCause = e instanceof ShimFailure ? e.reason : "unreachable";
     if (args.onUnreachable === "allow") return { exitCode: EXIT_ALLOW };
     return { exitCode: EXIT_BLOCK, stderr: formatHookShimStderr(cause) };

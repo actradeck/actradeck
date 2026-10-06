@@ -30,10 +30,21 @@
  * assert する。POSITIVE 対: token と request body は daemon 側で実際に受け取ったこと、response body の
  * 偽値は逐語ケースの stdout に現れること、argv の偽値は shim に渡したこと (搬送カウンタ)。
  *
+ * ## core を読めない entry (SEC-HS-R2-1)
+ * entry は core を dynamic import し、読めなければ exit 2 にする。src を TypeScript で transpile した
+ * dist 相当を一時 dir に置き、core 欠落の 3 形 (entry 単体の symlink + `--preserve-symlinks-main`・
+ * entry だけのコピー・core の途中切断) と runHookShim の reject を、`node` の実プロセスで流す。床の
+ * stderr は entry 内の 2 コピー目なので、表と同じ test 側リテラルへの全文一致で core の文と結合する。
+ *
  * ## 実行証跡
- * 表駆動ループの計測 callback 末尾でカウンタを加算し、file top-level の afterAll で表の件数と照合する
- * (`it.skip` 化・早期 return・加算行削除で RED)。CI 側の二段目は
- * `scripts/ci/assert-inv-ran.mjs --suite sidecar-hook-shim`。
+ * カウンタは**計測本体 `check()` の末尾** (全 assert の後) で加算し、file top-level の afterAll で表の
+ * 件数と照合する。捕まえる編集: `it.skip` 化・it callback / `check()` 内の早期 return (全行でも一部の行
+ * でも・QA-HS-R2-3 T1 / T1b)・加算行の削除。捕まえない編集: assert 自体の弱体化 (恒真化)。CI 側の
+ * 二段目は `scripts/ci/assert-inv-ran.mjs --suite sidecar-hook-shim`。
+ *
+ * ## 一時 dir の後始末 (QA-HS-R2-5)
+ * 偽 token・FIFO・権限違いの token file を置く dir は test ごとに作り、afterEach で消す (行が RED でも
+ * 消える)。top-level の afterAll は、作った dir が 1 つも残っていないことを assert する。
  */
 import { execFileSync, spawn } from "node:child_process";
 import {
@@ -56,7 +67,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 
+import ts from "typescript";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
@@ -70,6 +84,7 @@ import {
 import { isUsableHookToken, parseDaemonArgs } from "../src/daemon-cli.js";
 import { HOOK_MAX_BODY_BYTES, HookReceiver } from "../src/hook-receiver.js";
 import {
+  HOOK_SHIM_BAD_ARGS_DRAIN_MS,
   HOOK_SHIM_CAUSES,
   HOOK_SHIM_MAX_DEADLINE_MS,
   HOOK_SHIM_MAX_INPUT_BYTES,
@@ -168,6 +183,12 @@ type Behavior =
       readonly body: Buffer;
       readonly headers?: Readonly<Record<string, string>>;
     }
+  | {
+      // daemon と同じく token を照合する: 一致なら 200 + body、不一致なら 403。
+      readonly kind: "auth";
+      readonly token: string;
+      readonly body: Buffer;
+    }
   | { readonly kind: "destroy" } // body を受け取った後、応答せずに socket を destroy
   | { readonly kind: "truncate" } // Content-Length より短い本文を送って socket を destroy
   | { readonly kind: "hang" }; // 応答しない (deadline 超過用)
@@ -210,6 +231,12 @@ interface Case {
   /** 変種の生成元にする (env = token を env から読む版 / allow = kill-switch 版)。 */
   readonly envVariant?: boolean | undefined;
   readonly allowVariant?: boolean | undefined;
+  /**
+   * 生成された変種の印 (構造上のフィールド・TDA-HS-R2-3)。env 変種の判定を case 名の接頭辞に頼らない。
+   * `variantOf` は生成元の行 (表の構成 test が被覆を参照の一致で見る)。
+   */
+  readonly fromEnv?: boolean | undefined;
+  readonly variantOf?: Case | undefined;
   /** 起動前の準備 (戻り値は後始末)。 */
   readonly setup?: ((ctx: Ctx) => () => void) | undefined;
 }
@@ -257,6 +284,22 @@ const ok200 = (body: Buffer): Behavior => ({
   headers: { "Content-Type": "application/json" },
 });
 const OK_EMPTY_OBJECT = ok200(Buffer.from("{}"));
+
+/**
+ * token file の権限検査 `(mode & 0o077) !== 0` の単一ビット表 (QA-HS-R2-1)。所有者 0600 に group /
+ * other の r / w / x を 1 つずつ足した 6 形。マスクを 0o007 / 0o070 / 0o044 に狭める変異や、read
+ * ビットのときだけ拒否する変異は、どれかの行の token を受理して RED になる。
+ */
+const GROUP_OTHER_BITS = [0o040, 0o020, 0o010, 0o004, 0o002, 0o001] as const;
+const modeOf = (bit: number): string => `0${(0o600 | bit).toString(8)}`;
+const modeTokenName = (bit: number): string => `mode-${modeOf(bit)}.token`;
+const MODE_BIT_CASES: readonly Case[] = GROUP_OTHER_BITS.map((bit) => ({
+  name: `token file が ${modeOf(bit)} (group / other のビット 1 つ)`,
+  server: ok200(DENY_BODY),
+  args: withSpec((ctx) => ({ tokenFile: tok(ctx, modeTokenName(bit)) })),
+  cause: "token_unavailable",
+  reachesServer: false,
+}));
 
 /** 主表。env / allow の変種は下で生成する。 */
 const BASE_CASES: readonly Case[] = [
@@ -468,6 +511,7 @@ const BASE_CASES: readonly Case[] = [
     cause: "token_unavailable",
     reachesServer: false,
   },
+  ...MODE_BIT_CASES,
   {
     name: "token file が上限 +1 byte",
     server: OK_EMPTY_OBJECT,
@@ -488,6 +532,43 @@ const BASE_CASES: readonly Case[] = [
     args: withSpec((ctx) => ({ tokenFile: tok(ctx, "space.token") })),
     cause: "token_unavailable",
     reachesServer: false,
+  },
+  // ---- token file の書式 (ADR 0016 Decision 4・QA-HSH-1 / SEC-HSH-3(a)) ----
+  // server は daemon と同じく token を照合する (一致 200 deny / 不一致 403)。
+  {
+    name: "token file が CRLF 終端 (改行 1 つは token に含めない)",
+    server: { kind: "auth", token: FAKE_TOKEN_FILE, body: DENY_BODY },
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "crlf.token") })),
+    stdout: DENY_BODY,
+    reachesServer: true,
+    expectedToken: FAKE_TOKEN_FILE,
+  },
+  {
+    name: "token file が LF 2 つで終わる (剥がすのは改行 1 つだけ)",
+    server: { kind: "auth", token: FAKE_TOKEN_FILE, body: DENY_BODY },
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "lf2.token") })),
+    cause: "token_unavailable",
+    reachesServer: false,
+  },
+  {
+    // writeJson0600 で文字列を書いた形 (`JSON.stringify(t, null, 2) + "\n"`)。引用符ごと送られ
+    // daemon が拒否する。allow 変種では素通りになる (SEC-HS-R2-3)。
+    name: "token file が JSON 文字列 (引用符つきで送られ 403)",
+    server: { kind: "auth", token: FAKE_TOKEN_FILE, body: DENY_BODY },
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "json-string.token") })),
+    cause: "unauthorized",
+    reachesServer: true,
+    expectedToken: JSON.stringify(FAKE_TOKEN_FILE),
+    allowVariant: true,
+  },
+  {
+    // writeJson0600 で object を書いた形。改行と空白を含むので token として読めない。
+    name: "token file が JSON object (token として読めない)",
+    server: { kind: "auth", token: FAKE_TOKEN_FILE, body: DENY_BODY },
+    args: withSpec((ctx) => ({ tokenFile: tok(ctx, "json-object.token") })),
+    cause: "token_unavailable",
+    reachesServer: false,
+    allowVariant: true,
   },
   {
     name: "token env 未設定",
@@ -524,6 +605,33 @@ const BASE_CASES: readonly Case[] = [
     name: "localhost endpoint (daemon は 127.0.0.1 に bind)",
     server: OK_EMPTY_OBJECT,
     args: withSpec((ctx) => ({ endpoint: `http://localhost:${ctx.port}/hook` })),
+    cause: "bad_args",
+    reachesServer: false,
+  },
+  {
+    // host は 127.0.0.1 の完全一致 (127.0.0.x を受理する変異 M09 では、server が 127.0.0.1 にしか
+    // bind していないので接続拒否 = unreachable になり、cause の違いで RED・QA-HS-R2-2)。
+    name: "127.0.0.2 endpoint (127.0.0.1 以外の loopback)",
+    server: OK_EMPTY_OBJECT,
+    args: withSpec((ctx) => ({ endpoint: `http://127.0.0.2:${ctx.port}/hook` })),
+    cause: "bad_args",
+    reachesServer: false,
+  },
+  {
+    // 先頭 anchor (`^`) の固定 (SEC-HSH-4): 前に文字を足した値は bad_args。anchor を外すと部分一致で
+    // 受理され、request が不正 protocol で失敗して unreachable になり cause の違いで RED。
+    name: "endpoint の前に文字がある (先頭 anchor)",
+    server: OK_EMPTY_OBJECT,
+    args: withSpec((ctx) => ({ endpoint: `xhttp://127.0.0.1:${ctx.port}/hook` })),
+    cause: "bad_args",
+    reachesServer: false,
+  },
+  {
+    // host の `.` の escape の固定 (SEC-HSH-4): escape を外すと `127x0x0x1` を受理して名前解決へ進み、
+    // unreachable になって RED。
+    name: "endpoint の host が 127x0x0x1 (. の escape)",
+    server: OK_EMPTY_OBJECT,
+    args: withSpec((ctx) => ({ endpoint: `http://127x0x0x1:${ctx.port}/hook` })),
     cause: "bad_args",
     reachesServer: false,
   },
@@ -761,17 +869,21 @@ const ENV_CASES: readonly Case[] = BASE_CASES.filter((c) => c.envVariant === tru
   }),
   env: { [TOKEN_ENV_NAME]: FAKE_TOKEN_ENV },
   expectedToken: FAKE_TOKEN_ENV,
+  fromEnv: true,
+  variantOf: c,
 }));
 
 /**
  * `--on-unreachable allow` 変種: daemon とのやり取りの失敗は exit 0 無出力 (HTTP フック時代と同じ
  * 素通り)、bad_args は kill-switch でも block のまま、200 JSON は block と同じ bytes を転送する
  * (allow で deny を捨てない・QA-HS-1)。成功行は全行、失敗行は `allowVariant` の行と env 変種から作る。
+ * env 変種の判定は構造上の印 `fromEnv` で行う (名前の書式に依存しない・TDA-HS-R2-3)。
  */
 const ALLOW_CASES: readonly Case[] = [...BASE_CASES, ...ENV_CASES]
-  .filter((c) => c.cause === undefined || c.allowVariant === true || c.name.startsWith("[env]"))
+  .filter((c) => c.cause === undefined || c.allowVariant === true || c.fromEnv === true)
   .map((c) => ({
     ...c,
+    variantOf: c,
     name: `[allow] ${c.name}`,
     args: (ctx: Ctx) => ({ ...(c.args ?? defaultSpec)(ctx), onUnreachable: "allow" }),
     cause: c.cause === "bad_args" ? "bad_args" : undefined,
@@ -806,6 +918,12 @@ async function startServer(behavior: Behavior): Promise<{
           res.writeHead(behavior.status, behavior.headers ?? {});
           res.end(behavior.body);
           return;
+        case "auth": {
+          const ok = seen[seen.length - 1]?.token === behavior.token;
+          res.writeHead(ok ? 200 : 403, { "Content-Type": "application/json" });
+          res.end(ok ? behavior.body : Buffer.from('{"error":"forbidden"}'));
+          return;
+        }
         case "destroy":
           req.socket.destroy();
           return;
@@ -909,10 +1027,20 @@ async function expectAllGone(pgid: number, pids: readonly number[]): Promise<voi
   expect(alive, `shim processes survived cleanup (group ${pgid})`).toEqual([]);
 }
 
-/** 1 本の shim (entry) を新しいプロセスグループで起動し、後始末の対象に登録する。 */
-function spawnShim(argv: readonly string[], env: Readonly<Record<string, string>>) {
+/**
+ * 1 本の shim を新しいプロセスグループで起動し、後始末の対象に登録する。既定は src の entry を tsx で、
+ * `launch` を渡すと任意の起動形 (transpile した dist を `node` で等) で起動する。
+ */
+function spawnShim(
+  argv: readonly string[],
+  env: Readonly<Record<string, string>>,
+  launch: { readonly command: string; readonly args: readonly string[] } = {
+    command: tsxBin,
+    args: [SHIM_ENTRY],
+  },
+) {
   // 親 env を継承しない (偽 token env が既定で漏れ込まない・必要な PATH だけ渡す)。
-  const child = spawn(tsxBin, [SHIM_ENTRY, ...argv], {
+  const child = spawn(launch.command, [...launch.args, ...argv], {
     env: { PATH: process.env.PATH ?? "", ...env },
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
@@ -929,13 +1057,20 @@ afterEach(async () => {
   spawnedThisTest = [];
   const closers = closeAfterCleanup;
   closeAfterCleanup = [];
+  const dirs = dirsThisTest;
+  dirsThisTest = [];
   try {
     // 全グループを先に止める (1 つの assert 失敗で残りの kill を飛ばさない)。子孫は kill の前に採る。
     const observed = groups.map((pgid) => ({ pgid, descendants: descendantsOf(pgid) }));
     for (const { pgid } of observed) killGroup(pgid);
     for (const { pgid, descendants } of observed) await expectAllGone(pgid, descendants);
   } finally {
-    for (const close of closers) await close();
+    try {
+      for (const close of closers) await close();
+    } finally {
+      // 一時 dir は行が RED でも消す (QA-HS-R2-5)。shim を止めた後に消す。
+      for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
@@ -943,9 +1078,10 @@ function runProcess(
   argv: readonly string[],
   stdin: Buffer,
   env: Readonly<Record<string, string>>,
+  launch?: Parameters<typeof spawnShim>[2],
 ): Promise<Outcome> {
   return new Promise((resolve, reject) => {
-    const child = spawnShim(argv, env);
+    const child = spawnShim(argv, env, launch);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let stdinError: string | undefined;
@@ -980,12 +1116,23 @@ async function runInProcess(
   };
 }
 
-let workDir = "";
+/** この file が作った一時 dir の全件 (afterAll で「1 つも残っていない」を見る) と、この test の分。 */
+const createdDirs: string[] = [];
+let dirsThisTest: string[] = [];
 
-beforeAll(() => {
-  workDir = mkdtempSync(join(tmpdir(), "actradeck-hook-shim-"));
-  chmodSync(workDir, 0o700);
-  const at = (name: string): string => join(workDir, name);
+/** test ごとの一時 dir (0700)。afterEach が消す。 */
+function makeTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  chmodSync(dir, 0o700);
+  createdDirs.push(dir);
+  dirsThisTest.push(dir);
+  return dir;
+}
+
+/** test ごとの作業 dir に token file 群 (正常・各種の不正形) を置く (QA-HS-R2-5)。 */
+function makeWorkDir(): string {
+  const dir = makeTempDir("actradeck-hook-shim-");
+  const at = (name: string): string => join(dir, name);
   writeFileSync(at("hook.token"), `${FAKE_TOKEN_FILE}\n`, { mode: 0o600 });
   writeFileSync(at("empty.token"), "", { mode: 0o600 });
   mkdirSync(at("token-dir"), { mode: 0o700 });
@@ -994,14 +1141,25 @@ beforeAll(() => {
   symlinkSync(at("hook.token"), at("symlink.token"));
   writeFileSync(at("open.token"), `${FAKE_TOKEN_FILE}\n`, { mode: 0o644 });
   chmodSync(at("open.token"), 0o644); // umask に依存しない
+  for (const bit of GROUP_OTHER_BITS) {
+    writeFileSync(at(modeTokenName(bit)), `${FAKE_TOKEN_FILE}\n`, { mode: 0o600 });
+    chmodSync(at(modeTokenName(bit)), 0o600 | bit); // umask に依存しない
+  }
   writeFileSync(at("big.token"), "a".repeat(HOOK_SHIM_MAX_TOKEN_FILE_BYTES + 1), { mode: 0o600 });
   writeFileSync(at("long.token"), "a".repeat(HOOK_SHIM_MAX_TOKEN_LENGTH + 1), { mode: 0o600 });
   writeFileSync(at("space.token"), `${FAKE_TOKEN_FILE} x\n`, { mode: 0o600 });
-});
-
-afterAll(() => {
-  if (workDir !== "") rmSync(workDir, { recursive: true, force: true });
-});
+  writeFileSync(at("crlf.token"), `${FAKE_TOKEN_FILE}\r\n`, { mode: 0o600 });
+  writeFileSync(at("lf2.token"), `${FAKE_TOKEN_FILE}\n\n`, { mode: 0o600 });
+  writeFileSync(at("json-string.token"), `${JSON.stringify(FAKE_TOKEN_FILE, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  writeFileSync(
+    at("json-object.token"),
+    `${JSON.stringify({ token: FAKE_TOKEN_FILE }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  return dir;
+}
 
 function expectedTokenFor(c: Case, spec: ArgSpec, env: Readonly<Record<string, string>>): string {
   if (c.expectedToken !== undefined) return c.expectedToken;
@@ -1018,8 +1176,11 @@ const executed = {
   inProcess: 0,
   hold: 0,
   entry: 0,
+  dist: 0,
   argvCarried: Object.fromEntries(ARGV_CARRIED.map((w) => [w, 0])) as Record<string, number>,
 };
+/** transpile した dist で流す起動形の件数 (下の describe の行数)。 */
+const DIST_CASE_COUNT = 12;
 afterAll(() => {
   expect(executed.process, "every table case must have run (real process)").toBe(CASES.length);
   expect(executed.inProcess, "every table case must have run (in-process)").toBe(
@@ -1027,21 +1188,37 @@ afterAll(() => {
   );
   expect(executed.hold, "the hold case must have run").toBe(1);
   expect(executed.entry, "the entry wiring cases must have run").toBe(2);
+  expect(executed.dist, "every transpiled-dist launch case must have run").toBe(DIST_CASE_COUNT);
   // 起動した全 shim (正常終了・timeout・失敗のどれでも) のグループが残っていない。
-  // 件数の下限: 表 × 実プロセス + 保留 1 本 + entry 2 本 (空振りで恒真にならない)。
-  expect(spawnedAll.length).toBeGreaterThanOrEqual(CASES.length + 3);
+  // 件数の下限: 表 × 実プロセス + 保留 1 本 + entry 2 本 + dist の行 (空振りで恒真にならない)。
+  expect(spawnedAll.length).toBeGreaterThanOrEqual(CASES.length + 3 + DIST_CASE_COUNT);
   expect(spawnedAll.filter((pgid) => !isGone(-pgid))).toEqual([]);
+  // 一時 dir は afterEach が全部消している (QA-HS-R2-5)。POSITIVE 対: 実際に dir を作っている
+  // (表の行ごとに 1 つ以上・空振りで恒真にならない)。
+  expect(createdDirs.length).toBeGreaterThanOrEqual(CASES.length + IN_PROCESS_CASES.length);
+  expect(
+    createdDirs.filter((d) => existsSync(d)),
+    "temp dirs left behind",
+  ).toEqual([]);
   // POSITIVE 対 (stderr の negative 語彙と argv の偽値): 同じ語を argv に載せて shim に渡している。
   for (const w of ARGV_CARRIED) {
     expect(executed.argvCarried[w], `argv carried "${w}"`).toBeGreaterThanOrEqual(2);
   }
 });
 
-async function check(c: Case, run: typeof runProcess): Promise<void> {
+/**
+ * 表の 1 行を流して assert する。実行証跡のカウンタはこの関数の**末尾** (全 assert の後) で加算する
+ * (この関数の中の早期 return でも照合が RED になる・QA-HS-R2-3)。
+ */
+async function check(
+  c: Case,
+  run: typeof runProcess,
+  counter: "process" | "inProcess",
+): Promise<void> {
   const srv = await startServer(c.server);
   let teardown: (() => void) | undefined;
   try {
-    const ctx: Ctx = { port: srv.port, dir: workDir };
+    const ctx: Ctx = { port: srv.port, dir: makeWorkDir() };
     teardown = c.setup?.(ctx);
     const spec = (c.args ?? defaultSpec)(ctx);
     const env = c.env ?? {};
@@ -1103,6 +1280,9 @@ async function check(c: Case, run: typeof runProcess): Promise<void> {
     // 経過時間: deadline の相対境界 (QA-HS-2) と、塞がらないこと (SEC-HS-1)。
     if (c.minElapsedMs !== undefined) expect(elapsed).toBeGreaterThanOrEqual(c.minElapsedMs);
     if (c.maxElapsedMs !== undefined) expect(elapsed).toBeLessThan(c.maxElapsedMs);
+
+    // 実行証跡: 全 assert を通った後でだけ数える。
+    executed[counter] += 1;
   } finally {
     teardown?.();
     await srv.close();
@@ -1112,8 +1292,7 @@ async function check(c: Case, run: typeof runProcess): Promise<void> {
 describe("INV-HOOK-SHIM-FAIL-CLOSED: 実 shim プロセス (exit code / stdout bytes / stderr)", () => {
   for (const c of CASES) {
     it(c.name, { timeout: 30_000 }, async () => {
-      await check(c, runProcess);
-      executed.process += 1;
+      await check(c, runProcess, "process");
     });
   }
 });
@@ -1128,7 +1307,10 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: entry (hook-shim.ts) の結線", () => {
     it(`stdout に書けないと 200 deny でも exit 2 (output_failed・${onUnreachable})`, async () => {
       const srv = await startServer(ok200(DENY_BODY));
       closeAfterCleanup.push(srv.close);
-      const argv = toArgv({ ...defaultSpec({ port: srv.port, dir: workDir }), onUnreachable });
+      const argv = toArgv({
+        ...defaultSpec({ port: srv.port, dir: makeWorkDir() }),
+        onUnreachable,
+      });
       const child = spawnShim(argv, {});
       child.stdout.destroy();
       const errChunks: Buffer[] = [];
@@ -1156,7 +1338,7 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: 承認保留中の shim と後始末", () =
     const srv = await startServer({ kind: "hang" });
     // server は afterEach が shim を止めて ESRCH を確認した**後**に閉じる (上の closeAfterCleanup)。
     closeAfterCleanup.push(srv.close);
-    const child = spawnShim(toArgv(defaultSpec({ port: srv.port, dir: workDir })), {});
+    const child = spawnShim(toArgv(defaultSpec({ port: srv.port, dir: makeWorkDir() })), {});
     let exited = false;
     child.on("exit", () => (exited = true));
     child.stdin.on("error", () => undefined);
@@ -1178,8 +1360,7 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: 承認保留中の shim と後始末", () =
 describe("INV-HOOK-SHIM-FAIL-CLOSED: in-process parity (同じ表を runHookShim に流す)", () => {
   for (const c of IN_PROCESS_CASES) {
     it(c.name, { timeout: 30_000 }, async () => {
-      await check(c, runInProcess);
-      executed.inProcess += 1;
+      await check(c, runInProcess, "inProcess");
     });
   }
 
@@ -1193,7 +1374,7 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: in-process parity (同じ表を runHookShim
     const spy = vi.spyOn(globalThis, "setTimeout");
     try {
       const argv = toArgv({
-        ...defaultSpec({ port: srv.port, dir: workDir }),
+        ...defaultSpec({ port: srv.port, dir: makeWorkDir() }),
         deadlineMs: String(deadline),
       });
       const started = Date.now();
@@ -1210,6 +1391,263 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: in-process parity (同じ表を runHookShim
       await srv.close();
     }
   });
+
+  /**
+   * QA-HS-R2-4 Q24: ShimFailure でない例外 (stdin の読取りエラー) は `unreachable` に写像する。
+   * 実プロセスでは stdin の読取りエラーを起こせないので in-process で iterator に throw させる。
+   */
+  it("stdin の読取りが ShimFailure 以外の例外で失敗すると unreachable (allow なら素通り)", async () => {
+    const srv = await startServer(ok200(DENY_BODY));
+    try {
+      const failingStdin = (): AsyncIterable<Buffer> => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => Promise.reject(new Error("stdin read failed")),
+        }),
+      });
+      const spec = defaultSpec({ port: srv.port, dir: makeWorkDir() });
+      const blocked = await runHookShim(toArgv(spec), { stdin: failingStdin(), env: {} });
+      expect(blocked.exitCode).toBe(2);
+      expect(blocked.stdout).toBeUndefined();
+      expect(blocked.stderr).toBe(expectedStderr("unreachable"));
+      const allowed = await runHookShim(toArgv({ ...spec, onUnreachable: "allow" }), {
+        stdin: failingStdin(),
+        env: {},
+      });
+      expect(allowed).toEqual({ exitCode: 0 });
+      expect(srv.seen.length, "the daemon must not be reached").toBe(0);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  /**
+   * QA-HS-R2-2 M12: stdin が上限を超えた後の chunk は保持しない (EOF まで読み捨てる)。exit code は
+   * 保持してもしなくても同じ (`input_too_large`) なので、GC 後に chunk が回収されたかで見る。
+   * 上限内の chunk は保持される (POSITIVE 対: 同じ観測で「保持されている」を検出できる)。
+   * 最新 2 つは iterator / ループ変数が参照しうるので見ない。
+   */
+  it("stdin の上限を超えた分は保持しない (GC で回収される)", async () => {
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    const refs: WeakRef<Buffer>[] = [];
+    const chunk = (bytes: number): Buffer => {
+      const b = Buffer.alloc(bytes, 0x20);
+      refs.push(new WeakRef(b));
+      return b;
+    };
+    const POST_LIMIT = 8;
+    let observed: { withinLimitAlive: boolean; postLimitAlive: number } | undefined;
+    async function* stdin(): AsyncGenerator<Buffer> {
+      yield chunk(HOOK_SHIM_MAX_INPUT_BYTES);
+      for (let i = 0; i < POST_LIMIT; i++) yield chunk(64 * 1024);
+      // macrotask を 1 つ挟む: WeakRef 作成時に kept-alive になった対象を解放させてから GC する。
+      await new Promise((r) => setImmediate(r));
+      gc();
+      observed = {
+        withinLimitAlive: refs[0]?.deref() !== undefined,
+        postLimitAlive: refs.slice(1, POST_LIMIT - 1).filter((r) => r.deref() !== undefined).length,
+      };
+    }
+    const r = await runHookShim(
+      toArgv({ ...defaultSpec({ port: 1, dir: makeWorkDir() }), deadlineMs: "5000" }),
+      { stdin: stdin(), env: {} },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toBe(expectedStderr("input_too_large"));
+    expect(observed, "the stdin generator must have run to the end").toBeDefined();
+    expect(refs.length).toBe(1 + POST_LIMIT);
+    expect(observed?.withinLimitAlive, "chunks within the limit are kept (POSITIVE)").toBe(true);
+    expect(observed?.postLimitAlive, "chunks past the limit must not be kept").toBe(0);
+  });
+});
+
+/**
+ * entry を `node` で起動する形のうち、core を読めない 4 形 (評価が決着しない形を含む・SEC-HSH-1) と、
+ * core の runHookShim が reject する形 (SEC-HS-R2-1 / QA-HS-R2-4 Q25E)。床の行はすべて
+ * `--on-unreachable allow` 版も流す (床は kill-switch を見ない・SEC-HSH-2)。src の entry / core を
+ * TypeScript で transpile した dist 相当を一時 dir に置いて流す (tsc の出力と同じ ESM・dist の鮮度に
+ * 依存しない)。期待:
+ * - `deny`: daemon の 200 deny を逐語で通して exit 0 (起動形そのものが動くことの対照)。
+ * - `floor`: daemon に届かず exit 2・stdout 無出力・stderr は表と同じ test 側リテラルに全文一致
+ *   (entry 内の床の文 = core の文の 2 コピー目を、挙動で core と結合する)。
+ */
+interface DistCase {
+  readonly name: string;
+  readonly expect: "deny" | "floor";
+  /** `--on-unreachable allow` で起動する (床の行から生成する変種)。 */
+  readonly allow?: boolean | undefined;
+  /** dist の配置を作り、起動する entry の path と NODE_OPTIONS を返す。 */
+  readonly layout: (js: { entry: string; core: string }) => { entry: string; nodeOptions?: string };
+}
+
+function distDir(files: Readonly<Record<string, string>>): string {
+  const dir = makeTempDir("actradeck-hook-shim-dist-");
+  // sidecar の dist と同じく ESM として読ませる。
+  writeFileSync(join(dir, "package.json"), '{"type":"module"}\n');
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  return dir;
+}
+
+/** entry の symlink だけを置いた dir (symlink 先は core と並んだ完全な dist)。 */
+function symlinkOnlyDir(js: { entry: string; core: string }): string {
+  const full = distDir({ "hook-shim.js": js.entry, "hook-shim-core.js": js.core });
+  const linkDir = distDir({});
+  symlinkSync(join(full, "hook-shim.js"), join(linkDir, "hook-shim.js"));
+  return join(linkDir, "hook-shim.js");
+}
+
+const DIST_BASE_CASES: readonly DistCase[] = [
+  {
+    name: "完全な dist (対照)",
+    expect: "deny",
+    layout: (js) => ({
+      entry: join(
+        distDir({ "hook-shim.js": js.entry, "hook-shim-core.js": js.core }),
+        "hook-shim.js",
+      ),
+    }),
+  },
+  {
+    name: "entry 単体の symlink (--preserve-symlinks-main 無し・対照)",
+    expect: "deny",
+    layout: (js) => ({ entry: symlinkOnlyDir(js) }),
+  },
+  {
+    name: "entry 単体の symlink + NODE_OPTIONS=--preserve-symlinks-main (core を解決できない)",
+    expect: "floor",
+    layout: (js) => ({ entry: symlinkOnlyDir(js), nodeOptions: "--preserve-symlinks-main" }),
+  },
+  {
+    name: "entry だけを別 dir へコピー (core が無い)",
+    expect: "floor",
+    layout: (js) => ({ entry: join(distDir({ "hook-shim.js": js.entry }), "hook-shim.js") }),
+  },
+  {
+    name: "core が途中で切れている (評価できない)",
+    expect: "floor",
+    layout: (js) => ({
+      entry: join(
+        distDir({
+          "hook-shim.js": js.entry,
+          "hook-shim-core.js": js.core.slice(0, Math.floor(js.core.length / 2)),
+        }),
+        "hook-shim.js",
+      ),
+    }),
+  },
+  {
+    name: "core の runHookShim が reject する (entry の床・Q25E)",
+    expect: "floor",
+    layout: (js) => ({
+      entry: join(
+        distDir({
+          "hook-shim.js": js.entry,
+          "hook-shim-core-real.js": js.core,
+          "hook-shim-core.js":
+            'export * from "./hook-shim-core-real.js";\n' +
+            'export async function runHookShim() { throw new Error("injected"); }\n',
+        }),
+        "hook-shim.js",
+      ),
+    }),
+  },
+  {
+    // SEC-HSH-1: core の top-level await が決着しない。dynamic import は resolve も reject もせず、
+    // event loop が空になる (beforeExit の床が無いと何も書かずに exit 0)。
+    name: "core の評価が決着しない (top-level await が永久に pending)",
+    expect: "floor",
+    layout: (js) => ({
+      entry: join(
+        distDir({
+          "hook-shim.js": js.entry,
+          "hook-shim-core-real.js": js.core,
+          "hook-shim-core.js":
+            'export * from "./hook-shim-core-real.js";\n' + "await new Promise(() => {});\n",
+        }),
+        "hook-shim.js",
+      ),
+    }),
+  },
+];
+
+/** 床の行の `--on-unreachable allow` 変種 (SEC-HSH-2: core を読めないときは allow でも block)。 */
+const DIST_CASES: readonly DistCase[] = [
+  ...DIST_BASE_CASES,
+  ...DIST_BASE_CASES.filter((c) => c.expect === "floor").map((c) => ({
+    ...c,
+    name: `[allow] ${c.name}`,
+    allow: true,
+  })),
+];
+
+describe("INV-HOOK-SHIM-FAIL-CLOSED: core を読めない entry は exit 2 (transpile した dist・実プロセス)", () => {
+  const js = { entry: "", core: "" };
+  beforeAll(() => {
+    const transpile = (file: string): string =>
+      ts.transpileModule(readFileSync(file, "utf8"), {
+        fileName: file,
+        compilerOptions: {
+          module: ts.ModuleKind.ESNext,
+          target: ts.ScriptTarget.ES2022,
+          verbatimModuleSyntax: true,
+        },
+      }).outputText;
+    js.entry = transpile(SHIM_ENTRY);
+    js.core = transpile(SHIM_CORE);
+  });
+
+  it("表の構成: 対照 (deny) と床 (floor) の両方を持ち、床の行はすべて allow 版もある", () => {
+    expect(DIST_CASES.length).toBe(DIST_CASE_COUNT);
+    expect(new Set(DIST_CASES.map((c) => c.name)).size).toBe(DIST_CASES.length);
+    expect(DIST_CASES.filter((c) => c.expect === "deny").length).toBe(2);
+    expect(DIST_BASE_CASES.filter((c) => c.expect === "floor").length).toBe(5);
+    const allowFloor = DIST_CASES.filter((c) => c.allow === true);
+    expect(allowFloor.length).toBe(5);
+    expect(allowFloor.every((c) => c.expect === "floor")).toBe(true);
+    for (const base of DIST_BASE_CASES.filter((c) => c.expect === "floor")) {
+      expect(
+        allowFloor.some((a) => a.layout === base.layout),
+        `allow variant of ${base.name}`,
+      ).toBe(true);
+    }
+  });
+
+  for (const c of DIST_CASES) {
+    it(c.name, { timeout: 30_000 }, async () => {
+      const srv = await startServer(ok200(DENY_BODY));
+      try {
+        const { entry, nodeOptions } = c.layout(js);
+        const argv = toArgv({
+          ...defaultSpec({ port: srv.port, dir: makeWorkDir() }),
+          onUnreachable: c.allow === true ? "allow" : undefined,
+        });
+        const env: Record<string, string> =
+          nodeOptions === undefined ? {} : { NODE_OPTIONS: nodeOptions };
+        const r = await runProcess(argv, HOOK_INPUT, env, {
+          command: process.execPath,
+          args: [entry],
+        });
+        if (c.expect === "deny") {
+          expect(r.code, `${c.name}: exit code (stderr=${r.stderr})`).toBe(0);
+          expect(r.stderr).toBe("");
+          expect(r.stdout.equals(DENY_BODY), `${c.name}: stdout bytes`).toBe(true);
+          expect(srv.seen.length, `${c.name}: daemon reached once`).toBe(1);
+        } else {
+          // allow 変種でも exit 2 (床は kill-switch を見ない・SEC-HSH-2)。POSITIVE 対: 実際に allow を
+          // argv に載せている。
+          if (c.allow === true) expect(argv).toContain("allow");
+          expect(r.code, `${c.name}: exit code (stderr=${r.stderr})`).toBe(2);
+          expect(r.stdout.length, `${c.name}: stdout must be empty on block`).toBe(0);
+          // 表 (core 経由) と同じ test 側リテラルへの全文一致 = entry の床の文と core の文の結合。
+          expect(r.stderr, `${c.name}: stderr`).toBe(expectedStderr("unreachable"));
+          expect(srv.seen.length, `${c.name}: daemon must not be reached`).toBe(0);
+        }
+        executed.dist += 1;
+      } finally {
+        await srv.close();
+      }
+    });
+  }
 });
 
 describe("INV-HOOK-SHIM-FAIL-CLOSED: daemon / 単一出所との結合", () => {
@@ -1230,6 +1668,24 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: daemon / 単一出所との結合", () => {
     expect(USABLE_TOKEN_MAX).toHaveLength(1024);
     expect(isUsableHookToken(USABLE_TOKEN_MIN)).toBe(true);
     expect(isUsableHookToken(USABLE_TOKEN_MAX)).toBe(true);
+  });
+
+  /**
+   * QA-HS-R2-2 M58: 応答上限の値。境界行 (ちょうど / +1) はこの定数から作るので、値を変える編集は
+   * 境界行と一緒に動いて表では見えない。値そのものをここで固定する。
+   */
+  it("daemon 応答の上限は 1 MiB", () => {
+    expect(HOOK_SHIM_MAX_RESPONSE_BYTES).toBe(1024 * 1024);
+  });
+
+  /**
+   * QA-HS-R2-2 M13: 引数不正のときの stdin 読み捨て上限。引数が読めないので deadline は使えず、この
+   * 固定値が CC の hook timeout より先に終わる必要がある。承認待ちを最短にしたときの shim deadline
+   * (= hook timeout より短い・event-model の INV-APPROVAL-TIMEOUT-ORDERING) より短いことと、値 10s。
+   */
+  it("引数不正の stdin 読み捨て上限は 10s で、最短の shim deadline より短い", () => {
+    expect(HOOK_SHIM_BAD_ARGS_DRAIN_MS).toBe(10_000);
+    expect(HOOK_SHIM_BAD_ARGS_DRAIN_MS).toBeLessThan(shimDeadlineMsFor(MIN_APPROVAL_TIMEOUT_MS));
   });
 
   it("--deadline-ms の上限は shimDeadlineMsFor の最大 (= MAX 承認待ち) と同値", () => {
@@ -1302,8 +1758,8 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: daemon / 単一出所との結合", () => {
       readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
     ) as { bin: Record<string, string> };
     expect(Object.keys(pkg.bin)).toContain("agentmon");
-    expect(parseDaemonArgs("daemon stop --scope user".split(" "), workDir).action).toBe("stop");
-    expect(parseDaemonArgs("daemon start --scope user".split(" "), workDir).action).toBe("start");
+    expect(parseDaemonArgs("daemon stop --scope user".split(" "), tmpdir()).action).toBe("stop");
+    expect(parseDaemonArgs("daemon start --scope user".split(" "), tmpdir()).action).toBe("start");
     for (const w of ["agentmon", "daemon start", "daemon stop", "--scope"]) {
       expect(GATE_VOCAB_NEVER_ON_STDERR).toContain(w);
     }
@@ -1320,6 +1776,22 @@ describe("INV-HOOK-SHIM-FAIL-CLOSED: daemon / 単一出所との結合", () => {
     expect(new Set(ENV_CASES.map((c) => c.cause ?? "ok"))).toEqual(
       new Set(["unreachable", "unauthorized", "bad_response", "deadline", "ok"]),
     );
+    // env 変種は構造上の印を持ち、allow 変種は env 変種の全行 (失敗行を含む) を覆う (TDA-HS-R2-3:
+    // 判定を名前の書式に頼らない・判定を外すと env の失敗行が allow 変種から消えてここが RED)。
+    expect(ENV_CASES.length).toBeGreaterThan(0);
+    for (const e of ENV_CASES) {
+      expect(e.fromEnv, e.name).toBe(true);
+      expect(
+        ALLOW_CASES.some((a) => a.variantOf === e),
+        `allow variant of ${e.name}`,
+      ).toBe(true);
+    }
+    expect(BASE_CASES.some((c) => c.fromEnv === true)).toBe(false);
+    // token file の権限検査の単一ビット表: group / other の 6 ビットを 1 つずつ・すべて block。
+    expect(new Set(GROUP_OTHER_BITS).size).toBe(6);
+    expect(GROUP_OTHER_BITS.reduce((a, b) => a | b, 0)).toBe(0o077);
+    expect(MODE_BIT_CASES.every((c) => BASE_CASES.includes(c))).toBe(true);
+    expect(MODE_BIT_CASES.map((c) => c.cause)).toEqual(Array(6).fill("token_unavailable"));
     // allow 変種は daemon とのやり取りの失敗 (bad_args 以外) を cause ごとに 1 本以上持つ。
     const allowFrom = new Set(
       [...BASE_CASES, ...ENV_CASES]

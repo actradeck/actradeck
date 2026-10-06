@@ -140,14 +140,17 @@ export const SUITES = {
   // table of failure sources; its in-file afterAll counter catches a skipped/early-returned
   // case, and this entry is the CI-side second layer that also refuses a skipped/todo suite
   // and - through `minTests` - a table that silently shrank. `minTests` is the exact count in
-  // the full sidecar report this step reads (measured 204 after the R1 unblock: 96 table cases
-  // in the real-process describe + 94 in-process (two cases are process-only) + 2 entry wiring +
-  // 1 hold/cleanup + 1 deadline timer + 10 binding tests, all in
-  // inv-hook-shim-fail-closed.test.ts). Raise it by hand when cases are added.
+  // the full sidecar report this step reads (measured 253 after the task 01a10ce3 R1 unblock:
+  // 112 table cases in the real-process describe + 110 of them in-process (two cases are
+  // process-only) + 3 more in-process tests (deadline timer, stdin read error mapping, stdin past
+  // the limit not kept) + 2 entry wiring + 1 hold/cleanup + 12 binding tests + 13 in the
+  // transpiled-dist describe (2 controls + 5 floor forms + their 5 `allow` variants + its
+  // table-shape test), all in inv-hook-shim-fail-closed.test.ts). Raise it by hand when cases
+  // are added.
   "sidecar-hook-shim": {
     label: "sidecar PreToolUse hook shim (INV-HOOK-SHIM-FAIL-CLOSED)",
     pattern: "INV-HOOK-SHIM-FAIL-CLOSED",
-    minTests: 204,
+    minTests: 253,
   },
   // QA-DC-3 (SEC-ENV-4 R1): the refused-start cleanup of a dead daemon's wiring. Its in-file
   // afterAll counters catch a single skipped row, but skipping a whole describe also skips that
