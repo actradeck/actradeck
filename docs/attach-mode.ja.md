@@ -129,8 +129,9 @@ claude            # いつもどおり起動するだけ → ActraDeck の一覧
 > `./scripts/ad-attach codex service restart`（または `uninstall-all`→`install-all`）を実行してください。
 
 > サービスとして常駐させているときの一時停止は `ad-attach service stop` を使ってください。
-> `ad-attach stop`（= `daemon stop`）は foreground/単発起動向けで、サービスの PID を直接落とすため
-> `systemctl` の状態表示と食い違うことがあります（detach 自体はどちらでも正しく行われます）。
+> `ad-attach stop`（= `daemon stop`）は foreground/単発起動向けで、そのプロセスがその scope に記録された
+> daemon だと確かめられたときにサービスのプロセスへ `SIGTERM` を送るため、`systemctl` の状態表示と
+> 食い違うことがあります（detach 自体はどちらでも正しく行われます）。
 
 `stop`/`uninstall` 時の `SIGTERM` で CLI の shutdown ハンドラが
 `~/.claude/settings.json` から **ActraDeck の hook entry のみ** を可逆 detach します
@@ -176,6 +177,79 @@ scope と安全ガード:
 - token-mode は **literal 既定**。user scope は git-tracked でないため nonce 平文を置いても
   漏洩対象外で、かつ「配線するだけで効く」を保証します（`env` mode は CC 起動 shell に
   `ACTRADECK_HOOK_TOKEN` の export が必要となり「どこからでも」要件を壊します）。
+- **`env` token-mode の設定**: daemon の環境と Claude Code を起動する shell の両方に、**同じ値**の
+  `ACTRADECK_HOOK_TOKEN` を export してください（例: `openssl rand -hex 32` の出力）。`env` mode で
+  この変数が未設定または空のとき、daemon は起動を拒否します。値は 32 文字以上 1024 文字以下で、
+  ASCII の英字・数字と `. _ ~ + / = -` だけを使う必要があります。これを満たさない値では、`env` mode でも、
+  変数を export した `literal` mode でも daemon は起動を拒否します（Claude Code が変数参照として扱う `$` も拒否対象です）。settings に書かれるのは `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
+  と `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]` だけで、値は書かれません。daemon は Claude Code を
+  起動する shell の環境を確認できません。その shell が同じ値を export していないと、そのセッションの
+  hook はすべて拒否され、承認ゲートは働きません。user / project / local / managed のいずれかの
+  settings で `httpHookAllowedEnvVars` が定義されている場合は、その一覧に `ACTRADECK_HOOK_TOKEN` が
+  含まれている必要があります（含まれないと空のヘッダが送られ、全 hook が拒否されます）。
+- **`literal` mode も export 済みの `ACTRADECK_HOOK_TOKEN` を使います**: daemon 起動時にこの変数が
+  設定されていると、`literal` mode は起動ごとに新しい値を生成せずその値を採用し、settings に平文で
+  書きます。変数を変えない限り、再起動しても token は変わりません。起動ごとに新しい token にしたい
+  場合は、daemon の起動前に変数を unset してください。
+- **既存の `env` mode 構成を現行の entry へ移す**: daemon は起動時に entry を書き直すので、稼働中の
+  daemon を止め、同じ option で起動し直してください。
+
+  ```bash
+  node apps/sidecar/dist/cli.js daemon stop --scope <scope>   # 起動したディレクトリで実行する
+  node apps/sidecar/dist/cli.js attach --token-mode env --scope <scope> --yes   # project-local では --yes 不要
+  ```
+
+  `project` と `project-local` の daemon は起動したディレクトリに属するので、両方のコマンドをそこで
+  実行します。旧 daemon が稼働したまま `attach` を実行しても「既に稼働中」と表示されるだけで、旧 entry は
+  残ります。`./scripts/ad-attach`（`stop` と `service` を含む）が操作するのは `user` scope の daemon だけです。
+- **daemon が正常に終了しなかった場合**: daemon は `SIGINT` / `SIGTERM` / `SIGHUP`（実行中の端末を
+  閉じたときなど）で、記録が自分のものなら settings にある ActraDeck の entry をすべて外し、記録を消します。
+  別の `HOME` や別の path から同じ settings file を使って稼働中の daemon の entry も外れます。記録が無い場合と、記録を読めない・
+  検証できない場合は、自分の port を向いた entry だけを外し、記録はそのまま残します（検証できない場合は
+  `daemon stop --scope <scope>` コマンドを表示します）。記録が別のプロセスのものなら何も変えず、scope の lock
+  （後述）を取れない場合は entry を残して同じコマンドを表示します。`SIGKILL` のように処理できない形で
+  終了すると、entry は settings に残り、誰も listen していない port を向いたままになります。同じ scope で
+  次に起動が成功すると置き換わります（成功した起動は、自分の port を向いていない ActraDeck の entry を、
+  そのような daemon のものも含めてすべて外します）。起動が拒否された場合（token の検査に通らない等）と daemon の起動に
+  失敗した場合は、その scope に記録された daemon が既に終了していれば（プロセスが終了したか、その pid が
+  別のプロセスに使われている）entry を外します。起動に失敗した場合は、その後で元のエラーで終了します。
+  記録を読めない・検証できない場合や、記録されたプロセスがまだその daemon かを確かめられない場合は、
+  拒否された起動はファイルを変更しません（記録を読めない・検証できない場合は `daemon stop --scope <scope>`
+  コマンドも表示します）。外すのはその daemon に記録された port を向いた entry だけなので、同じ settings
+  file で稼働中の daemon の entry は残ります。別の `HOME` で起動した daemon、bind mount 経由でその file を
+  扱う daemon、entry を書いた後まだ記録を書いていない古い build の daemon も含みます。例外は、終了した
+  daemon と同じ port を得た daemon で、その entry は外れます。記録された port の entry を外した後もほかの
+  port を向いた ActraDeck の entry が settings に残っていれば、拒否された起動は記録を消さずに同じコマンドを
+  表示します。そのコマンドを実行すると記録された daemon を止め、settings にある ActraDeck の entry を
+  （ほかの port のものも含めて）すべて外します。
+  記録の確認と変更は scope ごとの lock（`~/.actradeck/daemon/<key>.lock`）を保持したまま行います。同じ
+  `HOME` を使い、同じ path（symbolic link は解決）から settings file を扱うこの build の daemon は、entry と
+  記録を書く間も同じ lock を保持するので、その間に走った拒否された起動は待ってからその daemon に触らずに
+  終わります。別の `attach` / `daemon` コマンドが lock を保持し続けていると、`attach` / `daemon start` は
+  何も変えずに終了コード 1 で終わり、拒否された起動は短く待った後に諦めてファイルを変更せずにメッセージを
+  表示し、`daemon stop` は何も変えずに終了コード 1 で終わります。`user` と `project`
+  scope では `--yes` を付けたときだけ外し、付けていなければファイルを変更せず、外すための
+  `daemon stop --scope <scope>` コマンドを表示します。`daemon stop --scope <scope>` は daemon の
+  プロセスが既に終了していても、その scope の記録が残っていれば使えます。`SIGTERM` を送るのは、記録された
+  daemon だと確かめられたプロセスだけです。確かめられない場合（例: 古い build が書いた記録で、その後に
+  システムの時計が進んだ場合）も entry と記録は外しますが、プロセスは止めずにメッセージを表示するので、
+  そのプロセスは手動で止めてください。記録を読めない・検証できない場合、`daemon stop` はどのプロセスにも
+  signal を送らずに、settings にある ActraDeck の entry をすべて外し、記録を消します。`daemon stop` は、
+  記録か hook token file を消せなかった場合、読んだ後に記録が書き換わっていた場合、外した後も ActraDeck の
+  entry が settings に残っていた場合（lock を取らないものがその間に書いた）に終了コード 1 で終わります。
+- **daemon の記録の場所**: 記録は settings file ごとに 1 つ、`~/.actradeck/daemon/` の下にあります。
+  記録は、symbolic link を解決した settings file のディレクトリと、書かれたままのファイル名で決まります。
+  そのため symlink 経由のディレクトリと実体のディレクトリから起動・停止した場合は同じ daemon を指し、
+  settings file 自体が別のファイルへの symbolic link の場合はそれ自身の記録を持ちます。daemon の起動中に
+  settings file のディレクトリの path 上にある symbolic link を付け替えないでください。記録と daemon が
+  書くファイルがずれ、終了後もそのファイルに daemon の entry が残ることがあります。ホームディレクトリでは
+  `project` と `user` の scope が同じファイルを使うので、どちらの scope で起動した daemon も他方の scope で
+  確認・停止でき、`--scope user` はどのディレクトリからでも使えます。
+- **古い build に戻す場合**: この記録形式より前の build は、現在の build が書いた記録を読めず、その
+  `daemon stop` と拒否された起動はエラーで終了します。戻す前に、現在の build で
+  `daemon stop --scope <scope>` を実行してください。daemon が既に終了していて古い build がそのエラーを
+  出す場合は、`~/.actradeck/daemon/` の下にあるその scope の記録ファイルを消してから古い build を
+  起動してください。起動が entry を置き換えます。
 
 ---
 
@@ -232,6 +306,26 @@ node apps/sidecar/dist/cli.js approvals clear                # 全永続承認�
   非所有 PID を kill せず **no-op**（安全側）。
 - **Claude Code の承認 relay は対応**: Claude Code Attach は hooks の応答経路で cockpit から
   allow / deny を返せます。一方で ActraDeck が起動を所有しないため、停止制御とは別物です。
+- **承認ゲートが働くのは daemon が hook に応答できる間だけです**: Claude Code は、接続できない・
+  2xx 以外が返る・timeout した HTTP hook を non-blocking なエラーとして扱い、ツール呼び出しを
+  そのまま続けます。したがって次の場合、承認ゲートはツール呼び出しを止めません。
+  - daemon が動いていない（停止中・再起動中・crash）。
+  - hook の認証が通らない（例: `env` token-mode で、Claude Code を起動した shell が同じ
+    `ACTRADECK_HOOK_TOKEN` を持っていない）。
+  - hook の request body が 4 MB を超える（daemon が接続を切ります）。
+  - Claude Code 側で hook が timeout する。ActraDeck は自分の承認待ちより長い hook timeout を書くので、
+    これが起きるのはその timeout を短くした場合だけです。
+  - settings の `allowedHttpHookUrls` が daemon の endpoint を含まない、または
+    `httpHookAllowedEnvVars` が `ACTRADECK_HOOK_TOKEN` を除外している（`env` token-mode）。
+
+  daemon が承認要求として受け付けた後の hook では、処理中のエラーは deny で返します。これとは別に、
+  Claude Code では `tool.check` を扱う mod が hook の判断を上書きでき、上書きできないのは managed
+  settings の hook だけです。ActraDeck の attach entry は user / project の settings にあります。
+
+  これらを狭めるには: daemon を service として動かす（`./scripts/ad-attach install`。unit は失敗後に
+  再起動します）、エージェントを無人で走らせる前に `daemon status` を確認する、無人実行では `dontAsk`
+  mode を使う（hook が承認しない呼び出しのうち、本来プロンプトが出るものは実行されず deny されます）。
+  daemon に届かないとき `PreToolUse` を止める変更を予定しています（[ADR 0016](adr/0016-pretooluse-command-shim-fail-closed.md)）。
 - **codex は観測専用**: 素の Codex TUI は Codex Attach（`agentmon codex attach` / `ad-attach codex install`）が
   rollout JSONL を passive tail して観測します（codex を spawn/kill しない）。承認の書き戻し（interrupt/approval relay）は
   CC 経路のみで、codex には適用しません（observe-only）。これは**未実装でなく構造的な制約**です — rollout JSONL は

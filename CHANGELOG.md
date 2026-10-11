@@ -13,6 +13,41 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ### Security
 
+- **Attach `--token-mode env` hooks now authenticate.** In `env` mode the hook entries sent the
+  token in a header the daemon does not check, so every hook was rejected and the approval gate
+  did not run. They now use the same `X-ActraDeck-Hook-Token` header as the default `literal` mode,
+  and the daemon now checks `ACTRADECK_HOOK_TOKEN` before it starts. This check also applies to
+  `literal` mode when the variable is exported, so a value that `literal` mode used to accept can
+  now make the daemon refuse to start. The accepted values and the steps to move an existing
+  `env`-mode setup over are in the `env` token-mode notes of `docs/attach-mode.md`.
+
+- **Fewer cases where attach hook entries are left pointing at a dead port.** The attach daemon
+  now also removes its entries when it receives `SIGHUP`, and a refused `attach` / `daemon start`
+  can now remove the entries left by a daemon that is no longer running. When this happens, and
+  what to run when the entries are still left, is in the notes on unclean shutdown in
+  `docs/attach-mode.md`.
+
+- **Attach start, stop and the cleanup of a dead daemon's entries hold a per-scope lock, and the
+  daemon's own shutdown no longer touches another daemon's record.** A start that fails while
+  starting the daemon now cleans up a dead daemon's entries like a refused start before it exits with
+  the original error. What the lock covers, which entries each case removes, and what happens when
+  the lock is held are in the unclean shutdown notes of `docs/attach-mode.md`.
+
+- **`daemon stop` signals the attach daemon only when it can confirm the recorded process.** The
+  daemon now records its process start time, and `daemon stop` checks it before sending `SIGTERM`,
+  so a process that reused the recorded process ID is not signalled. The record format changed and
+  its location now follows the settings file's directory with symbolic links resolved. What happens
+  when the check is inconclusive or the record cannot be validated, where the record lives, and
+  what to do before switching back to an older build are in the unclean shutdown, record location
+  and older build notes of `docs/attach-mode.md`.
+
+- **Dependency updates for advisories published after the previous round (one critical,
+  eight high, four moderate at the time of the change).** Direct bumps: Next.js
+  16.3.3 → 16.3.8 (critical advisory) and Fastify 5.12.1 → 5.12.5. Transitive fixes
+  through `pnpm.overrides`: `undici` (new window `>=7.29.1 <8`), `brace-expansion`
+  (window moved from `>=5.0.9 <6` to `>=5.0.11 <6`) and `ip-address` (new window
+  `>=10.7.1 <11`). `pnpm audit` reports no known vulnerabilities and the CI
+  dependency-audit gate (INV-DEP-AUDIT) passes again.
 - **Dependency updates clearing every open Dependabot alert (30 at the time of the
   change).** Direct bumps: Next.js 16.2.11 → 16.3.3 (critical advisory), Fastify
   5.8.5 → 5.12.1, Vitest and `@vitest/coverage-v8` 4.1.8 → 4.1.11,
@@ -23,6 +58,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   `moderate` level and the CI dependency-audit gate (INV-DEP-AUDIT) passes again.
 
 ### Changed
+
+- **`daemon stop` no longer reports an unfinished cleanup as stopped.** When it removes the attach
+  hook entries but cannot remove the daemon's record or its hook token file, or the record was
+  rewritten after `daemon stop` read it, it now says so and names what is left instead of
+  reporting that the daemon stopped. It then exits with status 1 (the cases are in the unclean
+  shutdown notes of `docs/attach-mode.md`).
 
 - **Advisory file lock: takeover and release share one detach procedure.** The rename →
   re-verify → unlink-or-restore steps were written out twice; they now live in a single helper,

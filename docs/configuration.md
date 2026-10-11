@@ -94,5 +94,7 @@ Defaults are right for almost everyone; these exist for unusual setups.
 ## Not configuration
 
 Variables you may see in the source that are **not** operator settings: `ACTRADECK_HOOK_TOKEN`
-(wired automatically into agent hook settings by `ad-attach`), and `ACTRADECK_MARKER` /
+(wired automatically into agent hook settings by `ad-attach`; the one exception is attach
+`--token-mode env`, where you set it yourself — see the token-mode notes in
+[attach-mode.md](attach-mode.md)), and `ACTRADECK_MARKER` /
 `ACTRADECK_SENTINEL` and friends (test fixtures). Leave them alone.

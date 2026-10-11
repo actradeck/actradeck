@@ -36,7 +36,17 @@ import { runApprovalsCli } from "./approvals-cli.js";
 import { Sidecar } from "./sidecar.js";
 import { AttachDaemon } from "./attach-daemon.js";
 import { CodexRolloutDaemon } from "./codex-rollout-daemon.js";
-import { type DaemonRuntime, parseDaemonArgs, runStart, runStatus, runStop } from "./daemon-cli.js";
+import {
+  type DaemonRuntime,
+  parseDaemonArgs,
+  runStart,
+  runStatus,
+  runStop,
+  shutdownSelf,
+  startOutcomeExitCode,
+  stopOutcomeExitCode,
+} from "./daemon-cli.js";
+import { HOOK_TOKEN_ENV_VAR } from "./settings-merge.js";
 
 function parseArgs(argv: readonly string[]): {
   provider: string;
@@ -230,9 +240,9 @@ async function mainDaemon(): Promise<void> {
   const wsUrl = resolveWsUrl();
   const dbPath = process.env.ACTRADECK_DB ?? defaultDbPath();
   const ingestToken = process.env.INGEST_TOKEN;
-  // literal token-mode の nonce: env override (ACTRADECK_HOOK_TOKEN) があれば流用、
-  // 無ければ daemon が自前採番する (AttachDaemon 側既定)。
-  const envHookToken = process.env.ACTRADECK_HOOK_TOKEN;
+  // hook 認証トークン: env (ACTRADECK_HOOK_TOKEN) があれば流用、無ければ daemon が自前採番する
+  // (AttachDaemon 側既定)。env token-mode ではこの値が必須 (runStart が未設定を拒否する・SEC-FC-2)。
+  const envHookToken = process.env[HOOK_TOKEN_ENV_VAR];
   // idle-reaper の env 上書き (QA-2 / ADR 019eb448)。誤 reap 窓の運用調整用。
   const reaperConfig = resolveAttachReaperConfig();
 
@@ -272,11 +282,12 @@ async function mainDaemon(): Promise<void> {
     return;
   }
   if (args.action === "stop") {
-    runStop(args, rt);
+    // 後始末が終わっていない (incomplete) / scope lock を取得できなかったら exit 1 (裁定 01a11052 ③)。
+    process.exitCode = stopOutcomeExitCode(runStop(args, rt));
     return;
   }
 
-  // start: daemon を起動して settings を配線し、常駐する (SIGINT/SIGTERM で detach + shutdown)。
+  // start: daemon を起動して settings を配線し、常駐する (SIGINT/SIGTERM/SIGHUP で detach + shutdown)。
   const outcome = await runStart(
     args,
     {
@@ -289,24 +300,27 @@ async function mainDaemon(): Promise<void> {
   );
   if (outcome.status !== "started" || runningDaemon === undefined) {
     // dry-run / already-running / denied-* は常駐しない (daemon も起動済でない)。
-    if (outcome.status === "denied-needs-confirm" || outcome.status === "denied-token-leak") {
-      process.exitCode = 1;
-    }
+    process.exitCode = startOutcomeExitCode(outcome);
     return;
   }
   const daemon = runningDaemon;
+  const hookEndpoint = outcome.hookEndpoint ?? "";
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     process.stderr.write(`[attach] ${signal} → detach + shutdown\n`);
-    // settings から ActraDeck hooks を可逆 detach し state を消す。
-    runStop(args, rt);
+    // shutdownSelf (scope lock の下・kill しない・失敗しても throw せず shutdown を続ける): state が自分の pid なら
+    // settings の全 ActraDeck entry (lock を共有しない daemon の配線も含む・base と同じ) と state を外す。state が
+    // 無い / corrupt なら自分の endpoint の entry だけを外し state に触らない。state が別 pid なら何も触らない。
+    shutdownSelf(args, rt, hookEndpoint);
     await daemon.shutdown();
     process.exit(0);
   };
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  // SIGHUP (端末クローズ) も同じ経路へ (SEC-ENV-4)。既定動作のまま落ちると配線が死んだ port を向いて残る。
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => void shutdown(signal));
+  }
   process.stderr.write(
     `[attach] 常駐中 (endpoint=${outcome.hookEndpoint ?? "?"})。CC を起動すると hook が届きます。Ctrl-C で detach。\n`,
   );

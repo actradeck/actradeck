@@ -1,5 +1,15 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { defaultExclude, defineConfig } from "vitest/config";
+
+/**
+ * Timing-ratio metatests (INV-LITERAL-RULES-LINEAR). They measure wall-clock ratios, so they run in
+ * their own project with a later `groupOrder`: vitest finishes every other sidecar test file first,
+ * and this file then runs with no other sidecar test file in parallel. Other packages started by the
+ * same `pnpm -r` run are not ordered by this. Thresholds, geometry and repeats are unchanged; only
+ * the scheduling regime is (task 01a10f9f). Each project gets the production-DB guard through
+ * `extends: true` (INV-TEST-DB-GUARD-WIRING in test/inv-vitest-projects-db-guard.test.ts).
+ */
+const TIMING_SENSITIVE_TESTS = ["test/inv-policy-categories.test.ts"];
 
 // Resolve the workspace event-model package to its TS source so tests do not
 // require a prior build step (Phase 0). Phase 2 may revisit if build artifacts
@@ -19,12 +29,32 @@ export default defineConfig({
     environment: "node",
     // SEC-2 (裁定 019fc4c6): production-DB ガード (event-model test-db-guard の単一出所)。
     setupFiles: ["./test/setup-env.ts"],
-    include: ["src/**/*.{test,spec}.ts", "test/**/*.{test,spec}.ts"],
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "sidecar",
+          include: ["src/**/*.{test,spec}.ts", "test/**/*.{test,spec}.ts"],
+          exclude: [...defaultExclude, ...TIMING_SENSITIVE_TESTS],
+          sequence: { groupOrder: 0 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "sidecar-timing",
+          include: TIMING_SENSITIVE_TESTS,
+          sequence: { groupOrder: 1 },
+        },
+      },
+    ],
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
       // cli.ts は exec エントリ (process.argv/exit/PTY 起動) で e2e 担保。index.ts は re-export。
-      exclude: ["src/cli.ts", "src/index.ts", "src/**/*.{test,spec}.ts"],
+      // hook-shim.ts は PreToolUse shim の exec エントリ (process に結線するだけ) で、
+      // INV-HOOK-SHIM-FAIL-CLOSED が実プロセスとして起動して担保する (in-process の計測に乗らない)。
+      exclude: ["src/cli.ts", "src/index.ts", "src/hook-shim.ts", "src/**/*.{test,spec}.ts"],
       reporter: ["text", "json-summary"],
       // QA-3: testing.md 目標を CI 強制 (閾値割れで exit≠0)。コアは include 全体で底上げ。
       thresholds: {
@@ -102,6 +132,17 @@ export default defineConfig({
         //   per-file-coverage-floor-below-worst-not-best)。fn は少関数ゆえ coarse (1 関数脱落で ~12pt 降下)
         //   だが margin 内で実 erosion を捕捉する。
         "src/codex-spawn-manager.ts": { statements: 85, branches: 80, functions: 82, lines: 84 },
+        // TDA-HS-11 (task 01a108ac-cd47): PreToolUse shim の本体 (承認ゲートの transport 境界)。
+        //   実測 (全 suite の test:coverage・task 01a10ce3 後・2026-10-06) 97.66 / 93.06 / 90.47 /
+        //   99.29 (branches は stdin 読取り例外の写像行 Q24 の追加で 92.07 から上昇)。この file を
+        //   import するのは shim INV だけで、R2 監査では 5 回とも同値 (決定的)。floor はその 4〜5pt 下に
+        //   締めた (TDA-HS-R2-1 (h)・per-file-coverage-floor-below-worst-not-best)。functions は 21 中
+        //   19 で、被覆済みの関数が 1 つ未被覆になると 18 / 21 = 85.7 で floor を割る。
+        "src/hook-shim-core.ts": { statements: 93, branches: 88, functions: 86, lines: 95 },
+        // QA-STA-8 (task 01a10c42 PR-A): `daemon stop` が SIGTERM を送るかを決める同一性判定
+        //   (process-identity.ts)。test:coverage を 3 回実測して 3 回とも 91.8 / 83.92 / 100 / 96.07
+        //   (分散 0)。floor はその 4〜5pt 下 (per-file-coverage-floor-below-worst-not-best)。
+        "src/process-identity.ts": { statements: 87, branches: 79, functions: 95, lines: 92 },
       },
     },
   },

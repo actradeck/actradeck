@@ -144,9 +144,9 @@ claude            # just start it as usual → it appears in ActraDeck's list wi
 > in the env of the running processes.
 
 > To temporarily pause while running as a service, use `ad-attach service stop`. `ad-attach stop`
-> (= `daemon stop`) is for foreground / one-shot startup and directly kills the service's PID, so
-> it can disagree with `systemctl`'s status display (the detach itself is done correctly either
-> way).
+> (= `daemon stop`) is for foreground / one-shot startup. It sends `SIGTERM` to the service's
+> process when it can confirm that the process is the daemon recorded for that scope, so it can
+> disagree with `systemctl`'s status display (the detach itself is done correctly either way).
 
 On `SIGTERM` at `stop`/`uninstall`, the CLI's shutdown handler reversibly detaches **only
 ActraDeck's hook entries** from `~/.claude/settings.json` (the hooks you added are preserved).
@@ -192,6 +192,96 @@ Scope and safety guards:
   plaintext is not a leak target, and it guarantees "just wiring makes it work" (`env` mode
   requires exporting `ACTRADECK_HOOK_TOKEN` in CC's startup shell, which breaks the "from
   anywhere" requirement).
+- **`env` token-mode setup.** Export the **same** `ACTRADECK_HOOK_TOKEN` value in the daemon's
+  environment and in the shell that starts Claude Code (for example a value from
+  `openssl rand -hex 32`). In `env` mode the daemon refuses to start when the variable is unset or
+  empty. The value must be 32 to 1024 characters long and use only ASCII letters, ASCII digits and
+  `. _ ~ + / = -`; otherwise the daemon refuses to start, in `env` mode and also in `literal` mode when the variable
+  is exported (this includes `$`,
+  which Claude Code would treat as a variable reference). The settings file holds only `X-ActraDeck-Hook-Token: $ACTRADECK_HOOK_TOKEN`
+  plus `allowedEnvVars: ["ACTRADECK_HOOK_TOKEN"]`, never the value. The daemon cannot see the
+  environment of the shell that starts Claude Code: if that shell does not export the same value,
+  every hook is rejected and the approval gate does not run for that session. If any of your
+  settings files (user, project, local or managed) defines `httpHookAllowedEnvVars`, that list
+  must include `ACTRADECK_HOOK_TOKEN`; otherwise Claude Code sends an empty header and every hook
+  is rejected.
+- **`literal` mode also uses an exported `ACTRADECK_HOOK_TOKEN`.** If the variable is set when the
+  daemon starts, `literal` mode adopts that value instead of generating a fresh one per start, and
+  writes it in plaintext into the settings file. The token then stays the same across restarts
+  until you change the variable. Unset it before starting the daemon if you want a new token on
+  every start.
+- **Moving an existing `env`-mode setup to the current entries.** The daemon rewrites its entries
+  when it starts, so stop the running daemon and start it again with the same options:
+
+  ```bash
+  node apps/sidecar/dist/cli.js daemon stop --scope <scope>   # run in the directory you started it from
+  node apps/sidecar/dist/cli.js attach --token-mode env --scope <scope> --yes   # drop --yes for project-local
+  ```
+
+  For `project` and `project-local` the daemon belongs to the directory you started it in, so run
+  both commands there. Running `attach` while the old daemon is still up only reports that it is
+  already running and leaves the old entries in place. `./scripts/ad-attach` (its `stop` and
+  `service` commands included) acts on the `user`-scope daemon only.
+- **When the daemon did not shut down cleanly.** On `SIGINT`, `SIGTERM` and `SIGHUP` (for example
+  when you close the terminal it runs in) the daemon removes every ActraDeck entry from the
+  settings file and its record when the record is its own; that includes the entries of a running
+  daemon that uses the same settings file with another `HOME` or through another path. When there
+  is no record, or the record cannot be read or validated, it removes
+  only the entries that point at its own port and leaves the record as it is (it prints the
+  `daemon stop --scope <scope>` command when the record cannot be validated). When the record
+  belongs to another process it changes nothing, and when it cannot take the scope's lock (below) it
+  leaves its entries and prints that command. If it is killed in a way it cannot handle, such as
+  `SIGKILL`, its entries stay in the settings file and point at a port nothing listens on. The next
+  successful start in the same scope replaces them (a successful start removes every ActraDeck entry
+  that does not point at its own port, including those of such daemons). A start that is refused (for example because the
+  token check fails), or that fails while starting the daemon, removes them if the daemon recorded
+  for that scope is no longer running (its process has exited, or its process ID now belongs to
+  another process); a failed start then exits with the original error. If the record cannot be read
+  or validated, or it cannot be confirmed whether the recorded process is still the daemon, a refused
+  start leaves the file unchanged; when the record cannot be read or validated it also prints the
+  `daemon stop --scope <scope>` command. It removes only the entries that point at the port recorded
+  for that daemon, so a daemon that is running with the same settings file keeps its entries,
+  including one started with another `HOME`, one that reached the file through a bind mount, and one
+  of an older build that has written its entries but not yet its record. The exception is a daemon
+  that is given the same port as the daemon that exited: its entries are removed. When ActraDeck
+  entries for other ports are still in the settings file after it removed the ones for the recorded
+  port, a refused start keeps the record and prints the same command. Running that command stops the
+  recorded daemon and removes every ActraDeck entry from the settings file, including entries for
+  other ports.
+  The record check and the changes are made while holding a lock for the scope
+  (`~/.actradeck/daemon/<key>.lock`). Daemons of this build that use the same `HOME` and reach the
+  settings file through the same path (symbolic links resolved) take the same lock while they write
+  their entries and their record, so a refused start that runs at that moment waits and then leaves
+  that daemon alone. When another `attach` or `daemon` command keeps holding the lock,
+  `attach` / `daemon start` exits with status 1 without changing anything, a refused start gives up
+  after a short wait, leaves the file unchanged and prints a message, and `daemon stop` exits with
+  status 1 without changing anything.
+  For `user` and `project` scope a refused start removes them only when you passed `--yes`;
+  otherwise it leaves the file unchanged and prints the `daemon stop --scope <scope>` command that
+  removes them. `daemon stop --scope <scope>` works even when the daemon process has already exited,
+  as long as the record for that scope is still there. It sends `SIGTERM` only to a process it can
+  confirm is the recorded daemon. When it cannot confirm this (for example for a record written by
+  an older build after the system clock moved forward), it still removes the entries and the record,
+  leaves the process running and prints a message; stop that process yourself. When the record
+  cannot be read or validated, `daemon stop` removes every ActraDeck entry from the settings file
+  and the record without signalling any process. `daemon stop` exits with status 1 when it cannot
+  remove the record or the hook token file, when the record was rewritten after it read it, or when
+  ActraDeck entries are still in the settings file after it removed them (something that does not
+  take the lock wrote them in between).
+- **Where the daemon keeps its record.** There is one record per settings file under
+  `~/.actradeck/daemon/`. It is keyed by the directory of the settings file with symbolic links
+  resolved, plus the file name as written. Starting from a symlinked directory and from the real
+  directory therefore refer to the same daemon, while a settings file that is itself a symbolic link
+  to another file has its own record. Do not repoint a symbolic link on the path of the settings
+  file's directory while a daemon is starting: the record and the file the daemon writes can then
+  differ, and the daemon's entries can stay in that file after it exits. In your home directory the
+  `project` and `user` scopes use the same file, so a daemon started with either scope can be
+  checked and stopped with the other, and `--scope user` works from any directory.
+- **Switching back to an older build.** Builds from before this record format cannot read the record
+  the current build writes: their `daemon stop` and a refused start exit with an error. Before
+  switching back, run `daemon stop --scope <scope>` with the current build. If the daemon has
+  already exited and an older build reports that error, delete the scope's record file under
+  `~/.actradeck/daemon/` and start the older build; the start replaces the entries.
 
 ---
 
@@ -258,6 +348,28 @@ Security assumption: the store is, like `file-lock`, a **single-operator / local
 - **Claude Code's approval relay is supported**: Claude Code Attach can return allow / deny from
   the cockpit via the hooks' response path. Meanwhile, because ActraDeck does not own startup,
   this is separate from stop control.
+- **The approval gate works only while the daemon answers the hook.** Claude Code treats an HTTP
+  hook that cannot connect, gets a non-2xx response, or times out as a non-blocking error and
+  continues with the tool call. So the gate does not hold a tool call when:
+  - the daemon is not running (stopped, restarting, or crashed);
+  - the hook fails authentication (for example, in `env` token-mode the shell that started
+    Claude Code does not have the same `ACTRADECK_HOOK_TOKEN`);
+  - the hook request body is larger than 4 MB (the daemon drops the connection);
+  - the hook times out on the Claude Code side. ActraDeck writes a hook timeout longer than its
+    own approval wait, so this happens only if that timeout is lowered;
+  - a settings file's `allowedHttpHookUrls` does not include the daemon's endpoint, or its
+    `httpHookAllowedEnvVars` excludes `ACTRADECK_HOOK_TOKEN` (`env` token-mode).
+
+  Once the daemon has accepted a hook as an approval request, an error while handling it is
+  answered with a deny. Separately, Claude Code lets a mod that handles `tool.check` override a
+  hook's decision unless the hook comes from managed settings, and ActraDeck's attach entries are
+  in user or project settings.
+
+  To narrow these cases: run the daemon as a service (`./scripts/ad-attach install`; the unit
+  restarts it after a failure), check `daemon status` before leaving an agent running unattended,
+  and for unattended runs prefer `dontAsk` mode, where a call that would otherwise prompt is
+  denied rather than run when no hook approves it. A change that makes `PreToolUse` block when the
+  daemon cannot be reached is planned; see [ADR 0016](adr/0016-pretooluse-command-shim-fail-closed.md).
 - **codex is observation-only**: the bare Codex TUI is observed by Codex Attach (`agentmon codex
   attach` / `ad-attach codex install`) passively tailing the rollout JSONL (without
   spawning/killing codex). The write-back of approvals (interrupt/approval relay) is CC-path only

@@ -321,6 +321,8 @@ run_verify_job() {
   rc=0
   pnpm --filter @actradeck/event-model exec vitest run --reporter=json --outputFile=/tmp/event-model-test.json || rc=$?
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/event-model-test.json --suite strip-comments
+  # TDA-HS-5: same report, the approval timeout ordering INV ran.
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/event-model-test.json --suite event-model-timeout-ordering
 
   step "verify: Test (telemetry-contract coverage gate)"
   pnpm --filter @actradeck/telemetry-contract run test:coverage
@@ -344,6 +346,19 @@ run_verify_job() {
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-linear
   # QA-FLV2-R2-4: mirrors ci.yml — same report, third suite (advisory file-lock INV ran).
   RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-filelock
+  # QA-FC-R2-4: mirrors ci.yml — same report, fourth suite (approval fail-closed INV ran).
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-approval-fail-closed
+  # Task 01a108ac-cd47: mirrors ci.yml - same report, the PreToolUse shim INV ran.
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-hook-shim
+  # QA-DC-3: mirrors ci.yml - same report, the sidecar-attach-deny-cleanup and
+  # sidecar-attach-sighup suites (attach refused-start cleanup / SIGHUP detach INV ran).
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-deny-cleanup
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-sighup
+  # Task 01a10c42 PR-A: mirrors ci.yml - same report, the attach state trust INV ran.
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-state-trust
+  # Task 01a10c42 PR-B1: mirrors ci.yml - same report, the attach teardown INV ran.
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-teardown
+  RC=$rc node scripts/ci/assert-inv-ran.mjs /tmp/sidecar-e2e.json --suite sidecar-attach-scope-lock
 
   step "verify: Test (webui coverage gate)"
   pnpm --filter @actradeck/webui run test:coverage

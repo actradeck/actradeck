@@ -97,7 +97,11 @@ function isLoopbackHostHeader(value: string | undefined): boolean {
  */
 export { tokenEquals };
 
-const MAX_BODY = 4 * 1024 * 1024; // 4MB 上限 (巨大 payload 防御)。
+/**
+ * 4MB 上限 (巨大 payload 防御)。PreToolUse command shim の本体 (`hook-shim-core.ts`) の stdin 上限
+ * `HOOK_SHIM_MAX_INPUT_BYTES` と同値でなければならない (INV-HOOK-SHIM-FAIL-CLOSED が一致を固定)。
+ */
+export const HOOK_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -105,7 +109,7 @@ function readBody(req: IncomingMessage): Promise<string> {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => {
       size += c.length;
-      if (size > MAX_BODY) {
+      if (size > HOOK_MAX_BODY_BYTES) {
         reject(new Error("payload too large"));
         req.destroy();
         return;
@@ -397,7 +401,9 @@ export class HookReceiver {
     // **全 subagent ツール結果**が "[Tool result missing due to internal error]" に化ける
     // (A/B/A + 中間 proxy の応答書換で実証・upstream anthropics/claude-code#67221。
     // 空 {} と明示 allow/deny は main / subagent 両方で正常)。空 JSON は仕様上
-    // 「no opinion = 通常 permission flow へ委譲」で "defer" と意味的に同一。
+    // 「no opinion = 通常 permission flow へ委譲」。上流の "defer" はこれと**別物**で、`-p` の
+    // 非対話モードでだけ有効・ツールを実行せずにプロセスを終了する (対話セッションでは警告して無視)
+    // (code.claude.com/docs/en/hooks・2026-10-05 確認・SEC-FC-5)。ここで欲しいのは前者。
     if (decision.behavior === "defer") {
       // PreToolUse は payload を normalize して観測 (command.started 等) する。
       // PermissionRequest の defer はそのまま通常フローへ (waiting.approval を出さない)。

@@ -216,7 +216,7 @@ describe("QA-1: handleApprovalGate HTTP round-trip (INV-APPROVAL)", () => {
     }
   });
 
-  it("INV-APPROVAL-FAIL-CLOSED: pre-gate identity failure returns PermissionRequest deny", async () => {
+  it("INV-APPROVAL-FAIL-CLOSED: identity resolution failure returns PermissionRequest deny", async () => {
     const receiver = new HookReceiver({
       sink: { emit: vi.fn() } as unknown as EventSink,
       approvalBridge: new ApprovalBridge({ timeoutMs: 1000 }),
