@@ -25,13 +25,13 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | Apache-2.0 | @humanfs/types | 0.15.0 |
 | Apache-2.0 | @humanwhocodes/module-importer | 1.0.1 |
 | Apache-2.0 | @humanwhocodes/retry | 0.4.3 |
-| Apache-2.0 | @img/sharp-linux-x64 | 0.35.4 |
+| Apache-2.0 | @img/sharp-linux-x64 | 0.35.5 |
 | Apache-2.0 | @swc/helpers | 0.5.23 |
 | Apache-2.0 | baseline-browser-mapping | 2.11.25 |
 | Apache-2.0 | detect-libc | 2.1.2 |
 | Apache-2.0 | eslint-visitor-keys | 3.4.3, 4.2.1, 5.0.1 |
 | Apache-2.0 | expect-type | 1.3.0 |
-| Apache-2.0 | sharp | 0.35.4 |
+| Apache-2.0 | sharp | 0.35.5 |
 | Apache-2.0 | tunnel-agent | 0.6.0 |
 | Apache-2.0 | typescript | 6.0.3 |
 | Apache-2.0 | workerd | 1.20260811.1, 1.20260815.1 |
@@ -88,7 +88,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | ISC | wrappy | 1.0.2 |
 | ISC | y18n | 5.0.8 |
 | ISC | yargs-parser | 21.1.1 |
-| LGPL-3.0-or-later | @img/sharp-libvips-linux-x64 | 1.3.3 |
+| LGPL-3.0-or-later | @img/sharp-libvips-linux-x64 | 1.3.4 |
 | MIT | @acemir/cssom | 0.9.31 |
 | MIT | @asamuzakjp/css-color | 4.1.2 |
 | MIT | @asamuzakjp/dom-selector | 6.8.1 |
