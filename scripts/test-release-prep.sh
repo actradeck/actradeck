@@ -2963,6 +2963,97 @@ YML
 fi
 
 # ============================================================================
+# INV-SECRET-SCANNING-PATHS-IGNORE: .github/secret_scanning.yml lists the paths whose
+# secret-looking strings are deliberate test vectors, so GitHub secret scanning raises no alert
+# for them and scans every other path.
+#   - Always (public CI included): the file exists and paths-ignore is a non-empty list of
+#     distinct strings that keeps the test-vector globs and ignores nothing broader (no bare
+#     `**`, `*` or a top-level source directory).
+#   - Where the maintainer-only scripts/lib/oss-patterns.sh exists (it is not in the public
+#     tree): paths-ignore equals the local secret scan's OSS_SECRET_FIXTURE_PATHSPEC, so both
+#     scans agree on what a test vector is. A copy with one entry dropped and one with an extra
+#     entry must both be detected.
+echo
+echo "== INV-SECRET-SCANNING-PATHS-IGNORE (GitHub secret scanning paths-ignore) =="
+secret_scanning_shape_ok() { # $1 = secret_scanning.yml path
+  python3 - "$1" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1])) or {}
+gh = doc.get("paths-ignore")
+if not isinstance(gh, list) or not gh or not all(isinstance(x, str) and x for x in gh):
+    print("paths-ignore missing, empty or not a list of strings"); sys.exit(1)
+if len(set(gh)) != len(gh):
+    print("duplicate entries in paths-ignore"); sys.exit(1)
+too_broad = [x for x in gh if x in ("**", "*", "**/*", "/") or x.startswith(("apps/", "packages/", "db/", "src/")) and not x.endswith("/test/**")]
+if too_broad:
+    print("too broad:", too_broad); sys.exit(1)
+for need in ("**/test/**", "**/*.test.ts"):
+    if need not in gh:
+        print("missing test-vector glob:", need); sys.exit(1)
+PY
+}
+secret_scanning_paths_equal() { # $1 = secret_scanning.yml path; needs lib/oss-patterns.sh
+  local yml="$1" local_set
+  # shellcheck source=lib/oss-patterns.sh
+  . "$SELF/lib/oss-patterns.sh"
+  [ "${#OSS_SECRET_FIXTURE_PATHSPEC[@]}" -gt 0 ] || { echo "empty local pathspec"; return 2; }
+  local_set="$(printf '%s\n' "${OSS_SECRET_FIXTURE_PATHSPEC[@]}" | sed 's/^:(exclude)//' | sort)"
+  python3 - "$yml" "$local_set" <<'PY'
+import sys, yaml
+gh = (yaml.safe_load(open(sys.argv[1])) or {}).get("paths-ignore") or []
+local = [x for x in sys.argv[2].split("\n") if x]
+if sorted(gh) != local:
+    print("only in GitHub:", sorted(set(gh) - set(local)), "only in local:", sorted(set(local) - set(gh)))
+    sys.exit(1)
+PY
+}
+SSY="$SELF/../.github/secret_scanning.yml"
+if [ ! -f "$SSY" ]; then
+  ng "INV-SECRET-SCANNING-PATHS-IGNORE: .github/secret_scanning.yml is missing"
+else
+  SST="$(mktemp -d)"
+  python3 - "$SSY" "$SST" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1])); out = sys.argv[2]
+def w(name, paths):
+    yaml.safe_dump({**d, "paths-ignore": paths}, open(f"{out}/{name}.yml", "w"))
+w("drop", d["paths-ignore"][1:])
+w("extra", d["paths-ignore"] + ["scripts/release.sh"])
+w("broad", d["paths-ignore"] + ["**"])
+w("notests", [x for x in d["paths-ignore"] if x != "**/test/**"])
+PY
+  if out="$(secret_scanning_shape_ok "$SSY" 2>&1)"; then
+    ok "INV-SECRET-SCANNING-PATHS-IGNORE: paths-ignore keeps the test-vector globs and nothing broader"
+  else
+    ng "INV-SECRET-SCANNING-PATHS-IGNORE: shape — $out"
+  fi
+  for v in broad notests; do
+    if secret_scanning_shape_ok "$SST/$v.yml" >/dev/null 2>&1; then
+      ng "INV-SECRET-SCANNING-PATHS-IGNORE: DEAD — shape check passes the '$v' copy"
+    else
+      ok "INV-SECRET-SCANNING-PATHS-IGNORE: shape check FAILS on the '$v' copy (falsifiable)"
+    fi
+  done
+  if [ -f "$SELF/lib/oss-patterns.sh" ]; then
+    if out="$(secret_scanning_paths_equal "$SSY" 2>&1)"; then
+      ok "INV-SECRET-SCANNING-PATHS-IGNORE: paths-ignore equals OSS_SECRET_FIXTURE_PATHSPEC"
+    else
+      ng "INV-SECRET-SCANNING-PATHS-IGNORE: mismatch with OSS_SECRET_FIXTURE_PATHSPEC — $out"
+    fi
+    for v in drop extra; do
+      if secret_scanning_paths_equal "$SST/$v.yml" >/dev/null 2>&1; then
+        ng "INV-SECRET-SCANNING-PATHS-IGNORE: DEAD — parity check passes the '$v' copy"
+      else
+        ok "INV-SECRET-SCANNING-PATHS-IGNORE: parity check FAILS on the '$v' copy (falsifiable)"
+      fi
+    done
+  else
+    echo "SKIP  INV-SECRET-SCANNING-PATHS-IGNORE: parity with OSS_SECRET_FIXTURE_PATHSPEC (lib/oss-patterns.sh is maintainer-only and absent here)"
+  fi
+  rm -rf "$SST"
+fi
+
+# ============================================================================
 echo
 if [ "$fail" = 0 ]; then
   echo "ALL release-prep invariants PASS."
