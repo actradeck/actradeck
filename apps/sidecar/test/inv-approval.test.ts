@@ -3362,6 +3362,9 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
     flattenCommandSubstitutions: 3,
   };
 
+  // The two source-scan metatests below take 0.4-0.7s locally but 7-13x longer on a CI runner
+  // (coverage instrumentation, other files in parallel), which hit the 5s default (task 01a10f9f).
+  // Their 30s bound is generous on purpose; no assertion in them depends on time.
   it("metatest: the shell-reading primitives live only in normalize.ts (form-independent exclusivity)", () => {
     const files = srcFiles();
     expect(files, "scan set is non-vacuous").toContain(SINGLE_SOURCE_FILE);
@@ -3509,7 +3512,7 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
       if (file === SINGLE_SOURCE_FILE) continue;
       expect(codeOf(file), `${file} must not hand-read shell syntax`).not.toMatch(secondParserRe);
     }
-  });
+  }, 30_000);
 
   /**
    * 実測 (R16 unblock・normalize.ts + import 閉包 4 ファイル): executable 2318 /
@@ -3597,7 +3600,7 @@ describe("INV-APPROVAL-R10-M: bash-parity quoting edges, bounded executor bindin
     expect(branchTokens, "branch tokens across the classifier module set").toBeLessThanOrEqual(
       MODULE_SET_BRANCH_TOKEN_CEILING,
     );
-  });
+  }, 30_000);
 });
 
 /**

@@ -72,7 +72,7 @@ interface HookGroup {
 }
 
 /** settings.json の最小型 (hooks 以外のキーは温存するため index で受ける)。 */
-interface ClaudeSettingsFile {
+export interface ClaudeSettingsFile {
   hooks?: Record<string, HookGroup[]>;
   [k: string]: unknown;
 }
@@ -224,18 +224,40 @@ function clone<T>(v: T): T {
 }
 
 /**
+ * daemon の hook endpoint の唯一の形 (`HookReceiver.endpoint` が作る `http://127.0.0.1:<port>/hook`・
+ * port は先頭 0 の無い 1〜65535)。受理集合は hook shim (`hook-shim-core.ts` の `ENDPOINT_RE`・runtime
+ * import できないための複製) と同じで、一致は INV-ATTACH-TEARDOWN が同じ vector 表で固定する
+ * (TDA-STA-6 (a): state の検証は先頭 0 の port も受理していた)。
+ */
+const DAEMON_HOOK_ENDPOINT_RE = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/hook$/;
+
+/** daemon の hook endpoint の形か ({@link DAEMON_HOOK_ENDPOINT_RE})。state の検証が使う。 */
+export function isDaemonHookEndpoint(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const port = DAEMON_HOOK_ENDPOINT_RE.exec(value)?.[1];
+  return port !== undefined && Number(port) <= 65_535;
+}
+
+/**
+ * hook entry が向く endpoint を取り出す (唯一の取り出し・ADR 01a10ddb D6)。http entry は `url`。
+ * T-B の command entry (url を持たず args に `--endpoint` を持つ) はここに足す。self-heal・detach の
+ * endpoint 限定・{@link countActradeckEntries} はすべてこれを通す (2 本目を書かない)。
+ */
+export function endpointOfEntry(entry: unknown): string | undefined {
+  if (typeof entry !== "object" || entry === null) return undefined;
+  const url = (entry as Record<string, unknown>).url;
+  return typeof url === "string" ? url : undefined;
+}
+
+/**
  * ある hook entry が「自 endpoint と同じ canonical」な ActraDeck entry か。
- * url 一致で判定する (canonical endpoint 概念: 自 daemon が今配線している唯一の正)。
+ * endpoint の一致で判定する (canonical endpoint 概念: 自 daemon が今配線している唯一の正)。
  *
- * QA-4: canonical endpoint は daemon が機械生成する固定文字列。url の **exact-match** は
+ * QA-4: canonical endpoint は daemon が機械生成する固定文字列。**exact-match** は
  * 意図的 — 似た別 url (旧 port 等) は dead-port residue として self-heal で purge する。
  */
 function isCanonicalActradeckEntry(entry: unknown, canonicalEndpoint: string): boolean {
-  return (
-    isActradeckEntry(entry) &&
-    typeof (entry as AttachHookEntry).url === "string" &&
-    (entry as AttachHookEntry).url === canonicalEndpoint
-  );
+  return isActradeckEntry(entry) && endpointOfEntry(entry) === canonicalEndpoint;
 }
 
 /**
@@ -393,11 +415,14 @@ export function mergeAttachHooks(opts: MergeOptions): MergeResult {
  * 検出は canonical な {@link isActradeckEntry} / {@link groupHasActradeckEntry} を共有する
  * (NO 二重実装 — `__actradeck` 検出器を別実装しない。security-gate-reuse-canonical-parser)。
  *
- * TDA-2 (sweep 019f1991): 唯一の呼び出しは同 module の {@link settingsFileHasActradeckHook} ゆえ
- * **module-private** (非 export)。malformed hooks の非 throw 回帰 (SEC-1/QA-1/SEC-R1) は file 経由の
- * settingsFileHasActradeckHook / computeAgentVisibility で transitive に固定済 (直 importer 不要)。
+ * export されており、呼び出し元は 2 つ: 同 module の {@link settingsFileHasActradeckHook} (診断) と、
+ * 配線の後始末 (attach-teardown の teardownWiring) が detach 後に読み直した settings に ActraDeck entry が
+ * 残っているかを判定する箇所 (R2 ガード・SEC-DC-R2-1・裁定 01a11052 ①)。後者は marker の無い legacy 署名
+ * entry も数える。
+ * malformed hooks の非 throw 回帰 (SEC-1/QA-1/SEC-R1) は file 経由の settingsFileHasActradeckHook /
+ * computeAgentVisibility で transitive に固定済。
  */
-function hasActradeckHookInSettings(settings: ClaudeSettingsFile): boolean {
+export function hasActradeckHookInSettings(settings: ClaudeSettingsFile): boolean {
   // SEC-1≡QA-1 (decision 019f1991): readSettings はトップレベルが object かのみ検証し hooks の
   // 型は見ない。hooks が object 非該当/配列、event 値が非配列、group 要素が null だと .some /
   // group.hooks アクセスで TypeError が uncaught throw し doctor をクラッシュさせる (docstring が謳う
@@ -421,6 +446,50 @@ function hasActradeckHookInSettings(settings: ClaudeSettingsFile): boolean {
 }
 
 /**
+ * settings の ActraDeck entry ({@link isActradeckEntry}) を、`endpoint` を向くもの ({@link endpointOfEntry}
+ * の一致) とそれ以外に分けて数える (純関数・非 throw)。`endpoint` が無ければ全部が `other`。
+ * hooks の型が崩れていても {@link hasActradeckHookInSettings} と同じく型を見て数えずに進む。
+ */
+export function countActradeckEntries(
+  settings: ClaudeSettingsFile,
+  endpoint: string | undefined,
+): { readonly recorded: number; readonly other: number } {
+  let recorded = 0;
+  let other = 0;
+  const hooks: unknown = settings.hooks;
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) {
+    return { recorded, other };
+  }
+  for (const groups of Object.values(hooks as Record<string, unknown>)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      if (typeof group !== "object" || group === null) continue;
+      const entries = (group as HookGroup).hooks;
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (!isActradeckEntry(entry)) continue;
+        if (endpoint !== undefined && endpointOfEntry(entry) === endpoint) recorded += 1;
+        else other += 1;
+      }
+    }
+  }
+  return { recorded, other };
+}
+
+/**
+ * settings を読むだけの reader (**非 throw**)。無い / 空なら `{}`、読めない・JSON 不正・object でないなら
+ * undefined。診断と status (inspectStaleWiring に渡す) が使う。merge / detach は誤上書きを避けるため
+ * throw する readSettings を使う。
+ */
+export function readSettingsForInspection(path: string): ClaudeSettingsFile | undefined {
+  try {
+    return readSettings(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * 診断 (agentmon doctor) 用: 指定 settings.json に ActraDeck hook が配線されているかを判定する
  * (read-only・**非 throw**)。
  * - ファイル無し / 空 → false (readSettings が {} を返す)。
@@ -428,13 +497,8 @@ function hasActradeckHookInSettings(settings: ClaudeSettingsFile): boolean {
  *   誤上書き防止のため throw するが、診断は読むだけなので not-installed 扱いで安全側に縮退)。
  */
 export function settingsFileHasActradeckHook(path: string): boolean {
-  let settings: ClaudeSettingsFile;
-  try {
-    settings = readSettings(path);
-  } catch {
-    return false;
-  }
-  return hasActradeckHookInSettings(settings);
+  const settings = readSettingsForInspection(path);
+  return settings !== undefined && hasActradeckHookInSettings(settings);
 }
 
 export interface DetachResult {
@@ -445,15 +509,38 @@ export interface DetachResult {
 }
 
 /**
+ * detach の範囲 (**必須の判別 union・既定値なし**・TDA-DC-R2-4: 既定が広い側だと、範囲を渡し忘れた
+ * 新しい呼び出し側が全 entry を外す)。
+ * 範囲の使い分けの正はここ (daemon-cli の各経路と docs はこれを参照する・裁定 01a110b2 / 01a11140):
+ * - `all`: 全 ActraDeck entry ({@link isActradeckEntry}・marker と legacy 署名)。利用者の `daemon stop` と、
+ *   daemon 自身の終了 (shutdownSelf) で state が自分の pid のときの 2 経路だけが scope lock の下で使う。lock を
+ *   共有しない daemon (別 HOME・別 path・旧い版) の生きた配線もこの 2 経路では外れる (base と同じ)。
+ * - `endpoint`: その endpoint を向く ActraDeck entry だけ ({@link isCanonicalActradeckEntry} と同じ判定)。
+ *   自動の後始末 (拒否起動・起動失敗) が stale state に記録された endpoint を外す (+ R2 ガード) のと、
+ *   shutdownSelf で state が無い / corrupt のときに自分の endpoint を外すのに使う。記録 endpoint と同じ port を
+ *   得た lock 非共有の daemon の配線は外れる (開示済みの残余)。
+ * なお成功した起動の merge は self-heal で自 endpoint 以外の ActraDeck entry を外す (この型を使わない・base と同じ)。
+ */
+export type DetachRange =
+  | { readonly kind: "all" }
+  | { readonly kind: "endpoint"; readonly endpoint: string };
+
+/**
  * settings から ActraDeck マーカー entry **のみ** を除去した settings を計算する (純関数)。
  * - ユーザー hooks は温存 (マーカー一致のみ除去)。
  * - ActraDeck group 内の非マーカー hooks (ユーザーが後から同 group に足したもの) は温存。
  * - hooks 群が空になった event キーは削除し、hooks 自体が空なら hooks キーも削除する。
+ * - `range` が `endpoint` なら、その endpoint を向く ActraDeck entry だけを除去する。
  */
-export function computeDetachedSettings(current: ClaudeSettingsFile): {
+export function computeDetachedSettings(
+  current: ClaudeSettingsFile,
+  range: DetachRange,
+): {
   settings: ClaudeSettingsFile;
   removed: boolean;
 } {
+  const isTarget = (h: unknown): boolean =>
+    range.kind === "all" ? isActradeckEntry(h) : isCanonicalActradeckEntry(h, range.endpoint);
   const next = clone(current);
   if (next.hooks === undefined) return { settings: next, removed: false };
   let removed = false;
@@ -467,11 +554,11 @@ export function computeDetachedSettings(current: ClaudeSettingsFile): {
         continue;
       }
       const kept = group.hooks.filter((h) => {
-        if (isActradeckEntry(h)) {
+        if (isTarget(h)) {
           removed = true;
-          return false; // ActraDeck entry のみ除去
+          return false; // ActraDeck entry のみ除去 (range が endpoint ならその endpoint のものだけ)
         }
-        return true; // ユーザー hooks は温存
+        return true; // ユーザー hooks (と対象外の ActraDeck entry) は温存
       });
       // group 内に hooks が残ればその group を保持 (ユーザーが同 group に足した分を消さない)。
       if (kept.length > 0) {
@@ -506,9 +593,11 @@ function groupHasActradeckEntryOriginally(group: HookGroup): boolean {
  *
  * INV-ATTACH-WIRE-LOCK: merge と同じ lock で直列化し、並行 merge と detach が
  * 互いの read→compute→write を踏まないようにする (lost update 防止)。
+ * 範囲 (`range`) は必須 ({@link DetachRange})。
  */
 export function detachAttachHooks(
   settingsPath: string,
+  range: DetachRange,
   lockOptions?: FileLockCallOptions,
 ): DetachResult {
   if (!existsSync(settingsPath)) return { removed: false, settings: {} };
@@ -517,7 +606,7 @@ export function detachAttachHooks(
     () => {
       if (!existsSync(settingsPath)) return { removed: false, settings: {} };
       const current = readSettings(settingsPath);
-      const { settings, removed } = computeDetachedSettings(current);
+      const { settings, removed } = computeDetachedSettings(current, range);
       if (!removed) return { removed: false, settings };
       atomicWrite(settingsPath, settings);
       return { removed: true, settings };

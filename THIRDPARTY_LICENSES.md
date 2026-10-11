@@ -52,7 +52,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | BSD-3-Clause | istanbul-reports | 3.2.0 |
 | BSD-3-Clause | light-my-request | 6.6.0 |
 | BSD-3-Clause | secure-json-parse | 4.1.0 |
-| BSD-3-Clause | source-map-js | 1.2.1 |
+| BSD-3-Clause | source-map-js | 1.2.2 |
 | BSD-3-Clause | tough-cookie | 6.0.1 |
 | BlueOak-1.0.0 | @isaacs/cliui | 9.0.0 |
 | BlueOak-1.0.0 | glob | 11.1.0 |

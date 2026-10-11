@@ -21,6 +21,26 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   now make the daemon refuse to start. The accepted values and the steps to move an existing
   `env`-mode setup over are in the `env` token-mode notes of `docs/attach-mode.md`.
 
+- **Fewer cases where attach hook entries are left pointing at a dead port.** The attach daemon
+  now also removes its entries when it receives `SIGHUP`, and a refused `attach` / `daemon start`
+  can now remove the entries left by a daemon that is no longer running. When this happens, and
+  what to run when the entries are still left, is in the notes on unclean shutdown in
+  `docs/attach-mode.md`.
+
+- **Attach start, stop and the cleanup of a dead daemon's entries hold a per-scope lock, and the
+  daemon's own shutdown no longer touches another daemon's record.** A start that fails while
+  starting the daemon now cleans up a dead daemon's entries like a refused start before it exits with
+  the original error. What the lock covers, which entries each case removes, and what happens when
+  the lock is held are in the unclean shutdown notes of `docs/attach-mode.md`.
+
+- **`daemon stop` signals the attach daemon only when it can confirm the recorded process.** The
+  daemon now records its process start time, and `daemon stop` checks it before sending `SIGTERM`,
+  so a process that reused the recorded process ID is not signalled. The record format changed and
+  its location now follows the settings file's directory with symbolic links resolved. What happens
+  when the check is inconclusive or the record cannot be validated, where the record lives, and
+  what to do before switching back to an older build are in the unclean shutdown, record location
+  and older build notes of `docs/attach-mode.md`.
+
 - **Dependency updates for advisories published after the previous round (one critical,
   eight high, four moderate at the time of the change).** Direct bumps: Next.js
   16.3.3 → 16.3.8 (critical advisory) and Fastify 5.12.1 → 5.12.5. Transitive fixes
@@ -38,6 +58,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   `moderate` level and the CI dependency-audit gate (INV-DEP-AUDIT) passes again.
 
 ### Changed
+
+- **`daemon stop` no longer reports an unfinished cleanup as stopped.** When it removes the attach
+  hook entries but cannot remove the daemon's record or its hook token file, or the record was
+  rewritten after `daemon stop` read it, it now says so and names what is left instead of
+  reporting that the daemon stopped. It then exits with status 1 (the cases are in the unclean
+  shutdown notes of `docs/attach-mode.md`).
 
 - **Advisory file lock: takeover and release share one detach procedure.** The rename →
   re-verify → unlink-or-restore steps were written out twice; they now live in a single helper,
