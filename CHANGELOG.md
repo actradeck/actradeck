@@ -41,6 +41,12 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   what to do before switching back to an older build are in the unclean shutdown, record location
   and older build notes of `docs/attach-mode.md`.
 
+- **Dependency updates for two Vite and two Vitest advisories (two high, two moderate
+  at the time of the change).** Direct bump: Vitest and `@vitest/coverage-v8`
+  4.1.11 → 4.1.12 (`@vitest/mocker` advisories). Transitive fix through
+  `pnpm.overrides`: `vite` (new window `>=8.1.6 <8.2`, resolving 8.0.16 → 8.1.6).
+  Both are development-only dependencies; nothing in the shipped package or image
+  changes. `pnpm audit` reports no known vulnerabilities.
 - **Dependency updates for advisories published after the previous round (one critical,
   eight high, four moderate at the time of the change).** Direct bumps: Next.js
   16.3.3 → 16.3.8 (critical advisory) and Fastify 5.12.1 → 5.12.5. Transitive fixes
