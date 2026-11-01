@@ -11,6 +11,8 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-01
+
 ### Security
 
 - **Attach `--token-mode env` hooks now authenticate.** In `env` mode the hook entries sent the
@@ -1319,7 +1321,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/actradeck/actradeck/releases/tag/v0.9.1
 [0.9.0]: https://github.com/actradeck/actradeck/releases/tag/v0.9.0
 [0.8.1]: https://github.com/actradeck/actradeck/releases/tag/v0.8.1
 [0.8.0]: https://github.com/actradeck/actradeck/releases/tag/v0.8.0
