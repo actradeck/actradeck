@@ -45,7 +45,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | BSD-2-Clause | uri-js | 4.4.1 |
 | BSD-2-Clause | webidl-conversions | 8.0.1 |
 | BSD-3-Clause | esquery | 1.7.0 |
-| BSD-3-Clause | fast-uri | 3.1.8, 4.2.1 |
+| BSD-3-Clause | fast-uri | 3.1.9, 4.2.3 |
 | BSD-3-Clause | ieee754 | 1.2.1 |
 | BSD-3-Clause | istanbul-lib-coverage | 3.2.2 |
 | BSD-3-Clause | istanbul-lib-report | 3.0.1 |
@@ -123,8 +123,8 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | @jridgewell/sourcemap-codec | 1.5.5 |
 | MIT | @jridgewell/trace-mapping | 0.3.9, 0.3.31 |
 | MIT | @lukeed/ms | 2.0.2 |
-| MIT | @next/env | 16.3.8 |
-| MIT | @next/swc-linux-x64-gnu | 16.3.8 |
+| MIT | @next/env | 16.4.1 |
+| MIT | @next/swc-linux-x64-gnu | 16.4.1 |
 | MIT | @oxc-project/types | 0.139.0 |
 | MIT | @parcel/watcher | 2.5.6 |
 | MIT | @parcel/watcher-linux-x64-glibc | 2.5.6 |
@@ -227,7 +227,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | fast-json-stringify | 6.4.0, 7.0.1 |
 | MIT | fast-levenshtein | 2.0.6 |
 | MIT | fast-querystring | 1.1.2 |
-| MIT | fastify | 5.12.5 |
+| MIT | fastify | 5.12.6 |
 | MIT | fastify-plugin | 5.1.0, 6.0.0 |
 | MIT | fdir | 6.5.0 |
 | MIT | file-entry-cache | 8.0.0 |
@@ -247,7 +247,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | immutable | 5.1.9 |
 | MIT | import-fresh | 3.3.1 |
 | MIT | imurmurhash | 0.1.4 |
-| MIT | ip-address | 10.7.3 |
+| MIT | ip-address | 10.7.5 |
 | MIT | ipaddr.js | 2.4.0 |
 | MIT | is-extglob | 2.1.1 |
 | MIT | is-fullwidth-code-point | 3.0.0 |
@@ -276,7 +276,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | nanoid | 3.3.19 |
 | MIT | napi-build-utils | 2.0.0 |
 | MIT | natural-compare | 1.4.0 |
-| MIT | next | 16.3.8 |
+| MIT | next | 16.4.1 |
 | MIT | node-abi | 3.92.0 |
 | MIT | node-addon-api | 7.1.1 |
 | MIT | node-pg-migrate | 8.0.4 |
@@ -365,7 +365,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | tsx | 4.22.4 |
 | MIT | type-check | 0.4.0 |
 | MIT | typescript-eslint | 8.60.1 |
-| MIT | undici | 7.30.0 |
+| MIT | undici | 7.30.1 |
 | MIT | undici-types | 7.24.6 |
 | MIT | unenv | 2.0.0-rc.24 |
 | MIT | util-deprecate | 1.0.2 |
@@ -385,7 +385,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | yocto-queue | 0.1.0 |
 | MIT | youch | 4.1.0-beta.10 |
 | MIT | youch-core | 0.3.3 |
-| MIT | zod | 4.4.3 |
+| MIT | zod | 4.6.7 |
 | MIT OR Apache-2.0 | @cloudflare/kv-asset-handler | 0.5.0 |
 | MIT OR Apache-2.0 | @cloudflare/unenv-preset | 2.16.1 |
 | MIT OR Apache-2.0 | @cloudflare/workers-types | 5.20260813.1 |
