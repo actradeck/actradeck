@@ -41,6 +41,17 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
   what to do before switching back to an older build are in the unclean shutdown, record location
   and older build notes of `docs/attach-mode.md`.
 
+- **Dependency updates for the advisories published since the previous round (four
+  critical, three high, six moderate, six low Dependabot alerts at the time of the
+  change).** Direct bumps: Next.js 16.3.8 → 16.4.1 (two critical remote code execution
+  advisories and one high denial-of-service advisory), Fastify 5.12.5 → 5.12.6, and
+  Zod 4.4.3 → 4.6.7. Transitive fixes through `pnpm.overrides`: `fast-uri` (window
+  moved from `>=3.1.5 <4` to `>=3.1.9 <4`, plus a new `>=4.2.3 <5` window for the 4.x
+  line), `undici` (window moved to `>=7.30.1 <8`), `ip-address` (window moved to
+  `>=10.7.4 <11`) and `zod` (new window `>=4.6.6 <5` for a test-tooling dependency).
+  `pnpm audit --audit-level=high` passes; three moderate advisories in development
+  tooling (`minimatch` under ESLint, `glob` under node-pg-migrate) remain because the
+  fixed versions are new major releases those tools do not accept yet.
 - **Dependency updates for two Vite and two Vitest advisories (two high, two moderate
   at the time of the change).** Direct bump: Vitest and `@vitest/coverage-v8`
   4.1.11 → 4.1.12 (`@vitest/mocker` advisories). Transitive fix through
