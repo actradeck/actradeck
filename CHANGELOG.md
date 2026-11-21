@@ -11,6 +11,16 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Security
+
+- **Next.js 16.4.1 → 16.4.5 (seven moderate advisories).** The cockpit web UI does not
+  use the affected features (`use cache`, Cache Components, the Edge runtime, image
+  optimization, App Router route handlers that return a fetched response; the BFF proxy is
+  a plain `node:http` server in `apps/webui/server.ts`), so none of them was reachable; the
+  bump keeps the shipped dependency current. `pnpm audit --audit-level=high` passes; two moderate advisories remain with no
+  fix inside the major versions the depending packages accept (`glob` through
+  `node-pg-migrate`, `minimatch` through development tooling).
+
 ## [0.9.1] - 2026-11-01
 
 ### Security

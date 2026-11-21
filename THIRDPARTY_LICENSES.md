@@ -123,8 +123,8 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | @jridgewell/sourcemap-codec | 1.5.5 |
 | MIT | @jridgewell/trace-mapping | 0.3.9, 0.3.31 |
 | MIT | @lukeed/ms | 2.0.2 |
-| MIT | @next/env | 16.4.1 |
-| MIT | @next/swc-linux-x64-gnu | 16.4.1 |
+| MIT | @next/env | 16.4.5 |
+| MIT | @next/swc-linux-x64-gnu | 16.4.5 |
 | MIT | @oxc-project/types | 0.139.0 |
 | MIT | @parcel/watcher | 2.5.6 |
 | MIT | @parcel/watcher-linux-x64-glibc | 2.5.6 |
@@ -276,7 +276,7 @@ the CycloneDX SBOM attached to each release (`scripts/lib/sbom.sh`).
 | MIT | nanoid | 3.3.19 |
 | MIT | napi-build-utils | 2.0.0 |
 | MIT | natural-compare | 1.4.0 |
-| MIT | next | 16.4.1 |
+| MIT | next | 16.4.5 |
 | MIT | node-abi | 3.92.0 |
 | MIT | node-addon-api | 7.1.1 |
 | MIT | node-pg-migrate | 8.0.4 |
