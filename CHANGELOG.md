@@ -11,15 +11,22 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-21
+
 ### Security
 
 - **Next.js 16.4.1 → 16.4.5 (seven moderate advisories).** The cockpit web UI does not
   use the affected features (`use cache`, Cache Components, the Edge runtime, image
   optimization, App Router route handlers that return a fetched response; the BFF proxy is
   a plain `node:http` server in `apps/webui/server.ts`), so none of them was reachable; the
-  bump keeps the shipped dependency current. `pnpm audit --audit-level=high` passes; two moderate advisories remain with no
-  fix inside the major versions the depending packages accept (`glob` through
-  `node-pg-migrate`, `minimatch` through development tooling).
+  bump keeps the shipped dependency current. `pnpm audit --audit-level=high` passes; two
+  moderate advisories remain with no fix inside the major versions the depending packages
+  accept (`glob` through `node-pg-migrate`, `minimatch` through development tooling).
+
+### Changed
+
+- **Docker image base: Node.js 22.23.4 → 22.23.5** (`node:22.23.5-bookworm-slim`, pinned by
+  digest).
 
 ## [0.9.1] - 2026-11-01
 
@@ -1331,7 +1338,8 @@ relays.
   pid (hardlink from a pid-bearing temp), structurally removing the window. Pinned by a
   real multi-process invariant test (`INV-FILELOCK-NO-EMPTY-WINDOW`).
 
-[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/actradeck/actradeck/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/actradeck/actradeck/releases/tag/v0.9.2
 [0.9.1]: https://github.com/actradeck/actradeck/releases/tag/v0.9.1
 [0.9.0]: https://github.com/actradeck/actradeck/releases/tag/v0.9.0
 [0.8.1]: https://github.com/actradeck/actradeck/releases/tag/v0.8.1
