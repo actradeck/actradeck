@@ -11,6 +11,14 @@ version bumps may include breaking changes (SemVer §4). The version is applied 
 
 ## [Unreleased]
 
+### Security
+
+- **The backend's skipped-row warning can no longer be split into forged log lines.** When
+  the backend skips an event row that fails contract validation, its warning embeds the
+  row's `session_id`, `event_type` and the validation reason. Line breaks and other control
+  characters in those values (including U+2028 and U+2029) are now replaced with `?`, and
+  each value is capped at 200 characters. Found by CodeQL (`js/log-injection`).
+
 ## [0.9.2] - 2026-11-21
 
 ### Security

@@ -1027,13 +1027,29 @@ function validateRowForLiveness(r: EventRow, sessionId: string): NormalizedEvent
   return restoreRowAsEvent(r, sessionId);
 }
 
-/** 契約違反行の skip を secret 非出力で記録する (event_type は enum なので秘匿性なし)。 */
-function logSkippedRow(sessionId: string, eventType: string, reason: string): void {
+/** ログ 1 行に埋め込む値から行区切り・制御文字を落とし、長さを抑える (log injection 対策)。 */
+const LOG_FIELD_MAX = 200;
+// eslint-disable-next-line no-control-regex -- 制御文字 (0x00-0x1F,0x7F) と U+2028/29 を置換する意図的な範囲。
+const LOG_FIELD_BREAK_RE = /[\x00-\x1f\x7f\u2028\u2029]/g;
+export function sanitizeLogField(value: string): string {
+  const cleaned = String(value).replace(LOG_FIELD_BREAK_RE, "?");
+  return cleaned.length > LOG_FIELD_MAX ? `${cleaned.slice(0, LOG_FIELD_MAX)}…` : cleaned;
+}
+
+/** 契約違反行の skip ログ 1 行を組み立てる (secret 非出力・3 値とも sanitize)。 */
+export function formatSkippedRowLog(sessionId: string, eventType: string, reason: string): string {
   // session_id / event_type / reason のみ。payload・summary・credential は出力しない。
-  console.warn(
+  // 契約違反行の event_type は enum 外でありうるので、3 値とも sanitize してから埋め込む。
+  return (
     `[ingest-store] skipped contract-invalid event row for liveness synthesis: ` +
-      `session_id=${sessionId} event_type=${eventType} reason=${reason}`,
+    `session_id=${sanitizeLogField(sessionId)} event_type=${sanitizeLogField(eventType)} ` +
+    `reason=${sanitizeLogField(reason)}`
   );
+}
+
+/** 契約違反行の skip を secret 非出力で記録する。 */
+function logSkippedRow(sessionId: string, eventType: string, reason: string): void {
+  console.warn(formatSkippedRowLog(sessionId, eventType, reason));
 }
 
 interface EventRow {
