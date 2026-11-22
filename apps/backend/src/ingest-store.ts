@@ -1029,10 +1029,11 @@ function validateRowForLiveness(r: EventRow, sessionId: string): NormalizedEvent
 
 /** ログ 1 行に埋め込む値から行区切り・制御文字を落とし、長さを抑える (log injection 対策)。 */
 const LOG_FIELD_MAX = 200;
-// eslint-disable-next-line no-control-regex -- 制御文字 (0x00-0x1F,0x7F) と U+2028/29 を置換する意図的な範囲。
-const LOG_FIELD_BREAK_RE = /[\x00-\x1f\x7f\u2028\u2029]/g;
 export function sanitizeLogField(value: string): string {
-  const cleaned = String(value).replace(LOG_FIELD_BREAK_RE, "?");
+  // \n / \r は範囲 \x00-\x1f に含まれるが明示する: 範囲だけの定数 regex を通した版は
+  // CodeQL js/log-injection が sanitizer と認めなかった (PR #102 の初版で alert #30 として実測)。
+  // eslint-disable-next-line no-control-regex -- 制御文字 (0x00-0x1F,0x7F) と U+2028/29 を置換する意図的な範囲。
+  const cleaned = String(value).replace(/[\n\r\x00-\x1f\x7f\u2028\u2029]/g, "?");
   return cleaned.length > LOG_FIELD_MAX ? `${cleaned.slice(0, LOG_FIELD_MAX)}…` : cleaned;
 }
 
